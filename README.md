@@ -1,2 +1,1 @@
-# AA-CIS-App
-Application code for CIS pipeline
+# AA-CIS Application — Tour Content Automation Pipeline
