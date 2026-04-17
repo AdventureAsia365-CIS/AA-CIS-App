@@ -1,13 +1,14 @@
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Upload, ClipboardList, BookOpen } from "lucide-react";
+import { LayoutDashboard, Upload, ClipboardList, BookOpen, Key } from "lucide-react";
 
 const NAV_ITEMS = [
   { href: "/dashboard", label: "Dashboard",    icon: LayoutDashboard },
   { href: "/upload",    label: "Upload",       icon: Upload },
   { href: "/review",    label: "Review Queue", icon: ClipboardList },
   { href: "/catalog",   label: "Catalog",      icon: BookOpen },
+  { href: "/tenant",    label: "Tenant Portal", icon: Key },
 ];
 
 export default function NavBar() {
