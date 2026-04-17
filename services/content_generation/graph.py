@@ -1,0 +1,136 @@
+import json
+import structlog
+from typing import TypedDict, Annotated
+from langgraph.graph import StateGraph, END
+
+from shared.llm_client.client import LLMClient
+from shared.llm_client.models import LLMRequest
+from .prompts import SYSTEM_PROMPT, build_rewrite_prompt
+
+logger = structlog.get_logger()
+
+MAX_RETRIES = 3
+MIN_QUALITY = 7.0
+
+class ContentState(TypedDict):
+    tour:           dict
+    seo:            dict
+    few_shots:      list
+    generated:      dict
+    quality_score:  float
+    retry_count:    int
+    feedback:       str
+    error:          str
+    cost_usd:       float
+    model_used:     str
+
+def generate_node(state: ContentState) -> ContentState:
+    """Node 1: Generate content via LLMClient."""
+    import asyncio
+
+    client = LLMClient()
+    prompt = build_rewrite_prompt(
+        state["tour"],
+        state["seo"],
+        state.get("few_shots", []),
+    )
+
+    # Inject feedback nếu đang retry
+    if state.get("feedback"):
+        prompt += f"\n\nPREVIOUS ATTEMPT FEEDBACK:\n{state['feedback']}\nPlease fix these issues."
+
+    request = LLMRequest(system_prompt=SYSTEM_PROMPT, user_prompt=prompt)
+
+    try:
+        resp = asyncio.get_event_loop().run_until_complete(client.generate(request))
+        generated = json.loads(resp.content)
+        logger.info("content_generated", retry=state.get("retry_count", 0),
+                    model=resp.model_used, cost=resp.cost_usd)
+        return {
+            **state,
+            "generated":  generated,
+            "cost_usd":   state.get("cost_usd", 0) + resp.cost_usd,
+            "model_used": resp.model_used,
+            "error":      "",
+        }
+    except json.JSONDecodeError as e:
+        logger.warning("json_parse_failed", error=str(e))
+        return {**state, "generated": {}, "error": f"JSON parse error: {e}"}
+    except Exception as e:
+        logger.error("generation_failed", error=str(e))
+        return {**state, "generated": {}, "error": str(e)}
+
+def validate_node(state: ContentState) -> ContentState:
+    """Node 2: Basic quality check — score 0-10."""
+    generated = state.get("generated", {})
+    issues    = []
+    score     = 10.0
+
+    # Required fields
+    for field in ["name", "subtitle", "summary", "highlights", "seo_title", "seo_meta"]:
+        if not generated.get(field):
+            issues.append(f"Missing field: {field}")
+            score -= 2.0
+
+    # highlights must be list
+    if not isinstance(generated.get("highlights"), list):
+        issues.append("highlights must be a list")
+        score -= 1.0
+
+    # seo_title length
+    if len(generated.get("seo_title", "")) > 60:
+        issues.append("seo_title exceeds 60 chars")
+        score -= 0.5
+
+    # seo_meta length
+    if len(generated.get("seo_meta", "")) > 160:
+        issues.append("seo_meta exceeds 160 chars")
+        score -= 0.5
+
+    # Forbidden words
+    forbidden = ["cheap", "deal", "book now", "instant booking", "discount"]
+    content_text = json.dumps(generated).lower()
+    for word in forbidden:
+        if word in content_text:
+            issues.append(f"Forbidden word: '{word}'")
+            score -= 1.0
+
+    score = max(0.0, score)
+    feedback = "; ".join(issues) if issues else ""
+
+    logger.info("validation_done", score=score, issues=len(issues),
+                retry=state.get("retry_count", 0))
+
+    return {**state, "quality_score": score, "feedback": feedback}
+
+def should_retry(state: ContentState) -> str:
+    """Edge: decide retry / done / hitl."""
+    retry_count = state.get("retry_count", 0)
+    score       = state.get("quality_score", 0)
+
+    if score >= MIN_QUALITY:
+        return "done"
+    if retry_count < MAX_RETRIES - 1:
+        return "retry"
+    return "hitl"
+
+def increment_retry(state: ContentState) -> ContentState:
+    return {**state, "retry_count": state.get("retry_count", 0) + 1}
+
+def build_graph() -> StateGraph:
+    graph = StateGraph(ContentState)
+
+    graph.add_node("generate", generate_node)
+    graph.add_node("validate", validate_node)
+    graph.add_node("increment_retry", increment_retry)
+
+    graph.set_entry_point("generate")
+    graph.add_edge("generate", "validate")
+    graph.add_conditional_edges("validate", should_retry, {
+        "done":  END,
+        "retry": "increment_retry",
+        "hitl":  END,
+    })
+    graph.add_edge("increment_retry", "generate")
+
+    return graph.compile()
