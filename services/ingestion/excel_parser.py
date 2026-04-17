@@ -1,8 +1,8 @@
 import pandas as pd
 import json
+import math
 from typing import Any
 
-# Column mapping: Excel header → DB field
 COLUMN_MAP = {
     "Tour ID": "tour_id_external",
     "SKU": "sku",
@@ -33,7 +33,6 @@ class ExcelParser:
 
     def parse(self) -> list[dict]:
         df = pd.read_excel(self.file_path, engine="openpyxl")
-        df = df.where(pd.notnull(df), None)  # NaN → None
 
         records = []
         for _, row in df.iterrows():
@@ -53,6 +52,10 @@ class ExcelParser:
         return records
 
     def _clean(self, value: Any) -> str | None:
+        # Check NaN/None trước khi convert sang string
         if value is None:
             return None
-        return str(value).strip() or None
+        if isinstance(value, float) and math.isnan(value):
+            return None
+        cleaned = str(value).strip()
+        return cleaned if cleaned and cleaned.lower() != "nan" else None
