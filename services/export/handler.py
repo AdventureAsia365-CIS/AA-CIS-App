@@ -13,15 +13,17 @@ async def process_export(version_id: str) -> dict:
     Copy approved silver.published_tour_versions → gold.published_catalog
     """
     conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+    tenant_slug   = os.environ.get("TENANT_SLUG", "aa_internal")
+    silver_schema = f"silver_{tenant_slug}"
+    gold_schema   = f"gold_{tenant_slug}"
     try:
         # Fetch approved version
-        row = await conn.fetchrow("""
+        row = await conn.fetchrow(f"""
             SELECT ptv.*, rt.country, rt.duration
-            FROM silver.published_tour_versions ptv
-            JOIN bronze.raw_tours rt ON rt.id = ptv.raw_tour_id
+            FROM {silver_schema}.generated_content ptv
+            JOIN {silver_schema}.raw_tours rt ON rt.tour_id = ptv.tour_id
             WHERE ptv.id = $1
-              AND ptv.hitl_status = 'approved'
-              AND ptv.publish_ready = TRUE
+              AND ptv.status = 'approved'
         """, version_id)
 
         if not row:
@@ -34,8 +36,8 @@ async def process_export(version_id: str) -> dict:
             row.get("name", ""), row.get("country")
         )
 
-        # Upsert into gold.published_catalog
-        repo = PublishedCatalogRepository(conn)
+        # Upsert into gold_{tenant_slug}.published_tours
+        repo = PublishedCatalogRepository(conn, tenant_slug)
         catalog_id = await repo.upsert({
             "published_version_id": str(row["id"]),
             "raw_tour_id":          str(row["raw_tour_id"]),

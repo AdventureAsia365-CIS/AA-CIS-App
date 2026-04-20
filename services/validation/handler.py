@@ -12,9 +12,10 @@ sqs = boto3.client("sqs", region_name=os.environ.get("AWS_REGION", "us-west-1"))
 
 async def process_validation(version_id: str) -> dict:
     conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+    tenant_slug = os.environ.get("TENANT_SLUG", "aa_internal")
     try:
         row = await conn.fetchrow(
-            "SELECT * FROM silver.published_tour_versions WHERE id = $1", version_id
+            f"SELECT * FROM silver_{tenant_slug}.generated_content WHERE id = $1", version_id
         )
         if not row:
             raise ValueError(f"Version not found: {version_id}")
@@ -49,7 +50,7 @@ async def process_validation(version_id: str) -> dict:
 
         # Update DB
         await conn.execute("""
-            UPDATE silver.published_tour_versions SET
+            f"UPDATE silver_{tenant_slug}.generated_content SET
                 audit_status        = $2,
                 audit_failure_codes = $3,
                 audit_issues        = $4,

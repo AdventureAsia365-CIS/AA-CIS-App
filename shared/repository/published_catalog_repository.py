@@ -1,88 +1,84 @@
-from .base import BaseRepository
-import re
-from unidecode import unidecode
+import asyncpg
+import structlog
 
-class PublishedCatalogRepository(BaseRepository):
+logger = structlog.get_logger()
 
-    async def upsert(self, data: dict) -> str:
-        row = await self.conn.fetchrow("""
-            INSERT INTO gold.published_catalog (
-                published_version_id, raw_tour_id, name, subtitle,
-                country, trip_type, duration, seo_title, seo_meta,
-                quality_score, status, slug, published_by
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-            ON CONFLICT (slug) DO UPDATE SET
-                name          = EXCLUDED.name,
-                subtitle      = EXCLUDED.subtitle,
-                seo_title     = EXCLUDED.seo_title,
-                seo_meta      = EXCLUDED.seo_meta,
-                quality_score = EXCLUDED.quality_score,
-                status        = EXCLUDED.status,
-                updated_at    = NOW()
-            RETURNING id
+
+class PublishedCatalogRepository:
+    """Repository for gold_{tenant}.published_tours table."""
+
+    def __init__(self, conn: asyncpg.Connection, tenant_slug: str = "aa_internal"):
+        self.conn = conn
+        self.silver = f"silver_{tenant_slug}"
+        self.gold   = f"gold_{tenant_slug}"
+
+    async def insert(self, data: dict) -> str:
+        row = await self.conn.fetchrow(f"""
+            INSERT INTO {self.gold}.published_tours (
+                tour_id, generated_content_id, tenant_id,
+                aa_name, aa_subtitle, aa_summary, aa_description,
+                aa_highlights, aa_itineraries, mobile_card_text,
+                seo_title, seo_meta, seo_keywords_used, og_tags,
+                quality_score, quality_score_id,
+                s3_gold_path, approved_by
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7,
+                $8, $9, $10, $11, $12, $13, $14,
+                $15, $16, $17, $18
+            )
+            ON CONFLICT (tour_id) DO UPDATE SET
+                generated_content_id = EXCLUDED.generated_content_id,
+                aa_name              = EXCLUDED.aa_name,
+                quality_score        = EXCLUDED.quality_score,
+                published_at         = NOW()
+            RETURNING id::text
         """,
-            data["published_version_id"],
-            data["raw_tour_id"],
-            data.get("name"),
-            data.get("subtitle"),
-            data.get("country"),
-            data.get("trip_type"),
-            data.get("duration"),
+            data["tour_id"],
+            data["generated_content_id"],
+            data.get("tenant_id", "00000000-0000-0000-0000-000000000001"),
+            data["aa_name"],
+            data.get("aa_subtitle"),
+            data.get("aa_summary"),
+            data.get("aa_description"),
+            data.get("aa_highlights", "[]"),
+            data.get("aa_itineraries"),
+            data.get("mobile_card_text"),
             data.get("seo_title"),
             data.get("seo_meta"),
+            data.get("seo_keywords_used", "[]"),
+            data.get("og_tags", "{}"),
             data.get("quality_score"),
-            data.get("status", "draft"),
-            data["slug"],
-            data.get("published_by", "pipeline"),
+            data.get("quality_score_id"),
+            data.get("s3_gold_path"),
+            data.get("approved_by", "auto"),
         )
-        return str(row["id"])
-
-    async def publish(self, id: str) -> None:
-        await self.conn.execute("""
-            UPDATE gold.published_catalog
-            SET status = 'published', published_at = NOW(), updated_at = NOW()
-            WHERE id = $1
-        """, id)
-
-    async def unpublish(self, id: str) -> None:
-        await self.conn.execute("""
-            UPDATE gold.published_catalog
-            SET status = 'unpublished', unpublished_at = NOW(), updated_at = NOW()
-            WHERE id = $1
-        """, id)
+        return row["id"]
 
     async def get_by_id(self, id: str) -> dict | None:
         row = await self.conn.fetchrow(
-            "SELECT * FROM gold.published_catalog WHERE id = $1", id
+            f"SELECT * FROM {self.gold}.published_tours WHERE id = $1::uuid", id
         )
         return dict(row) if row else None
 
-    async def get_by_slug(self, slug: str) -> dict | None:
+    async def get_by_tour_id(self, tour_id: str) -> dict | None:
         row = await self.conn.fetchrow(
-            "SELECT * FROM gold.published_catalog WHERE slug = $1", slug
+            f"SELECT * FROM {self.gold}.published_tours WHERE tour_id = $1::uuid", tour_id
         )
         return dict(row) if row else None
 
-    async def list(self, status: str = None, limit: int = 50, offset: int = 0) -> list:
-        if status:
-            rows = await self.conn.fetch("""
-                SELECT * FROM gold.published_catalog
-                WHERE status = $1
-                ORDER BY created_at DESC LIMIT $2 OFFSET $3
-            """, status, limit, offset)
-        else:
-            rows = await self.conn.fetch("""
-                SELECT * FROM gold.published_catalog
-                ORDER BY created_at DESC LIMIT $1 OFFSET $2
-            """, limit, offset)
+    async def list(self, limit: int = 50, offset: int = 0) -> list:
+        rows = await self.conn.fetch(
+            f"SELECT * FROM {self.gold}.published_tours ORDER BY published_at DESC LIMIT $1 OFFSET $2",
+            limit, offset
+        )
         return [dict(r) for r in rows]
 
-    @staticmethod
-    def generate_slug(name: str, country: str = None) -> str:
-        text = f"{name} {country}".strip() if country else name
-        text = unidecode(text)          # ộ → o, ă → a, etc.
-        slug = text.lower()
-        slug = re.sub(r"[^\w\s-]", "", slug)
-        slug = re.sub(r"[\s_]+", "-", slug)
-        slug = re.sub(r"-+", "-", slug).strip("-")
-        return slug[:120]
+    async def list_by_country(self, country: str, limit: int = 50) -> list:
+        rows = await self.conn.fetch(f"""
+            SELECT pt.* FROM {self.gold}.published_tours pt
+            JOIN {self.silver}.raw_tours rt ON rt.tour_id = pt.tour_id
+            WHERE rt.country = $1
+            ORDER BY pt.published_at DESC
+            LIMIT $2
+        """, country, limit)
+        return [dict(r) for r in rows]

@@ -72,10 +72,12 @@ async def process_tour(raw_tour_id: str, seo_id: str = None) -> dict:
                     retries=final_state["retry_count"],
                     cost=final_state["cost_usd"])
 
-        # Insert vào silver.published_tour_versions
+        tenant_slug = event.get("tenant_slug", "aa_internal")
+        silver = f"silver_{tenant_slug}"
+        # Insert vào silver_{tenant_slug}.generated_content
         generated = final_state["generated"]
         version_id = await conn.fetchval("""
-            INSERT INTO silver.published_tour_versions (
+            INSERT INTO " + silver + ".generated_content (
                 raw_tour_id, version_number, name, subtitle, summary,
                 highlights, seo_title, seo_meta, trip_type,
                 quality_score, publish_ready, hitl_status,

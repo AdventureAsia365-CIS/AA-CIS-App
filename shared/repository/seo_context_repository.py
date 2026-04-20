@@ -1,46 +1,54 @@
-from .base import BaseRepository
+import asyncpg
+import structlog
 
-class SeoContextRepository(BaseRepository):
+logger = structlog.get_logger()
 
-    async def upsert(self, data: dict) -> str:
-        row = await self.conn.fetchrow("""
-            INSERT INTO silver.seo_contexts (
-                destination, activity, keywords, demographics,
-                fetched_at, expires_at
-            ) VALUES ($1, $2, $3, $4, NOW(), NOW() + INTERVAL '24 hours')
-            ON CONFLICT (destination, activity)
-            DO UPDATE SET
-                keywords     = EXCLUDED.keywords,
-                demographics = EXCLUDED.demographics,
-                fetched_at   = NOW(),
-                expires_at   = NOW() + INTERVAL '24 hours'
-            RETURNING id
+
+class SeoContextRepository:
+    """Repository for silver_{tenant}.seo_context table."""
+
+    def __init__(self, conn: asyncpg.Connection, tenant_slug: str = "aa_internal"):
+        self.conn = conn
+        self.schema = f"silver_{tenant_slug}"
+
+    async def insert(self, data: dict) -> str:
+        row = await self.conn.fetchrow(f"""
+            INSERT INTO {self.schema}.seo_context (
+                tour_id, tenant_id, keyword_search, provider,
+                keyword_ideas, demographics, trends, top_keywords,
+                cache_key, expires_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            RETURNING id::text
         """,
-            data["destination"],
-            data.get("activity"),
-            data.get("keywords"),
-            data.get("demographics"),
+            data["tour_id"],
+            data.get("tenant_id", "00000000-0000-0000-0000-000000000001"),
+            data.get("keyword_search"),
+            data.get("provider", "dataforseo"),
+            data.get("keyword_ideas", "[]"),
+            data.get("demographics", "{}"),
+            data.get("trends", "{}"),
+            data.get("top_keywords", "[]"),
+            data.get("cache_key"),
+            data.get("expires_at"),
         )
-        return str(row["id"])
+        return row["id"]
 
-    async def get(self, destination: str, activity: str = None) -> dict | None:
-        row = await self.conn.fetchrow("""
-            SELECT * FROM silver.seo_contexts
-            WHERE destination = $1
-              AND ($2::text IS NULL OR activity = $2)
-              AND expires_at > NOW()
-        """, destination, activity)
+    async def get_by_cache_key(self, cache_key: str) -> dict | None:
+        row = await self.conn.fetchrow(
+            f"SELECT * FROM {self.schema}.seo_context WHERE cache_key = $1 AND expires_at > NOW()",
+            cache_key
+        )
         return dict(row) if row else None
 
     async def get_by_id(self, id: str) -> dict | None:
         row = await self.conn.fetchrow(
-            "SELECT * FROM silver.seo_contexts WHERE id = $1", id
+            f"SELECT * FROM {self.schema}.seo_context WHERE id = $1::uuid", id
         )
         return dict(row) if row else None
 
     async def list(self, limit: int = 50, offset: int = 0) -> list:
         rows = await self.conn.fetch(
-            "SELECT * FROM silver.seo_contexts ORDER BY fetched_at DESC LIMIT $1 OFFSET $2",
+            f"SELECT * FROM {self.schema}.seo_context ORDER BY fetched_at DESC LIMIT $1 OFFSET $2",
             limit, offset
         )
         return [dict(r) for r in rows]

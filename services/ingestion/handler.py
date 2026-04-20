@@ -29,8 +29,9 @@ async def process_file(s3_bucket: str, s3_key: str):
     logger.info("excel_parsed", total_rows=len(records))
 
     conn = await asyncpg.connect(os.environ["DATABASE_URL"])
-    source_repo = RawSourceRepository(conn)
-    tour_repo = RawTourRepository(conn)
+    tenant_slug = "aa_internal"  # Phase 1: single tenant
+    source_repo = RawSourceRepository(conn, tenant_slug)
+    tour_repo = RawTourRepository(conn, tenant_slug)
 
     try:
         # 1. Insert raw_source → lấy source_id
