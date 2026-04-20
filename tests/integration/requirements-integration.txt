@@ -1,0 +1,12 @@
+# Integration test dependencies — NO Docker required
+# Requires: PostgreSQL 16 running locally (pg_ctlcluster 16 main start)
+#           DB setup: psql -c "CREATE USER cistest WITH PASSWORD 'cistest';"
+#                     psql -c "CREATE DATABASE cis_integration_test OWNER cistest;"
+
+pytest==8.3.5
+pytest-asyncio==0.24.0
+pytest-cov==5.0.0
+fakeredis==2.35.1
+psycopg2-binary==2.9.10
+boto3==1.35.99
+botocore==1.35.99
