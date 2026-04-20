@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends
 from contextlib import asynccontextmanager
 import asyncpg
 import os
-
+import uuid
 from shared.repository.raw_tour_repository import RawTourRepository
 
 # DB pool
@@ -44,6 +44,11 @@ async def get_tour(
     tour_id: str,
     repo: RawTourRepository = Depends(get_repo)
 ):
+    try:
+        uuid.UUID(tour_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Tour not found")
+
     tour = await repo.get_by_id(tour_id)
     if not tour:
         raise HTTPException(status_code=404, detail="Tour not found")
