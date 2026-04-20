@@ -6,7 +6,9 @@ const INTERNAL_PATHS = ["/upload", "/review", "/catalog"];
 const TENANT_PATHS   = ["/portal"];
 const PUBLIC_PATHS   = ["/login", "/tenant-login"];
 
-export function middleware(request: NextRequest) {
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://api-cis.lumiguides.it.com";
+
+export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   // Skip public paths
@@ -16,24 +18,76 @@ export function middleware(request: NextRequest) {
 
   const role = request.cookies.get("cis_role")?.value;
 
-  // Admin only
+  // ── Admin only ────────────────────────────────────────────────────────────
   if (ADMIN_PATHS.some(p => pathname.startsWith(p))) {
-    if (role !== "admin") return NextResponse.redirect(new URL("/login", request.url));
+    if (role !== "admin") {
+      return NextResponse.redirect(new URL("/login", request.url));
+    }
   }
 
-  // Internal (admin + content)
+  // ── Internal (admin + content) ────────────────────────────────────────────
   if (INTERNAL_PATHS.some(p => pathname.startsWith(p))) {
-    if (!role || role === "tenant") return NextResponse.redirect(new URL("/login", request.url));
+    if (!role || role === "tenant") {
+      return NextResponse.redirect(new URL("/login", request.url));
+    }
   }
 
-  // Tenant only
+  // ── Tenant portal — verify JWT ────────────────────────────────────────────
   if (TENANT_PATHS.some(p => pathname.startsWith(p))) {
-    if (role !== "tenant" && role !== "admin") return NextResponse.redirect(new URL("/tenant-login", request.url));
+    // Admin can always access portal (for testing)
+    if (role === "admin") return NextResponse.next();
+
+    if (role !== "tenant") {
+      return NextResponse.redirect(new URL("/tenant-login", request.url));
+    }
+
+    // Verify JWT with backend
+    const token = request.cookies.get("cis_tenant_token")?.value;
+    if (!token) {
+      return NextResponse.redirect(new URL("/tenant-login", request.url));
+    }
+
+    try {
+      const res = await fetch(`${API_URL}/auth/verify-tenant`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+        // Short timeout — don't block page load
+        signal: AbortSignal.timeout(3000),
+      });
+
+      if (!res.ok) {
+        // JWT invalid/expired → clear cookies + redirect
+        const response = NextResponse.redirect(new URL("/tenant-login", request.url));
+        response.cookies.delete("cis_role");
+        response.cookies.delete("cis_tenant_token");
+        response.cookies.delete("cis_tenant_id");
+        response.cookies.delete("cis_tenant_name");
+        response.cookies.delete("cis_tenant_plan");
+        return response;
+      }
+    } catch {
+      // Verification service unreachable — fail open in dev, fail closed in prod
+      const isDev = process.env.NODE_ENV === "development";
+      if (!isDev) {
+        return NextResponse.redirect(new URL("/tenant-login", request.url));
+      }
+      // In dev: allow through with warning (logged server-side)
+      console.warn("[middleware] JWT verify failed — dev mode, allowing through");
+    }
   }
 
   return NextResponse.next();
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/upload/:path*", "/review/:path*", "/catalog/:path*", "/portal/:path*", "/login", "/tenant-login"],
+  matcher: [
+    "/dashboard/:path*",
+    "/upload/:path*",
+    "/review/:path*",
+    "/catalog/:path*",
+    "/portal/:path*",
+    "/login",
+    "/tenant-login",
+  ],
 };
