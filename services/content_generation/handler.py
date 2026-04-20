@@ -7,6 +7,28 @@ import structlog
 from .graph import build_graph
 from shared.repository.raw_tour_repository import RawTourRepository
 from shared.repository.seo_context_repository import SeoContextRepository
+from shared.rag import GoldenTourRepository
+
+RAG_ENABLED = os.getenv("RAG_ENABLED", "true").lower() == "true"
+RAG_N_SHOTS = int(os.getenv("RAG_N_SHOTS", "3"))
+
+
+def _get_few_shots(event: dict) -> list:
+    if not RAG_ENABLED:
+        return []
+    try:
+        repo = GoldenTourRepository()
+        return repo.query_similar(
+            tour_name=event.get("src_name", ""),
+            country=event.get("country", ""),
+            tenant_id=event.get("tenant_id", "aa-internal"),
+            n_results=RAG_N_SHOTS,
+        )
+    except Exception as e:
+        structlog.get_logger().warning("few_shots_failed", error=str(e))
+        return []
+
+
 
 logger = structlog.get_logger()
 
@@ -34,7 +56,7 @@ async def process_tour(raw_tour_id: str, seo_id: str = None) -> dict:
         initial_state = {
             "tour":          dict(tour),
             "seo":           seo,
-            "few_shots":     [],
+            "few_shots": _get_few_shots(event),
             "generated":     {},
             "quality_score": 0.0,
             "retry_count":   0,
