@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import asyncpg
+import redis.asyncio as aioredis
 import os
 import uuid
 
@@ -11,20 +12,30 @@ from api.routers.auth import (
     TenantLoginRequest, TenantLoginResponse,
 )
 
+from api.routers.v1_tours import router as v1_tours_router
+from api.routers.v1_exports import router as v1_exports_router
+from api.middleware.rate_limit import rate_limit_middleware
 pool: asyncpg.Pool = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global pool
+    redis = aioredis.from_url(
+        f"redis://{os.environ.get('REDIS_HOST', 'aa-cis-dev-redis.wvp8vb.0001.usw1.cache.amazonaws.com')}:6379",
+        encoding="utf-8", decode_responses=True
+    )
+    app.state.redis = redis
     pool = await asyncpg.create_pool(
         os.environ["DATABASE_URL"], min_size=2, max_size=10,
     )
+    app.state.pool = pool
     yield
     await pool.close()
+    await redis.aclose()
 
 app = FastAPI(
     title="AA-CIS API",
-    version="0.2.0",
+    version="0.3.0",
     description="Adventure Asia Content Intelligence System",
     lifespan=lifespan,
 )
@@ -40,6 +51,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(v1_tours_router)
+app.include_router(v1_exports_router)
+
+app.middleware("http")(rate_limit_middleware)
 
 def get_pool() -> asyncpg.Pool:
     if not pool:
@@ -87,7 +103,7 @@ async def verify_tenant(request: Request):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "aa-cis-api", "version": "0.2.0"}
+    return {"status": "ok", "service": "aa-cis-api", "version": "0.3.0"}
 
 @app.get("/tours")
 async def list_tours(
