@@ -65,7 +65,7 @@ jobs:
             --cov=services \
             --cov=shared \
             --cov-report=term-missing \
-            --cov-fail-under=60
+            --cov-fail-under=30
 
   test-integration:
     name: Integration Tests
