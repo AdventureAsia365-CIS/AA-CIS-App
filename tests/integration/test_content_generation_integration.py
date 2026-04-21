@@ -260,12 +260,13 @@ class TestLLMFallbackChain:
         """pipeline_runs must record Langfuse trace URL for observability."""
         cur = db_conn.cursor()
         run_id = str(uuid.uuid4())
+        test_batch_id = str(uuid.uuid4())  # use unique batch_id to avoid UK conflict
         trace_url = "https://langfuse.aa-cis.internal/traces/trace-test-001"
         cur.execute("""
             INSERT INTO shared.pipeline_runs
                 (id, tenant_id, batch_id, tours_total, langfuse_trace_url)
             VALUES (%s, %s, %s, 1, %s)
-        """, (run_id, TENANT_ID, BATCH_ID, trace_url))
+        """, (run_id, TENANT_ID, test_batch_id, trace_url))
         cur.execute(
             "SELECT langfuse_trace_url FROM shared.pipeline_runs WHERE id = %s",
             (run_id,)
