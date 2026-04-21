@@ -8,7 +8,7 @@ from .prompt_cache import build_cached_system_prompt, build_cached_messages
 logger = structlog.get_logger()
 
 COST_TABLE = {
-    "claude-sonnet-4-6":      {"in": 0.003,   "out": 0.015},
+    "claude-sonnet-4-20250514":      {"in": 0.003,   "out": 0.015},
     "claude-haiku-4-5-20251001": {"in": 0.00025, "out": 0.00125},
     "gpt-4.1":                {"in": 0.002,   "out": 0.008},
 }
@@ -50,7 +50,7 @@ class LLMClient:
         # T1: Claude Sonnet + prompt caching
         try:
             resp = self._call_anthropic(
-                request, model="claude-sonnet-4-6", use_cache=True
+                request, model="claude-sonnet-4-20250514", use_cache=True
             )
             self._end_trace(trace_id, resp, "t1_success")
             return resp
