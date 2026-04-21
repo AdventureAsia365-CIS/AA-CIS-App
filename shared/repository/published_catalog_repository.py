@@ -82,3 +82,22 @@ class PublishedCatalogRepository:
             LIMIT $2
         """, country, limit)
         return [dict(r) for r in rows]
+
+    @staticmethod
+    def generate_slug(name: str, country: str = "") -> str:
+        """Generate URL-friendly slug from tour name and country."""
+        import re
+        import unicodedata
+        # Normalize unicode (ộ → o, etc.)
+        text = unicodedata.normalize("NFKD", name.lower())
+        text = text.encode("ascii", "ignore").decode("ascii")
+        if country:
+            country_part = unicodedata.normalize("NFKD", country.lower())
+            country_part = country_part.encode("ascii", "ignore").decode("ascii")
+            text = f"{text}-{country_part}"
+        # Replace non-alphanumeric with dash
+        text = re.sub(r"[^a-z0-9]+", "-", text)
+        # Strip leading/trailing dashes
+        text = text.strip("-")
+        # Max 100 chars
+        return text[:100]
