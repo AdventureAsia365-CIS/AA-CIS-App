@@ -29,7 +29,7 @@ def _setup_validated_tour(db_conn) -> tuple[str, str]:
         VALUES (%s,%s,1,%s,%s,%s,'[]','...','SEO T','SEO M',
                 'claude-3-5-sonnet-20241022','gpt-4.1','v3.2','approved')
     """, (
-        content_id, tour_id,
+        content_id, tour_id, TENANT_ID,
         SAMPLE_GENERATED["aa_name"], SAMPLE_GENERATED["aa_subtitle"],
         SAMPLE_GENERATED["aa_summary"],
     ))

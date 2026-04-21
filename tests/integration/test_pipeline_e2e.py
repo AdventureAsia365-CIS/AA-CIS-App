@@ -82,7 +82,7 @@ class TestFullPipelineHappyPath:
                  model_editorial, model_schema, prompt_version, retry_count, status)
             VALUES (%s,%s,1,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,'draft')
         """, (
-            content_id, tour_id,
+            content_id, tour_id, TENANT_ID,
             SAMPLE_GENERATED["aa_name"], SAMPLE_GENERATED["aa_subtitle"],
             SAMPLE_GENERATED["aa_summary"],
             json.dumps(SAMPLE_GENERATED["aa_highlights"]),
