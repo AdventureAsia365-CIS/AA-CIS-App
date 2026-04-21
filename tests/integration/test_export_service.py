@@ -80,7 +80,7 @@ async def _seed_raw_tour(conn, tenant_id: str) -> str:
             (tour_id, batch_id, tenant_id, country, src_name,
              src_subtitle, src_summary, src_highlights, src_itineraries,
              pipeline_status)
-        VALUES ($1,$2,$3,'Vietnam','RAW NAME','Sub','Sum','[]','[]','validated')
+        VALUES ($1,$2,$3,'Vietnam','RAW NAME','Sub','Sum','[]','[]','passed')
     """, tour_id, str(uuid.uuid4()), tenant_id)
     return tour_id
 

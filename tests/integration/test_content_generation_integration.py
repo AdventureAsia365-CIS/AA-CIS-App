@@ -101,7 +101,7 @@ class TestGeneratedContentRepository:
             SAMPLE_GENERATED["model_editorial"], SAMPLE_GENERATED["model_schema"],
             SAMPLE_GENERATED["prompt_version"],
         ))
-        for new_status in ["validated", "approved"]:
+        for new_status in ["passed", "approved"]:
             cur.execute(
                 "UPDATE silver_aa_internal.generated_content SET status = %s WHERE id = %s",
                 (new_status, content_id)

@@ -104,11 +104,11 @@ class TestFullPipelineHappyPath:
         """, (score_id, tour_id, content_id, json.dumps(lesson_results)))
         cur.execute("""
             UPDATE silver_aa_internal.generated_content
-            SET status = 'validated' WHERE id = %s
+            SET status = 'passed' WHERE id = %s
         """, (content_id,))
         cur.execute("""
             UPDATE silver_aa_internal.raw_tours
-            SET pipeline_status = 'validated' WHERE tour_id = %s
+            SET pipeline_status = 'passed' WHERE tour_id = %s
         """, (tour_id,))
         redis_client.setex(f"pipeline:job:{BATCH_ID}", 3600,
                            json.dumps({"step": "validation", "pct": 80}))

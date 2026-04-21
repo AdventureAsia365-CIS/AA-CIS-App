@@ -241,13 +241,13 @@ class TestHITLRouting:
         """, (content_id,))
         cur.execute("""
             UPDATE silver_aa_internal.raw_tours
-            SET pipeline_status = 'validated' WHERE tour_id = %s
+            SET pipeline_status = 'passed' WHERE tour_id = %s
         """, (tour_id,))
         cur.execute(
             "SELECT pipeline_status FROM silver_aa_internal.raw_tours WHERE tour_id = %s",
             (tour_id,)
         )
-        assert cur.fetchone()[0] == "validated"
+        assert cur.fetchone()[0] == "passed"
         cur.close()
 
     def test_batch_stats_reflect_hitl_count(self, db_conn):
