@@ -46,7 +46,7 @@ class TestGeneratedContentRepository:
             SAMPLE_GENERATED["aa_itineraries"],
             SAMPLE_GENERATED["seo_title"], SAMPLE_GENERATED["seo_meta"],
             SAMPLE_GENERATED["model_editorial"], SAMPLE_GENERATED["model_schema"],
-            SAMPLE_GENERATED["prompt_version"], 0, "generated",
+            SAMPLE_GENERATED["prompt_version"], 0, "draft",
         ))
         cur.execute(
             "SELECT aa_name, status, model_editorial FROM silver_aa_internal.generated_content WHERE id = %s",
@@ -55,7 +55,7 @@ class TestGeneratedContentRepository:
         row = cur.fetchone()
         cur.close()
         assert row[0] == "Ha Long Bay 3-Day Luxury Cruise"
-        assert row[1] == "generated"
+        assert row[1] == "draft"
         assert row[2] == "claude-3-5-sonnet-20241022"
 
     def test_version_increment_on_retry(self, db_conn):

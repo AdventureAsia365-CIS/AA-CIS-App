@@ -55,7 +55,7 @@ SAMPLE_GENERATED = {
     "model_schema": "gpt-4.1",
     "prompt_version": "v3.2",
     "retry_count": 0,
-    "status": "generated",
+    "status": "draft",
 }
 
 # Verify word count at import time
