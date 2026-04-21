@@ -100,7 +100,7 @@ def _apply_schema(conn):
             aa_summary TEXT, aa_highlights JSONB, aa_itineraries TEXT,
             seo_title TEXT, seo_meta TEXT, model_editorial TEXT,
             model_schema TEXT, prompt_version TEXT,
-            retry_count INT DEFAULT 0, status TEXT DEFAULT 'generated',
+            retry_count INT DEFAULT 0, status TEXT DEFAULT 'draft',
             created_at TIMESTAMPTZ DEFAULT NOW()
         );
         CREATE TABLE IF NOT EXISTS silver_aa_internal.quality_scores (

@@ -69,7 +69,7 @@ class TestGeneratedContentRepository:
                      aa_highlights, aa_itineraries, seo_title, seo_meta,
                      model_editorial, model_schema, prompt_version, retry_count, status)
                 VALUES (%s,%s,%s,%s,%s,'[]','...','SEO Title','SEO Meta',
-                        %s,%s,%s,%s,'generated')
+                        %s,%s,%s,%s,'draft')
             """, (
                 tour_id, version, f"Tour v{version}", "subtitle", "summary",
                 "claude-3-5-sonnet-20241022", "gpt-4.1", "v3.2", version - 1,
@@ -93,7 +93,7 @@ class TestGeneratedContentRepository:
                 (id, tour_id, version_num, aa_name, aa_subtitle, aa_summary,
                  aa_highlights, aa_itineraries, seo_title, seo_meta,
                  model_editorial, model_schema, prompt_version, status)
-            VALUES (%s,%s,1,%s,%s,%s,'[]','...','T','M',%s,%s,%s,'generated')
+            VALUES (%s,%s,1,%s,%s,%s,'[]','...','T','M',%s,%s,%s,'draft')
         """, (
             content_id, tour_id,
             SAMPLE_GENERATED["aa_name"], SAMPLE_GENERATED["aa_subtitle"],
@@ -122,7 +122,7 @@ class TestGeneratedContentRepository:
                 (tour_id, version_num, aa_name, aa_subtitle, aa_summary,
                  aa_highlights, aa_itineraries, seo_title, seo_meta,
                  model_editorial, model_schema, prompt_version, status)
-            VALUES (%s,1,%s,%s,%s,'[]','...','T','M','claude-3-5-sonnet-20241022','gpt-4.1','v3.2','generated')
+            VALUES (%s,1,%s,%s,%s,'[]','...','T','M','claude-3-5-sonnet-20241022','gpt-4.1','v3.2','draft')
         """, (
             tour_id,
             SAMPLE_GENERATED["aa_name"],  # "Ha Long Bay 3-Day Luxury Cruise"
@@ -152,7 +152,7 @@ class TestGeneratedContentRepository:
                  aa_highlights, aa_itineraries, seo_title, seo_meta,
                  model_editorial, model_schema, prompt_version, status)
             VALUES (%s,1,'Test','Sub','Sum','[]','...','T',%s,
-                    'claude-3-5-sonnet-20241022','gpt-4.1','v3.2','generated')
+                    'claude-3-5-sonnet-20241022','gpt-4.1','v3.2','draft')
         """, (tour_id, seo_meta))
         cur.execute(
             "SELECT LENGTH(seo_meta) FROM silver_aa_internal.generated_content WHERE tour_id = %s",

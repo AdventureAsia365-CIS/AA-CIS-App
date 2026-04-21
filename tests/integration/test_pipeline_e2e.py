@@ -80,7 +80,7 @@ class TestFullPipelineHappyPath:
                 (id, tour_id, version_num, aa_name, aa_subtitle, aa_summary,
                  aa_highlights, aa_itineraries, seo_title, seo_meta,
                  model_editorial, model_schema, prompt_version, retry_count, status)
-            VALUES (%s,%s,1,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,'generated')
+            VALUES (%s,%s,1,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,'draft')
         """, (
             content_id, tour_id,
             SAMPLE_GENERATED["aa_name"], SAMPLE_GENERATED["aa_subtitle"],

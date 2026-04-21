@@ -28,7 +28,7 @@ def _setup_tour_with_content(db_conn, aa_name=None, aa_subtitle=None,
              aa_highlights, aa_itineraries, seo_title, seo_meta,
              model_editorial, model_schema, prompt_version, status)
         VALUES (%s,%s,1,%s,%s,%s,'[]','...','SEO Title',%s,
-                'claude-3-5-sonnet-20241022','gpt-4.1','v3.2','generated')
+                'claude-3-5-sonnet-20241022','gpt-4.1','v3.2','draft')
     """, (
         content_id, tour_id,
         aa_name or SAMPLE_GENERATED["aa_name"],
