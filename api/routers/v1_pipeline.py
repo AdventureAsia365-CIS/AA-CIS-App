@@ -41,8 +41,15 @@ async def _rewrite_tour(tour: dict, idx: int, total: int) -> dict:
             "model_used": "",
         }
 
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, graph.invoke, initial_state)
+        def run_graph():
+            import asyncio as _asyncio
+            loop = _asyncio.new_event_loop()
+            _asyncio.set_event_loop(loop)
+            try:
+                return graph.invoke(initial_state)
+            finally:
+                loop.close()
+        result = await asyncio.get_event_loop().run_in_executor(None, run_graph)
 
         return {
             "idx": idx,
