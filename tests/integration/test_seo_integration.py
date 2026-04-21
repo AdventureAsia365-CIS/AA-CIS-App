@@ -17,7 +17,7 @@ def _insert_raw_tour(db_conn, tour_id=None) -> str:
         INSERT INTO silver_aa_internal.raw_tours
             (tour_id, tenant_id, batch_id, country, src_name, src_subtitle, src_summary,
              src_highlights, src_itineraries, pipeline_status)
-        VALUES (%s, %s, %s, %s, %s, %s, '[]', '[]', 'ingested')
+        VALUES (%s, %s, %s, %s, %s, %s, %s, '[]', '[]', 'ingested')
     """, (tid, TENANT_ID, BATCH_ID, SAMPLE_TOUR["country"], SAMPLE_TOUR["src_name"],
           SAMPLE_TOUR["src_subtitle"], SAMPLE_TOUR["src_summary"]))
     cur.close()
@@ -64,7 +64,7 @@ class TestSEOContextRepository:
                 INSERT INTO silver_aa_internal.seo_context
                     (tour_id, keyword_search, keyword_ideas, demographics, trends, provider)
                 VALUES (%s, %s, '[]', '{}', '{}', 'dataforseo')
-            """, (str(uuid.uuid4()), "some keyword"))
+            """, (str(uuid.uuid4()), str(uuid.uuid4())), "some keyword"))
         cur.close()
 
     def test_pipeline_status_updated_after_seo(self, db_conn):

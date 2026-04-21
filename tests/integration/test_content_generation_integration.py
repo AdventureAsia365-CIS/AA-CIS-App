@@ -68,7 +68,7 @@ class TestGeneratedContentRepository:
                     (tour_id, tenant_id, version_num, aa_name, aa_subtitle, aa_summary,
                      aa_highlights, aa_itineraries, seo_title, seo_meta,
                      model_editorial, model_schema, prompt_version, retry_count, status)
-                VALUES (%s,%s,%s,%s,%s,%s,'[]','...','SEO Title','SEO Meta',
+                VALUES (%s,%s,%s,%s,%s,%s,%s,'[]','...','SEO Title','SEO Meta',
                         %s,%s,%s,%s,'draft')
             """, (
                 tour_id, TENANT_ID, version, f"Tour v{version}", "subtitle", "summary",
@@ -93,7 +93,7 @@ class TestGeneratedContentRepository:
                 (id, tour_id, tenant_id, version_num, aa_name, aa_subtitle, aa_summary,
                  aa_highlights, aa_itineraries, seo_title, seo_meta,
                  model_editorial, model_schema, prompt_version, status)
-            VALUES (%s,%s,%s,1,%s,%s,%s,'[]','...','T','M',%s,%s,%s,'draft')
+            VALUES (%s,%s,%s,1,%s,%s,%s,%s,'[]','...','T','M',%s,%s,%s,'draft')
         """, (
             content_id, tour_id, TENANT_ID,
             SAMPLE_GENERATED["aa_name"], SAMPLE_GENERATED["aa_subtitle"],
@@ -122,9 +122,9 @@ class TestGeneratedContentRepository:
                     (tour_id, tenant_id, version_num, aa_name, aa_subtitle, aa_summary,
                  aa_highlights, aa_itineraries, seo_title, seo_meta,
                  model_editorial, model_schema, prompt_version, status)
-            VALUES (%s,%s,1,%s,%s,%s,'[]','...','T','M','claude-3-5-sonnet-20241022','gpt-4.1','v3.2','draft')
+            VALUES (%s,%s,%s,1,%s,%s,%s,'[]','...','T','M','claude-3-5-sonnet-20241022','gpt-4.1','v3.2','draft')
         """, (
-            tour_id, TENANT_ID,
+            tour_id, TENANT_ID, 1,
             SAMPLE_GENERATED["aa_name"],  # "Ha Long Bay 3-Day Luxury Cruise"
             SAMPLE_GENERATED["aa_subtitle"], SAMPLE_GENERATED["aa_summary"],
         ))

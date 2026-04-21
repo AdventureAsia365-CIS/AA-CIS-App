@@ -26,7 +26,7 @@ def _setup_validated_tour(db_conn) -> tuple[str, str]:
                 (id, tour_id, tenant_id, version_num, aa_name, aa_subtitle, aa_summary,
              aa_highlights, aa_itineraries, seo_title, seo_meta,
              model_editorial, model_schema, prompt_version, status)
-        VALUES (%s,%s,1,%s,%s,%s,'[]','...','SEO T','SEO M',
+        VALUES (%s,%s,%s,1,%s,%s,%s,%s,'[]','...','SEO T','SEO M',
                 'claude-3-5-sonnet-20241022','gpt-4.1','v3.2','approved')
     """, (
         content_id, tour_id, TENANT_ID,
@@ -49,7 +49,7 @@ class TestPublishedToursRepository:
                 (tour_id, tenant_id, aa_name, aa_subtitle, aa_summary,
                  aa_highlights, aa_itineraries, seo_title, seo_meta,
                  country, slug, quality_score)
-            VALUES (%s,%s,%s,%s,%s,'[]','...','SEO T','SEO M',%s,%s,0.94)
+            VALUES (%s,%s,%s,%s,%s,%s,'[]','...','SEO T','SEO M',%s,%s,0.94)
         """, (
             tour_id, TENANT_ID,
             SAMPLE_GENERATED["aa_name"], SAMPLE_GENERATED["aa_subtitle"],

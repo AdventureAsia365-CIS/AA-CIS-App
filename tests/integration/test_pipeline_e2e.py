@@ -34,11 +34,11 @@ class TestFullPipelineHappyPath:
         # ── STAGE 1: Ingestion → silver raw_tours ─────────────────────────
         cur.execute("""
             INSERT INTO silver_aa_internal.raw_tours
-                (tour_id, batch_id, country, src_name, src_subtitle, src_summary,
+                (tour_id, tenant_id, batch_id, country, src_name, src_subtitle, src_summary,
                  src_highlights, src_itineraries, pipeline_status)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'ingested')
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'ingested')
         """, (
-            tour_id, BATCH_ID, SAMPLE_TOUR["country"],
+            tour_id, TENANT_ID, BATCH_ID, SAMPLE_TOUR["country"],
             SAMPLE_TOUR["src_name"], SAMPLE_TOUR["src_subtitle"],
             SAMPLE_TOUR["src_summary"],
             json.dumps(SAMPLE_TOUR["src_highlights"]),

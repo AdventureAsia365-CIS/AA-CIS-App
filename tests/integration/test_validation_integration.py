@@ -20,14 +20,14 @@ def _setup_tour_with_content(db_conn, aa_name=None, aa_subtitle=None,
             (tour_id, tenant_id, batch_id, country, src_name, src_subtitle, src_summary,
              src_highlights, src_itineraries, pipeline_status)
         VALUES (%s, %s, %s, %s, %s, %s, %s, '[]', '[]', 'seo_done')
-    """, (tour_id, BATCH_ID, "Vietnam", SAMPLE_TOUR["src_name"],
+    """, (tour_id, TENANT_ID, BATCH_ID, "Vietnam", SAMPLE_TOUR["src_name"],
           SAMPLE_TOUR["src_subtitle"], SAMPLE_TOUR["src_summary"]))
     cur.execute("""
         INSERT INTO silver_aa_internal.generated_content
                 (id, tour_id, tenant_id, version_num, aa_name, aa_subtitle, aa_summary,
              aa_highlights, aa_itineraries, seo_title, seo_meta,
              model_editorial, model_schema, prompt_version, status)
-        VALUES (%s,%s,1,%s,%s,%s,'[]','...','SEO Title',%s,
+        VALUES (%s,%s,%s,1,%s,%s,%s,'[]','...','SEO Title',%s,
                 'claude-3-5-sonnet-20241022','gpt-4.1','v3.2','draft')
     """, (
         content_id, tour_id, TENANT_ID,
