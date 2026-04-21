@@ -64,7 +64,7 @@ class TestSEOContextRepository:
                 INSERT INTO silver_aa_internal.seo_context
                     (tour_id, keyword_search, keyword_ideas, demographics, trends, provider)
                 VALUES (%s, %s, '[]', '{}', '{}', 'dataforseo')
-            """, (str(uuid.uuid4()), str(uuid.uuid4())), "some keyword"))
+            """, (str(uuid.uuid4()), str(uuid.uuid4())))
         cur.close()
 
     def test_pipeline_status_updated_after_seo(self, db_conn):
