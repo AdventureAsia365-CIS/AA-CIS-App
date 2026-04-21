@@ -1,7 +1,7 @@
 import uuid
 
 TENANT_ID = "00000000-0000-0000-0000-000000000001"
-BATCH_ID = str(uuid.uuid4())
+BATCH_ID = "00000000-0000-0000-0000-000000000002"
 
 SAMPLE_TOUR = {
     "tour_id": str(uuid.uuid4()),
