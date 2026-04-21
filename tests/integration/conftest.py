@@ -129,7 +129,7 @@ def _apply_schema(conn):
     """)
 
     cur.execute("""
-        INSERT INTO shared.tenants (tenant_id, name, plan_tier)
+        INSERT INTO shared.tenants (tenant_id, name, slug, plan_tier, rate_limit_rpm, is_active)
         VALUES ('00000000-0000-0000-0000-000000000001', 'Adventure Asia Internal', 'aa-internal', 'internal', 60, true)
         ON CONFLICT DO NOTHING;
     """)
