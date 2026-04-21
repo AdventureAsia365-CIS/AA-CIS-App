@@ -9,7 +9,6 @@ import asyncio
 import tempfile
 import structlog
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from fastapi.responses import JSONResponse
 
 from services.ingestion.excel_parser import ExcelParser
@@ -17,7 +16,6 @@ from services.content_generation.graph import build_graph
 from shared.llm_client.client import LLMClient
 from shared.llm_client.models import LLMRequest
 from services.content_generation.prompts import SYSTEM_PROMPT, build_rewrite_prompt
-from api.middleware.auth import get_current_tenant
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/v1/pipeline", tags=["pipeline"])
