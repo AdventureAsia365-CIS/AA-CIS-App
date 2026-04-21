@@ -241,7 +241,7 @@ class TestHITLRouting:
         """, (content_id,))
         cur.execute("""
             UPDATE silver_aa_internal.raw_tours
-            SET pipeline_status = 'passed' WHERE tour_id = %s
+            SET pipeline_status = 'hitl_approved' WHERE tour_id = %s
         """, (tour_id,))
         cur.execute(
             "SELECT pipeline_status FROM silver_aa_internal.raw_tours WHERE tour_id = %s",

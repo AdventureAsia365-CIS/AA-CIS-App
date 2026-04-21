@@ -18,7 +18,7 @@ def _setup_validated_tour(db_conn) -> tuple[str, str]:
         INSERT INTO silver_aa_internal.raw_tours
             (tour_id, tenant_id, batch_id, country, src_name, src_subtitle, src_summary,
              src_highlights, src_itineraries, pipeline_status)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,'[]','[]','passed')
+        VALUES (%s,%s,%s,%s,%s,%s,%s,'[]','[]','hitl_approved')
     """, (tour_id, TENANT_ID, BATCH_ID, "Vietnam", SAMPLE_TOUR["src_name"],
           SAMPLE_TOUR["src_subtitle"], SAMPLE_TOUR["src_summary"]))
     cur.execute("""
