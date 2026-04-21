@@ -18,6 +18,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy source
 COPY api/ ./api/
 COPY shared/ ./shared/
+COPY services/ ./services/
 
 EXPOSE 8000
 
