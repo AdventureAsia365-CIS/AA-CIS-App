@@ -1,6 +1,6 @@
 import uuid
 
-TENANT_ID = "aa_internal"
+TENANT_ID = "00000000-0000-0000-0000-000000000001"
 BATCH_ID = str(uuid.uuid4())
 
 SAMPLE_TOUR = {
