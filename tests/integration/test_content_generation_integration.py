@@ -68,7 +68,7 @@ class TestGeneratedContentRepository:
                     (tour_id, tenant_id, version_num, aa_name, aa_subtitle, aa_summary,
                      aa_highlights, aa_itineraries, seo_title, seo_meta,
                      model_editorial, model_schema, prompt_version, retry_count, status)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,'[]','...','SEO Title','SEO Meta',
+                VALUES (%s,%s,%s,%s,%s,%s,'[]','...','SEO Title','SEO Meta',
                         %s,%s,%s,%s,'draft')
             """, (
                 tour_id, TENANT_ID, version, f"Tour v{version}", "subtitle", "summary",
