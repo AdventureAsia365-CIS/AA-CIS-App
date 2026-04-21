@@ -77,14 +77,14 @@ class TestSEOContextRepository:
         """, (tour_id, "ha long bay cruise"))
         cur.execute("""
             UPDATE silver_aa_internal.raw_tours
-            SET pipeline_status = 'seo_complete'
+            SET pipeline_status = 'seo_done'
             WHERE tour_id = %s
         """, (tour_id,))
         cur.execute(
             "SELECT pipeline_status FROM silver_aa_internal.raw_tours WHERE tour_id = %s",
             (tour_id,)
         )
-        assert cur.fetchone()[0] == "seo_complete"
+        assert cur.fetchone()[0] == "seo_done"
         cur.close()
 
     def test_keyword_ideas_jsonb_query(self, db_conn):

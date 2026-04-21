@@ -51,7 +51,7 @@ class TestFullPipelineHappyPath:
         # ── STAGE 2: SEO Intelligence → seo_context ───────────────────────
         cur.execute("""
             UPDATE silver_aa_internal.raw_tours
-            SET pipeline_status = 'seo_complete' WHERE tour_id = %s
+            SET pipeline_status = 'seo_done' WHERE tour_id = %s
         """, (tour_id,))
         cache_key = f"seo:{TENANT_ID}:vietnam:ha-long-bay:en_US"
         redis_client.setex(cache_key, 86400, json.dumps(SAMPLE_SEO))

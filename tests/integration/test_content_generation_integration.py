@@ -18,7 +18,7 @@ def _insert_raw_tour(db_conn, tour_id=None) -> str:
         INSERT INTO silver_aa_internal.raw_tours
             (tour_id, batch_id, country, src_name, src_subtitle, src_summary,
              src_highlights, src_itineraries, pipeline_status)
-        VALUES (%s, %s, %s, %s, %s, %s, '[]', '[]', 'seo_complete')
+        VALUES (%s, %s, %s, %s, %s, %s, '[]', '[]', 'seo_done')
     """, (tid, BATCH_ID, SAMPLE_TOUR["country"], SAMPLE_TOUR["src_name"],
           SAMPLE_TOUR["src_subtitle"], SAMPLE_TOUR["src_summary"]))
     cur.close()
