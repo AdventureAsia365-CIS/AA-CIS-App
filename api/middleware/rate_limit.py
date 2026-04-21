@@ -1,7 +1,8 @@
 import time, os, logging
-from fastapi import Request, HTTPException
+from fastapi import Request
 from fastapi.responses import JSONResponse
 from api.routers.auth import verify_jwt
+from shared.services.billing_service import track_api_call
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ async def rate_limit_middleware(request: Request, call_next):
     plan_tier = payload.get("plan_tier", "starter")
     rpm_limit = PLAN_RPM.get(plan_tier, 60)
 
+    # Rate limit check
     try:
         redis = request.app.state.redis
         window = int(time.time() // 60)
@@ -37,20 +39,37 @@ async def rate_limit_middleware(request: Request, call_next):
         count = await redis.incr(key)
         if count == 1:
             await redis.expire(key, 120)
-        logger.info(f"Rate limit: tenant={tenant_id} plan={plan_tier} count={count}/{rpm_limit}")
     except Exception as e:
         logger.error(f"Rate limit Redis error: {e}")
-        return await call_next(request)
+        count = 0
 
     if count > rpm_limit:
         retry_after = 60 - int(time.time() % 60)
+        # Track 429
+        await track_api_call(
+            request.app.state.pool,
+            tenant_id, request.url.path,
+            request.method, 429
+        )
         return JSONResponse(
             status_code=429,
             content={"detail": f"Rate limit exceeded. Plan: {plan_tier}, limit: {rpm_limit} RPM"},
             headers={"Retry-After": str(retry_after)}
         )
 
+    # Process request + measure time
+    start = time.time()
     response = await call_next(request)
+    response_ms = int((time.time() - start) * 1000)
+
+    # Track successful call
+    await track_api_call(
+        request.app.state.pool,
+        tenant_id, request.url.path,
+        request.method, response.status_code,
+        response_ms
+    )
+
     response.headers["X-RateLimit-Limit"] = str(rpm_limit)
     response.headers["X-RateLimit-Remaining"] = str(max(0, rpm_limit - count))
     response.headers["X-RateLimit-Plan"] = plan_tier
