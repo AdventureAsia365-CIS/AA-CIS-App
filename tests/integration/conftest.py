@@ -50,9 +50,11 @@ def _apply_schema(conn):
         CREATE SCHEMA IF NOT EXISTS shared;
         CREATE TABLE IF NOT EXISTS shared.tenants (
             tenant_id UUID PRIMARY KEY, name TEXT NOT NULL,
+            slug TEXT NOT NULL DEFAULT 'default',
             plan_tier TEXT DEFAULT 'internal', api_key_hash TEXT,
             rate_limit_rpm INT DEFAULT 60, is_active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMPTZ DEFAULT NOW()
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW()
         );
         CREATE TABLE IF NOT EXISTS shared.pipeline_runs (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -128,7 +130,7 @@ def _apply_schema(conn):
 
     cur.execute("""
         INSERT INTO shared.tenants (tenant_id, name, plan_tier)
-        VALUES ('00000000-0000-0000-0000-000000000001', 'Adventure Asia Internal', 'internal')
+        VALUES ('00000000-0000-0000-0000-000000000001', 'Adventure Asia Internal', 'aa-internal', 'internal', 60, true)
         ON CONFLICT DO NOTHING;
     """)
     cur.close()
