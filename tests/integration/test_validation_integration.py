@@ -17,7 +17,7 @@ def _setup_tour_with_content(db_conn, aa_name=None, aa_subtitle=None,
     cur = db_conn.cursor()
     cur.execute("""
         INSERT INTO silver_aa_internal.raw_tours
-            (tour_id, batch_id, country, src_name, src_subtitle, src_summary,
+            (tour_id, tenant_id, batch_id, country, src_name, src_subtitle, src_summary,
              src_highlights, src_itineraries, pipeline_status)
         VALUES (%s, %s, %s, %s, %s, %s, '[]', '[]', 'seo_done')
     """, (tour_id, BATCH_ID, "Vietnam", SAMPLE_TOUR["src_name"],
