@@ -45,94 +45,51 @@ def _apply_schema(conn):
     conn.autocommit = True
     cur = conn.cursor()
 
-    # shared schema
+    # Drop all schemas and recreate fresh
     cur.execute("""
-        CREATE SCHEMA IF NOT EXISTS shared;
-        CREATE TABLE IF NOT EXISTS shared.tenants (
-            tenant_id UUID PRIMARY KEY, name TEXT NOT NULL,
-            slug TEXT NOT NULL DEFAULT 'default',
-            plan_tier TEXT DEFAULT 'internal', api_key_hash TEXT,
-            rate_limit_rpm INT DEFAULT 60, is_active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMPTZ DEFAULT NOW(),
-            updated_at TIMESTAMPTZ DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS shared.pipeline_runs (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            tenant_id UUID REFERENCES shared.tenants(tenant_id),
-            batch_id TEXT NOT NULL, status TEXT DEFAULT 'running',
-            tours_total INT DEFAULT 0, tours_passed INT DEFAULT 0,
-            tours_hitl INT DEFAULT 0, tours_failed INT DEFAULT 0,
-            cost_usd NUMERIC(10,4), tokens_input BIGINT DEFAULT 0,
-            tokens_output BIGINT DEFAULT 0, langfuse_trace_url TEXT,
-            started_at TIMESTAMPTZ DEFAULT NOW(), completed_at TIMESTAMPTZ
-        );
-        CREATE TABLE IF NOT EXISTS shared.lessons_registry (
-            id SERIAL PRIMARY KEY, lesson_num TEXT UNIQUE NOT NULL,
-            category TEXT, validator_fn TEXT, is_active BOOLEAN DEFAULT TRUE,
-            failure_code TEXT, example_before TEXT, example_after TEXT,
-            version INT DEFAULT 1
-        );
+        DROP SCHEMA IF EXISTS gold_aa_internal CASCADE;
+        DROP SCHEMA IF EXISTS silver_aa_internal CASCADE;
+        DROP SCHEMA IF EXISTS shared CASCADE;
+        DROP SCHEMA IF EXISTS ops CASCADE;
+        DROP TYPE IF EXISTS pipeline_status_enum CASCADE;
+        DROP TYPE IF EXISTS content_status_enum CASCADE;
+        DROP TYPE IF EXISTS review_status_enum CASCADE;
+        DROP TYPE IF EXISTS webhook_status_enum CASCADE;
     """)
 
-    # silver_aa_internal schema
-    cur.execute("""
-        CREATE SCHEMA IF NOT EXISTS silver_aa_internal;
-        CREATE TABLE IF NOT EXISTS silver_aa_internal.raw_tours (
-            tour_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            batch_id TEXT NOT NULL, country TEXT, src_name TEXT,
-            src_subtitle TEXT, src_summary TEXT,
-            src_highlights JSONB, src_itineraries JSONB,
-            pipeline_status TEXT DEFAULT 'ingested',
-            ingest_at TIMESTAMPTZ DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS silver_aa_internal.seo_context (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            tour_id UUID REFERENCES silver_aa_internal.raw_tours(tour_id),
-            keyword_search TEXT, keyword_ideas JSONB,
-            demographics JSONB, trends JSONB, cache_key TEXT,
-            fetched_at TIMESTAMPTZ DEFAULT NOW(),
-            provider TEXT DEFAULT 'dataforseo'
-        );
-        CREATE TABLE IF NOT EXISTS silver_aa_internal.generated_content (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            tour_id UUID REFERENCES silver_aa_internal.raw_tours(tour_id),
-            version_num INT DEFAULT 1, aa_name TEXT, aa_subtitle TEXT,
-            aa_summary TEXT, aa_highlights JSONB, aa_itineraries TEXT,
-            seo_title TEXT, seo_meta TEXT, model_editorial TEXT,
-            model_schema TEXT, prompt_version TEXT,
-            retry_count INT DEFAULT 0, status TEXT DEFAULT 'draft',
-            created_at TIMESTAMPTZ DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS silver_aa_internal.quality_scores (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            tour_id UUID REFERENCES silver_aa_internal.raw_tours(tour_id),
-            content_id UUID REFERENCES silver_aa_internal.generated_content(id),
-            overall_score NUMERIC(4,2), lesson_results JSONB,
-            passed BOOLEAN, hitl_required BOOLEAN DEFAULT FALSE,
-            scored_at TIMESTAMPTZ DEFAULT NOW()
-        );
-    """)
+    # Apply real migrations in order
+    migrations_dir = os.path.join(
+        os.path.dirname(__file__), '..', '..', 'api', 'migrations'
+    )
+    migration_files = sorted([
+        f for f in os.listdir(migrations_dir)
+        if f.endswith('.sql') and not f.startswith('007_seed')
+        and not f.startswith('007b') and not f.startswith('008')
+    ])
 
-    # gold_aa_internal schema
-    cur.execute("""
-        CREATE SCHEMA IF NOT EXISTS gold_aa_internal;
-        CREATE TABLE IF NOT EXISTS gold_aa_internal.published_tours (
-            tour_id UUID PRIMARY KEY,
-            tenant_id UUID REFERENCES shared.tenants(tenant_id),
-            aa_name TEXT NOT NULL, aa_subtitle TEXT, aa_summary TEXT,
-            aa_highlights JSONB, aa_itineraries TEXT,
-            seo_title TEXT, seo_meta TEXT, country TEXT,
-            slug TEXT UNIQUE, quality_score NUMERIC(4,2),
-            published_at TIMESTAMPTZ DEFAULT NOW(),
-            is_active BOOLEAN DEFAULT TRUE
-        );
-    """)
+    for mf in migration_files:
+        fpath = os.path.join(migrations_dir, mf)
+        sql = open(fpath).read()
+        try:
+            cur.execute(sql)
+            print(f"Applied: {mf}")
+        except Exception as e:
+            print(f"Warning {mf}: {e}")
+            conn.autocommit = False
+            conn.rollback()
+            conn.autocommit = True
 
+    # Seed test tenant
     cur.execute("""
-        INSERT INTO shared.tenants (tenant_id, name, slug, plan_tier, rate_limit_rpm, is_active)
-        VALUES ('00000000-0000-0000-0000-000000000001', 'Adventure Asia Internal', 'aa-internal', 'internal', 60, true)
+        INSERT INTO shared.tenants
+            (tenant_id, name, slug, plan_tier, api_key_hash, rate_limit_rpm, is_active)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT DO NOTHING;
-    """)
+    """, (
+        TENANT_ID, 'Test Tenant', 'test-tenant',
+        'internal', None, 60, True
+    ))
+
     cur.close()
     _SCHEMA_APPLIED = True
 

@@ -109,16 +109,9 @@ jobs:
           pip install -r requirements.txt
           pip install -r tests/integration/requirements-integration.txt
 
-      - name: Apply migrations
-        env:
-          DATABASE_URL: postgresql://cistest:cistest@localhost:5432/cis_integration_test
+      - name: Setup test DB user
         run: |
-          for f in api/migrations/*.sql; do
-            echo "Applying $f..."
-            PGPASSWORD=cistest psql \
-              -h localhost -U cistest -d cis_integration_test \
-              -f "$f" || true
-          done
+          PGPASSWORD=cistest psql -h localhost -U cistest             -d cis_integration_test             -c "SELECT 1" 2>/dev/null ||           PGPASSWORD=postgres psql -h localhost -U postgres             -c "CREATE USER cistest WITH PASSWORD 'cistest' SUPERUSER;"             -c "CREATE DATABASE cis_integration_test OWNER cistest;" 2>/dev/null || true
 
       - name: Run integration tests
         env:
