@@ -70,14 +70,22 @@ def _apply_schema(conn):
     for mf in migration_files:
         fpath = os.path.join(migrations_dir, mf)
         sql = open(fpath).read()
+        # Use fresh connection per migration to avoid aborted transaction state
         try:
-            cur.execute(sql)
+            mconn = psycopg2.connect(
+                host=DB_HOST, port=DB_PORT,
+                dbname=DB_NAME, user=DB_USER, password=DB_PASS,
+            )
+            mconn.autocommit = True
+            mcur = mconn.cursor()
+            mcur.execute(sql)
+            mcur.close()
+            mconn.close()
             print(f"Applied: {mf}")
         except Exception as e:
             print(f"Warning {mf}: {e}")
-            conn.autocommit = False
-            conn.rollback()
-            conn.autocommit = True
+            try: mconn.close()
+            except: pass
 
     # Seed test tenant
     cur.execute("""
