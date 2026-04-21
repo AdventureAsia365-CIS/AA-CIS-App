@@ -1,0 +1,167 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install lint deps
+        run: pip install flake8 flake8-bugbear
+
+      - name: Run flake8
+        run: |
+          flake8 api/ services/ shared/ \
+            --max-line-length=120 \
+            --extend-ignore=E203,W503 \
+            --exclude=__pycache__,.venv,migrations
+
+  test-unit:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run unit tests
+        env:
+          ENVIRONMENT: test
+          AWS_REGION: us-west-1
+          DATABASE_URL: postgresql://test:test@localhost:5432/test
+          OPENAI_API_KEY: sk-test-dummy
+          DATAFORSEO_LOGIN: test
+          DATAFORSEO_PASSWORD: test
+          LANGFUSE_SECRET_KEY: test
+          LANGFUSE_PUBLIC_KEY: test
+          LANGFUSE_HOST: http://localhost:3000
+        run: |
+          pytest tests/unit/ -v \
+            --tb=short \
+            --cov=services \
+            --cov=shared \
+            --cov-report=term-missing \
+            --cov-fail-under=60
+
+  test-integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: cistest
+          POSTGRES_PASSWORD: cistest
+          POSTGRES_DB: cis_integration_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r tests/integration/requirements-integration.txt
+
+      - name: Apply migrations
+        env:
+          DATABASE_URL: postgresql://cistest:cistest@localhost:5432/cis_integration_test
+        run: |
+          for f in migrations/*.sql; do
+            echo "Applying $f..."
+            PGPASSWORD=cistest psql \
+              -h localhost -U cistest -d cis_integration_test \
+              -f "$f" || true
+          done
+
+      - name: Run integration tests
+        env:
+          ENVIRONMENT: test
+          DATABASE_URL: postgresql://cistest:cistest@localhost:5432/cis_integration_test
+          REDIS_URL: redis://localhost:6379
+          AWS_REGION: us-west-1
+          AWS_DEFAULT_REGION: us-west-1
+          OPENAI_API_KEY: sk-test-dummy
+          DATAFORSEO_LOGIN: test
+          DATAFORSEO_PASSWORD: test
+          LANGFUSE_SECRET_KEY: test
+          LANGFUSE_PUBLIC_KEY: test
+          LANGFUSE_HOST: http://localhost:3000
+        run: |
+          pytest tests/integration/ -v \
+            --tb=short \
+            --ignore=tests/integration/test_007_rls_isolation.py \
+            -x
+
+  docker-build:
+    name: Docker Build Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            --tag aa-cis-api:ci-${{ github.sha }} \
+            --file Dockerfile \
+            .
+
+      - name: Smoke test container
+        run: |
+          docker run --rm -d \
+            --name cis-smoke \
+            -p 8000:8000 \
+            -e DATABASE_URL=postgresql://test:test@localhost/test \
+            -e ENVIRONMENT=test \
+            -e AWS_REGION=us-west-1 \
+            -e JWT_SECRET=test-secret \
+            aa-cis-api:ci-${{ github.sha }}
+          sleep 10
+          docker logs cis-smoke
+          docker stop cis-smoke || true
