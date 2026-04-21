@@ -20,7 +20,7 @@ def _setup_validated_tour(db_conn) -> tuple[str, str]:
              src_highlights, src_itineraries, pipeline_status)
         VALUES (%s,%s,%s,%s,%s,%s,'[]','[]','validated')
     """, (tour_id, BATCH_ID, "Vietnam", SAMPLE_TOUR["src_name"],
-          SAMPLE_TOUR["src_subtitle"], SAMPLE_TOUR["src_summary"]))
+          SAMPLE_TOUR["src_subtitle"], SAMPLE_TOUR["src_summary"], SAMPLE_TOUR.get("src_description", "")))
     cur.execute("""
         INSERT INTO silver_aa_internal.generated_content
             (id, tour_id, version_num, aa_name, aa_subtitle, aa_summary,

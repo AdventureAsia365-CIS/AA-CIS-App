@@ -19,7 +19,7 @@ def _insert_raw_tour(db_conn, tour_id=None) -> str:
              src_highlights, src_itineraries, pipeline_status)
         VALUES (%s, %s, %s, %s, %s, %s, '[]', '[]', 'ingested')
     """, (tid, '00000000-0000-0000-0000-000000000001', BATCH_ID, SAMPLE_TOUR["country"], SAMPLE_TOUR["src_name"],
-          SAMPLE_TOUR["src_subtitle"], SAMPLE_TOUR["src_summary"]))
+          SAMPLE_TOUR["src_subtitle"], SAMPLE_TOUR["src_summary"], SAMPLE_TOUR.get("src_description", "")))
     cur.close()
     return tid
 
