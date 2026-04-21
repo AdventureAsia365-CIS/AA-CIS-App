@@ -40,7 +40,6 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Login to ECR
-        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build, tag, push image
@@ -49,13 +48,10 @@ jobs:
           IMAGE_TAG=dev-${{ github.sha }}
           FULL_IMAGE=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
           LATEST_IMAGE=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:dev-latest
-
           docker build -t $FULL_IMAGE -t $LATEST_IMAGE .
           docker push $FULL_IMAGE
           docker push $LATEST_IMAGE
-
           echo "image=$FULL_IMAGE" >> $GITHUB_OUTPUT
-          echo "Built and pushed: $FULL_IMAGE"
 
   deploy:
     name: Deploy to ECS Dev
@@ -72,7 +68,7 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Scale up ECS (ensure running)
+      - name: Scale up ECS
         run: |
           aws ecs update-service \
             --cluster ${{ env.ECS_CLUSTER }} \
@@ -80,45 +76,50 @@ jobs:
             --desired-count 1 \
             --region ${{ env.AWS_REGION }}
 
-      - name: Register new task definition with secrets
+      - name: Update task definition with new image
         id: task-def
         run: |
-          # Get current task def
-          CURRENT_TD=$(aws ecs describe-task-definition \
+          # Get current task def (revision with secrets)
+          aws ecs describe-task-definition \
             --task-definition ${{ env.ECS_SERVICE }} \
             --region ${{ env.AWS_REGION }} \
-            --query 'taskDefinition' --output json)
+            --query 'taskDefinition' \
+            --output json > /tmp/current_td.json
 
-          # Update image to new tag
-          NEW_TD=$(echo $CURRENT_TD | python3 -c "
+          # Update image
+          NEW_IMAGE="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:dev-${{ github.sha }}"
+          cat /tmp/current_td.json | \
+            python3 -c "
 import json, sys
 td = json.load(sys.stdin)
-td['containerDefinitions'][0]['image'] = '${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:dev-${{ github.sha }}'
+import os
+td['containerDefinitions'][0]['image'] = os.environ['NEW_IMAGE']
 for f in ['taskDefinitionArn','revision','status','requiresAttributes','placementConstraints','compatibilities','registeredAt','registeredBy','deregisteredAt']:
     td.pop(f, None)
 print(json.dumps(td))
-")
+" > /tmp/new_td.json
+          env:
+            NEW_IMAGE: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:dev-${{ github.sha }}
 
           # Register new revision
-          NEW_REV=$(aws ecs register-task-definition \
-            --cli-input-json "$NEW_TD" \
+          NEW_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file:///tmp/new_td.json \
             --region ${{ env.AWS_REGION }} \
-            --query 'taskDefinition.taskDefinitionArn' --output text)
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          echo "task_arn=$NEW_ARN" >> $GITHUB_OUTPUT
+          echo "Registered: $NEW_ARN"
 
-          echo "task_def_arn=$NEW_REV" >> $GITHUB_OUTPUT
-          echo "Registered: $NEW_REV"
-
-      - name: Deploy new task definition
+      - name: Deploy to ECS
         run: |
           aws ecs update-service \
             --cluster ${{ env.ECS_CLUSTER }} \
             --service ${{ env.ECS_SERVICE }} \
-            --task-definition ${{ steps.task-def.outputs.task_def_arn }} \
+            --task-definition ${{ steps.task-def.outputs.task_arn }} \
             --region ${{ env.AWS_REGION }}
 
       - name: Wait for deployment stable
         run: |
-          echo "Waiting for ECS service to stabilize..."
           aws ecs wait services-stable \
             --cluster ${{ env.ECS_CLUSTER }} \
             --services ${{ env.ECS_SERVICE }} \
@@ -134,9 +135,4 @@ print(json.dumps(td))
             echo "Health check failed: HTTP $RESPONSE"
             exit 1
           fi
-          echo "Health check passed: HTTP $RESPONSE ✅"
-
-      - name: Print deployed image
-        run: |
-          echo "Deployed image: ${{ needs.build-and-push.outputs.image }}"
-          echo "API: https://api-cis.lumiguides.it.com"
+          echo "Health check passed ✅"
