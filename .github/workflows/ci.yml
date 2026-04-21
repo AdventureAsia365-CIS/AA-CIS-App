@@ -135,8 +135,9 @@ jobs:
           LANGFUSE_HOST: http://localhost:3000
         run: |
           pytest tests/integration/ -v \
-            --tb=short \
+            --tb=long \
             --ignore=tests/integration/test_007_rls_isolation.py \
+            -p no:cacheprovider \
             -x
 
   docker-build:
