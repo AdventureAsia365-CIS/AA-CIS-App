@@ -133,14 +133,6 @@ def _apply_schema(conn):
         VALUES ('00000000-0000-0000-0000-000000000001', 'Adventure Asia Internal', 'aa-internal', 'internal', 60, true)
         ON CONFLICT DO NOTHING;
     """)
-    # Seed pipeline_runs so batch_id FK works in raw_tours
-    from _constants import BATCH_ID
-    cur.execute("""
-        INSERT INTO shared.pipeline_runs
-            (id, tenant_id, batch_id, status, tours_total, tours_passed, tours_hitl, tours_failed, started_at)
-        VALUES (%s, %s, %s, 'completed', 0, 0, 0, 0, NOW())
-        ON CONFLICT DO NOTHING;
-    """, (BATCH_ID, '00000000-0000-0000-0000-000000000001', BATCH_ID))
     cur.close()
     _SCHEMA_APPLIED = True
 
@@ -156,8 +148,18 @@ def _setup_schema():
 @pytest.fixture
 def db_conn():
     """Function-scoped connection. Truncates all tables on teardown."""
+    from _constants import BATCH_ID, TENANT_ID
     conn = _get_conn()
     conn.autocommit = True
+    # Seed pipeline_runs for FK constraint
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO shared.pipeline_runs
+            (id, tenant_id, batch_id, status, tours_total, tours_passed, tours_hitl, tours_failed, started_at)
+        VALUES (%s, %s, %s, 'completed', 0, 0, 0, 0, NOW())
+        ON CONFLICT DO NOTHING;
+    """, (BATCH_ID, TENANT_ID, BATCH_ID))
+    cur.close()
     yield conn
     cur = conn.cursor()
     cur.execute("""
