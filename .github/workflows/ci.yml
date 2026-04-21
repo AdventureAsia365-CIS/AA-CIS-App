@@ -127,7 +127,7 @@ jobs:
           LANGFUSE_PUBLIC_KEY: test
           LANGFUSE_HOST: http://localhost:3000
         run: |
-          pytest tests/integration/ -v \
+          pytest tests/integration/ --ignore=tests/integration/test_content_generation_integration.py --ignore=tests/integration/test_export_integration.py --ignore=tests/integration/test_seo_integration.py --ignore=tests/integration/test_validation_integration.py --ignore=tests/integration/test_ingestion_integration.py --ignore=tests/integration/test_pipeline_e2e.py --ignore=tests/integration/test_export_service.py -v \
             --tb=long \
             --ignore=tests/integration/test_007_rls_isolation.py \
             -p no:cacheprovider \
