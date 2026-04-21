@@ -80,12 +80,40 @@ jobs:
             --desired-count 1 \
             --region ${{ env.AWS_REGION }}
 
-      - name: Force new ECS deployment
+      - name: Register new task definition with secrets
+        id: task-def
+        run: |
+          # Get current task def
+          CURRENT_TD=$(aws ecs describe-task-definition \
+            --task-definition ${{ env.ECS_SERVICE }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskDefinition' --output json)
+
+          # Update image to new tag
+          NEW_TD=$(echo $CURRENT_TD | python3 -c "
+import json, sys
+td = json.load(sys.stdin)
+td['containerDefinitions'][0]['image'] = '${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:dev-${{ github.sha }}'
+for f in ['taskDefinitionArn','revision','status','requiresAttributes','placementConstraints','compatibilities','registeredAt','registeredBy','deregisteredAt']:
+    td.pop(f, None)
+print(json.dumps(td))
+")
+
+          # Register new revision
+          NEW_REV=$(aws ecs register-task-definition \
+            --cli-input-json "$NEW_TD" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+
+          echo "task_def_arn=$NEW_REV" >> $GITHUB_OUTPUT
+          echo "Registered: $NEW_REV"
+
+      - name: Deploy new task definition
         run: |
           aws ecs update-service \
             --cluster ${{ env.ECS_CLUSTER }} \
             --service ${{ env.ECS_SERVICE }} \
-            --force-new-deployment \
+            --task-definition ${{ steps.task-def.outputs.task_def_arn }} \
             --region ${{ env.AWS_REGION }}
 
       - name: Wait for deployment stable
