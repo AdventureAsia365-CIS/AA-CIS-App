@@ -129,4 +129,3 @@ async def get_tour(
     if not tour:
         raise HTTPException(status_code=404, detail="Tour not found")
     return tour
-
