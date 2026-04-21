@@ -34,12 +34,12 @@ class TestGeneratedContentRepository:
         content_id = str(uuid.uuid4())
         cur.execute("""
             INSERT INTO silver_aa_internal.generated_content
-                (id, tour_id, version_num, aa_name, aa_subtitle, aa_summary,
+                (id, tour_id, tenant_id, version_num, aa_name, aa_subtitle, aa_summary,
                  aa_highlights, aa_itineraries, seo_title, seo_meta,
                  model_editorial, model_schema, prompt_version, retry_count, status)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, (
-            content_id, tour_id, 1,
+            content_id, tour_id, TENANT_ID, 1,
             SAMPLE_GENERATED["aa_name"], SAMPLE_GENERATED["aa_subtitle"],
             SAMPLE_GENERATED["aa_summary"],
             json.dumps(SAMPLE_GENERATED["aa_highlights"]),
@@ -65,13 +65,13 @@ class TestGeneratedContentRepository:
         for version in range(1, 4):
             cur.execute("""
                 INSERT INTO silver_aa_internal.generated_content
-                    (tour_id, version_num, aa_name, aa_subtitle, aa_summary,
+                    (tour_id, tenant_id, version_num, aa_name, aa_subtitle, aa_summary,
                      aa_highlights, aa_itineraries, seo_title, seo_meta,
                      model_editorial, model_schema, prompt_version, retry_count, status)
                 VALUES (%s,%s,%s,%s,%s,'[]','...','SEO Title','SEO Meta',
                         %s,%s,%s,%s,'draft')
             """, (
-                tour_id, version, f"Tour v{version}", "subtitle", "summary",
+                tour_id, TENANT_ID, version, f"Tour v{version}", "subtitle", "summary",
                 "claude-3-5-sonnet-20241022", "gpt-4.1", "v3.2", version - 1,
             ))
         cur.execute(
@@ -90,7 +90,7 @@ class TestGeneratedContentRepository:
         content_id = str(uuid.uuid4())
         cur.execute("""
             INSERT INTO silver_aa_internal.generated_content
-                (id, tour_id, version_num, aa_name, aa_subtitle, aa_summary,
+                (id, tour_id, tenant_id, version_num, aa_name, aa_subtitle, aa_summary,
                  aa_highlights, aa_itineraries, seo_title, seo_meta,
                  model_editorial, model_schema, prompt_version, status)
             VALUES (%s,%s,1,%s,%s,%s,'[]','...','T','M',%s,%s,%s,'draft')
@@ -119,7 +119,7 @@ class TestGeneratedContentRepository:
         cur = db_conn.cursor()
         cur.execute("""
             INSERT INTO silver_aa_internal.generated_content
-                (tour_id, version_num, aa_name, aa_subtitle, aa_summary,
+                    (tour_id, tenant_id, version_num, aa_name, aa_subtitle, aa_summary,
                  aa_highlights, aa_itineraries, seo_title, seo_meta,
                  model_editorial, model_schema, prompt_version, status)
             VALUES (%s,1,%s,%s,%s,'[]','...','T','M','claude-3-5-sonnet-20241022','gpt-4.1','v3.2','draft')
@@ -148,7 +148,7 @@ class TestGeneratedContentRepository:
         cur = db_conn.cursor()
         cur.execute("""
             INSERT INTO silver_aa_internal.generated_content
-                (tour_id, version_num, aa_name, aa_subtitle, aa_summary,
+                    (tour_id, tenant_id, version_num, aa_name, aa_subtitle, aa_summary,
                  aa_highlights, aa_itineraries, seo_title, seo_meta,
                  model_editorial, model_schema, prompt_version, status)
             VALUES (%s,1,'Test','Sub','Sum','[]','...','T',%s,

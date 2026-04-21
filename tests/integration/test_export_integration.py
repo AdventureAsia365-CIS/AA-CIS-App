@@ -23,7 +23,7 @@ def _setup_validated_tour(db_conn) -> tuple[str, str]:
           SAMPLE_TOUR["src_subtitle"], SAMPLE_TOUR["src_summary"]))
     cur.execute("""
         INSERT INTO silver_aa_internal.generated_content
-            (id, tour_id, version_num, aa_name, aa_subtitle, aa_summary,
+                (id, tour_id, tenant_id, version_num, aa_name, aa_subtitle, aa_summary,
              aa_highlights, aa_itineraries, seo_title, seo_meta,
              model_editorial, model_schema, prompt_version, status)
         VALUES (%s,%s,1,%s,%s,%s,'[]','...','SEO T','SEO M',

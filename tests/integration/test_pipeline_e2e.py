@@ -77,7 +77,7 @@ class TestFullPipelineHappyPath:
         """, (tour_id,))
         cur.execute("""
             INSERT INTO silver_aa_internal.generated_content
-                (id, tour_id, version_num, aa_name, aa_subtitle, aa_summary,
+                (id, tour_id, tenant_id, version_num, aa_name, aa_subtitle, aa_summary,
                  aa_highlights, aa_itineraries, seo_title, seo_meta,
                  model_editorial, model_schema, prompt_version, retry_count, status)
             VALUES (%s,%s,1,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,'draft')
