@@ -49,14 +49,14 @@ def _apply_schema(conn):
     cur.execute("""
         CREATE SCHEMA IF NOT EXISTS shared;
         CREATE TABLE IF NOT EXISTS shared.tenants (
-            tenant_id TEXT PRIMARY KEY, name TEXT NOT NULL,
+            tenant_id UUID PRIMARY KEY, name TEXT NOT NULL,
             plan_tier TEXT DEFAULT 'internal', api_key_hash TEXT,
             rate_limit_rpm INT DEFAULT 60, is_active BOOLEAN DEFAULT TRUE,
             created_at TIMESTAMPTZ DEFAULT NOW()
         );
         CREATE TABLE IF NOT EXISTS shared.pipeline_runs (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            tenant_id TEXT REFERENCES shared.tenants(tenant_id),
+            tenant_id UUID REFERENCES shared.tenants(tenant_id),
             batch_id TEXT NOT NULL, status TEXT DEFAULT 'running',
             tours_total INT DEFAULT 0, tours_passed INT DEFAULT 0,
             tours_hitl INT DEFAULT 0, tours_failed INT DEFAULT 0,
@@ -116,7 +116,7 @@ def _apply_schema(conn):
         CREATE SCHEMA IF NOT EXISTS gold_aa_internal;
         CREATE TABLE IF NOT EXISTS gold_aa_internal.published_tours (
             tour_id UUID PRIMARY KEY,
-            tenant_id TEXT REFERENCES shared.tenants(tenant_id),
+            tenant_id UUID REFERENCES shared.tenants(tenant_id),
             aa_name TEXT NOT NULL, aa_subtitle TEXT, aa_summary TEXT,
             aa_highlights JSONB, aa_itineraries TEXT,
             seo_title TEXT, seo_meta TEXT, country TEXT,
@@ -128,7 +128,7 @@ def _apply_schema(conn):
 
     cur.execute("""
         INSERT INTO shared.tenants (tenant_id, name, plan_tier)
-        VALUES ('aa_internal', 'Adventure Asia Internal', 'internal')
+        VALUES ('00000000-0000-0000-0000-000000000001', 'Adventure Asia Internal', 'internal')
         ON CONFLICT DO NOTHING;
     """)
     cur.close()
