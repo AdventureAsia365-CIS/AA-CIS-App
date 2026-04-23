@@ -43,7 +43,14 @@ def generate_node(state: ContentState) -> ContentState:
 
     try:
         resp = asyncio.get_event_loop().run_until_complete(client.generate(request))
-        generated = json.loads(resp.content)
+        # Strip markdown fences nếu LLM wrap JSON trong ```json ... ```
+        raw = resp.content.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+        generated = json.loads(raw)
         logger.info("content_generated", retry=state.get("retry_count", 0),
                     model=resp.model_used, cost=resp.cost_usd)
         return {
