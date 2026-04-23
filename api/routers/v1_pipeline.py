@@ -21,6 +21,17 @@ from services.content_generation.prompts import SYSTEM_PROMPT, build_rewrite_pro
 logger = structlog.get_logger()
 router = APIRouter(prefix="/v1/pipeline", tags=["pipeline"])
 
+def _normalize_generated(generated: dict, tour: dict) -> dict:
+    """Post-process LLM output: title-case name, strip forbidden words from name."""
+    if not generated:
+        return generated
+    # Title-case name if ALL-CAPS (preserve if already mixed case)
+    name = generated.get("name", "")
+    if name and name == name.upper():
+        generated["name"] = name.title()
+    return generated
+
+
 
 async def _rewrite_tour(tour: dict, idx: int, total: int) -> dict:
     """Rewrite single tour using LangGraph."""
@@ -56,7 +67,7 @@ async def _rewrite_tour(tour: dict, idx: int, total: int) -> dict:
             "src_name": tour.get("name", ""),
             "country": tour.get("country", ""),
             "duration": tour.get("duration", ""),
-            "generated": result.get("generated", {}),
+            "generated": _normalize_generated(result.get("generated", {}), tour),
             "quality_score": result.get("quality_score", 0.0),
             "model_used": result.get("model_used", ""),
             "cost_usd": result.get("cost_usd", 0.0),
