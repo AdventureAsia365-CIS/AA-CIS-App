@@ -24,17 +24,24 @@ def make_state(**kwargs) -> ContentState:
 # --- validate_node tests ---
 
 def test_validate_perfect_content():
-    state = make_state(generated={
-        "name":      "Halong Bay Private Cruise",
-        "subtitle":  "A curated journey through karst landscapes",
-        "summary":   "Discover the timeless beauty of Halong Bay on a refined private cruise.",
-        "highlights": ["Private sundeck", "Chef-prepared meals", "Kayaking excursion"],
-        "seo_title": "Halong Bay Private Cruise | Adventure Asia",
-        "seo_meta":  "Experience Halong Bay on a curated private cruise with Adventure Asia.",
-        "trip_type": "cultural",
+    state = make_state(
+        tour={"name": "Halong Bay Private Cruise", "country": "Vietnam"},
+        generated={
+        "name":        "Halong Bay Private Cruise",
+        "subtitle":    "A 3-night private cruise through Halong Bay karst islands",
+        "summary":     "Three nights aboard a private vessel through Halong Bay, visiting karst caves and fishing villages. Kayaking, cooking class, and sundeck access included.",
+        "highlights":  [
+            "Kayaking through Luon Cave at low tide with a private guide",
+            "Sunrise from the sundeck at Bai Tu Long Bay, 50km from main tourist routes",
+            "Chef-prepared seafood dinner sourced from local fishing communities",
+        ],
+        "itineraries": "Day 1: Board at Tuan Chau, sail to Bai Tu Long. Day 2: Cave visit, kayaking. Day 3: Sunrise, return to port.",
+        "seo_title":   "Halong Bay Private Cruise | Adventure Asia",
+        "seo_meta":    "A 3-night private cruise through Halong Bay with kayaking, cave visits, and chef-prepared meals. Departing Tuan Chau.",
+        "trip_type":   "cultural",
     })
     result = validate_node(state)
-    assert result["quality_score"] == 10.0
+    assert result["quality_score"] == 10.0, f"Expected 10.0 got {result['quality_score']}: {result['feedback']}"
     assert result["feedback"] == ""
 
 def test_validate_missing_fields():
