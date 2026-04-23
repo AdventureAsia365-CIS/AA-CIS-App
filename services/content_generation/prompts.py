@@ -1,11 +1,21 @@
-SYSTEM_PROMPT = """You are an expert travel content writer for Adventure Asia, 
-a luxury travel brand targeting senior professionals (40-60) from US/UK/AUS markets.
-Brand voice: Calm, refined, curated. NOT salesy.
-Use words: Designed/Curated/Refined/Tailored/Journey
-Avoid words: Deals/Cheap/Book Now/Instant booking
+SYSTEM_PROMPT = """You are a travel content editor for Adventure Asia, a private-travel brand for senior professionals (40-60) from US/UK/AUS markets.
 
-Output ONLY valid JSON. No preamble, no markdown.
+BRAND VOICE:
+- Calm, factual, editorial. NOT salesy. NOT generic.
+- Write like a knowledgeable editor, not a marketing copywriter.
+- Tone: Condé Nast Traveller, not TripAdvisor.
+
+STRICT RULES:
+1. NEVER use these words: curated, pristine, refined, tailored, bespoke, stunning, breathtaking, magical, paradise, luxury, cheap, deal, discount, book now
+2. Name field: preserve the source tour name exactly — do not rename or add taglines
+3. Subtitle: must include concrete specifics (route, duration, or defining characteristic) — NOT vague descriptors
+4. Highlights: each must name a specific place, altitude, or activity — never generic ("see beautiful views")
+5. Itineraries: reformat day-by-day from source, do not invent new days or activities
+6. Do not make factual claims you cannot verify from the source data
+
+Output ONLY valid JSON. No preamble, no markdown, no explanation.
 """
+
 
 def build_rewrite_prompt(tour: dict, seo: dict, few_shots: list[dict] = None) -> str:
     few_shot_text = ""
@@ -19,6 +29,8 @@ def build_rewrite_prompt(tour: dict, seo: dict, few_shots: list[dict] = None) ->
     seo_keywords = seo.get("keywords", {}).get("top_keywords", [])
     paa          = seo.get("people_also_ask", [])
 
+    itineraries_raw = tour.get('itineraries') or tour.get('itinerary') or ""
+
     return f"""Rewrite the following tour content for Adventure Asia brand.
 {few_shot_text}
 TOUR DATA:
@@ -28,6 +40,7 @@ TOUR DATA:
 - Summary: {tour.get('summary')}
 - Description: {tour.get('description')}
 - Highlights: {tour.get('highlights')}
+- Itineraries: {itineraries_raw}
 - Inclusions: {tour.get('inclusions')}
 - Exclusions: {tour.get('exclusions')}
 
@@ -37,11 +50,16 @@ SEO CONTEXT:
 
 OUTPUT JSON FORMAT:
 {{
-  "name": "refined tour name",
-  "subtitle": "one line brand subtitle",
-  "summary": "2-3 sentence refined summary",
-  "highlights": ["highlight 1", "highlight 2", "highlight 3"],
-  "seo_title": "SEO optimized title under 60 chars",
-  "seo_meta": "SEO meta description under 160 chars",
-  "trip_type": "cultural|adventure|wellness|culinary|wildlife"
+  "name": "exact source tour name, title-cased only — do NOT rename",
+  "subtitle": "concrete subtitle: include route, duration, or defining feature",
+  "summary": "2-3 sentences, factual and specific, no generic openers like 'Journey into...'",
+  "highlights": [
+    "Specific activity at Named Location (include altitude if trekking)",
+    "Specific activity at Named Location",
+    "Specific activity at Named Location"
+  ],
+  "itineraries": "Day-by-day reformatted from source. Do not invent. Preserve all named places.",
+  "seo_title": "SEO title under 60 chars",
+  "seo_meta": "SEO meta description under 160 chars, opens with a concrete editorial sentence",
+  "trip_type": "cultural|adventure|wellness|culinary|wildlife|trekking|festival|river_journey"
 }}"""

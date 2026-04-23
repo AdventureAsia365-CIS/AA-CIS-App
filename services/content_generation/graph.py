@@ -61,39 +61,89 @@ def generate_node(state: ContentState) -> ContentState:
         return {**state, "generated": {}, "error": str(e)}
 
 def validate_node(state: ContentState) -> ContentState:
-    """Node 2: Basic quality check — score 0-10."""
+    """Node 2: Quality check — score 0-10."""
     generated = state.get("generated", {})
+    tour      = state.get("tour", {})
     issues    = []
     score     = 10.0
 
     # Required fields
-    for field in ["name", "subtitle", "summary", "highlights", "seo_title", "seo_meta"]:
+    for field in ["name", "subtitle", "summary", "highlights", "itineraries",
+                  "seo_title", "seo_meta"]:
         if not generated.get(field):
             issues.append(f"Missing field: {field}")
-            score -= 2.0
+            score -= 1.5
 
-    # highlights must be list
-    if not isinstance(generated.get("highlights"), list):
+    # highlights must be list with 3+ items
+    highlights = generated.get("highlights", [])
+    if not isinstance(highlights, list):
         issues.append("highlights must be a list")
         score -= 1.0
-
-    # seo_title length
-    if len(generated.get("seo_title", "")) > 60:
-        issues.append("seo_title exceeds 60 chars")
+    elif len(highlights) < 3:
+        issues.append(f"highlights has only {len(highlights)} items, need 3+")
         score -= 0.5
 
-    # seo_meta length
-    if len(generated.get("seo_meta", "")) > 160:
-        issues.append("seo_meta exceeds 160 chars")
-        score -= 0.5
+    # Name must not be modified
+    src_name = (tour.get("name") or "").strip().lower()
+    ai_name  = (generated.get("name") or "").strip().lower()
+    if src_name and ai_name and src_name != ai_name:
+        issues.append(f"Name modified: '{tour.get('name')}' → '{generated.get('name')}'")
+        score -= 2.0
 
-    # Forbidden words
-    forbidden = ["cheap", "deal", "book now", "instant booking", "discount"]
+    # Subtitle must not be generic
+    subtitle = generated.get("subtitle", "").lower()
+    generic_subtitle_flags = [
+        "kingdom of happiness", "land of thunder dragon",
+        "last shangri-la", "pristine wilderness",
+    ]
+    for flag in generic_subtitle_flags:
+        if flag in subtitle:
+            issues.append(f"Generic subtitle phrase: '{flag}'")
+            score -= 1.0
+
+    # Forbidden words (brand flags + marketing)
+    forbidden = [
+        "curated", "pristine", "refined", "tailored", "bespoke",
+        "stunning", "breathtaking", "magical", "paradise",
+        "cheap", "deal", "book now", "instant booking", "discount",
+    ]
     content_text = json.dumps(generated).lower()
     for word in forbidden:
         if word in content_text:
             issues.append(f"Forbidden word: '{word}'")
+            score -= 0.5
+
+    # Highlights specificity — must not be pure generic
+    generic_highlight_patterns = [
+        "panoramic views", "beautiful landscapes", "stunning scenery",
+        "breathtaking views", "pristine nature", "gross national happiness",
+    ]
+    highlights_text = " ".join(highlights).lower()
+    for pattern in generic_highlight_patterns:
+        if pattern in highlights_text:
+            issues.append(f"Generic highlight phrase: '{pattern}'")
+            score -= 0.5
+
+    # SEO field lengths
+    if len(generated.get("seo_title", "")) > 60:
+        issues.append("seo_title exceeds 60 chars")
+        score -= 0.5
+    if len(generated.get("seo_meta", "")) > 160:
+        issues.append("seo_meta exceeds 160 chars")
+        score -= 0.5
+
+    # Summary generic opener check
+    summary = generated.get("summary", "")
+    generic_openers = [
+        "journey into", "journey along", "embark on", "discover the magic",
+        "experience the wonder", "this refined", "this carefully",
+        "this curated", "designed for discerning",
+    ]
+    for opener in generic_openers:
+        if summary.lower().startswith(opener):
+            issues.append(f"Generic summary opener: '{opener}'")
             score -= 1.0
+            break
 
     score = max(0.0, score)
     feedback = "; ".join(issues) if issues else ""
