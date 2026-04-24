@@ -30,6 +30,18 @@ COLUMN_MAP = {
     "activities": "activities",
     "feature": "feature",
     "best time to go": "best_time_to_go",
+    "source_name": "name",
+    "source_subtitle": "subtitle",
+    "source_summary": "summary",
+    "source_highlights": "highlights",
+    "source_itineraries": "itineraries",
+    "aa_name": "name",
+    "aa_subtitle": "subtitle",
+    "aa_summary": "summary",
+    "aa_highlights": "highlights",
+    "aa_itineraries": "itineraries",
+    "seo_title": "seo_title",
+    "seo_meta": "seo_meta",
 }
 
 class ExcelParser:
@@ -38,7 +50,12 @@ class ExcelParser:
         self.source_file = source_file
 
     def parse(self) -> list[dict]:
-        df = pd.read_excel(self.file_path, engine="openpyxl")
+        # Try header=0 first; if columns look like group labels, use header=1
+        df = pd.read_excel(self.file_path, engine="openpyxl", header=0)
+        first_cols = [str(c).strip().lower() for c in df.columns]
+        group_labels = {"identity", "source", "final content", "seo", "audit", "dfs context"}
+        if any(c in group_labels for c in first_cols):
+            df = pd.read_excel(self.file_path, engine="openpyxl", header=1)
         # Normalize column names: strip + lowercase for case-insensitive lookup
         col_map = {col.strip().lower(): col for col in df.columns}
 
