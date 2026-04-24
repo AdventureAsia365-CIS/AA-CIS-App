@@ -11,6 +11,7 @@ build/
 .venv/
 venv/
 env/
+.bak
 
 # Secrets
 .env
@@ -28,3 +29,4 @@ node_modules/
 package-lock.json
 test-results/
 playwright-report/
+data/

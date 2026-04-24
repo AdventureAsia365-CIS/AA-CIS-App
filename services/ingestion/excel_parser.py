@@ -8,7 +8,7 @@ COLUMN_MAP = {
     "sku": "sku",
     "country": "country",
     "region": "region",
-    "name": "name",
+    "name": "src_name",
     "subtitle": "subtitle",
     "duration": "duration",
     "group size": "group_size",
@@ -30,12 +30,12 @@ COLUMN_MAP = {
     "activities": "activities",
     "feature": "feature",
     "best time to go": "best_time_to_go",
-    "source_name": "name",
+    "source_name": "src_name",
     "source_subtitle": "subtitle",
     "source_summary": "summary",
     "source_highlights": "highlights",
     "source_itineraries": "itineraries",
-    "aa_name": "name",
+    "aa_name": "src_name",
     "aa_subtitle": "subtitle",
     "aa_summary": "summary",
     "aa_highlights": "highlights",
@@ -68,7 +68,7 @@ class ExcelParser:
                     record[db_field] = self._clean(row.get(original_col))
 
             # Bắt buộc phải có name
-            if not record.get("name"):
+            if not record.get("src_name"):
                 continue
 
             record["source_file"] = self.source_file

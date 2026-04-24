@@ -29,8 +29,8 @@ class RawSourceRepository:
         )
         return row["id"]
 
-    async def update_status(self, source_id: str, status: str, row_count: int = None):
-        """Update parse status and row count."""
+    async def update_status(self, source_id: str, status: str, row_count: int = None, error: str = None):
+        """Update parse status, row count, and optional error."""
         await self.conn.execute(f"""
             UPDATE {self.schema}.raw_sources
             SET row_count = COALESCE($2, row_count)

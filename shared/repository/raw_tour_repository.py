@@ -11,7 +11,7 @@ class RawTourRepository:
     PRD v4: Multi-tenant isolation via PostgreSQL Row Level Security.
     """
 
-    def __init__(self, conn: asyncpg.Connection, tenant_id: str = "aa_internal"):
+    def __init__(self, conn: asyncpg.Connection, tenant_id: str = "00000000-0000-0000-0000-000000000001"):
         self.conn = conn
         self.tenant_id = tenant_id
         # Schema is fixed to silver_aa_internal for internal platform (S0-S6)
@@ -118,3 +118,11 @@ class RawTourRepository:
             self.tenant_id, status
         )
         return row["cnt"]
+
+    async def insert_batch(self, records: list) -> list:
+        """Insert nhiều tours cùng lúc, return list tour_id."""
+        ids = []
+        for record in records:
+            tour_id = await self.insert(record)
+            ids.append(tour_id)
+        return ids

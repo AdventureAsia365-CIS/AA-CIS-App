@@ -159,3 +159,55 @@ async def run_pipeline(
 
     finally:
         os.unlink(tmp_path)
+
+
+# ── SF per-tour endpoint ──────────────────────────────────────────────────────
+from pydantic import BaseModel
+import asyncpg
+
+class TourRunRequest(BaseModel):
+    tour_id: str
+    batch_id: str
+    tenant_id: str
+    retry_count: int = 0
+    validation_feedback: list = []
+
+@router.post("/run-tour")
+async def run_tour(req: TourRunRequest):
+    """Per-tour endpoint for Step Functions — load tour from DB, rewrite, return result."""
+    conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+    try:
+        row = await conn.fetchrow(
+            """SELECT * FROM silver_aa_internal.raw_tours
+               WHERE tour_id = $1::uuid""",
+            req.tour_id
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Tour {req.tour_id} not found")
+
+        tour = {
+            "name":        row["src_name"],
+            "subtitle":    row["src_subtitle"],
+            "summary":     row["src_summary"],
+            "description": row["src_description"],
+            "highlights":  row["src_highlights"],
+            "itineraries": row["src_itineraries"],
+            "country":     row["country"],
+            "duration":    row["duration"],
+            "price":       row["price_raw"],
+            "inclusions":  row["inclusions"],
+            "exclusions":  row["exclusions"],
+        }
+
+        result = await _rewrite_tour(tour, idx=0, total=1)
+        return {
+            "tour_id":      req.tour_id,
+            "batch_id":     req.batch_id,
+            "status":       result.get("status"),
+            "quality_score": result.get("quality_score"),
+            "generated":    result.get("generated"),
+            "cost_usd":     result.get("cost_usd"),
+            "model_used":   result.get("model_used"),
+        }
+    finally:
+        await conn.close()

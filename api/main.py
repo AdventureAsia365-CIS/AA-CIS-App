@@ -66,7 +66,7 @@ def get_pool() -> asyncpg.Pool:
 
 async def get_repo(db: asyncpg.Pool = Depends(get_pool)):
     async with db.acquire() as conn:
-        yield RawTourRepository(conn)
+        yield RawTourRepository(conn, "00000000-0000-0000-0000-000000000001")
 
 @app.post("/auth/tenant-login", response_model=TenantLoginResponse, tags=["auth"])
 async def tenant_login(
