@@ -111,7 +111,14 @@ jobs:
 
       - name: Setup test DB user
         run: |
-          PGPASSWORD=cistest psql -h localhost -U cistest             -d cis_integration_test             -c "SELECT 1" 2>/dev/null ||           PGPASSWORD=postgres psql -h localhost -U postgres             -c "CREATE USER cistest WITH PASSWORD 'cistest' SUPERUSER;"             -c "CREATE DATABASE cis_integration_test OWNER cistest;" 2>/dev/null || true
+          PGPASSWORD=cistest psql -h localhost -U cistest \
+            -d cis_integration_test \
+            -c "SELECT 1" 2>/dev/null || \
+          PGPASSWORD=postgres psql -h localhost -U postgres \
+            -c "CREATE USER cistest WITH PASSWORD 'cistest' SUPERUSER;" \
+            -c "CREATE DATABASE cis_integration_test OWNER cistest;" 2>/dev/null || true
+          PGPASSWORD=cistest psql -h localhost -U cistest -d cis_integration_test \
+            -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'app_user') THEN CREATE ROLE app_user LOGIN PASSWORD 'appuser123'; END IF; END \$\$;" || true
 
       - name: Run integration tests
         env:
