@@ -4,34 +4,32 @@ import math
 from typing import Any
 
 COLUMN_MAP = {
-    "Tour ID": "tour_id_external",
-    "SKU": "sku",
-    "Country": "country",
-    "Region": "country",
-    "REGION": "country",
-    "Name": "name",
-    "NAME": "name",
-    "Subtitle": "subtitle",
-    "SUBTITLE": "subtitle",
-    "Duration": "duration",
-    "DURATION": "duration",
-    "Group Size": "group_size",
-    "Period": "period",
-    "Summary": "summary",
-    "SUMMARY": "summary",
-    "Description": "description",
-    "Highlights": "highlights",
-    "HIGHLIGHTS": "highlights",
-    "Itineraries": "itineraries",
-    "ITINERARIES": "itineraries",
-    "Inclusions": "inclusions",
-    "Exclusions": "exclusions",
-    "Provider": "provider",
-    "Price": "price_raw",
-    "Links": "links",
-    "Activities": "activities",
-    "Feature": "feature",
-    "Best Time To Go": "best_time_to_go",
+    "tour id": "tour_id_external",
+    "sku": "sku",
+    "country": "country",
+    "region": "region",
+    "name": "name",
+    "subtitle": "subtitle",
+    "duration": "duration",
+    "group size": "group_size",
+    "period": "period",
+    "summary": "summary",
+    "description": "description",
+    "highlights": "highlights",
+    "itineraries": "itineraries",
+    "itinerary": "itineraries",
+    "itinerary_summary": "itineraries",
+    "trip_type": "trip_type",
+    "price_usd": "price_raw",
+    "tour_id": "tour_id_external",
+    "inclusions": "inclusions",
+    "exclusions": "exclusions",
+    "provider": "provider",
+    "price": "price_raw",
+    "links": "links",
+    "activities": "activities",
+    "feature": "feature",
+    "best time to go": "best_time_to_go",
 }
 
 class ExcelParser:
@@ -41,13 +39,16 @@ class ExcelParser:
 
     def parse(self) -> list[dict]:
         df = pd.read_excel(self.file_path, engine="openpyxl")
+        # Normalize column names: strip + lowercase for case-insensitive lookup
+        col_map = {col.strip().lower(): col for col in df.columns}
 
         records = []
         for _, row in df.iterrows():
             record = {}
-            for excel_col, db_field in COLUMN_MAP.items():
-                if excel_col in df.columns:
-                    record[db_field] = self._clean(row.get(excel_col))
+            for lower_key, db_field in COLUMN_MAP.items():
+                if lower_key in col_map:
+                    original_col = col_map[lower_key]
+                    record[db_field] = self._clean(row.get(original_col))
 
             # Bắt buộc phải có name
             if not record.get("name"):
