@@ -68,15 +68,16 @@ class ExportService:
         if existing and str(existing) != tour_id:
             slug = f"{slug}-{tour_id[:8]}"
 
+        generated_content_id = content.get("generated_content_id") or str(uuid.uuid4())
         await self.conn.execute("""
             INSERT INTO gold_aa_internal.published_tours
-                (tour_id, tenant_id, aa_name, aa_subtitle, aa_summary,
+                (tour_id, tenant_id, generated_content_id, aa_name, aa_subtitle, aa_summary,
                  aa_highlights, aa_itineraries, seo_title, seo_meta,
                  country, slug, quality_score, is_active)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,TRUE)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,TRUE)
             ON CONFLICT (tour_id) DO NOTHING
         """,
-            tour_id, tenant_id,
+            tour_id, tenant_id, generated_content_id,
             content["aa_name"],
             content.get("aa_subtitle", ""),
             content.get("aa_summary", ""),
@@ -208,7 +209,7 @@ class ExportService:
 
     async def record_delivery_result(self, delivery_id: str,
                                      http_status: int,
-                                     error_msg: str = None) -> None:
+                                     last_error: str = None) -> None:
         """Record HTTP result of webhook delivery attempt."""
         success = 200 <= http_status < 300
 
@@ -233,12 +234,12 @@ class ExportService:
 
             await self.conn.execute("""
                 UPDATE gold_aa_internal.webhook_deliveries
-                SET status        = $2,
+                SET status        = $2::webhook_status_enum,
                     http_status   = $3,
                     attempt_count = attempt_count + 1,
-                    error_msg     = $4,
+                    last_error     = $4,
                     next_retry_at = CASE
-                        WHEN $2 = 'retrying'
+                        WHEN $2::webhook_status_enum = 'retrying'::webhook_status_enum
                         THEN NOW() + INTERVAL '5 minutes'
                         ELSE NULL
                     END
@@ -247,7 +248,7 @@ class ExportService:
                 delivery_id,
                 "failed" if exhausted else "retrying",
                 http_status,
-                error_msg,
+                last_error,
             )
 
         logger.info("webhook.delivery_recorded",

@@ -21,9 +21,13 @@ Setup:
 import uuid
 import pytest
 import psycopg2
+from _constants import BATCH_ID, TENANT_ID
+BATCH_B = '00000000-0000-0000-0000-000000000098'
+TENANT_A_UUID = '00000000-0000-0000-0000-000000000001'
+TENANT_B_UUID = '00000000-0000-0000-0000-000000000099'
 
-TENANT_A = "aa_internal"
-TENANT_B = "wl_tenant_b2b_test"
+TENANT_A = "00000000-0000-0000-0000-000000000001"
+TENANT_B = "00000000-0000-0000-0000-000000000099"
 
 # app_conn fixture — connects as app_user (non-owner → RLS enforced)
 @pytest.fixture
@@ -70,7 +74,9 @@ def _insert_tour(conn, tenant_id: str, src_name: str = None) -> str:
              src_subtitle, src_summary, src_highlights, src_itineraries,
              pipeline_status)
         VALUES (%s, %s, %s, 'Vietnam', %s, 'Sub', 'Sum', '[]', '[]', 'ingested')
-    """, (tour_id, str(uuid.uuid4()), tenant_id,
+    """, (tour_id,
+          BATCH_B if tenant_id == TENANT_B_UUID else BATCH_ID,
+          tenant_id,
           src_name or f"Tour by {tenant_id}"))
     cur.close()
     return tour_id
@@ -136,7 +142,7 @@ class TestRLSTenantIsolation:
         cur.execute("SELECT set_config('app.tenant_id', %s, false)", (TENANT_A,))
         cur.execute("""
             UPDATE silver_aa_internal.raw_tours
-            SET pipeline_status = 'hacked'
+            SET pipeline_status = 'failed'
             WHERE tour_id = %s
         """, (tour_id_b,))
         rows_affected = cur.rowcount
@@ -170,14 +176,20 @@ class TestRLSTenantIsolation:
         tour_id = str(uuid.uuid4())
 
         cur.execute("SELECT set_config('app.tenant_id', %s, false)", (TENANT_B,))
+        # Insert raw_tour first — published_tours.tour_id FK references raw_tours
+        cur.execute("""
+            INSERT INTO silver_aa_internal.raw_tours
+                (tour_id, batch_id, tenant_id, country, src_name, pipeline_status)
+            VALUES (%s, %s, %s, 'Vietnam', 'B2B Gold Test', 'published')
+        """, (tour_id, BATCH_B, TENANT_B))
         cur.execute("""
             INSERT INTO gold_aa_internal.published_tours
-                (tour_id, tenant_id, aa_name, aa_subtitle, aa_summary,
-                 aa_highlights, aa_itineraries, seo_title, seo_meta,
-                 country, slug, quality_score)
-            VALUES (%s, %s, 'B2B Tour', 'Sub', 'Sum', '[]', '...',
-                    'T', 'M', 'Vietnam', %s, 0.90)
-        """, (tour_id, TENANT_B, f"slug-{uuid.uuid4()}"))
+                (tour_id, tenant_id, generated_content_id, aa_name, aa_subtitle,
+                 aa_summary, aa_highlights, aa_itineraries, seo_title, seo_meta,
+                 quality_score)
+            VALUES (%s, %s, %s, 'B2B Tour', 'Sub', 'Sum', '[]', '...',
+                    'T', 'M', 0.90)
+        """, (tour_id, TENANT_B, str(uuid.uuid4())))
 
         cur.execute("SELECT set_config('app.tenant_id', %s, false)", (TENANT_A,))
         cur.execute(
@@ -212,7 +224,7 @@ class TestRLSTenantContext:
         _insert_tour(app_conn, TENANT_A, "Should be hidden")
 
         cur = app_conn.cursor()
-        cur.execute("SELECT set_config('app.tenant_id', '', false)")
+        cur.execute("SELECT set_config('app.tenant_id', '00000000-0000-0000-0000-000000000000', false)")
         cur.execute("SELECT COUNT(*) FROM silver_aa_internal.raw_tours")
         count = cur.fetchone()[0]
         cur.close()

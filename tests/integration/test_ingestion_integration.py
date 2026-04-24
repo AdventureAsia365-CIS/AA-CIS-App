@@ -133,11 +133,12 @@ class TestIngestionPipelineRun:
     def test_create_pipeline_run(self, db_conn):
         cur = db_conn.cursor()
         run_id = str(uuid.uuid4())
+        batch_id = str(uuid.uuid4())  # unique per test
         cur.execute("""
             INSERT INTO shared.pipeline_runs
                 (id, tenant_id, batch_id, tours_total)
             VALUES (%s, %s, %s, %s)
-        """, (run_id, TENANT_ID, BATCH_ID, 10))
+        """, (run_id, TENANT_ID, batch_id, 10))
         cur.execute(
             "SELECT tenant_id, tours_total, status FROM shared.pipeline_runs WHERE id = %s",
             (run_id,)
@@ -151,11 +152,12 @@ class TestIngestionPipelineRun:
     def test_pipeline_run_completion(self, db_conn):
         cur = db_conn.cursor()
         run_id = str(uuid.uuid4())
+        batch_id = str(uuid.uuid4())  # unique per test
         cur.execute("""
             INSERT INTO shared.pipeline_runs
                 (id, tenant_id, batch_id, tours_total)
             VALUES (%s, %s, %s, 5)
-        """, (run_id, TENANT_ID, BATCH_ID))
+        """, (run_id, TENANT_ID, batch_id))
         cur.execute("""
             UPDATE shared.pipeline_runs
             SET status = 'completed',

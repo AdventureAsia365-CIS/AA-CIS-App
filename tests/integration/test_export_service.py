@@ -9,7 +9,7 @@ import pytest
 import asyncpg
 from unittest.mock import MagicMock
 
-TENANT_A  = "aa_internal"
+TENANT_A  = "00000000-0000-0000-0000-000000000001"
 WEBHOOK_SECRET = "test_webhook_secret_abc123"
 DB_DSN = "postgresql://cistest:cistest@127.0.0.1:5432/cis_integration_test"
 
@@ -30,6 +30,7 @@ SAMPLE_CONTENT = {
 @pytest.fixture
 async def aconn():
     conn = await asyncpg.connect(DB_DSN)
+    await conn.execute("SET app.tenant_id = '00000000-0000-0000-0000-000000000001'")
     yield conn
     # Cleanup
     await conn.execute("""
@@ -266,7 +267,7 @@ class TestWebhookDelivery:
         )
 
         await export_svc.record_delivery_result(
-            delivery_id, http_status=500, error_msg="Internal Server Error"
+            delivery_id, http_status=500, last_error="Internal Server Error"
         )
 
         row = await aconn.fetchrow(
@@ -288,7 +289,7 @@ class TestWebhookDelivery:
         # 3 failures
         for _ in range(3):
             await export_svc.record_delivery_result(
-                delivery_id, http_status=503, error_msg="Service unavailable"
+                delivery_id, http_status=503, last_error="Service unavailable"
             )
 
         row = await aconn.fetchrow(

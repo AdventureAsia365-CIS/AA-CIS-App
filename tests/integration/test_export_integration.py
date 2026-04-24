@@ -25,9 +25,9 @@ def _setup_validated_tour(db_conn) -> tuple[str, str]:
         INSERT INTO silver_aa_internal.generated_content
                 (id, tour_id, tenant_id, version_num, aa_name, aa_subtitle, aa_summary,
              aa_highlights, aa_itineraries, seo_title, seo_meta,
-             model_editorial, model_schema, prompt_version, status)
-        VALUES (%s,%s,%s,1,%s,%s,%s,%s,'[]','...','SEO T','SEO M',
-                'claude-3-5-sonnet-20241022','gpt-4.1','v3.2','approved')
+             model_editorial, model_schema, prompt_version, retry_count, status)
+        VALUES (%s,%s,%s,1,%s,%s,%s,'[]','...','SEO T','SEO M',
+                'claude-3-5-sonnet-20241022','gpt-4.1','v3.2',0,'approved')
     """, (
         content_id, tour_id, TENANT_ID,
         SAMPLE_GENERATED["aa_name"], SAMPLE_GENERATED["aa_subtitle"],
@@ -41,17 +41,17 @@ class TestPublishedToursRepository:
     """Test: gold_aa_internal.published_tours CRUD."""
 
     def test_publish_tour_to_gold(self, db_conn):
-        tour_id, _ = _setup_validated_tour(db_conn)
+        tour_id, content_id = _setup_validated_tour(db_conn)
         cur = db_conn.cursor()
         slug = "ha-long-bay-3-day-luxury-cruise"
         cur.execute("""
             INSERT INTO gold_aa_internal.published_tours
-                (tour_id, tenant_id, aa_name, aa_subtitle, aa_summary,
+                (tour_id, tenant_id, generated_content_id, aa_name, aa_subtitle, aa_summary,
                  aa_highlights, aa_itineraries, seo_title, seo_meta,
                  country, slug, quality_score)
             VALUES (%s,%s,%s,%s,%s,%s,'[]','...','SEO T','SEO M',%s,%s,0.94)
         """, (
-            tour_id, TENANT_ID,
+            tour_id, TENANT_ID, content_id,
             SAMPLE_GENERATED["aa_name"], SAMPLE_GENERATED["aa_subtitle"],
             SAMPLE_GENERATED["aa_summary"],
             "Vietnam", slug,
@@ -75,19 +75,19 @@ class TestPublishedToursRepository:
         cur = db_conn.cursor()
         cur.execute("""
             INSERT INTO gold_aa_internal.published_tours
-                (tour_id, tenant_id, aa_name, aa_subtitle, aa_summary,
+                (tour_id, tenant_id, generated_content_id, aa_name, aa_subtitle, aa_summary,
                  aa_highlights, aa_itineraries, seo_title, seo_meta,
                  country, slug, quality_score)
-            VALUES (%s,%s,'Name','Sub','Sum','[]','...','T','M','Vietnam',%s,0.90)
-        """, (tour_id_1, TENANT_ID, slug))
+            VALUES (%s,%s,%s,'Name','Sub','Sum','[]','...','T','M','Vietnam',%s,0.90)
+        """, (tour_id_1, TENANT_ID, str(__import__('uuid').uuid4()), slug))
         with pytest.raises(Exception):  # unique constraint violation
             cur.execute("""
                 INSERT INTO gold_aa_internal.published_tours
-                    (tour_id, tenant_id, aa_name, aa_subtitle, aa_summary,
+                    (tour_id, tenant_id, generated_content_id, aa_name, aa_subtitle, aa_summary,
                      aa_highlights, aa_itineraries, seo_title, seo_meta,
                      country, slug, quality_score)
                 VALUES (%s,%s,'Name2','Sub','Sum','[]','...','T','M','Vietnam',%s,0.88)
-            """, (tour_id_2, TENANT_ID, slug))
+            """, (tour_id_2, TENANT_ID, str(__import__('uuid').uuid4()), slug))
         cur.close()
 
     def test_published_tour_is_immutable(self, db_conn):
@@ -97,20 +97,20 @@ class TestPublishedToursRepository:
         cur = db_conn.cursor()
         cur.execute("""
             INSERT INTO gold_aa_internal.published_tours
-                (tour_id, tenant_id, aa_name, aa_subtitle, aa_summary,
+                (tour_id, tenant_id, generated_content_id, aa_name, aa_subtitle, aa_summary,
                  aa_highlights, aa_itineraries, seo_title, seo_meta,
                  country, slug, quality_score)
-            VALUES (%s,%s,%s,'Sub','Sum','[]','...','T','M','Vietnam','slug-immutable-test',0.92)
-        """, (tour_id, TENANT_ID, original_name))
+            VALUES (%s,%s,%s,%s,'Sub','Sum','[]','...','T','M','Vietnam','slug-immutable-test',0.92)
+        """, (tour_id, TENANT_ID, str(__import__('uuid').uuid4()), original_name))
         # Simulate an accidental re-insert attempt (ON CONFLICT DO NOTHING)
         cur.execute("""
             INSERT INTO gold_aa_internal.published_tours
-                (tour_id, tenant_id, aa_name, aa_subtitle, aa_summary,
+                (tour_id, tenant_id, generated_content_id, aa_name, aa_subtitle, aa_summary,
                  aa_highlights, aa_itineraries, seo_title, seo_meta,
                  country, slug, quality_score)
-            VALUES (%s,%s,'OVERWRITTEN NAME','Sub','Sum','[]','...','T','M','Vietnam','slug-immutable-test',0.55)
+            VALUES (%s,%s,%s,'OVERWRITTEN NAME','Sub','Sum','[]','...','T','M','Vietnam','slug-immutable-test',0.55)
             ON CONFLICT (tour_id) DO NOTHING
-        """, (tour_id, TENANT_ID))
+        """, (tour_id, TENANT_ID, str(__import__('uuid').uuid4())))
         cur.execute(
             "SELECT aa_name FROM gold_aa_internal.published_tours WHERE tour_id = %s",
             (tour_id,)
@@ -123,11 +123,11 @@ class TestPublishedToursRepository:
         cur = db_conn.cursor()
         cur.execute("""
             INSERT INTO gold_aa_internal.published_tours
-                (tour_id, tenant_id, aa_name, aa_subtitle, aa_summary,
+                (tour_id, tenant_id, generated_content_id, aa_name, aa_subtitle, aa_summary,
                  aa_highlights, aa_itineraries, seo_title, seo_meta,
                  country, slug, quality_score)
-            VALUES (%s,%s,'Name','Sub','Sum','[]','...','T','M','Vietnam','pub-slug-1',0.91)
-        """, (tour_id, TENANT_ID))
+            VALUES (%s,%s,%s,'Name','Sub','Sum','[]','...','T','M','Vietnam','pub-slug-1',0.91)
+        """, (tour_id, TENANT_ID, str(__import__('uuid').uuid4())))
         cur.execute("""
             UPDATE silver_aa_internal.raw_tours
             SET pipeline_status = 'published'

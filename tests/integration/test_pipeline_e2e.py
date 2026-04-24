@@ -8,6 +8,9 @@ import json
 import re
 import pytest
 from conftest import SAMPLE_TOUR, SAMPLE_SEO, SAMPLE_GENERATED, BATCH_ID, TENANT_ID
+import uuid as _uuid
+TEST_BATCH_ID = str(_uuid.uuid4())  # unique per session
+TEST_TEST_BATCH_ID = str(_uuid.uuid4())  # unique per test session, avoids conflict with conftest seed
 
 
 class TestFullPipelineHappyPath:
@@ -19,7 +22,7 @@ class TestFullPipelineHappyPath:
 
     def test_full_pipeline_single_tour(self, db_conn, redis_client):
         tour_id = str(uuid.uuid4())
-        content_id = str(uuid.uuid4())
+        generated_content_id = str(uuid.uuid4())
         score_id = str(uuid.uuid4())
         run_id = str(uuid.uuid4())
         cur = db_conn.cursor()
@@ -29,7 +32,7 @@ class TestFullPipelineHappyPath:
             INSERT INTO shared.pipeline_runs
                 (id, tenant_id, batch_id, tours_total, status)
             VALUES (%s, %s, %s, 1, 'running')
-        """, (run_id, TENANT_ID, BATCH_ID))
+        """, (run_id, TENANT_ID, TEST_BATCH_ID))
 
         # ── STAGE 1: Ingestion → silver raw_tours ─────────────────────────
         cur.execute("""
@@ -38,14 +41,14 @@ class TestFullPipelineHappyPath:
                  src_highlights, src_itineraries, pipeline_status)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'ingested')
         """, (
-            tour_id, TENANT_ID, BATCH_ID, SAMPLE_TOUR["country"],
+            tour_id, TENANT_ID, TEST_BATCH_ID, SAMPLE_TOUR["country"],
             SAMPLE_TOUR["src_name"], SAMPLE_TOUR["src_subtitle"],
             SAMPLE_TOUR["src_summary"],
             json.dumps(SAMPLE_TOUR["src_highlights"]),
             json.dumps(SAMPLE_TOUR["src_itineraries"]),
         ))
         # Update Redis pipeline progress
-        redis_client.setex(f"pipeline:job:{BATCH_ID}", 3600,
+        redis_client.setex(f"pipeline:job:{TEST_BATCH_ID}", 3600,
                            json.dumps({"step": "ingestion", "pct": 20}))
 
         # ── STAGE 2: SEO Intelligence → seo_context ───────────────────────
@@ -67,22 +70,22 @@ class TestFullPipelineHappyPath:
             json.dumps(SAMPLE_SEO["trends"]),
             cache_key,
         ))
-        redis_client.setex(f"pipeline:job:{BATCH_ID}", 3600,
+        redis_client.setex(f"pipeline:job:{TEST_BATCH_ID}", 3600,
                            json.dumps({"step": "seo_intelligence", "pct": 40}))
 
         # ── STAGE 3: Content Generation → generated_content ───────────────
         cur.execute("""
             UPDATE silver_aa_internal.raw_tours
-            SET pipeline_status = 'content_generated' WHERE tour_id = %s
+            SET pipeline_status = 'gen_done' WHERE tour_id = %s
         """, (tour_id,))
         cur.execute("""
             INSERT INTO silver_aa_internal.generated_content
                 (id, tour_id, tenant_id, version_num, aa_name, aa_subtitle, aa_summary,
                  aa_highlights, aa_itineraries, seo_title, seo_meta,
                  model_editorial, model_schema, prompt_version, retry_count, status)
-            VALUES (%s,%s,1,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,'draft')
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,'draft')
         """, (
-            content_id, tour_id, TENANT_ID, 1,
+            generated_content_id, tour_id, TENANT_ID, 1,
             SAMPLE_GENERATED["aa_name"], SAMPLE_GENERATED["aa_subtitle"],
             SAMPLE_GENERATED["aa_summary"],
             json.dumps(SAMPLE_GENERATED["aa_highlights"]),
@@ -91,38 +94,38 @@ class TestFullPipelineHappyPath:
             SAMPLE_GENERATED["model_editorial"], SAMPLE_GENERATED["model_schema"],
             SAMPLE_GENERATED["prompt_version"],
         ))
-        redis_client.setex(f"pipeline:job:{BATCH_ID}", 3600,
+        redis_client.setex(f"pipeline:job:{TEST_BATCH_ID}", 3600,
                            json.dumps({"step": "content_generation", "pct": 60}))
 
         # ── STAGE 4: Validation → quality_scores ──────────────────────────
-        lesson_results = {f"v{str(i).zfill(2)}": "pass" for i in range(1, 30)}
+        failure_codes = {f"v{str(i).zfill(2)}": "pass" for i in range(1, 30)}
         cur.execute("""
             INSERT INTO silver_aa_internal.quality_scores
-                (id, tour_id, content_id, overall_score, lesson_results,
-                 passed, hitl_required)
-            VALUES (%s,%s,%s,0.92,%s,TRUE,FALSE)
-        """, (score_id, tour_id, content_id, json.dumps(lesson_results)))
+                (id, tour_id, generated_content_id, score_overall, failure_codes,
+                 passed_count, hitl_flag)
+            VALUES (%s,%s,%s,0.92,%s,1,FALSE)
+        """, (score_id, tour_id, generated_content_id, json.dumps(failure_codes)))
         cur.execute("""
             UPDATE silver_aa_internal.generated_content
-            SET status = 'hitl_approved' WHERE id = %s
-        """, (content_id,))
+            SET status = 'approved' WHERE id = %s
+        """, (generated_content_id,))
         cur.execute("""
             UPDATE silver_aa_internal.raw_tours
             SET pipeline_status = 'hitl_approved' WHERE tour_id = %s
         """, (tour_id,))
-        redis_client.setex(f"pipeline:job:{BATCH_ID}", 3600,
+        redis_client.setex(f"pipeline:job:{TEST_BATCH_ID}", 3600,
                            json.dumps({"step": "validation", "pct": 80}))
 
         # ── STAGE 5: Export → gold published_tours ─────────────────────────
         slug = re.sub(r"[^a-z0-9]+", "-", SAMPLE_GENERATED["aa_name"].lower()).strip("-")
         cur.execute("""
             INSERT INTO gold_aa_internal.published_tours
-                (tour_id, tenant_id, aa_name, aa_subtitle, aa_summary,
+                (tour_id, tenant_id, generated_content_id, aa_name, aa_subtitle, aa_summary,
                  aa_highlights, aa_itineraries, seo_title, seo_meta,
                  country, slug, quality_score)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0.92)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0.92)
         """, (
-            tour_id, TENANT_ID,
+            tour_id, TENANT_ID, generated_content_id,
             SAMPLE_GENERATED["aa_name"], SAMPLE_GENERATED["aa_subtitle"],
             SAMPLE_GENERATED["aa_summary"],
             json.dumps(SAMPLE_GENERATED["aa_highlights"]),
@@ -146,7 +149,7 @@ class TestFullPipelineHappyPath:
                 completed_at = NOW()
             WHERE id = %s
         """, (run_id,))
-        redis_client.setex(f"pipeline:job:{BATCH_ID}", 3600,
+        redis_client.setex(f"pipeline:job:{TEST_BATCH_ID}", 3600,
                            json.dumps({"step": "export", "pct": 100}))
 
         # ── ASSERTIONS ─────────────────────────────────────────────────────
@@ -179,7 +182,7 @@ class TestFullPipelineHappyPath:
         assert float(run_row[2]) == 0.018
 
         # 4. Redis progress at 100%
-        progress = json.loads(redis_client.get(f"pipeline:job:{BATCH_ID}"))
+        progress = json.loads(redis_client.get(f"pipeline:job:{TEST_BATCH_ID}"))
         assert progress["pct"] == 100
 
         # 5. SEO cache present
@@ -196,7 +199,7 @@ class TestFullPipelineHappyPath:
                 (id, tenant_id, batch_id, tours_total, tours_passed, tours_hitl,
                  tours_failed, cost_usd, status)
             VALUES (%s,%s,%s, 5, 3, 1, 1, 0.072, 'completed')
-        """, (run_id, TENANT_ID, BATCH_ID))
+        """, (run_id, TENANT_ID, TEST_BATCH_ID))
         cur.execute("""
             SELECT tours_total, tours_passed, tours_hitl, tours_failed, cost_usd
             FROM shared.pipeline_runs WHERE id = %s
@@ -211,7 +214,7 @@ class TestFullPipelineHappyPath:
 
 
 class TestDLQRouting:
-    """Test: failed tours route to DLQ (pipeline_status = 'dlq')."""
+    """Test: failed tours route to DLQ (pipeline_status = 'failed')."""
 
     def test_failed_tour_dlq_status(self, db_conn):
         tour_id = str(uuid.uuid4())
@@ -221,17 +224,17 @@ class TestDLQRouting:
                 (tour_id, batch_id, country, src_name, src_subtitle, src_summary,
                  src_highlights, src_itineraries, pipeline_status)
             VALUES (%s,%s,'Vietnam','BAD TOUR','City','Sum','[]','[]','failed')
-        """, (tour_id, BATCH_ID))
-        # DLQ classifier sets to 'dlq' after 3 retries
+        """, (tour_id, TEST_BATCH_ID))
+        # DLQ classifier sets to 'failed' after 3 retries
         cur.execute("""
             UPDATE silver_aa_internal.raw_tours
-            SET pipeline_status = 'dlq' WHERE tour_id = %s
+            SET pipeline_status = 'failed' WHERE tour_id = %s
         """, (tour_id,))
         cur.execute(
             "SELECT pipeline_status FROM silver_aa_internal.raw_tours WHERE tour_id = %s",
             (tour_id,)
         )
-        assert cur.fetchone()[0] == "dlq"
+        assert cur.fetchone()[0] == "failed"
         cur.close()
 
     def test_dlq_tours_excluded_from_published_count(self, db_conn):
@@ -248,8 +251,8 @@ class TestDLQRouting:
             INSERT INTO silver_aa_internal.raw_tours
                 (tour_id, batch_id, country, src_name, src_subtitle, src_summary,
                  src_highlights, src_itineraries, pipeline_status)
-            VALUES (%s,%s,'Vietnam','FAIL TOUR','Sub','Sum','[]','[]','dlq')
-        """, (tour_id, BATCH_ID))
+            VALUES (%s,%s,'Vietnam','FAIL TOUR','Sub','Sum','[]','[]','failed')
+        """, (tour_id, TEST_BATCH_ID))
 
         cur.execute(
             "SELECT COUNT(*) FROM gold_aa_internal.published_tours WHERE is_active = TRUE"

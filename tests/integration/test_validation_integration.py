@@ -11,9 +11,9 @@ from conftest import SAMPLE_TOUR, SAMPLE_GENERATED, BATCH_ID, TENANT_ID
 
 def _setup_tour_with_content(db_conn, aa_name=None, aa_subtitle=None,
                                aa_summary=None, seo_meta=None) -> tuple[str, str]:
-    """Insert raw_tour + generated_content, return (tour_id, content_id)."""
+    """Insert raw_tour + generated_content, return (tour_id, generated_content_id)."""
     tour_id = str(uuid.uuid4())
-    content_id = str(uuid.uuid4())
+    generated_content_id = str(uuid.uuid4())
     cur = db_conn.cursor()
     cur.execute("""
         INSERT INTO silver_aa_internal.raw_tours
@@ -30,69 +30,70 @@ def _setup_tour_with_content(db_conn, aa_name=None, aa_subtitle=None,
         VALUES (%s,%s,%s,1,%s,%s,%s,'[]','...','SEO Title',%s,
                 'claude-3-5-sonnet-20241022','gpt-4.1','v3.2','draft')
     """, (
-        content_id, tour_id, TENANT_ID,
+        generated_content_id, tour_id, TENANT_ID,
         aa_name or SAMPLE_GENERATED["aa_name"],
         aa_subtitle or SAMPLE_GENERATED["aa_subtitle"],
         aa_summary or SAMPLE_GENERATED["aa_summary"],
         seo_meta or SAMPLE_GENERATED["seo_meta"],
     ))
     cur.close()
-    return tour_id, content_id
+    return tour_id, generated_content_id
 
 
 class TestQualityScoresRepository:
     """Test: quality_scores insert, pass/fail/HITL thresholds."""
 
     def test_insert_passing_score(self, db_conn):
-        tour_id, content_id = _setup_tour_with_content(db_conn)
+        tour_id, generated_content_id = _setup_tour_with_content(db_conn)
         cur = db_conn.cursor()
         score_id = str(uuid.uuid4())
-        lesson_results = {f"v{str(i).zfill(2)}": "pass" for i in range(1, 30)}
+        failure_codes = {f"v{str(i).zfill(2)}": "pass" for i in range(1, 30)}
 
         cur.execute("""
             INSERT INTO silver_aa_internal.quality_scores
-                (id, tour_id, content_id, overall_score, lesson_results,
-                 passed, hitl_required)
-            VALUES (%s, %s, %s, %s, %s, TRUE, FALSE)
-        """, (score_id, tour_id, content_id, 0.94, json.dumps(lesson_results)))
+                (id, tour_id, generated_content_id, score_overall, failure_codes,
+                 passed_count, hitl_flag)
+            VALUES (%s, %s, %s, %s, %s, 1, FALSE)
+        """, (score_id, tour_id, generated_content_id, 0.94, json.dumps(failure_codes)))
+        # passed_count=smallint, hitl_flag=bool
         cur.execute(
-            "SELECT overall_score, passed, hitl_required FROM silver_aa_internal.quality_scores WHERE id = %s",
+            "SELECT score_overall, passed_count, hitl_flag FROM silver_aa_internal.quality_scores WHERE id = %s",
             (score_id,)
         )
         row = cur.fetchone()
         cur.close()
         assert float(row[0]) == 0.94
-        assert row[1] is True
+        assert row[1] == 1  # passed_count is smallint
         assert row[2] is False
 
     def test_hitl_required_when_score_borderline(self, db_conn):
-        """Score 0.70–0.79 → hitl_required = True, passed = False."""
-        tour_id, content_id = _setup_tour_with_content(db_conn)
+        """Score 0.70–0.79 → hitl_flag = True, passed_count = False."""
+        tour_id, generated_content_id = _setup_tour_with_content(db_conn)
         cur = db_conn.cursor()
         cur.execute("""
             INSERT INTO silver_aa_internal.quality_scores
-                (tour_id, content_id, overall_score, lesson_results,
-                 passed, hitl_required)
-            VALUES (%s, %s, 0.74, '{}', FALSE, TRUE)
-        """, (tour_id, content_id))
+                (tour_id, generated_content_id, score_overall, failure_codes,
+                 passed_count, hitl_flag)
+            VALUES (%s, %s, 0.74, '{}', 0, TRUE)
+        """, (tour_id, generated_content_id))
         cur.execute(
-            "SELECT passed, hitl_required FROM silver_aa_internal.quality_scores WHERE tour_id = %s",
+            "SELECT passed_count, hitl_flag FROM silver_aa_internal.quality_scores WHERE tour_id = %s",
             (tour_id,)
         )
         row = cur.fetchone()
         cur.close()
-        assert row[0] is False
+        assert row[0] == 0  # passed_count is smallint
         assert row[1] is True
 
     def test_pipeline_status_to_failed_on_low_score(self, db_conn):
         """Score < 0.70 → pipeline_status = 'failed'."""
-        tour_id, content_id = _setup_tour_with_content(db_conn)
+        tour_id, generated_content_id = _setup_tour_with_content(db_conn)
         cur = db_conn.cursor()
         cur.execute("""
             INSERT INTO silver_aa_internal.quality_scores
-                (tour_id, content_id, overall_score, lesson_results, passed, hitl_required)
-            VALUES (%s, %s, 0.55, '{}', FALSE, FALSE)
-        """, (tour_id, content_id))
+                (tour_id, generated_content_id, score_overall, failure_codes, passed_count, hitl_flag)
+            VALUES (%s, %s, 0.55, '{}', 0, FALSE)
+        """, (tour_id, generated_content_id))
         cur.execute("""
             UPDATE silver_aa_internal.raw_tours
             SET pipeline_status = 'failed'
@@ -110,11 +111,11 @@ class TestQualityScoresRepository:
         cur = db_conn.cursor()
         # Seed a representative subset
         validators = [
-            ("v01", "formatting", "no_all_caps", "V01_CAPS_CHECK"),
-            ("v02", "formatting", "title_case_name", "V02_TITLE_CASE"),
-            ("v05", "seo", "no_this_is_opener", "V05_SEO_OPENER"),
-            ("v25", "seo", "meta_max_160_chars", "V25_META_LENGTH"),
-            ("v29", "brand", "no_forbidden_words", "V29_FORBIDDEN"),
+            (1, "formatting", "no_all_caps", "V01_CAPS_CHECK"),
+            (2, "formatting", "title_case_name", "V02_TITLE_CASE"),
+            (5, "seo", "no_this_is_opener", "V05_SEO_OPENER"),
+            (25, "seo", "meta_max_160_chars", "V25_META_LENGTH"),
+            (29, "brand", "no_forbidden_words", "V29_FORBIDDEN"),
         ]
         for lesson_num, category, fn, failure_code in validators:
             cur.execute("""
@@ -202,43 +203,43 @@ class TestHITLRouting:
     """Test: HITL task token flow, approve/reject transitions."""
 
     def test_hitl_flag_persists_in_quality_scores(self, db_conn):
-        tour_id, content_id = _setup_tour_with_content(db_conn)
+        tour_id, generated_content_id = _setup_tour_with_content(db_conn)
         cur = db_conn.cursor()
         cur.execute("""
             INSERT INTO silver_aa_internal.quality_scores
-                (tour_id, content_id, overall_score, lesson_results,
-                 passed, hitl_required)
-            VALUES (%s, %s, 0.76, '{"v01":"pass","v05":"fail"}', FALSE, TRUE)
-        """, (tour_id, content_id))
+                (tour_id, generated_content_id, score_overall, failure_codes,
+                 passed_count, hitl_flag)
+            VALUES (%s, %s, 0.76, '{"v01":"pass","v05":"fail"}', 0, TRUE)
+        """, (tour_id, generated_content_id))
         cur.execute("""
             UPDATE silver_aa_internal.raw_tours
-            SET pipeline_status = 'hitl_pending'
+            SET pipeline_status = 'hitl_required'
             WHERE tour_id = %s
         """, (tour_id,))
         cur.execute(
             "SELECT pipeline_status FROM silver_aa_internal.raw_tours WHERE tour_id = %s",
             (tour_id,)
         )
-        assert cur.fetchone()[0] == "hitl_pending"
+        assert cur.fetchone()[0] == "hitl_required"
         cur.close()
 
     def test_hitl_approve_transitions_to_validated(self, db_conn):
-        tour_id, content_id = _setup_tour_with_content(db_conn)
+        tour_id, generated_content_id = _setup_tour_with_content(db_conn)
         cur = db_conn.cursor()
         # Set to hitl_pending
         cur.execute("""
             UPDATE silver_aa_internal.raw_tours
-            SET pipeline_status = 'hitl_pending' WHERE tour_id = %s
+            SET pipeline_status = 'hitl_required' WHERE tour_id = %s
         """, (tour_id,))
         cur.execute("""
             UPDATE silver_aa_internal.generated_content
-            SET status = 'hitl_pending' WHERE id = %s
-        """, (content_id,))
+            SET status = 'hitl' WHERE id = %s
+        """, (generated_content_id,))
         # Approve action
         cur.execute("""
             UPDATE silver_aa_internal.generated_content
             SET status = 'approved' WHERE id = %s
-        """, (content_id,))
+        """, (generated_content_id,))
         cur.execute("""
             UPDATE silver_aa_internal.raw_tours
             SET pipeline_status = 'hitl_approved' WHERE tour_id = %s
@@ -247,7 +248,7 @@ class TestHITLRouting:
             "SELECT pipeline_status FROM silver_aa_internal.raw_tours WHERE tour_id = %s",
             (tour_id,)
         )
-        assert cur.fetchone()[0] == "passed"
+        assert cur.fetchone()[0] == "hitl_approved"
         cur.close()
 
     def test_batch_stats_reflect_hitl_count(self, db_conn):
@@ -259,7 +260,7 @@ class TestHITLRouting:
             INSERT INTO shared.pipeline_runs
                 (id, tenant_id, batch_id, tours_total, tours_passed, tours_hitl, tours_failed)
             VALUES (%s, %s, %s, 3, 2, 1, 0)
-        """, (run_id, TENANT_ID, BATCH_ID))
+        """, (run_id, TENANT_ID, str(__import__("uuid").uuid4())))
         cur.execute(
             "SELECT tours_total, tours_passed, tours_hitl FROM shared.pipeline_runs WHERE id = %s",
             (run_id,)

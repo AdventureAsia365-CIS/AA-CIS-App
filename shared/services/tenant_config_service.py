@@ -251,7 +251,7 @@ class TenantConfigService:
         if not row:
             return None
 
-        tenant = dict(row)
+        tenant = {k: str(v) if hasattr(v, 'hex') else v for k, v in dict(row).items()}
         if self.cache:
             await self.cache.set(cache_key, json.dumps(tenant), ex=CACHE_TTL)
 
