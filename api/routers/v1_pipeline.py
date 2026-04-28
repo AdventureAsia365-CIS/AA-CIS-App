@@ -20,8 +20,8 @@ from services.content_generation.prompts import SYSTEM_PROMPT, build_rewrite_pro
 from pydantic import BaseModel
 import asyncpg
 import boto3 as _boto3
-from fastapi import Depends, Request as _Request
-from fastapi.security import HTTPBearer as _HTTPBearer, HTTPAuthorizationCredentials as _Creds
+from fastapi import Depends, Request
+from fastapi.security import HTTPBearer as _HTTPBearer, HTTPAuthorizationCredentials as _HTTPCreds
 from api.routers.auth import verify_jwt as _verify_jwt
 
 logger = structlog.get_logger()
