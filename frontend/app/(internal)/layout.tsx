@@ -14,10 +14,12 @@ const NAV = [
 export default function InternalLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [isAdmin, setIsAdmin] = useState(false);
-  const [theme, setTheme] = useState<"dark"|"light">("dark");
+  const [theme, setTheme] = useState<"dark"|"light">("light");
   useEffect(() => {
     const saved = localStorage.getItem("cis_theme") as "dark"|"light" | null;
-    if (saved) { setTheme(saved); document.documentElement.setAttribute("data-theme", saved); }
+    const t = saved || "light";
+    setTheme(t);
+    document.documentElement.setAttribute("data-theme", t);
   }, []);
   const toggleTheme = () => {
     const next = theme === "dark" ? "light" : "dark";

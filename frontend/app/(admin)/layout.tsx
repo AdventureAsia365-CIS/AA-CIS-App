@@ -1,7 +1,8 @@
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Upload, ClipboardList, BookOpen } from "lucide-react";
+import { LayoutDashboard, Upload, ClipboardList, BookOpen, Sun, Moon } from "lucide-react";
+import { useState, useEffect } from "react";
 import LogoutButton from "@/components/LogoutButton";
 
 const ADMIN_NAV = [
@@ -15,6 +16,19 @@ const CONTENT_NAV = [
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const [theme, setTheme] = useState<"dark"|"light">("light");
+  useEffect(() => {
+    const saved = localStorage.getItem("cis_theme") as "dark"|"light" | null;
+    const t = saved || "light";
+    setTheme(t);
+    document.documentElement.setAttribute("data-theme", t);
+  }, []);
+  const toggleTheme = () => {
+    const next = theme === "dark" ? "light" : "dark";
+    setTheme(next);
+    localStorage.setItem("cis_theme", next);
+    document.documentElement.setAttribute("data-theme", next);
+  };
 
   const linkStyle = (href: string, color = "#ef4444"): React.CSSProperties => ({
     display:"flex", alignItems:"center", gap:6,
@@ -65,6 +79,14 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         {/* Spacer */}
         <div style={{ flex:1 }} />
 
+        <button onClick={toggleTheme} title="Toggle theme"
+          style={{ padding:"6px 10px", borderRadius:8, border:"1px solid var(--border)",
+            background:"none", cursor:"pointer", color:"#8B9BB4",
+            display:"flex", alignItems:"center", gap:6, fontSize:12,
+          }}>
+          {theme === "dark" ? <Sun size={14}/> : <Moon size={14}/>}
+          {theme === "dark" ? "Light" : "Dark"}
+        </button>
         <LogoutButton />
       </nav>
       <main style={{ maxWidth:1280, margin:"0 auto", padding:"32px" }}>
