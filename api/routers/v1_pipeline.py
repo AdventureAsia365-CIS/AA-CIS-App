@@ -293,7 +293,7 @@ class UploadUrlResponse(BaseModel):
     s3_key: str
     bucket: str
 
-@router.post("/v1/pipeline/upload-url", response_model=UploadUrlResponse)
+@router.post("/upload-url", response_model=UploadUrlResponse)
 async def get_upload_url(
     body: UploadUrlRequest,
     tenant=Depends(_get_tenant),
@@ -321,7 +321,7 @@ class ExecutionStatus(BaseModel):
     stop_date:  str | None = None
     tours_processed: int | None = None
 
-@router.get("/v1/pipeline/execution/{execution_id:path}", response_model=ExecutionStatus)
+@router.get("/execution/{execution_id:path}", response_model=ExecutionStatus)
 async def get_execution_status(
     execution_id: str,
     tenant=Depends(_get_tenant),
@@ -347,7 +347,7 @@ async def get_execution_status(
 
 # ── Review Queue ──────────────────────────────────────────────────────────────
 
-@router.get("/v1/pipeline/review-queue")
+@router.get("/review-queue")
 async def get_review_queue(
     request: Request,
     tenant=Depends(_get_tenant),
@@ -387,7 +387,7 @@ async def get_review_queue(
     }
 
 
-@router.post("/v1/pipeline/review-queue/{review_id}/approve")
+@router.post("/review-queue/{review_id}/approve")
 async def approve_review(
     review_id: str,
     request: Request,
@@ -416,7 +416,7 @@ async def approve_review(
     return {"status": "approved", "review_id": review_id}
 
 
-@router.post("/v1/pipeline/review-queue/{review_id}/reject")
+@router.post("/review-queue/{review_id}/reject")
 async def reject_review(
     review_id: str,
     request: Request,

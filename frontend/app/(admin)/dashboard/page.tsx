@@ -132,7 +132,7 @@ export default function DashboardPage() {
         <div>
           <h1 style={{ fontSize: 24, fontWeight: 700, color: "var(--text-primary)", margin: 0 }}>Dev Dashboard</h1>
           <p style={{ color: "var(--text-secondary)", fontSize: 13, marginTop: 6 }}>
-            Pipeline metrics · Last 7 days · Mock data (live after Terraform apply)
+            Pipeline metrics · Live data
           </p>
         </div>
         <div style={{ display: "flex", gap: 6 }}>
