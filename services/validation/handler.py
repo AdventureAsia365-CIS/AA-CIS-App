@@ -1,105 +1,101 @@
 import asyncio
 import asyncpg
-import boto3
 import json
 import os
 import structlog
-
 from shared.validators.rules import validate_content
 
 logger = structlog.get_logger()
-sqs = boto3.client("sqs", region_name=os.environ.get("AWS_REGION", "us-west-1"))
 
 async def process_validation(version_id: str) -> dict:
     conn = await asyncpg.connect(os.environ["DATABASE_URL"])
     tenant_slug = os.environ.get("TENANT_SLUG", "aa_internal")
     try:
         row = await conn.fetchrow(
-            f"SELECT * FROM silver_{tenant_slug}.generated_content WHERE id = $1", version_id
+            f"SELECT * FROM silver_{tenant_slug}.generated_content WHERE id = $1::uuid",
+            version_id
         )
         if not row:
             raise ValueError(f"Version not found: {version_id}")
 
         content = {
-            "name":       row["name"],
-            "subtitle":   row["subtitle"],
-            "summary":    row["summary"],
-            "highlights": row["highlights"] or [],
+            "name":       row["aa_name"],
+            "subtitle":   row["aa_subtitle"],
+            "summary":    row["aa_summary"],
+            "highlights": row["aa_highlights"] or [],
             "seo_title":  row["seo_title"],
             "seo_meta":   row["seo_meta"],
-            "trip_type":  row["trip_type"],
+            "trip_type":  "cultural",
         }
 
         result = validate_content(content)
         score  = result["score"]
 
-        # Determine hitl_status
-        retry_count  = row.get("retry_count", 0) or 0
+        retry_count = row.get("retry_count", 0) or 0
         if score >= 7.0:
-            hitl_status   = "approved"
-            publish_ready = True
-            route         = "export"
+            new_status = "approved"
+            route      = "export"
         elif retry_count < 2:
-            hitl_status   = "revision_requested"
-            publish_ready = False
-            route         = "regenerate"
+            new_status = "pending"
+            route      = "regenerate"
         else:
-            hitl_status   = "pending"
-            publish_ready = False
-            route         = "hitl"
+            new_status = "pending"
+            route      = "hitl"
 
-        # Update DB
-        await conn.execute("""
-            f"UPDATE silver_{tenant_slug}.generated_content SET
-                audit_status        = $2,
-                audit_failure_codes = $3,
-                audit_issues        = $4,
-                quality_score       = $5,
-                publish_ready       = $6,
-                hitl_status         = $7,
-                updated_at          = NOW()
-            WHERE id = $1
+        await conn.execute(f"""
+            UPDATE silver_{tenant_slug}.generated_content
+            SET status = $2::content_status_enum
+            WHERE id = $1::uuid
         """,
             version_id,
-            result["audit_status"],
-            result["issues"][:5],   # top 5 failure codes
-            "; ".join(result["issues"]),
-            score,
-            publish_ready,
-            hitl_status,
+            new_status,
         )
 
         logger.info("validation_complete",
-                    version_id=version_id, score=score,
-                    route=route, failed=result["failed"])
+                    version_id=version_id, score=score, route=route)
 
         return {
             "version_id":   version_id,
             "score":        score,
-            "audit_status": result["audit_status"],
             "route":        route,
-            "issues":       result["issues"],
+            "failed_rules": result["issues"],
         }
-
     finally:
         await conn.close()
 
+
 def lambda_handler(event: dict, context) -> dict:
-    results = []
-    for record in event.get("Records", []):
+    # Pattern 1: SF direct invoke — version_id inside content_result.Payload
+    if "content_result" in event:
+        payload = event["content_result"].get("Payload", {})
+        version_id = payload.get("version_id")
+        if not version_id:
+            logger.warning("no_version_id_in_content_result", keys=str(event.keys()))
+            return {"processed": 0, "error": "missing version_id"}
         try:
-            body       = json.loads(record["body"])
-            version_id = body.get("version_id")
-
-            if not version_id:
-                logger.warning("missing_version_id")
-                continue
-
             result = asyncio.run(process_validation(version_id))
-            results.append(result)
-
+            return result
         except Exception as e:
             logger.error("validation_failed", error=str(e))
-            results.append({"status": "failed", "error": str(e)})
+            return {"status": "failed", "error": str(e)}
 
-    return {"processed": len(results), "results": results}
+    # Pattern 2: SQS trigger (Phase 2)
+    elif "Records" in event:
+        results = []
+        for record in event["Records"]:
+            try:
+                body       = json.loads(record["body"])
+                version_id = body.get("version_id")
+                if not version_id:
+                    logger.warning("missing_version_id")
+                    continue
+                result = asyncio.run(process_validation(version_id))
+                results.append(result)
+            except Exception as e:
+                logger.error("validation_failed", error=str(e))
+                results.append({"status": "failed", "error": str(e)})
+        return {"processed": len(results), "results": results}
+
+    else:
+        logger.warning("unknown_event_format", keys=str(event.keys()))
+        return {"processed": 0, "error": "unknown event format"}

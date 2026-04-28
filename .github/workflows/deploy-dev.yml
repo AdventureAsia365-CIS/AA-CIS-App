@@ -1,5 +1,4 @@
 name: Deploy Dev
-
 on:
   push:
     branches: [develop]
@@ -10,21 +9,18 @@ on:
       - 'Dockerfile'
       - 'requirements.txt'
   workflow_dispatch:
-
 permissions:
   id-token: write
   contents: read
-
 env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
   ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
   ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
   ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
   ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
-
 jobs:
   build-and-push:
-    name: Build & Push ECR
+    name: Build and Push ECR
     runs-on: ubuntu-latest
     environment: dev
     outputs:
@@ -43,12 +39,11 @@ jobs:
         run: |
           IMAGE_TAG=dev-${{ github.sha }}
           FULL_IMAGE=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
-          LATEST=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:dev-latest
+          LATEST=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
           docker build -t $FULL_IMAGE -t $LATEST .
           docker push $FULL_IMAGE
           docker push $LATEST
-          echo "image=$FULL_IMAGE" >> $GITHUB_OUTPUT
-
+          echo "image=$LATEST" >> $GITHUB_OUTPUT
   deploy:
     name: Deploy to ECS Dev
     runs-on: ubuntu-latest
@@ -73,7 +68,7 @@ jobs:
       - name: Register new task definition
         id: task-def
         run: |
-          NEW_IMAGE="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:dev-${{ github.sha }}"
+          NEW_IMAGE="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest"
           aws ecs describe-task-definition \
             --task-definition ${{ env.ECS_SERVICE }} \
             --region ${{ env.AWS_REGION }} \
@@ -102,9 +97,9 @@ jobs:
             --cluster ${{ env.ECS_CLUSTER }} \
             --services ${{ env.ECS_SERVICE }} \
             --region ${{ env.AWS_REGION }}
-          echo "ECS stable ✅"
+          echo "ECS deployment stable"
       - name: Smoke test
         run: |
           sleep 10
           HTTP=$(curl -s -o /dev/null -w "%{http_code}" https://api-cis.lumiguides.it.com/health)
-          [ "$HTTP" = "200" ] && echo "Health OK ✅" || (echo "Health FAIL: $HTTP" && exit 1)
+          [ "$HTTP" = "200" ] && echo "Health check passed" || (echo "Health check failed: $HTTP" && exit 1)

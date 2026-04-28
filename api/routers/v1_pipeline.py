@@ -200,14 +200,48 @@ async def run_tour(req: TourRunRequest):
         }
 
         result = await _rewrite_tour(tour, idx=0, total=1)
+
+        # Write to generated_content so Validation Lambda can read it
+        version_id = None
+        if result.get("status") == "success" and result.get("generated"):
+            import json as _json
+            generated = result["generated"]
+            status = "approved" if result.get("quality_score", 0.0) >= 7.0 else "pending"
+            version_id = await conn.fetchval("""
+                INSERT INTO silver_aa_internal.generated_content (
+                    tour_id, tenant_id, version_num,
+                    aa_name, aa_subtitle, aa_summary,
+                    aa_highlights, seo_title, seo_meta,
+                    model_editorial, status
+                ) VALUES (
+                    $1::uuid, $2::uuid,
+                    COALESCE((SELECT MAX(version_num) + 1 FROM silver_aa_internal.generated_content WHERE tour_id = $1::uuid), 1),
+                    $3, $4, $5,
+                    $6::jsonb, $7, $8,
+                    $9, $10::content_status_enum
+                ) RETURNING id
+            """,
+                req.tour_id,
+                "00000000-0000-0000-0000-000000000001",
+                generated.get("name"),
+                generated.get("subtitle"),
+                generated.get("summary"),
+                _json.dumps(generated.get("highlights", [])),
+                generated.get("seo_title"),
+                generated.get("seo_meta"),
+                result.get("model_used", ""),
+                status,
+            )
+
         return {
-            "tour_id":      req.tour_id,
-            "batch_id":     req.batch_id,
-            "status":       result.get("status"),
+            "tour_id":       req.tour_id,
+            "batch_id":      req.batch_id,
+            "version_id":    str(version_id) if version_id else None,
+            "status":        result.get("status"),
             "quality_score": result.get("quality_score"),
-            "generated":    result.get("generated"),
-            "cost_usd":     result.get("cost_usd"),
-            "model_used":   result.get("model_used"),
+            "generated":     result.get("generated"),
+            "cost_usd":      result.get("cost_usd"),
+            "model_used":    result.get("model_used"),
         }
     finally:
         await conn.close()

@@ -3,86 +3,92 @@ import asyncpg
 import json
 import os
 import structlog
-
 from shared.repository.published_catalog_repository import PublishedCatalogRepository
 
 logger = structlog.get_logger()
 
+
 async def process_export(version_id: str) -> dict:
-    """
-    Copy approved silver.published_tour_versions → gold.published_catalog
-    """
     conn = await asyncpg.connect(os.environ["DATABASE_URL"])
-    tenant_slug   = os.environ.get("TENANT_SLUG", "aa_internal")
-    silver_schema = f"silver_{tenant_slug}"
-    gold_schema   = f"gold_{tenant_slug}"
+    tenant_slug = os.environ.get("TENANT_SLUG", "aa_internal")
+    silver      = f"silver_{tenant_slug}"
     try:
-        # Fetch approved version
         row = await conn.fetchrow(f"""
-            SELECT ptv.*, rt.country, rt.duration
-            FROM {silver_schema}.generated_content ptv
-            JOIN {silver_schema}.raw_tours rt ON rt.tour_id = ptv.tour_id
-            WHERE ptv.id = $1
-              AND ptv.status = 'approved'
+            SELECT gc.*, rt.country, rt.duration
+            FROM {silver}.generated_content gc
+            JOIN {silver}.raw_tours rt ON rt.tour_id = gc.tour_id
+            WHERE gc.id = $1::uuid
+              AND gc.status = 'approved'
         """, version_id)
 
         if not row:
             raise ValueError(f"Version not approved or not found: {version_id}")
 
         row = dict(row)
-
-        # Generate slug
-        slug = PublishedCatalogRepository.generate_slug(
-            row.get("name", ""), row.get("country")
-        )
-
-        # Upsert into gold_{tenant_slug}.published_tours
         repo = PublishedCatalogRepository(conn, tenant_slug)
-        catalog_id = await repo.upsert({
-            "published_version_id": str(row["id"]),
-            "raw_tour_id":          str(row["raw_tour_id"]),
-            "name":                 row.get("name"),
-            "subtitle":             row.get("subtitle"),
-            "country":              row.get("country"),
-            "trip_type":            row.get("trip_type"),
-            "duration":             row.get("duration"),
+        catalog_id = await repo.insert({
+            "tour_id":              row["tour_id"],
+            "generated_content_id": row["id"],
+            "tenant_id":            row["tenant_id"],
+            "aa_name":              row.get("aa_name"),
+            "aa_subtitle":          row.get("aa_subtitle"),
+            "aa_summary":           row.get("aa_summary"),
+            "aa_description":       row.get("aa_description"),
+            "aa_highlights":        json.dumps(row.get("aa_highlights") or []),
+            "aa_itineraries":       row.get("aa_itineraries"),
+            "mobile_card_text":     row.get("mobile_card_text"),
             "seo_title":            row.get("seo_title"),
             "seo_meta":             row.get("seo_meta"),
-            "quality_score":        row.get("quality_score"),
-            "status":               "draft",
-            "slug":                 slug,
-            "published_by":         "pipeline",
+            "seo_keywords_used":    json.dumps(row.get("seo_keywords_used") or []),
+            "og_tags":              json.dumps(row.get("og_tags") or {}),
+            "quality_score":        None,
+            "quality_score_id":     None,
+            "s3_gold_path":         None,
+            "approved_by":          "pipeline",
         })
 
-        logger.info("export_done", catalog_id=catalog_id, slug=slug,
-                    version_id=version_id)
-
+        logger.info("export_done", catalog_id=catalog_id, version_id=version_id)
         return {
             "status":     "exported",
             "catalog_id": catalog_id,
-            "slug":       slug,
             "version_id": version_id,
         }
-
     finally:
         await conn.close()
 
+
 def lambda_handler(event: dict, context) -> dict:
-    results = []
-    for record in event.get("Records", []):
+    # Pattern 1: SF direct invoke — version_id inside validation_result.Payload
+    if "validation_result" in event:
+        payload    = event["validation_result"].get("Payload", {})
+        version_id = payload.get("version_id")
+        if not version_id:
+            logger.warning("no_version_id_in_validation_result", keys=str(event.keys()))
+            return {"status": "failed", "error": "missing version_id"}
         try:
-            body       = json.loads(record["body"])
-            version_id = body.get("version_id")
-
-            if not version_id:
-                logger.warning("missing_version_id")
-                continue
-
             result = asyncio.run(process_export(version_id))
-            results.append(result)
-
+            return result
         except Exception as e:
             logger.error("export_failed", error=str(e))
-            results.append({"status": "failed", "error": str(e)})
+            return {"status": "failed", "error": str(e)}
 
-    return {"processed": len(results), "results": results}
+    # Pattern 2: SQS trigger (Phase 2)
+    elif "Records" in event:
+        results = []
+        for record in event["Records"]:
+            try:
+                body       = json.loads(record["body"])
+                version_id = body.get("version_id")
+                if not version_id:
+                    logger.warning("missing_version_id")
+                    continue
+                result = asyncio.run(process_export(version_id))
+                results.append(result)
+            except Exception as e:
+                logger.error("export_failed", error=str(e))
+                results.append({"status": "failed", "error": str(e)})
+        return {"processed": len(results), "results": results}
+
+    else:
+        logger.warning("unknown_event_format", keys=str(event.keys()))
+        return {"status": "failed", "error": "unknown event format"}
