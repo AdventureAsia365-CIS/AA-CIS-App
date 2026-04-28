@@ -17,6 +17,8 @@ from services.content_generation.graph import build_graph
 from shared.llm_client.client import LLMClient
 from shared.llm_client.models import LLMRequest
 from services.content_generation.prompts import SYSTEM_PROMPT, build_rewrite_prompt
+from pydantic import BaseModel
+import asyncpg
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/v1/pipeline", tags=["pipeline"])
@@ -162,8 +164,6 @@ async def run_pipeline(
 
 
 # ── SF per-tour endpoint ──────────────────────────────────────────────────────
-from pydantic import BaseModel
-import asyncpg
 
 class TourRunRequest(BaseModel):
     tour_id: str
@@ -215,7 +215,9 @@ async def run_tour(req: TourRunRequest):
                     model_editorial, status
                 ) VALUES (
                     $1::uuid, $2::uuid,
-                    COALESCE((SELECT MAX(version_num) + 1 FROM silver_aa_internal.generated_content WHERE tour_id = $1::uuid), 1),
+                    COALESCE((SELECT MAX(version_num) + 1
+                    FROM silver_aa_internal.generated_content
+                    WHERE tour_id = $1::uuid), 1),
                     $3, $4, $5,
                     $6::jsonb, $7, $8,
                     $9, $10::content_status_enum
