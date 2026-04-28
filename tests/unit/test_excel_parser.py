@@ -19,9 +19,9 @@ def test_parse_basic():
         parser = ExcelParser(path, source_file="test.xlsx")
         records = parser.parse()
         assert len(records) == 2
-        assert records[0]["name"] == "Halong Bay Tour"
+        assert records[0]["src_name"] == "Halong Bay Tour"
         assert records[0]["country"] == "Vietnam"
-        assert records[1]["name"] == "Angkor Wat Trek"
+        assert records[1]["src_name"] == "Angkor Wat Trek"
     finally:
         os.unlink(path)
 
@@ -37,7 +37,7 @@ def test_skip_row_without_name():
         parser = ExcelParser(path, source_file="test.xlsx")
         records = parser.parse()
         assert len(records) == 1
-        assert records[0]["name"] == "Valid Tour"
+        assert records[0]["src_name"] == "Valid Tour"
     finally:
         os.unlink(path)
 
