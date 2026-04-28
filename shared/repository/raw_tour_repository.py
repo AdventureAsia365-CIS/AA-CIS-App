@@ -1,3 +1,4 @@
+import json
 import asyncpg
 import structlog
 
@@ -54,7 +55,7 @@ class RawTourRepository:
             data.get("src_subtitle"),
             data.get("src_summary"),
             data.get("src_description"),
-            data.get("src_highlights", "[]"),
+            (lambda v: v if (v or "").strip().startswith("[") else json.dumps([v]) if v else "[]")(data.get("src_highlights")),
             data.get("src_itineraries"),
             data.get("country"),
             data.get("duration"),
@@ -63,8 +64,8 @@ class RawTourRepository:
             data.get("price_raw"),
             data.get("inclusions"),
             data.get("exclusions"),
-            data.get("links", "[]"),
-            data.get("activities", "[]"),
+            (lambda v: v if (v or "").strip().startswith("[") else json.dumps([v]) if v else "[]")(data.get("links")),
+            (lambda v: v if (v or "").strip().startswith("[") else json.dumps([v]) if v else "[]")(data.get("activities")),
             data.get("feature"),
             data.get("best_time_to_go"),
             data.get("pipeline_status", "ingested"),
