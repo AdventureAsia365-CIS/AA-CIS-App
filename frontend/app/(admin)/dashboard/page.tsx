@@ -151,7 +151,7 @@ export default function DashboardPage() {
         <StatCard icon={FileText}    label="Tours Processed" value={String(totalTours)}         sub="Last 7 days"           accent="#DB9628" />
         <StatCard icon={CheckCircle} label="Auto-Approved"   value={`${passRate}%`}             sub={`${totalPassed} tours`} accent="#22c55e" />
         <StatCard icon={Clock}       label="HITL Queue"      value={String(totalHITL)}           sub="Awaiting human review" accent="#f59e0b" />
-        <StatCard icon={DollarSign}  label="Total LLM Cost"  value={`$${totalCost.toFixed(2)}`} sub="~$0.018 per tour avg"  accent="#ef4444" />
+        <StatCard icon={DollarSign}  label="Total LLM Cost"  value={`$${totalCost}`} sub="~$0.018 per tour avg"  accent="#ef4444" />
       </div>
 
       {/* TAB: Metrics */}
