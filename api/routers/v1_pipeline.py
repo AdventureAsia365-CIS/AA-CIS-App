@@ -19,6 +19,10 @@ from shared.llm_client.models import LLMRequest
 from services.content_generation.prompts import SYSTEM_PROMPT, build_rewrite_prompt
 from pydantic import BaseModel
 import asyncpg
+import boto3 as _boto3
+from fastapi import Depends, Request as _Request
+from fastapi.security import HTTPBearer as _HTTPBearer, HTTPAuthorizationCredentials as _Creds
+from api.routers.auth import verify_jwt as _verify_jwt
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/v1/pipeline", tags=["pipeline"])
@@ -272,76 +276,6 @@ async def run_tour(req: TourRunRequest):
 
 # ── S3 Presigned Upload URL ───────────────────────────────────────────────────
 
-class UploadUrlRequest(BaseModel):
-    filename: str
-    content_type: str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-
-class UploadUrlResponse(BaseModel):
-    upload_url: str
-    s3_key: str
-    bucket: str
-
-@router.post("/v1/pipeline/upload-url", response_model=UploadUrlResponse)
-async def get_upload_url(
-    body: UploadUrlRequest,
-    request: Request,
-    token: dict = Depends(require_auth),
-):
-    """Generate S3 presigned PUT URL for Excel upload → triggers Ingestion Lambda."""
-    import boto3, uuid as _uuid
-    tenant_id = token.get("sub", "00000000-0000-0000-0000-000000000001")
-    s3_key = f"raw-inbox/{tenant_id}/{_uuid.uuid4()}_{body.filename}"
-    bucket = os.environ.get("BRONZE_BUCKET", "aa-cis-bronze-867490540162")
-    s3 = boto3.client("s3", region_name=os.environ.get("AWS_REGION", "us-west-1"))
-    upload_url = s3.generate_presigned_url(
-        "put_object",
-        Params={"Bucket": bucket, "Key": s3_key, "ContentType": body.content_type},
-        ExpiresIn=300,
-    )
-    return UploadUrlResponse(upload_url=upload_url, s3_key=s3_key, bucket=bucket)
-
-
-# ── Step Functions Execution Status ──────────────────────────────────────────
-
-class ExecutionStatus(BaseModel):
-    execution_id: str
-    status: str
-    start_date: str | None = None
-    stop_date: str | None = None
-    output: dict | None = None
-
-@router.get("/v1/pipeline/execution/{execution_id}", response_model=ExecutionStatus)
-async def get_execution_status(
-    execution_id: str,
-    request: Request,
-    token: dict = Depends(require_auth),
-):
-    """Poll Step Functions execution status."""
-    import boto3
-    sf = boto3.client("stepfunctions", region_name=os.environ.get("AWS_REGION", "us-west-1"))
-    try:
-        resp = sf.describe_execution(executionArn=execution_id)
-        output = None
-        if resp.get("output"):
-            import json as _json
-            output = _json.loads(resp["output"])
-        return ExecutionStatus(
-            execution_id=execution_id,
-            status=resp["status"],
-            start_date=str(resp.get("startDate", "")),
-            stop_date=str(resp.get("stopDate", "")) if resp.get("stopDate") else None,
-            output=output,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=str(e))
-
-
-# ── S3 Presigned Upload URL ───────────────────────────────────────────────────
-from fastapi import Depends, Request as _Request
-from fastapi.security import HTTPBearer as _HTTPBearer, HTTPAuthorizationCredentials as _Creds
-from api.routers.auth import verify_jwt as _verify_jwt
-import boto3 as _boto3
-
 _security = _HTTPBearer()
 
 def _get_tenant(credentials: _Creds = Depends(_security)):
@@ -426,7 +360,7 @@ async def get_review_queue(
     offset = (page - 1) * page_size
 
     async with pool.acquire() as conn:
-        rows = await conn.fetch(f"""
+        rows = await conn.fetch("""
             SELECT rq.id, rq.tour_id, rq.generated_content_id,
                    rq.review_status, rq.score_overall, rq.failure_summary, rq.created_at,
                    gc.aa_name, gc.aa_subtitle, gc.aa_summary,
@@ -442,7 +376,7 @@ async def get_review_queue(
             LIMIT $2 OFFSET $3
         """, tenant_id, page_size, offset)
 
-        total = await conn.fetchval(f"""
+        total = await conn.fetchval("""
             SELECT COUNT(*) FROM silver_aa_internal.review_queue
             WHERE tenant_id = $1::uuid AND review_status = 'pending'
         """, tenant_id)
