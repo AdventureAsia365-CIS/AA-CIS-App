@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 
 const MOCK_RUNS = [
+  // Sample data — live metrics after P2-S2
   { date: "Apr 11", tours: 45, passed: 38, hitl: 5, failed: 2, cost: 1.24 },
   { date: "Apr 12", tours: 62, passed: 55, hitl: 4, failed: 3, cost: 1.87 },
   { date: "Apr 13", tours: 38, passed: 34, hitl: 3, failed: 1, cost: 1.12 },
@@ -20,6 +21,7 @@ const MOCK_RUNS = [
 ];
 
 const MOCK_MODELS = [
+  // Sample data — live metrics after P2-S2
   { model: "claude-sonnet-4-6",      calls: 312, cost: 8.42, avg_score: 8.7 },
   { model: "claude-haiku-4-5",       calls: 48,  cost: 0.31, avg_score: 7.9 },
   { model: "gpt-4.1",               calls: 12,  cost: 0.89, avg_score: 7.4 },
@@ -308,7 +310,7 @@ export default function DashboardPage() {
             <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: 0 }}>
               Langfuse traces all LLM calls — prompts, completions, costs, latency per tour.
             </p>
-            <a href="http://localhost:3001" target="_blank" rel="noreferrer"
+            <a href="https://langfuse.lumiguides.it.com" target="_blank" rel="noreferrer"
               style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 14px", background: "var(--brand-gold)", borderRadius: 8, color: "white", fontSize: 12, fontWeight: 600, textDecoration: "none" }}>
               <ExternalLink size={12} /> Open Langfuse
             </a>
@@ -317,7 +319,7 @@ export default function DashboardPage() {
           {/* Iframe embed with fallback */}
           <div style={{ position: "relative", borderRadius: 10, overflow: "hidden", border: "1px solid var(--border)", background: "var(--bg-primary)", height: 480 }}>
             <iframe
-              src={process.env.NEXT_PUBLIC_LANGFUSE_URL || "http://localhost:3001"}
+              src="https://langfuse.lumiguides.it.com"
               style={{ width: "100%", height: "100%", border: "none" }}
               title="Langfuse Dashboard"
               onError={() => {}}
