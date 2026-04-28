@@ -316,46 +316,30 @@ export default function DashboardPage() {
             </a>
           </div>
 
-          {/* Iframe embed with fallback */}
-          <div style={{ position: "relative", borderRadius: 10, overflow: "hidden", border: "1px solid var(--border)", background: "var(--bg-primary)", height: 480 }}>
-            <iframe
-              src="https://langfuse.lumiguides.it.com"
-              style={{ width: "100%", height: "100%", border: "none" }}
-              title="Langfuse Dashboard"
-              onError={() => {}}
-            />
-            {/* Fallback overlay — shown when Langfuse not yet deployed */}
-            <div style={{
-              position: "absolute", inset: 0,
-              display: "flex", flexDirection: "column",
-              alignItems: "center", justifyContent: "center",
-              background: "var(--bg-primary)",
-              gap: 16,
-            }}>
-              <div style={{ fontSize: 32 }}>🔍</div>
-              <div style={{ fontWeight: 600, color: "var(--text-primary)", fontSize: 16 }}>
-                Langfuse Not Yet Connected
+          {/* Langfuse feature cards */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12, marginTop: 8 }}>
+            {[
+              { label: "LLM Traces", desc: "Every prompt + completion logged with latency", icon: "🔍" },
+              { label: "Cost Breakdown", desc: "Per tour, per model, per batch", icon: "💰" },
+              { label: "Quality Trends", desc: "Score history + retry patterns over time", icon: "📈" },
+              { label: "Prompt Versions", desc: "A/B test prompt iterations", icon: "🧪" },
+            ].map(f => (
+              <div key={f.label} style={{ display: "flex", gap: 12, padding: "14px 16px", background: "var(--bg-primary)", borderRadius: 10, border: "1px solid var(--border)" }}>
+                <span style={{ fontSize: 20 }}>{f.icon}</span>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)", marginBottom: 4 }}>{f.label}</div>
+                  <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>{f.desc}</div>
+                </div>
               </div>
-              <div style={{ fontSize: 13, color: "var(--text-secondary)", textAlign: "center", maxWidth: 360, lineHeight: 1.6 }}>
-                Langfuse will be available after <code style={{ color: "var(--brand-gold)", background: "rgba(219,150,40,0.1)", padding: "1px 6px", borderRadius: 4 }}>terraform apply</code> deploys the ECS service.
-              </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8, width: "100%", maxWidth: 360 }}>
-                {[
-                  { label: "LLM Traces", desc: "Every prompt + completion logged" },
-                  { label: "Cost Breakdown", desc: "Per tour, per model, per batch" },
-                  { label: "Quality Trends", desc: "Score history + retry patterns" },
-                  { label: "Prompt Versions", desc: "A/B test prompt iterations" },
-                ].map(f => (
-                  <div key={f.label} style={{ display: "flex", gap: 12, padding: "10px 14px", background: "var(--bg-card)", borderRadius: 8, border: "1px solid var(--border)" }}>
-                    <CheckCircle size={15} style={{ color: "#22c55e", flexShrink: 0, marginTop: 1 }} />
-                    <div>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{f.label}</div>
-                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{f.desc}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
+            ))}
+          </div>
+          <div style={{ marginTop: 16, padding: "12px 16px", background: "rgba(219,150,40,0.06)", borderRadius: 8, fontSize: 12, color: "var(--text-muted)", textAlign: "center" }}>
+            Langfuse is live at{" "}
+            <a href="https://langfuse.lumiguides.it.com" target="_blank" rel="noreferrer"
+              style={{ color: "var(--brand-gold)", fontWeight: 600 }}>
+              langfuse.lumiguides.it.com
+            </a>
+            {" "}— open in a new tab to view traces (iframe blocked by browser security policy)
           </div>
         </ChartCard>
       )}
