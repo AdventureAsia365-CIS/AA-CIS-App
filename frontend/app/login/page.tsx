@@ -8,24 +8,48 @@ const MOCK_USERS = [
   { username:"content", password:"content2026", role:"content", name:"Trang (Content)" },
 ];
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
+// aa_internal tenant API key — injected at build time or hardcoded for internal demo
+const INTERNAL_API_KEY = process.env.NEXT_PUBLIC_INTERNAL_API_KEY || "";
+
 export default function LoginPage() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError]       = useState("");
+  const [loading, setLoading]   = useState(false);
   const router = useRouter();
 
-  const login = () => {
+  const login = async () => {
     const user = MOCK_USERS.find(u => u.username === username && u.password === password);
     if (!user) { setError("Invalid username or password"); return; }
-    document.cookie = `cis_role=${user.role}; path=/; max-age=86400`;
-    document.cookie = `cis_user=${user.name}; path=/; max-age=86400`;
-    router.push(user.role === "admin" ? "/dashboard" : "/upload");
+
+    setLoading(true);
+    try {
+      // Fetch real JWT from API
+      const res = await fetch(`${API_URL}/auth/tenant-login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: INTERNAL_API_KEY }),
+      });
+
+      if (!res.ok) throw new Error("Failed to authenticate with API");
+      const data = await res.json();
+
+      // Store JWT + role cookies
+      document.cookie = `cis_api_token=${encodeURIComponent(data.token)}; path=/; max-age=86400`;
+      document.cookie = `cis_role=${user.role}; path=/; max-age=86400`;
+      document.cookie = `cis_user=${user.name}; path=/; max-age=86400`;
+
+      router.push(user.role === "admin" ? "/dashboard" : "/upload");
+    } catch (e: any) {
+      setError("API connection failed — check network");
+      setLoading(false);
+    }
   };
 
   return (
     <div style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", background:"var(--bg-primary)" }}>
       <div style={{ background:"var(--bg-card)", border:"1px solid var(--border)", borderRadius:16, padding:40, width:380 }}>
-        {/* Logo */}
         <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:32 }}>
           <div style={{ width:36, height:36, background:"var(--brand-gold)", borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", fontWeight:800, color:"white" }}>AA</div>
           <div>
@@ -34,7 +58,6 @@ export default function LoginPage() {
           </div>
         </div>
 
-        {/* Username */}
         <div style={{ marginBottom:14 }}>
           <label style={{ fontSize:11, fontWeight:600, color:"var(--text-muted)", textTransform:"uppercase" as const, letterSpacing:1, display:"block", marginBottom:8 }}>Username</label>
           <div style={{ position:"relative" }}>
@@ -46,7 +69,6 @@ export default function LoginPage() {
           </div>
         </div>
 
-        {/* Password */}
         <div style={{ marginBottom:20 }}>
           <label style={{ fontSize:11, fontWeight:600, color:"var(--text-muted)", textTransform:"uppercase" as const, letterSpacing:1, display:"block", marginBottom:8 }}>Password</label>
           <div style={{ position:"relative" }}>
@@ -59,20 +81,18 @@ export default function LoginPage() {
           {error && <div style={{ fontSize:12, color:"#ef4444", marginTop:6 }}>{error}</div>}
         </div>
 
-        <button onClick={login} style={{ width:"100%", padding:12, background:"var(--brand-gold)", border:"none", borderRadius:8, color:"white", fontSize:14, fontWeight:700, cursor:"pointer" }}>
-          Login
+        <button onClick={login} disabled={loading}
+          style={{ width:"100%", padding:12, background:"var(--brand-gold)", border:"none", borderRadius:8, color:"white", fontSize:14, fontWeight:700, cursor: loading ? "not-allowed" : "pointer", opacity: loading ? 0.7 : 1 }}>
+          {loading ? "Connecting..." : "Login"}
         </button>
 
-        {/* Demo hint */}
         <div style={{ marginTop:16, padding:12, background:"rgba(219,150,40,0.06)", border:"1px solid rgba(219,150,40,0.2)", borderRadius:8, fontSize:12, color:"var(--text-muted)", lineHeight:1.6 }}>
           Demo: <code style={{ color:"var(--brand-gold)" }}>admin / admin2026</code><br/>
           or: <code style={{ color:"var(--brand-gold)" }}>content / content2026</code>
         </div>
 
         <div style={{ marginTop:16, textAlign:"center" as const }}>
-          <a href="/tenant-login" style={{ fontSize:12, color:"var(--text-muted)", textDecoration:"none" }}>
-            B2B Tenant login →
-          </a>
+          <a href="/tenant-login" style={{ fontSize:12, color:"var(--text-muted)", textDecoration:"none" }}>B2B Tenant login →</a>
         </div>
       </div>
     </div>
