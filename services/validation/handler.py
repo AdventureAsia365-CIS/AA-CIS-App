@@ -51,6 +51,24 @@ async def process_validation(version_id: str) -> dict:
             new_status,
         )
 
+        # Write to review_queue when route = hitl
+        if route == "hitl":
+            await conn.execute(f"""
+                INSERT INTO silver_{tenant_slug}.review_queue (
+                    tour_id, generated_content_id, tenant_id,
+                    score_overall, failure_summary, review_status
+                )
+                SELECT gc.tour_id, gc.id, gc.tenant_id, $2, $3, 'pending'
+                FROM silver_{tenant_slug}.generated_content gc
+                WHERE gc.id = $1::uuid
+                ON CONFLICT DO NOTHING
+            """,
+                version_id,
+                float(score),
+                json.dumps(result["issues"]),
+            )
+            logger.info("hitl_queued", version_id=version_id, score=score)
+
         logger.info("validation_complete",
                     version_id=version_id, score=score, route=route)
 

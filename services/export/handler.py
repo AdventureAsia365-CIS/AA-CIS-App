@@ -14,9 +14,12 @@ async def process_export(version_id: str) -> dict:
     silver      = f"silver_{tenant_slug}"
     try:
         row = await conn.fetchrow(f"""
-            SELECT gc.*, rt.country, rt.duration
+            SELECT gc.*, rt.country, rt.duration,
+                   qs.id        AS quality_score_id,
+                   qs.score_overall AS quality_score
             FROM {silver}.generated_content gc
             JOIN {silver}.raw_tours rt ON rt.tour_id = gc.tour_id
+            LEFT JOIN {silver}.quality_scores qs ON qs.generated_content_id = gc.id
             WHERE gc.id = $1::uuid
               AND gc.status = 'approved'
         """, version_id)
@@ -41,8 +44,8 @@ async def process_export(version_id: str) -> dict:
             "seo_meta":             row.get("seo_meta"),
             "seo_keywords_used":    json.dumps(row.get("seo_keywords_used") or []),
             "og_tags":              json.dumps(row.get("og_tags") or {}),
-            "quality_score":        None,
-            "quality_score_id":     None,
+            "quality_score":        row.get("quality_score"),
+            "quality_score_id":     str(row["quality_score_id"]) if row.get("quality_score_id") else None,
             "s3_gold_path":         None,
             "approved_by":          "pipeline",
         })

@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   LineChart, Line, CartesianGrid,
@@ -86,14 +86,36 @@ const STATUS_DOT: Record<string, string> = {
   idle:        "#4A5568",
 };
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
+
+function getToken(): string | null {
+  if (typeof document === "undefined") return null;
+  const match = document.cookie.match(/cis_api_token=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
 export default function DashboardPage() {
   const [activeTab, setActiveTab] = useState<"metrics" | "health" | "spot" | "langfuse">("metrics");
+  const [totalTours,  setTotalTours]  = useState(0);
+  const [totalHITL,   setTotalHITL]   = useState(0);
+  const [totalPassed, setTotalPassed] = useState(0);
 
-  const totalTours  = MOCK_RUNS.reduce((s, r) => s + r.tours,  0);
-  const totalPassed = MOCK_RUNS.reduce((s, r) => s + r.passed, 0);
-  const totalHITL   = MOCK_RUNS.reduce((s, r) => s + r.hitl,   0);
-  const totalCost   = MOCK_RUNS.reduce((s, r) => s + r.cost,   0);
-  const passRate    = ((totalPassed / totalTours) * 100).toFixed(1);
+  useEffect(() => {
+    const token = getToken();
+    if (!token) return;
+    const h = { Authorization: `Bearer ${token}` };
+    fetch(`${API_URL}/v1/tours?page=1&page_size=1`, { headers: h })
+      .then(r => r.json())
+      .then(d => { const t = d.pagination?.total || 0; setTotalTours(t); setTotalPassed(t); })
+      .catch(() => {});
+    fetch(`${API_URL}/v1/pipeline/review-queue?page_size=1`, { headers: h })
+      .then(r => r.json())
+      .then(d => setTotalHITL(d.pagination?.total || 0))
+      .catch(() => {});
+  }, []);
+
+  const totalCost = (totalTours * 0.006).toFixed(2);
+  const passRate  = totalTours > 0 ? ((totalPassed / totalTours) * 100).toFixed(1) : "0.0";
 
   const tabStyle = (t: string): React.CSSProperties => ({
     padding: "8px 18px", borderRadius: 8, fontSize: 13, fontWeight: 500,

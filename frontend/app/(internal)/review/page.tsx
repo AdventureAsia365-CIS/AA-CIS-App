@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   CheckCircle, XCircle, RotateCcw, ChevronDown, ChevronUp,
   Filter, AlertTriangle, Edit3, Flag,
@@ -374,14 +374,83 @@ function ReviewCard({ item, onApprove, onReject, onRegenerate, onFlag }: {
   );
 }
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
+
+function getToken(): string | null {
+  if (typeof document === "undefined") return null;
+  const match = document.cookie.match(/cis_api_token=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+function mapApiToReview(r: any) {
+  return {
+    id:          r.id,
+    name:        r.aa_name || r.src_name || "Unknown",
+    country:     r.country || "Unknown",
+    score:       parseFloat(r.score_overall || "0"),
+    date:        r.created_at ? new Date(r.created_at).toLocaleDateString() : "",
+    hitl_status: r.review_status || "pending",
+    issues:      (() => { try { return JSON.parse(r.failure_summary || "[]"); } catch { return []; } })(),
+    original: {
+      name:       r.src_name || "",
+      summary:    r.src_summary || "",
+      highlights: [],
+      seo_title:  "",
+      seo_meta:   "",
+    },
+    generated: {
+      name:       r.aa_name || "",
+      subtitle:   r.aa_subtitle || "",
+      summary:    r.aa_summary || "",
+      highlights: [],
+      seo_title:  r.seo_title || "",
+      seo_meta:   r.seo_meta || "",
+    },
+    seo_checks: [
+      { label: "Title length (≤60 chars)",  status: (r.seo_title?.length <= 60 ? "pass" : "fail"),  value: `${r.seo_title?.length || 0} chars` },
+      { label: "Meta length (80–160 chars)", status: (r.seo_meta?.length  >= 80 ? "pass" : "fail"),  value: `${r.seo_meta?.length  || 0} chars` },
+    ],
+  };
+}
+
 export default function ReviewPage() {
-  const [items, setItems]           = useState(MOCK_REVIEWS);
+  const [items, setItems]           = useState<any[]>([]);
+  const [loading, setLoading]       = useState(true);
   const [filterCountry, setCountry] = useState("all");
   const [filterScore, setScore]     = useState("all");
   const [approved, setApproved]     = useState(0);
   const [rejected, setRejected]     = useState(0);
 
-  const countries = [...new Set(MOCK_REVIEWS.map(i => i.country))];
+  useEffect(() => {
+    const token = getToken();
+    if (!token) { setLoading(false); return; }
+    fetch(`${API_URL}/v1/pipeline/review-queue`, {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+      .then(r => r.json())
+      .then(d => { setItems((d.data || []).map(mapApiToReview)); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+
+  const onApprove = async (id: string) => {
+    const token = getToken();
+    await fetch(`${API_URL}/v1/pipeline/review-queue/${id}/approve`, {
+      method: "POST", headers: { Authorization: `Bearer ${token}` }
+    });
+    setApproved(a => a + 1);
+    setItems(prev => prev.filter(i => i.id !== id));
+  };
+
+  const onReject = async (id: string) => {
+    const token = getToken();
+    await fetch(`${API_URL}/v1/pipeline/review-queue/${id}/reject`, {
+      method: "POST", headers: { Authorization: `Bearer ${token}` }
+    });
+    setRejected(r => r + 1);
+    setItems(prev => prev.filter(i => i.id !== id));
+  };
+
+  const countries = [...new Set(items.map((i: any) => i.country))];
 
   const filtered = items.filter(item => {
     const matchCountry = filterCountry === "all" || item.country === filterCountry;
@@ -391,8 +460,6 @@ export default function ReviewPage() {
     return matchCountry && matchScore;
   });
 
-  const onApprove    = (id: string) => { setApproved(a => a+1); setItems(prev => prev.filter(i => i.id !== id)); };
-  const onReject     = (id: string) => { setRejected(r => r+1); setItems(prev => prev.filter(i => i.id !== id)); };
   const onRegenerate = (id: string) => { console.log("Regenerate", id); };
   const onFlag       = (id: string) => { alert(`Content issue reported for ${id}`); };
 
