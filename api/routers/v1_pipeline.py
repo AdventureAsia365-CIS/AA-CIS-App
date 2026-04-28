@@ -21,7 +21,7 @@ from pydantic import BaseModel
 import asyncpg
 import boto3 as _boto3
 from fastapi import Depends, Request
-from fastapi.security import HTTPBearer as _HTTPBearer, HTTPAuthorizationCredentials as _HTTPCreds
+from fastapi.security import HTTPBearer as _HTTPBearer, HTTPAuthorizationCredentials as _Creds
 from api.routers.auth import verify_jwt as _verify_jwt
 
 logger = structlog.get_logger()
