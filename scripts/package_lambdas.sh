@@ -74,3 +74,4 @@ rm -rf "$BUILD_DIR"
 echo ""
 echo "✅ Done:"
 ls -lh "$DIST_DIR/"
+package_lambda "content_generation" "content" langchain langchain-core langgraph anthropic

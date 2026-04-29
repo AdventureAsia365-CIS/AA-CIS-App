@@ -11,6 +11,7 @@ import structlog
 from .excel_parser import ExcelParser
 from shared.repository.raw_tour_repository import RawTourRepository
 from shared.repository.raw_source_repository import RawSourceRepository
+from shared.secrets import get_database_url
 
 logger = structlog.get_logger()
 s3  = boto3.client("s3")
@@ -38,7 +39,7 @@ async def process_file(s3_bucket: str, s3_key: str) -> dict:
     logger.info("file_downloaded", s3_key=s3_key, file_hash=file_hash[:12])
 
     # TD-2: Dedup check — skip if same file already processed
-    conn_check = await asyncpg.connect(os.environ["DATABASE_URL"])
+    conn_check = await asyncpg.connect(get_database_url())
     try:
         existing = await conn_check.fetchrow(
             "SELECT id, filename FROM silver_aa_internal.raw_sources WHERE file_hash = $1",
@@ -64,7 +65,7 @@ async def process_file(s3_bucket: str, s3_key: str) -> dict:
     records = parser.parse()
     logger.info("excel_parsed", total_rows=len(records))
 
-    conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+    conn = await asyncpg.connect(get_database_url())
     tenant_slug = "aa_internal"  # Phase 1: single tenant
     tenant_uuid = "00000000-0000-0000-0000-000000000001"
 

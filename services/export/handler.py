@@ -3,13 +3,14 @@ import asyncpg
 import json
 import os
 import structlog
+from shared.secrets import get_database_url
 from shared.repository.published_catalog_repository import PublishedCatalogRepository
 
 logger = structlog.get_logger()
 
 
 async def process_export(version_id: str) -> dict:
-    conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+    conn = await asyncpg.connect(get_database_url())
     tenant_slug = os.environ.get("TENANT_SLUG", "aa_internal")
     silver      = f"silver_{tenant_slug}"
     try:

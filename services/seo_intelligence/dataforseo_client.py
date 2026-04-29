@@ -1,3 +1,4 @@
+from shared.secrets import get_dataforseo_creds
 import httpx
 import os
 import json
@@ -10,8 +11,10 @@ DATAFORSEO_BASE = "https://api.dataforseo.com/v3"
 
 class DataForSEOClient:
     def __init__(self, login: str = None, password: str = None):
-        self.login    = login    or os.environ.get("DATAFORSEO_LOGIN")
-        self.password = password or os.environ.get("DATAFORSEO_PASSWORD")
+        if not login or not password:
+            login, password = get_dataforseo_creds()
+        self.login    = login
+        self.password = password
 
     def _auth(self) -> tuple[str, str]:
         return (self.login, self.password)

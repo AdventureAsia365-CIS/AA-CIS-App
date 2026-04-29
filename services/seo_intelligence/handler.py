@@ -5,6 +5,7 @@ import os
 import structlog
 from datetime import datetime, timedelta
 from .dataforseo_client import DataForSEOClient
+from shared.secrets import get_database_url
 from shared.repository.seo_context_repository import SeoContextRepository
 from shared.cache.redis_cache import RedisCache
 from shared.cache.local_cache import LocalCache
@@ -24,7 +25,7 @@ async def process_seo(tour_id: str, destination: str, activity: str = None, cach
     client = DataForSEOClient()
     seo_data = await client.fetch_all(destination, activity)
 
-    conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+    conn = await asyncpg.connect(get_database_url())
     try:
         repo = SeoContextRepository(conn, tenant_slug="aa_internal")
         seo_id = await repo.insert({
