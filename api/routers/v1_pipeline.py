@@ -434,3 +434,49 @@ async def reject_review(
         """, review_id, tenant_id)
 
     return {"status": "rejected", "review_id": review_id}
+
+
+# =============================================================================
+# GET /sources — Upload history (TD-2 UI, added 29/04/2026)
+# =============================================================================
+@router.get("/sources")
+async def get_sources(
+    request: Request,
+    limit: int = 20,
+    tenant=Depends(_get_tenant),
+):
+    """Return upload history for current tenant."""
+    pool = request.app.state.pool
+    tenant_id = tenant.get("sub", "00000000-0000-0000-0000-000000000001")
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT
+                id,
+                filename,
+                s3_path,
+                file_hash,
+                file_size_kb,
+                row_count,
+                parsed_at
+            FROM silver_aa_internal.raw_sources
+            WHERE tenant_id = $1::uuid
+            ORDER BY parsed_at DESC
+            LIMIT $2
+        """, tenant_id, limit)
+
+    return {
+        "sources": [
+            {
+                "id":           str(r["id"]),
+                "filename":     r["filename"],
+                "s3_path":      r["s3_path"],
+                "file_hash":    r["file_hash"][:12] + "..." if r["file_hash"] else None,
+                "file_size_kb": r["file_size_kb"],
+                "row_count":    r["row_count"],
+                "parsed_at":    r["parsed_at"].isoformat() if r["parsed_at"] else None,
+            }
+            for r in rows
+        ],
+        "total": len(rows),
+    }

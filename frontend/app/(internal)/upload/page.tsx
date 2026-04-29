@@ -2,7 +2,7 @@
 import { useState, useCallback } from "react";
 import {
   Upload, FileSpreadsheet, CheckCircle, Loader2,
-  X, ChevronDown, Globe, Building2,
+  X, ChevronDown, Globe, Building2, History, AlertCircle, SkipForward,
 } from "lucide-react";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
@@ -39,6 +39,15 @@ interface FileEntry {
   status: "ready" | "uploading" | "done" | "error";
 }
 
+interface SourceEntry {
+  id: string;
+  filename: string;
+  file_hash: string | null;
+  file_size_kb: number | null;
+  row_count: number | null;
+  parsed_at: string | null;
+}
+
 function Select({ label, value, onChange, options, icon: Icon }: {
   label: string; value: string;
   onChange: (v: string) => void;
@@ -62,6 +71,84 @@ function Select({ label, value, onChange, options, icon: Icon }: {
           {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
         <ChevronDown size={14} style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", color: "var(--text-secondary)", pointerEvents: "none" }} />
+      </div>
+    </div>
+
+      {/* Upload History */}
+      <div style={{ marginTop: 32 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <History size={16} style={{ color: "var(--text-secondary)" }} />
+            <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: 1 }}>
+              Upload History
+            </span>
+          </div>
+          <button onClick={fetchSources} disabled={loadingSources}
+            style={{ fontSize: 12, color: "var(--brand-gold)", background: "none", border: "none", cursor: "pointer", opacity: loadingSources ? 0.5 : 1 }}>
+            {loadingSources ? "Refreshing..." : "↻ Refresh"}
+          </button>
+        </div>
+
+        {sources.length === 0 ? (
+          <div style={{ padding: 24, textAlign: "center", color: "var(--text-muted)", fontSize: 13,
+            background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 12 }}>
+            No uploads yet
+          </div>
+        ) : (
+          <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ borderBottom: "1px solid var(--border)", background: "var(--bg-primary)" }}>
+                  {["Filename", "Rows", "Size", "Hash", "Uploaded At"].map(h => (
+                    <th key={h} style={{ padding: "10px 16px", textAlign: "left", fontSize: 11,
+                      color: "var(--text-muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.5 }}>
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {sources.map((s, i) => (
+                  <tr key={s.id} style={{ borderBottom: i < sources.length - 1 ? "1px solid var(--border)" : "none",
+                    transition: "background 0.15s" }}
+                    onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-primary)")}
+                    onMouseLeave={e => (e.currentTarget.style.background = "transparent")}>
+                    <td style={{ padding: "10px 16px", color: "var(--text-primary)", fontWeight: 500 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <FileSpreadsheet size={14} style={{ color: "#22c55e", flexShrink: 0 }} />
+                        <span style={{ maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {s.filename}
+                        </span>
+                      </div>
+                    </td>
+                    <td style={{ padding: "10px 16px", color: "var(--text-secondary)" }}>
+                      {s.row_count ?? "—"}
+                    </td>
+                    <td style={{ padding: "10px 16px", color: "var(--text-secondary)" }}>
+                      {s.file_size_kb ? `${s.file_size_kb} KB` : "—"}
+                    </td>
+                    <td style={{ padding: "10px 16px" }}>
+                      {s.file_hash ? (
+                        <span style={{ fontFamily: "monospace", fontSize: 11,
+                          background: "var(--bg-primary)", padding: "2px 6px", borderRadius: 4,
+                          color: "var(--text-muted)" }}>
+                          {s.file_hash}
+                        </span>
+                      ) : (
+                        <span style={{ color: "var(--text-muted)", fontSize: 11 }}>—</span>
+                      )}
+                    </td>
+                    <td style={{ padding: "10px 16px", color: "var(--text-muted)", fontSize: 12 }}>
+                      {s.parsed_at ? new Date(s.parsed_at).toLocaleString("en-GB", {
+                        day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit"
+                      }) : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -119,11 +206,34 @@ export default function UploadPage() {
   const [error, setError]           = useState("");
   const [executionArn, setExecArn]  = useState("");
   const [toursProcessed, setTours]  = useState<number | null>(null);
+  const [isDuplicate, setIsDuplicate] = useState(false);
+  const [dupSourceId, setDupSourceId] = useState("");
+  const [sources, setSources]         = useState<SourceEntry[]>([]);
+  const [loadingSources, setLoadingSources] = useState(false);
 
   const addFiles = useCallback(async (newFiles: File[]) => {
     const xlsx = newFiles.filter(f => f.name.match(/\.xlsx?$/i));
     setFiles(prev => [...prev, ...xlsx.map(f => ({ file: f, status: "ready" as const }))]);
   }, []);
+
+  const fetchSources = useCallback(async () => {
+    const token = getToken();
+    if (!token) return;
+    setLoadingSources(true);
+    try {
+      const res = await fetch(`${API_URL}/v1/pipeline/sources?limit=10`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSources(data.sources || []);
+      }
+    } catch {}
+    finally { setLoadingSources(false); }
+  }, []);
+
+  // Fetch history on mount
+  useState(() => { fetchSources(); });
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault(); setDragOver(false);
@@ -162,6 +272,18 @@ export default function UploadPage() {
       });
       if (!uploadRes.ok) throw new Error("S3 upload failed");
       setProgress(100);
+
+      // Check dedup — wait for Lambda to process (~3s) then check sources
+      await new Promise(r => setTimeout(r, 3000));
+      const sourcesCheck = await fetch(`${API_URL}/v1/pipeline/sources?limit=1`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (sourcesCheck.ok) {
+        const sourcesData = await sourcesCheck.json();
+        const latest = sourcesData.sources?.[0];
+        // If latest source filename matches but was already in history before → duplicate
+        // Simpler: check if Lambda returned skipped via execution status
+      }
 
       // Step 1-5: Poll Step Functions (Lambda triggered by S3)
       // Wait for SF to start (~5s)
@@ -206,6 +328,7 @@ export default function UploadPage() {
       setActiveStep(STEPS.length);
       setAllDone(true);
       setFiles(prev => prev.map(f => ({ ...f, status: "done" })));
+      await fetchSources(); // Refresh history
     } catch (e: any) {
       setError(e.message || "Pipeline failed");
     } finally {
