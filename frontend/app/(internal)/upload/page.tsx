@@ -1,8 +1,8 @@
 "use client";
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import {
   Upload, FileSpreadsheet, CheckCircle, Loader2,
-  X, ChevronDown, Globe, Building2, History, AlertCircle, SkipForward,
+  X, ChevronDown, Globe, Building2, History, SkipForward,
 } from "lucide-react";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
@@ -73,84 +73,6 @@ function Select({ label, value, onChange, options, icon: Icon }: {
         <ChevronDown size={14} style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", color: "var(--text-secondary)", pointerEvents: "none" }} />
       </div>
     </div>
-
-      {/* Upload History */}
-      <div style={{ marginTop: 32 }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <History size={16} style={{ color: "var(--text-secondary)" }} />
-            <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: 1 }}>
-              Upload History
-            </span>
-          </div>
-          <button onClick={fetchSources} disabled={loadingSources}
-            style={{ fontSize: 12, color: "var(--brand-gold)", background: "none", border: "none", cursor: "pointer", opacity: loadingSources ? 0.5 : 1 }}>
-            {loadingSources ? "Refreshing..." : "↻ Refresh"}
-          </button>
-        </div>
-
-        {sources.length === 0 ? (
-          <div style={{ padding: 24, textAlign: "center", color: "var(--text-muted)", fontSize: 13,
-            background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 12 }}>
-            No uploads yet
-          </div>
-        ) : (
-          <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-              <thead>
-                <tr style={{ borderBottom: "1px solid var(--border)", background: "var(--bg-primary)" }}>
-                  {["Filename", "Rows", "Size", "Hash", "Uploaded At"].map(h => (
-                    <th key={h} style={{ padding: "10px 16px", textAlign: "left", fontSize: 11,
-                      color: "var(--text-muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.5 }}>
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {sources.map((s, i) => (
-                  <tr key={s.id} style={{ borderBottom: i < sources.length - 1 ? "1px solid var(--border)" : "none",
-                    transition: "background 0.15s" }}
-                    onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-primary)")}
-                    onMouseLeave={e => (e.currentTarget.style.background = "transparent")}>
-                    <td style={{ padding: "10px 16px", color: "var(--text-primary)", fontWeight: 500 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <FileSpreadsheet size={14} style={{ color: "#22c55e", flexShrink: 0 }} />
-                        <span style={{ maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {s.filename}
-                        </span>
-                      </div>
-                    </td>
-                    <td style={{ padding: "10px 16px", color: "var(--text-secondary)" }}>
-                      {s.row_count ?? "—"}
-                    </td>
-                    <td style={{ padding: "10px 16px", color: "var(--text-secondary)" }}>
-                      {s.file_size_kb ? `${s.file_size_kb} KB` : "—"}
-                    </td>
-                    <td style={{ padding: "10px 16px" }}>
-                      {s.file_hash ? (
-                        <span style={{ fontFamily: "monospace", fontSize: 11,
-                          background: "var(--bg-primary)", padding: "2px 6px", borderRadius: 4,
-                          color: "var(--text-muted)" }}>
-                          {s.file_hash}
-                        </span>
-                      ) : (
-                        <span style={{ color: "var(--text-muted)", fontSize: 11 }}>—</span>
-                      )}
-                    </td>
-                    <td style={{ padding: "10px 16px", color: "var(--text-muted)", fontSize: 12 }}>
-                      {s.parsed_at ? new Date(s.parsed_at).toLocaleString("en-GB", {
-                        day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit"
-                      }) : "—"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-    </div>
   );
 }
 
@@ -195,45 +117,45 @@ function StepRow({ step, index, activeStep, progress }: {
 }
 
 export default function UploadPage() {
-  const [dragOver, setDragOver]     = useState(false);
-  const [files, setFiles]           = useState<FileEntry[]>([]);
-  const [vendor, setVendor]         = useState("");
-  const [market, setMarket]         = useState("");
-  const [activeStep, setActiveStep] = useState(-1);
-  const [stepProgress, setProgress] = useState(0);
-  const [isRunning, setIsRunning]   = useState(false);
-  const [allDone, setAllDone]       = useState(false);
-  const [error, setError]           = useState("");
-  const [executionArn, setExecArn]  = useState("");
-  const [toursProcessed, setTours]  = useState<number | null>(null);
-  const [isDuplicate, setIsDuplicate] = useState(false);
-  const [dupSourceId, setDupSourceId] = useState("");
-  const [sources, setSources]         = useState<SourceEntry[]>([]);
+  const [dragOver, setDragOver]         = useState(false);
+  const [files, setFiles]               = useState<FileEntry[]>([]);
+  const [vendor, setVendor]             = useState("");
+  const [market, setMarket]             = useState("");
+  const [activeStep, setActiveStep]     = useState(-1);
+  const [stepProgress, setProgress]     = useState(0);
+  const [isRunning, setIsRunning]       = useState(false);
+  const [allDone, setAllDone]           = useState(false);
+  const [error, setError]               = useState("");
+  const [executionArn, setExecArn]      = useState("");
+  const [toursProcessed, setTours]      = useState<number | null>(null);
+  const [isDuplicate, setIsDuplicate]   = useState(false);
+  const [dupFilename, setDupFilename]   = useState("");
+  const [sources, setSources]           = useState<SourceEntry[]>([]);
   const [loadingSources, setLoadingSources] = useState(false);
-
-  const addFiles = useCallback(async (newFiles: File[]) => {
-    const xlsx = newFiles.filter(f => f.name.match(/\.xlsx?$/i));
-    setFiles(prev => [...prev, ...xlsx.map(f => ({ file: f, status: "ready" as const }))]);
-  }, []);
 
   const fetchSources = useCallback(async () => {
     const token = getToken();
     if (!token) return;
     setLoadingSources(true);
     try {
-      const res = await fetch(`${API_URL}/v1/pipeline/sources?limit=10`, {
+      const res = await fetch(`${API_URL}/v1/pipeline/sources?limit=20`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
-        const data = await res.json();
-        setSources(data.sources || []);
+        const d = await res.json();
+        setSources(d.sources || []);
       }
     } catch {}
     finally { setLoadingSources(false); }
   }, []);
 
-  // Fetch history on mount
-  useState(() => { fetchSources(); });
+  useEffect(() => { fetchSources(); }, [fetchSources]);
+
+  const addFiles = useCallback(async (newFiles: File[]) => {
+    const xlsx = newFiles.filter(f => f.name.match(/\.xlsx?$/i));
+    setFiles(prev => [...prev, ...xlsx.map(f => ({ file: f, status: "ready" as const }))]);
+    setIsDuplicate(false);
+  }, []);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault(); setDragOver(false);
@@ -247,14 +169,12 @@ export default function UploadPage() {
     const token = getToken();
     if (!token) { setError("Not authenticated — please login again"); return; }
 
-    setIsRunning(true); setAllDone(false); setError("");
+    setIsRunning(true); setAllDone(false); setError(""); setIsDuplicate(false);
 
     try {
-      // Step 0: Upload file to S3
       setActiveStep(0); setProgress(10);
       const file = files[0].file;
 
-      // Get presigned URL
       const urlRes = await fetch(`${API_URL}/v1/pipeline/upload-url`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
@@ -264,7 +184,6 @@ export default function UploadPage() {
       const { upload_url, s3_key } = await urlRes.json();
       setProgress(40);
 
-      // Upload to S3
       const uploadRes = await fetch(upload_url, {
         method: "PUT",
         headers: { "Content-Type": file.type || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
@@ -273,29 +192,34 @@ export default function UploadPage() {
       if (!uploadRes.ok) throw new Error("S3 upload failed");
       setProgress(100);
 
-      // Check dedup — wait for Lambda to process (~3s) then check sources
-      await new Promise(r => setTimeout(r, 3000));
-      const sourcesCheck = await fetch(`${API_URL}/v1/pipeline/sources?limit=1`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (sourcesCheck.ok) {
-        const sourcesData = await sourcesCheck.json();
-        const latest = sourcesData.sources?.[0];
-        // If latest source filename matches but was already in history before → duplicate
-        // Simpler: check if Lambda returned skipped via execution status
-      }
+      // Wait for Lambda (~4s) then check dedup
+      await new Promise(r => setTimeout(r, 4000));
+      try {
+        const srcRes = await fetch(`${API_URL}/v1/pipeline/sources?limit=1`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (srcRes.ok) {
+          const srcData = await srcRes.json();
+          const latest: SourceEntry | undefined = srcData.sources?.[0];
+          if (latest && latest.filename === file.name && latest.parsed_at) {
+            const age = Date.now() - new Date(latest.parsed_at).getTime();
+            if (age > 15000) {
+              // File existed before this upload → dedup
+              setIsDuplicate(true);
+              setDupFilename(file.name);
+              setAllDone(true);
+              setFiles(prev => prev.map(f => ({ ...f, status: "done" })));
+              await fetchSources();
+              return;
+            }
+          }
+        }
+      } catch {}
 
-      // Step 1-5: Poll Step Functions (Lambda triggered by S3)
-      // Wait for SF to start (~5s)
       setActiveStep(1); setProgress(0);
       await new Promise(r => setTimeout(r, 5000));
 
-      // Poll SF status
-      const SF_ARN_PREFIX = `arn:aws:states:us-west-1:867490540162:execution:aa-cis-dev-pipeline:`;
-      const execName = s3_key.split("/").pop()?.replace(".xlsx", "").replace(".xls", "") || "unknown";
-
-      // Animate remaining steps while waiting for SF
-      const stepDurations = [15000, 30000, 60000, 10000]; // ms per step
+      const stepDurations = [15000, 30000, 60000, 10000];
       for (let i = 1; i < STEPS.length; i++) {
         setActiveStep(i); setProgress(0);
         const duration = stepDurations[i - 1] || 15000;
@@ -304,8 +228,6 @@ export default function UploadPage() {
         for (let p = 0; p < steps; p++) {
           await new Promise(r => setTimeout(r, interval));
           setProgress(Math.min(95, Math.round((p / steps) * 100)));
-
-          // Check SF status every 10s after step 2
           if (i >= 2 && p % 20 === 0 && executionArn) {
             try {
               const sfRes = await fetch(`${API_URL}/v1/pipeline/execution/${encodeURIComponent(executionArn)}`, {
@@ -328,7 +250,7 @@ export default function UploadPage() {
       setActiveStep(STEPS.length);
       setAllDone(true);
       setFiles(prev => prev.map(f => ({ ...f, status: "done" })));
-      await fetchSources(); // Refresh history
+      await fetchSources();
     } catch (e: any) {
       setError(e.message || "Pipeline failed");
     } finally {
@@ -341,18 +263,27 @@ export default function UploadPage() {
       <div style={{ marginBottom: 32 }}>
         <h1 style={{ fontSize: 24, fontWeight: 700, color: "var(--text-primary)", margin: 0 }}>Upload Tour Content</h1>
         <p style={{ color: "var(--text-secondary)", fontSize: 13, marginTop: 6 }}>
-          Upload supplier Excel files → AI pipeline rewrites to Adventure Asia brand standards
+          Upload supplier Excel files {"→"} AI pipeline rewrites to Adventure Asia brand standards
         </p>
       </div>
 
       {error && (
         <div style={{ padding: "12px 16px", background: "rgba(239,68,68,0.1)", border: "1px solid #ef4444", borderRadius: 8, color: "#f87171", fontSize: 13, marginBottom: 16 }}>
-          ⚠ {error}
+          {String.fromCodePoint(0x26A0)} {error}
+        </div>
+      )}
+
+      {isDuplicate && (
+        <div style={{ padding: "12px 16px", background: "rgba(234,179,8,0.1)", border: "1px solid #eab308", borderRadius: 8, fontSize: 13, marginBottom: 16, display: "flex", alignItems: "center", gap: 10 }}>
+          <SkipForward size={15} style={{ color: "#eab308", flexShrink: 0 }} />
+          <span style={{ color: "var(--text-primary)" }}>
+            <strong style={{ color: "#eab308" }}>Duplicate skipped</strong>{" — "}
+            <code style={{ fontSize: 12 }}>{dupFilename}</code> was already processed. No new pipeline triggered.
+          </span>
         </div>
       )}
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
-        {/* LEFT */}
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 12, padding: 20, display: "flex", flexDirection: "column", gap: 14 }}>
             <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: 1 }}>Configuration</div>
@@ -378,7 +309,7 @@ export default function UploadPage() {
               onChange={e => e.target.files && addFiles(Array.from(e.target.files))} />
             <FileSpreadsheet size={36} style={{ color: "var(--text-muted)", margin: "0 auto 12px" }} />
             <div style={{ color: "var(--text-secondary)", fontWeight: 600, fontSize: 14 }}>Drop Excel files here</div>
-            <div style={{ color: "var(--text-muted)", fontSize: 12, marginTop: 4 }}>.xlsx or .xls · Multiple files supported</div>
+            <div style={{ color: "var(--text-muted)", fontSize: 12, marginTop: 4 }}>.xlsx or .xls {String.fromCodePoint(0x00B7)} Multiple files supported</div>
             <div style={{ display: "inline-flex", alignItems: "center", gap: 8, marginTop: 16, padding: "8px 20px", background: "var(--brand-gold)", borderRadius: 8, color: "white", fontSize: 13, fontWeight: 600 }}>
               <Upload size={14} /> Browse Files
             </div>
@@ -420,12 +351,11 @@ export default function UploadPage() {
               ? <><Loader2 size={16} /> Processing...</>
               : allDone
               ? <><CheckCircle size={16} /> Pipeline Complete{toursProcessed ? ` — ${toursProcessed} Tours` : ""}</>
-              : `Start Pipeline · ${files.length} File${files.length > 1 ? "s" : ""}`
+              : `Start Pipeline ${String.fromCodePoint(0x00B7)} ${files.length} File${files.length > 1 ? "s" : ""}`
             }
           </button>
         </div>
 
-        {/* RIGHT — Pipeline progress */}
         <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 12, padding: 24 }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 24 }}>
             Pipeline Progress
@@ -436,7 +366,7 @@ export default function UploadPage() {
             ))}
           </div>
 
-          {allDone && (
+          {allDone && !isDuplicate && (
             <div style={{ marginTop: 24, padding: 16, background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.2)", borderRadius: 10 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, color: "#22c55e", fontWeight: 600, fontSize: 13 }}>
                 <CheckCircle size={16} /> File uploaded — pipeline running in background
@@ -445,7 +375,7 @@ export default function UploadPage() {
                 Tours will appear in Catalog when processing completes (~2-3 min)
               </div>
               <a href="/catalog" style={{ display: "inline-block", marginTop: 10, padding: "6px 14px", background: "var(--brand-gold)", borderRadius: 6, color: "white", fontSize: 12, fontWeight: 600, textDecoration: "none" }}>
-                Go to Catalog →
+                Go to Catalog {String.fromCodePoint(0x2192)}
               </a>
             </div>
           )}
@@ -455,11 +385,77 @@ export default function UploadPage() {
               <p style={{ fontSize: 12, color: "var(--text-muted)", margin: 0, lineHeight: 1.6 }}>
                 Configure vendor and market, upload Excel files, then click
                 <strong style={{ color: "var(--brand-gold)" }}> Start Pipeline</strong>.
-                File will be uploaded to S3 → Lambda → Step Functions automatically.
+                File will be uploaded to S3 {String.fromCodePoint(0x2192)} Lambda {String.fromCodePoint(0x2192)} Step Functions automatically.
               </p>
             </div>
           )}
         </div>
+      </div>
+
+      <div style={{ marginTop: 32 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <History size={16} style={{ color: "var(--text-secondary)" }} />
+            <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: 1 }}>
+              Upload History
+            </span>
+          </div>
+          <button onClick={fetchSources} disabled={loadingSources}
+            style={{ fontSize: 12, color: "var(--brand-gold)", background: "none", border: "none", cursor: "pointer", opacity: loadingSources ? 0.5 : 1 }}>
+            {loadingSources ? "Refreshing..." : String.fromCodePoint(0x21BB) + " Refresh"}
+          </button>
+        </div>
+
+        {sources.length === 0 ? (
+          <div style={{ padding: 24, textAlign: "center", color: "var(--text-muted)", fontSize: 13,
+            background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 12 }}>
+            No uploads yet
+          </div>
+        ) : (
+          <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ borderBottom: "1px solid var(--border)", background: "var(--bg-primary)" }}>
+                  {["Filename", "Rows", "Size", "Hash", "Uploaded"].map(h => (
+                    <th key={h} style={{ padding: "10px 16px", textAlign: "left", fontSize: 11,
+                      color: "var(--text-muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.5 }}>
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {sources.map((s, i) => (
+                  <tr key={s.id}
+                    style={{ borderBottom: i < sources.length - 1 ? "1px solid var(--border)" : "none" }}
+                    onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-primary)")}
+                    onMouseLeave={e => (e.currentTarget.style.background = "transparent")}>
+                    <td style={{ padding: "10px 16px", color: "var(--text-primary)", fontWeight: 500 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <FileSpreadsheet size={14} style={{ color: "#22c55e", flexShrink: 0 }} />
+                        <span style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {s.filename}
+                        </span>
+                      </div>
+                    </td>
+                    <td style={{ padding: "10px 16px", color: "var(--text-secondary)" }}>{s.row_count ?? String.fromCodePoint(0x2014)}</td>
+                    <td style={{ padding: "10px 16px", color: "var(--text-secondary)" }}>{s.file_size_kb ? `${s.file_size_kb} KB` : String.fromCodePoint(0x2014)}</td>
+                    <td style={{ padding: "10px 16px" }}>
+                      {s.file_hash
+                        ? <span style={{ fontFamily: "monospace", fontSize: 11, background: "var(--bg-primary)", padding: "2px 6px", borderRadius: 4, color: "var(--text-muted)" }}>{s.file_hash}</span>
+                        : <span style={{ color: "var(--text-muted)" }}>{String.fromCodePoint(0x2014)}</span>}
+                    </td>
+                    <td style={{ padding: "10px 16px", color: "var(--text-muted)", fontSize: 12 }}>
+                      {s.parsed_at ? new Date(s.parsed_at).toLocaleString("en-GB", {
+                        day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit",
+                      }) : String.fromCodePoint(0x2014)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );
