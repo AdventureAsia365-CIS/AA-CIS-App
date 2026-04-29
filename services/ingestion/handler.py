@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import uuid
+import hashlib
 import structlog
 
 from .excel_parser import ExcelParser
@@ -16,6 +17,11 @@ s3  = boto3.client("s3")
 sfn = boto3.client("stepfunctions")
 
 
+def compute_file_hash(file_bytes: bytes) -> str:
+    """SHA256 hash of raw file — dedup key."""
+    return hashlib.sha256(file_bytes).hexdigest()
+
+
 async def process_file(s3_bucket: str, s3_key: str) -> dict:
     """Download Excel từ S3, parse, insert bronze.raw_sources → bronze.raw_tours."""
 
@@ -25,7 +31,33 @@ async def process_file(s3_bucket: str, s3_key: str) -> dict:
         s3.download_fileobj(s3_bucket, s3_key, tmp)
         tmp_path = tmp.name
 
-    logger.info("file_downloaded", s3_key=s3_key)
+    # Read file bytes for hash computation
+    with open(tmp_path, "rb") as fh:
+        file_bytes = fh.read()
+    file_hash = compute_file_hash(file_bytes)
+    logger.info("file_downloaded", s3_key=s3_key, file_hash=file_hash[:12])
+
+    # TD-2: Dedup check — skip if same file already processed
+    conn_check = await asyncpg.connect(os.environ["DATABASE_URL"])
+    try:
+        existing = await conn_check.fetchrow(
+            "SELECT id, filename FROM silver_aa_internal.raw_sources WHERE file_hash = $1",
+            file_hash,
+        )
+        if existing:
+            logger.info(
+                "dedup_skip",
+                file_hash=file_hash[:12],
+                existing_id=str(existing["id"]),
+                existing_filename=existing["filename"],
+            )
+            return {
+                "status": "skipped_duplicate",
+                "file_hash": file_hash[:12],
+                "existing_source_id": str(existing["id"]),
+            }
+    finally:
+        await conn_check.close()
 
     # Parse Excel
     parser = ExcelParser(tmp_path, source_file=s3_key)
@@ -63,6 +95,7 @@ async def process_file(s3_bucket: str, s3_key: str) -> dict:
             "filename":  filename,
             "s3_path":   s3_key,
             "row_count": len(records),
+            "file_hash": file_hash,
         })
         logger.info("source_created", source_id=source_id)
 

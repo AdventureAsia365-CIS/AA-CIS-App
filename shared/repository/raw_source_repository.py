@@ -15,8 +15,8 @@ class RawSourceRepository:
         row = await self.conn.fetchrow(f"""
             INSERT INTO {self.schema}.raw_sources (
                 tenant_id, batch_id, filename, s3_path,
-                file_size_kb, row_count, parse_errors
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                file_size_kb, row_count, parse_errors, file_hash
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING id::text
         """,
             data.get("tenant_id", "00000000-0000-0000-0000-000000000001"),
@@ -26,6 +26,7 @@ class RawSourceRepository:
             data.get("file_size_kb"),
             data.get("row_count"),
             data.get("parse_errors", "[]"),
+            data.get("file_hash"),
         )
         return row["id"]
 
