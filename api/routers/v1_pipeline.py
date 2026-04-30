@@ -14,9 +14,6 @@ from fastapi.responses import JSONResponse
 
 from services.ingestion.excel_parser import ExcelParser
 from services.content_generation.graph import build_graph
-from shared.llm_client.client import LLMClient
-from shared.llm_client.models import LLMRequest
-from services.content_generation.prompts import SYSTEM_PROMPT, build_rewrite_prompt
 from pydantic import BaseModel
 import asyncpg
 import boto3 as _boto3
@@ -27,6 +24,7 @@ from api.routers.auth import verify_jwt as _verify_jwt
 logger = structlog.get_logger()
 router = APIRouter(prefix="/v1/pipeline", tags=["pipeline"])
 
+
 def _normalize_generated(generated: dict, tour: dict) -> dict:
     """Post-process LLM output: title-case name, strip forbidden words from name."""
     if not generated:
@@ -36,7 +34,6 @@ def _normalize_generated(generated: dict, tour: dict) -> dict:
     if name and name == name.upper():
         generated["name"] = name.title()
     return generated
-
 
 
 async def _rewrite_tour(tour: dict, idx: int, total: int) -> dict:
@@ -176,6 +173,7 @@ class TourRunRequest(BaseModel):
     retry_count: int = 0
     validation_feedback: list = []
 
+
 @router.post("/run-tour")
 async def run_tour(req: TourRunRequest):
     """Per-tour endpoint for Step Functions — load tour from DB, rewrite, return result."""
@@ -278,20 +276,24 @@ async def run_tour(req: TourRunRequest):
 
 _security = _HTTPBearer()
 
+
 def _get_tenant(credentials: _Creds = Depends(_security)):
     try:
         return _verify_jwt(credentials.credentials)
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
+
 class UploadUrlRequest(BaseModel):
     filename: str
     content_type: str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
 
 class UploadUrlResponse(BaseModel):
     upload_url: str
     s3_key: str
     bucket: str
+
 
 @router.post("/upload-url", response_model=UploadUrlResponse)
 async def get_upload_url(
@@ -320,6 +322,7 @@ class ExecutionStatus(BaseModel):
     start_date: str | None = None
     stop_date:  str | None = None
     tours_processed: int | None = None
+
 
 @router.get("/execution/{execution_id:path}", response_model=ExecutionStatus)
 async def get_execution_status(
@@ -536,4 +539,99 @@ async def get_sources(
             for r in rows
         ],
         "total": len(rows),
+    }
+
+
+# =============================================================================
+# GET /pipeline/metrics — Dashboard metrics (admin)
+# =============================================================================
+@router.get("/metrics")
+async def get_pipeline_metrics(
+    request: Request,
+    days: int = 7,
+    tenant=Depends(_get_tenant),
+):
+    """Dashboard metrics: daily runs + model usage."""
+    pool = request.app.state.pool
+    tenant_slug = "aa_internal"
+
+    async with pool.acquire() as conn:
+        # Daily pipeline runs
+        daily = await conn.fetch("""
+            SELECT
+                DATE(started_at)            AS day,
+                COUNT(*)                    AS runs,
+                COALESCE(SUM(tours_total),0)  AS tours,
+                COALESCE(SUM(tours_passed),0) AS passed,
+                COALESCE(SUM(tours_hitl),0)   AS hitl,
+                COALESCE(SUM(tours_failed),0) AS failed,
+                COALESCE(ROUND(SUM(cost_usd)::numeric,4), 0) AS cost
+            FROM shared.pipeline_runs
+            WHERE started_at >= NOW() - ($1 || ' days')::interval
+            GROUP BY DATE(started_at)
+            ORDER BY day ASC
+        """, str(days))
+
+        # Model usage
+        models = await conn.fetch(f"""
+            SELECT
+                gc.model_editorial          AS model,
+                COUNT(*)                    AS calls,
+                ROUND(AVG(qs.score_overall)::numeric, 1) AS avg_score
+            FROM silver_{tenant_slug}.generated_content gc
+            LEFT JOIN silver_{tenant_slug}.quality_scores qs
+                ON qs.generated_content_id = gc.id
+            WHERE gc.model_editorial IS NOT NULL
+            GROUP BY gc.model_editorial
+            ORDER BY calls DESC
+        """)
+
+        # Pipeline health — check last run per service via pipeline_runs
+        last_run = await conn.fetchrow("""
+            SELECT
+                tours_total, tours_passed, tours_failed,
+                started_at, completed_at,
+                EXTRACT(EPOCH FROM (completed_at - started_at)) AS duration_sec
+            FROM shared.pipeline_runs
+            WHERE completed_at IS NOT NULL
+            ORDER BY started_at DESC LIMIT 1
+        """)
+
+    # Build cost estimate for models (Bedrock pricing)
+    COST_PER_CALL = {
+        "claude-sonnet-4-20250514":    0.027,
+        "us.anthropic.claude-sonnet-4-5-20250929-v1:0": 0.018,
+        "gpt-4.1":                     0.074,
+        "claude-3-5-sonnet":           0.027,
+    }
+
+    return {
+        "daily_runs": [
+            {
+                "date":   str(r["day"]),
+                "runs":   r["runs"],
+                "tours":  r["tours"],
+                "passed": r["passed"],
+                "hitl":   r["hitl"],
+                "failed": r["failed"],
+                "cost":   float(r["cost"]),
+            }
+            for r in daily
+        ],
+        "model_usage": [
+            {
+                "model":     r["model"],
+                "calls":     r["calls"],
+                "avg_score": float(r["avg_score"]) if r["avg_score"] else None,
+                "cost":      round(r["calls"] * COST_PER_CALL.get(r["model"], 0.027), 2),
+                "cost_per_call": COST_PER_CALL.get(r["model"], 0.027),
+            }
+            for r in models
+        ],
+        "last_run": {
+            "tours_total":  last_run["tours_total"]  if last_run else 0,
+            "tours_passed": last_run["tours_passed"] if last_run else 0,
+            "tours_failed": last_run["tours_failed"] if last_run else 0,
+            "duration_sec": float(last_run["duration_sec"]) if last_run and last_run["duration_sec"] else 0,
+        } if last_run else None,
     }
