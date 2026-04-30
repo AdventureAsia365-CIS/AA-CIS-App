@@ -15,6 +15,8 @@ from fastapi.responses import JSONResponse
 from services.ingestion.excel_parser import ExcelParser
 from services.content_generation.graph import build_graph
 from pydantic import BaseModel
+from pydantic import BaseModel as _BaseModel
+from typing import Optional as _Optional, List as _List
 import asyncpg
 import boto3 as _boto3
 from fastapi import Depends, Request
@@ -701,3 +703,102 @@ async def get_pipeline_metrics(
         } if last_run else None,
         "pipeline_health": pipeline_health,
     }
+
+
+# =============================================================================
+# Brand Identity endpoints
+# =============================================================================
+
+
+class BrandIdentityUpdate(_BaseModel):
+    system_prompt: _Optional[str] = None
+    style_guide:   _Optional[str] = None
+    forbidden_words: _Optional[_List[str]] = None
+
+
+@router.get("/brand-identity")
+async def get_brand_identity(
+    request: Request,
+    tenant=Depends(_get_tenant),
+):
+    """Get brand identity config for current tenant."""
+    pool = request.app.state.pool
+    tenant_id = tenant.get("sub", "00000000-0000-0000-0000-000000000001")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT system_prompt, style_guide, forbidden_words, version, updated_at
+            FROM shared.tenant_brand_rules
+            WHERE tenant_id = $1 AND is_active = true
+            ORDER BY version DESC LIMIT 1
+        """, tenant_id)
+    if not row:
+        return {"configured": False, "system_prompt": None, "style_guide": None, "forbidden_words": []}
+    return {
+        "configured": True,
+        "system_prompt":   row["system_prompt"],
+        "style_guide":     row["style_guide"],
+        "forbidden_words": row["forbidden_words"] or [],
+        "version":         row["version"],
+        "updated_at":      row["updated_at"].isoformat() if row["updated_at"] else None,
+    }
+
+
+@router.post("/brand-identity")
+async def update_brand_identity(
+    body: BrandIdentityUpdate,
+    request: Request,
+    tenant=Depends(_get_tenant),
+):
+    """Upsert brand identity for current tenant."""
+    pool = request.app.state.pool
+    tenant_id = tenant.get("sub", "00000000-0000-0000-0000-000000000001")
+    import json as _json
+    async with pool.acquire() as conn:
+        # Get current version
+        current = await conn.fetchval("""
+            SELECT COALESCE(MAX(version), 0) FROM shared.tenant_brand_rules
+            WHERE tenant_id = $1
+        """, tenant_id)
+
+        await conn.execute("""
+            UPDATE shared.tenant_brand_rules SET is_active = false WHERE tenant_id = $1
+        """, tenant_id)
+
+        await conn.execute("""
+            INSERT INTO shared.tenant_brand_rules
+                (tenant_id, system_prompt, style_guide, forbidden_words, version, is_active, updated_at)
+            VALUES ($1, $2, $3, $4::jsonb, $5, true, NOW())
+        """,
+            tenant_id,
+            body.system_prompt,
+            body.style_guide,
+            _json.dumps(body.forbidden_words or []),
+            current + 1,
+        )
+    return {"status": "updated", "version": current + 1}
+
+
+@router.post("/brand-identity/upload")
+async def upload_brand_file(
+    request: Request,
+    tenant=Depends(_get_tenant),
+):
+    """Get presigned URL to upload brand identity PDF/DOCX to S3."""
+    import uuid as _uuid2
+    tenant_id = tenant.get("sub", "00000000-0000-0000-0000-000000000001")
+    body = await request.json()
+    filename = body.get("filename", "brand.pdf")
+    content_type = body.get("content_type", "application/pdf")
+
+    import re as _re2
+    safe_name = _re2.sub(r'[^a-zA-Z0-9._-]', '_', filename)
+    s3_key = f"brand-identity/{tenant_id}/{_uuid2.uuid4()}_{safe_name}"
+    bucket = os.environ.get("BRONZE_BUCKET", "aa-cis-bronze-867490540162")
+
+    s3 = _boto3.client("s3", region_name=os.environ.get("AWS_REGION", "us-west-1"))
+    upload_url = s3.generate_presigned_url(
+        "put_object",
+        Params={"Bucket": bucket, "Key": s3_key, "ContentType": content_type},
+        ExpiresIn=300,
+    )
+    return {"upload_url": upload_url, "s3_key": s3_key}
