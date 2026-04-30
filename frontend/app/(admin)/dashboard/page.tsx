@@ -71,6 +71,7 @@ export default function DashboardPage() {
     daily_runs: any[];
     model_usage: any[];
     last_run: any;
+    pipeline_health?: any[];
   } | null>(null);
   const [metricsLoading, setMetricsLoading] = useState(true);
 
