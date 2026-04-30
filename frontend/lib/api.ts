@@ -1,4 +1,4 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"\;
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export async function fetchTours(limit = 50, offset = 0) {
   const res = await fetch(`${API_BASE}/tours?limit=${limit}&offset=${offset}`);

@@ -1,12 +1,13 @@
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Upload, ClipboardList, BookOpen, Sun, Moon } from "lucide-react";
+import { LayoutDashboard, Upload, ClipboardList, BookOpen, Sun, Moon, Users } from "lucide-react";
 import { useState, useEffect } from "react";
 import LogoutButton from "@/components/LogoutButton";
 
 const ADMIN_NAV = [
   { href:"/dashboard", label:"Dashboard", icon:LayoutDashboard },
+  { href:"/tenants",   label:"Tenants",   icon:Users },
 ];
 const CONTENT_NAV = [
   { href:"/upload",  label:"Upload",  icon:Upload },
