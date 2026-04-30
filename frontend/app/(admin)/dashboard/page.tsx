@@ -9,40 +9,6 @@ import {
   Activity, Cpu, AlertTriangle, ExternalLink,
 } from "lucide-react";
 
-const MOCK_RUNS = [
-  // Sample data — live metrics after P2-S2
-  { date: "Apr 11", tours: 45, passed: 38, hitl: 5, failed: 2, cost: 1.24 },
-  { date: "Apr 12", tours: 62, passed: 55, hitl: 4, failed: 3, cost: 1.87 },
-  { date: "Apr 13", tours: 38, passed: 34, hitl: 3, failed: 1, cost: 1.12 },
-  { date: "Apr 14", tours: 71, passed: 63, hitl: 6, failed: 2, cost: 2.15 },
-  { date: "Apr 15", tours: 55, passed: 49, hitl: 4, failed: 2, cost: 1.68 },
-  { date: "Apr 16", tours: 83, passed: 74, hitl: 7, failed: 2, cost: 2.51 },
-  { date: "Apr 17", tours: 29, passed: 26, hitl: 2, failed: 1, cost: 0.87 },
-];
-
-const MOCK_MODELS = [
-  // Sample data — live metrics after P2-S2
-  { model: "claude-sonnet-4-6",      calls: 312, cost: 8.42, avg_score: 8.7 },
-  { model: "claude-haiku-4-5",       calls: 48,  cost: 0.31, avg_score: 7.9 },
-  { model: "gpt-4.1",               calls: 12,  cost: 0.89, avg_score: 7.4 },
-];
-
-const SPOT_WORKERS = [
-  { id: "spot-1a", status: "running",     tours: 12, progress: 78, instance: "c5.xlarge" },
-  { id: "spot-1b", status: "running",     tours: 8,  progress: 45, instance: "c5.xlarge" },
-  { id: "spot-2a", status: "interrupted", tours: 5,  progress: 62, instance: "c5.2xlarge" },
-  { id: "spot-2b", status: "idle",        tours: 0,  progress: 0,  instance: "c5.xlarge" },
-];
-
-const PIPELINE_HEALTH = [
-  { name: "Ingestion Lambda",    status: "healthy",  latency: "1.2s",  errors: 0 },
-  { name: "SEO Intelligence",    status: "healthy",  latency: "3.8s",  errors: 0 },
-  { name: "Content Generation",  status: "degraded", latency: "48.2s", errors: 2 },
-  { name: "Validation Lambda",   status: "healthy",  latency: "0.8s",  errors: 0 },
-  { name: "Export Lambda",       status: "healthy",  latency: "0.5s",  errors: 0 },
-  { name: "DLQ Classifier",      status: "healthy",  latency: "0.3s",  errors: 0 },
-];
-
 const TOOLTIP_STYLE = {
   contentStyle: {
     backgroundColor: "#1A2230", border: "1px solid #2A3547",
@@ -101,11 +67,19 @@ export default function DashboardPage() {
   const [totalTours,  setTotalTours]  = useState(0);
   const [totalHITL,   setTotalHITL]   = useState(0);
   const [totalPassed, setTotalPassed] = useState(0);
+  const [metrics, setMetrics] = useState<{
+    daily_runs: any[];
+    model_usage: any[];
+    last_run: any;
+  } | null>(null);
+  const [metricsLoading, setMetricsLoading] = useState(true);
 
   useEffect(() => {
     const token = getToken();
     if (!token) return;
     const h = { Authorization: `Bearer ${token}` };
+
+    // Fetch stats
     fetch(`${API_URL}/v1/tours?page=1&page_size=1`, { headers: h })
       .then(r => r.json())
       .then(d => { const t = d.pagination?.total || 0; setTotalTours(t); setTotalPassed(t); })
@@ -114,9 +88,18 @@ export default function DashboardPage() {
       .then(r => r.json())
       .then(d => setTotalHITL(d.pagination?.total || 0))
       .catch(() => {});
+
+    // Fetch real metrics
+    fetch(`${API_URL}/v1/pipeline/metrics?days=7`, { headers: h })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d) setMetrics(d); })
+      .catch(() => {})
+      .finally(() => setMetricsLoading(false));
   }, []);
 
-  const totalCost = (totalTours * 0.006).toFixed(2);
+  const totalCost = metrics?.model_usage
+    ? metrics.model_usage.reduce((s: number, m: any) => s + (m.cost || 0), 0).toFixed(2)
+    : (totalTours * 0.006).toFixed(2);
   const passRate  = totalTours > 0 ? ((totalPassed / totalTours) * 100).toFixed(1) : "0.0";
 
   const tabStyle = (t: string): React.CSSProperties => ({
@@ -157,24 +140,26 @@ export default function DashboardPage() {
       </div>
 
       {/* TAB: Metrics */}
-      {activeTab === "metrics" && (
+      {activeTab === "metrics" && metricsLoading ? (
+        <div style={{ padding: 48, textAlign: "center", color: "var(--text-muted)" }}>Loading metrics…</div>
+      ) : activeTab === "metrics" && (
         <>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
             <ChartCard title="Daily Pipeline Volume">
               <ResponsiveContainer width="100%" height={220}>
-                <BarChart data={MOCK_RUNS} barGap={2}>
+                <BarChart data={metrics?.daily_runs ?? []} barGap={2}>
                   <XAxis dataKey="date" tick={{ fill: "#8B9BB4", fontSize: 11 }} axisLine={false} tickLine={false} />
                   <YAxis tick={{ fill: "#8B9BB4", fontSize: 11 }} axisLine={false} tickLine={false} />
                   <Tooltip {...TOOLTIP_STYLE} />
-                  <Bar dataKey="passed" name="Auto-Approved" fill="#22c55e" radius={[4,4,0,0]} />
-                  <Bar dataKey="hitl"   name="HITL"          fill="#DB9628" radius={[4,4,0,0]} />
+                  <Bar dataKey="tours" name="Tours" fill="#22c55e" radius={[4,4,0,0]} />
+                  <Bar dataKey="hitl" name="HITL"          fill="#DB9628" radius={[4,4,0,0]} />
                   <Bar dataKey="failed" name="Failed"        fill="#ef4444" radius={[4,4,0,0]} />
                 </BarChart>
               </ResponsiveContainer>
             </ChartCard>
             <ChartCard title="Daily LLM Cost (USD)">
               <ResponsiveContainer width="100%" height={220}>
-                <LineChart data={MOCK_RUNS}>
+                <LineChart data={metrics?.daily_runs ?? []}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#2A3547" />
                   <XAxis dataKey="date" tick={{ fill: "#8B9BB4", fontSize: 11 }} axisLine={false} tickLine={false} />
                   <YAxis tick={{ fill: "#8B9BB4", fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={v => `$${v}`} />
@@ -196,7 +181,7 @@ export default function DashboardPage() {
                 </tr>
               </thead>
               <tbody>
-                {MOCK_MODELS.map(m => (
+                {(metrics?.model_usage ?? []).map((m: any) => (
                   <tr key={m.model} style={{ borderBottom: "1px solid var(--border)" }}>
                     <td style={{ padding: 12, fontFamily: "monospace", fontSize: 13, color: "var(--brand-gold)" }}>{m.model}</td>
                     <td style={{ padding: 12, textAlign: "right", color: "var(--text-secondary)", fontSize: 13 }}>{m.calls}</td>
@@ -217,7 +202,7 @@ export default function DashboardPage() {
       {activeTab === "health" && (
         <ChartCard title="Pipeline Service Health">
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {PIPELINE_HEALTH.map(s => (
+            {((metrics?.pipeline_health ?? PIPELINE_HEALTH) as any[]).map((s: any) => (
               <div key={s.name} style={{
                 display: "flex", alignItems: "center", gap: 16,
                 padding: "12px 16px", borderRadius: 10,
@@ -253,7 +238,7 @@ export default function DashboardPage() {
       {activeTab === "spot" && (
         <ChartCard title="Batch Rewrite Spot Workers">
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            {SPOT_WORKERS.map(w => (
+            {(SPOT_WORKERS as any[]).map((w: any) => (
               <div key={w.id} style={{
                 padding: 16, borderRadius: 10,
                 background: "var(--bg-primary)", border: `1px solid ${STATUS_DOT[w.status]}33`,

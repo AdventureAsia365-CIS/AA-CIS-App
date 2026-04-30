@@ -597,6 +597,69 @@ async def get_pipeline_metrics(
             ORDER BY started_at DESC LIMIT 1
         """)
 
+        # Service health from tenant_api_usage (last 1 hour)
+        health_rows = await conn.fetch("""
+            SELECT
+                endpoint,
+                COUNT(*)                                                    AS calls,
+                ROUND(AVG(response_ms)::numeric, 0)                        AS avg_ms,
+                SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END)        AS errors,
+                SUM(CASE WHEN status_code = 429 THEN 1 ELSE 0 END)         AS rate_limited,
+                MAX(called_at)                                              AS last_call
+            FROM shared.tenant_api_usage
+            WHERE called_at >= NOW() - INTERVAL '1 hour'
+            GROUP BY endpoint
+            ORDER BY calls DESC
+        """)
+
+        # Map endpoints to service names
+        ENDPOINT_SERVICE_MAP = {
+            "/v1/pipeline/run":         "Step Functions Pipeline",
+            "/v1/pipeline/run-tour":    "Content Generation",
+            "/v1/pipeline/review-queue": "Validation Lambda",
+            "/v1/tours":                "Export / Catalog API",
+            "/v1/pipeline/upload-url":  "Ingestion Lambda",
+            "/v1/pipeline/metrics":     "Admin Metrics API",
+            "/v1/pipeline/sources":     "Source Tracker",
+            "/health":                  "API Health Check",
+        }
+
+        pipeline_health = []
+        seen_services = set()
+        for r in health_rows:
+            ep = r["endpoint"]
+            # Normalize endpoint (strip IDs)
+            import re as _re
+            ep_norm = _re.sub(r'/[0-9a-f-]{8,}', '/{id}', ep)
+            service = ENDPOINT_SERVICE_MAP.get(ep, ENDPOINT_SERVICE_MAP.get(ep_norm, ep))
+            if service in seen_services:
+                continue
+            seen_services.add(service)
+            errors = int(r["errors"] or 0)
+            calls  = int(r["calls"] or 0)
+            avg_ms = float(r["avg_ms"] or 0)
+            status = "healthy" if errors == 0 else ("degraded" if errors / max(calls, 1) < 0.1 else "down")
+            pipeline_health.append({
+                "name":    service,
+                "status":  status,
+                "latency": f"{avg_ms:.0f}ms",
+                "errors":  errors,
+                "calls":   calls,
+            })
+
+        # Always include core services even if no recent calls
+        CORE_SERVICES = [
+            "Ingestion Lambda", "Step Functions Pipeline",
+            "Content Generation", "Validation Lambda",
+            "Export / Catalog API",
+        ]
+        for svc in CORE_SERVICES:
+            if svc not in seen_services:
+                pipeline_health.append({
+                    "name": svc, "status": "idle",
+                    "latency": "—", "errors": 0, "calls": 0,
+                })
+
     # Build cost estimate for models (Bedrock pricing)
     COST_PER_CALL = {
         "claude-sonnet-4-20250514":    0.027,
@@ -634,4 +697,5 @@ async def get_pipeline_metrics(
             "tours_failed": last_run["tours_failed"] if last_run else 0,
             "duration_sec": float(last_run["duration_sec"]) if last_run and last_run["duration_sec"] else 0,
         } if last_run else None,
+        "pipeline_health": pipeline_health,
     }
