@@ -202,7 +202,7 @@ export default function DashboardPage() {
       {activeTab === "health" && (
         <ChartCard title="Pipeline Service Health">
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {((metrics?.pipeline_health ?? PIPELINE_HEALTH) as any[]).map((s: any) => (
+            {((metrics?.pipeline_health as any[]) ?? PIPELINE_HEALTH).map((s: any) => (
               <div key={s.name} style={{
                 display: "flex", alignItems: "center", gap: 16,
                 padding: "12px 16px", borderRadius: 10,
@@ -238,7 +238,7 @@ export default function DashboardPage() {
       {activeTab === "spot" && (
         <ChartCard title="Batch Rewrite Spot Workers">
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            {(SPOT_WORKERS as any[]).map((w: any) => (
+            {SPOT_WORKERS.map((w) => (
               <div key={w.id} style={{
                 padding: 16, borderRadius: 10,
                 background: "var(--bg-primary)", border: `1px solid ${STATUS_DOT[w.status]}33`,
