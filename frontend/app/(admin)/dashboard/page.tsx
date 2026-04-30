@@ -62,6 +62,21 @@ function getToken(): string | null {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
+const PIPELINE_HEALTH = [
+  { name: "Ingestion Lambda",   status: "idle", latency: "—", errors: 0 },
+  { name: "SEO Intelligence",   status: "idle", latency: "—", errors: 0 },
+  { name: "Content Generation", status: "idle", latency: "—", errors: 0 },
+  { name: "Validation Lambda",  status: "idle", latency: "—", errors: 0 },
+  { name: "Export Lambda",      status: "idle", latency: "—", errors: 0 },
+];
+
+const SPOT_WORKERS = [
+  { id: "spot-1a", status: "idle", tours: 0, progress: 0, instance: "c5.xlarge" },
+  { id: "spot-1b", status: "idle", tours: 0, progress: 0, instance: "c5.xlarge" },
+  { id: "spot-2a", status: "idle", tours: 0, progress: 0, instance: "c5.2xlarge" },
+  { id: "spot-2b", status: "idle", tours: 0, progress: 0, instance: "c5.xlarge" },
+];
+
 export default function DashboardPage() {
   const [activeTab, setActiveTab] = useState<"metrics" | "health" | "spot" | "langfuse">("metrics");
   const [totalTours,  setTotalTours]  = useState(0);
