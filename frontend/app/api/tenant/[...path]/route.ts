@@ -3,8 +3,11 @@ import { cookies } from "next/headers";
 
 const API_URL = process.env.API_URL ?? "https://api-cis.lumiguides.it.com";
 
-async function handler(req: NextRequest, { params }: { params: { path: string[] } }) {
-  const cookieStore = cookies();
+async function handler(
+  req: NextRequest,
+  { params }: { params: Promise<{ path: string[] }> }
+) {
+  const cookieStore = await cookies();
   const token = cookieStore.get("cis_tenant_token")?.value
     ?? cookieStore.get("cis_api_token")?.value
     ?? "";
@@ -13,9 +16,10 @@ async function handler(req: NextRequest, { params }: { params: { path: string[] 
     return NextResponse.json({ detail: "Unauthorized" }, { status: 401 });
   }
 
-  const path = params.path.join("/");
+  const { path } = await params;
+  const pathStr = path.join("/");
   const search = req.nextUrl.search;
-  const url = `${API_URL}/${path}${search}`;
+  const url = `${API_URL}/${pathStr}${search}`;
 
   const headers: Record<string, string> = {
     "Authorization": `Bearer ${token}`,

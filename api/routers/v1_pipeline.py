@@ -304,7 +304,9 @@ async def get_upload_url(
     import uuid as _uuid
     tenant_id = tenant.get("sub", "00000000-0000-0000-0000-000000000001")
     bucket    = os.environ.get("BRONZE_BUCKET", "aa-cis-bronze-867490540162")
-    s3_key    = f"raw-inbox/{tenant_id}/{_uuid.uuid4()}_{body.filename}"
+    import re as _re
+    safe_filename = _re.sub(r'[^a-zA-Z0-9._-]', '_', body.filename)
+    s3_key    = f"raw-inbox/{tenant_id}/{_uuid.uuid4()}_{safe_filename}"
     s3 = _boto3.client("s3", region_name=os.environ.get("AWS_REGION", "us-west-1"))
     upload_url = s3.generate_presigned_url(
         "put_object",

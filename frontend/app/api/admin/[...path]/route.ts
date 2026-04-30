@@ -3,14 +3,18 @@ import { NextRequest, NextResponse } from "next/server";
 const API_URL = process.env.API_URL ?? "https://api-cis.lumiguides.it.com";
 const ADMIN_SECRET = process.env.ADMIN_SECRET ?? "";
 
-async function handler(req: NextRequest, { params }: { params: { path: string[] } }) {
+async function handler(
+  req: NextRequest,
+  { params }: { params: Promise<{ path: string[] }> }
+) {
   if (!ADMIN_SECRET) {
     return NextResponse.json({ detail: "Admin secret not configured" }, { status: 503 });
   }
 
-  const path = params.path.join("/");
+  const { path } = await params;
+  const pathStr = path.join("/");
   const search = req.nextUrl.search;
-  const url = `${API_URL}/admin/${path}${search}`;
+  const url = `${API_URL}/admin/${pathStr}${search}`;
 
   const headers: Record<string, string> = {
     "X-Admin-Secret": ADMIN_SECRET,
