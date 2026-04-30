@@ -90,13 +90,21 @@ async def process_file(s3_bucket: str, s3_key: str) -> dict:
             len(records),
         )
 
+        # Get file size from S3 object
+        try:
+            s3_meta = s3.head_object(Bucket=s3_bucket, Key=s3_key)
+            file_size_kb = round(s3_meta["ContentLength"] / 1024, 1)
+        except Exception:
+            file_size_kb = None
+
         source_id = await source_repo.insert({
-            "tenant_id": "00000000-0000-0000-0000-000000000001",
-            "batch_id":  batch_id_new,
-            "filename":  filename,
-            "s3_path":   s3_key,
-            "row_count": len(records),
-            "file_hash": file_hash,
+            "tenant_id":    "00000000-0000-0000-0000-000000000001",
+            "batch_id":     batch_id_new,
+            "filename":     filename,
+            "s3_path":      s3_key,
+            "row_count":    len(records),
+            "file_hash":    file_hash,
+            "file_size_kb": file_size_kb,
         })
         logger.info("source_created", source_id=source_id)
 
