@@ -393,27 +393,57 @@ async def approve_review(
     request: Request,
     tenant=Depends(_get_tenant),
 ):
-    """Approve a tour in review queue → mark as approved."""
+    """Approve a tour in review queue → send_task_success → SF continues to Export."""
     pool = request.app.state.pool
     tenant_id = tenant.get("sub", "00000000-0000-0000-0000-000000000001")
 
     async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE silver_aa_internal.review_queue
-            SET review_status = 'approved', reviewed_at = NOW()
+        # Get task_token + generated_content_id
+        row = await conn.fetchrow("""
+            SELECT step_fn_task_token, generated_content_id
+            FROM silver_aa_internal.review_queue
             WHERE id = $1::uuid AND tenant_id = $2::uuid
         """, review_id, tenant_id)
 
-        # Also update generated_content status
+        if not row:
+            raise HTTPException(status_code=404, detail="Review not found")
+
+        task_token = row["step_fn_task_token"]
+        generated_content_id = str(row["generated_content_id"])
+
+        # Update review_queue + generated_content
         await conn.execute("""
-            UPDATE silver_aa_internal.generated_content gc
-            SET status = 'approved'
-            FROM silver_aa_internal.review_queue rq
-            WHERE rq.id = $1::uuid
-              AND gc.id = rq.generated_content_id
+            UPDATE silver_aa_internal.review_queue
+            SET review_status = 'approved', reviewed_at = NOW()
+            WHERE id = $1::uuid
         """, review_id)
 
-    return {"status": "approved", "review_id": review_id}
+        await conn.execute("""
+            UPDATE silver_aa_internal.generated_content
+            SET status = 'approved'
+            WHERE id = $1::uuid
+        """, generated_content_id)
+
+    # Send task success to Step Functions (outside DB transaction)
+    if task_token:
+        try:
+            sfn = _boto3.client(
+                "stepfunctions",
+                region_name=os.environ.get("AWS_REGION", "us-west-1"),
+            )
+            sfn.send_task_success(
+                taskToken=task_token,
+                output=json.dumps({
+                    "decision": "approved",
+                    "review_id": review_id,
+                    "version_id": generated_content_id,
+                }),
+            )
+        except Exception as e:
+            import structlog as _sl
+            _sl.get_logger().warning("send_task_success_failed", error=str(e))
+
+    return {"status": "approved", "review_id": review_id, "sf_notified": bool(task_token)}
 
 
 @router.post("/review-queue/{review_id}/reject")
@@ -422,18 +452,45 @@ async def reject_review(
     request: Request,
     tenant=Depends(_get_tenant),
 ):
-    """Reject a tour in review queue."""
+    """Reject a tour → send_task_failure → SF goes to TourRejected."""
     pool = request.app.state.pool
     tenant_id = tenant.get("sub", "00000000-0000-0000-0000-000000000001")
 
     async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE silver_aa_internal.review_queue
-            SET review_status = 'rejected', reviewed_at = NOW()
+        row = await conn.fetchrow("""
+            SELECT step_fn_task_token
+            FROM silver_aa_internal.review_queue
             WHERE id = $1::uuid AND tenant_id = $2::uuid
         """, review_id, tenant_id)
 
-    return {"status": "rejected", "review_id": review_id}
+        if not row:
+            raise HTTPException(status_code=404, detail="Review not found")
+
+        task_token = row["step_fn_task_token"]
+
+        await conn.execute("""
+            UPDATE silver_aa_internal.review_queue
+            SET review_status = 'rejected', reviewed_at = NOW()
+            WHERE id = $1::uuid
+        """, review_id)
+
+    # Send task failure to Step Functions
+    if task_token:
+        try:
+            sfn = _boto3.client(
+                "stepfunctions",
+                region_name=os.environ.get("AWS_REGION", "us-west-1"),
+            )
+            sfn.send_task_failure(
+                taskToken=task_token,
+                error="TourRejectedByReviewer",
+                cause="Human reviewer rejected the tour content",
+            )
+        except Exception as e:
+            import structlog as _sl
+            _sl.get_logger().warning("send_task_failure_failed", error=str(e))
+
+    return {"status": "rejected", "review_id": review_id, "sf_notified": bool(task_token)}
 
 
 # =============================================================================
