@@ -64,7 +64,7 @@ package_lambda() {
   echo "   ✅ ${ZIP_NAME}.zip ($SIZE)"
 }
 
-package_lambda "ingestion"        "ingestion"  asyncpg structlog "pydantic>=2.0" openpyxl pandas
+package_lambda "ingestion"        "ingestion"  asyncpg structlog "pydantic>=2.0" openpyxl pandas openai boto3
 package_lambda "seo_intelligence" "seo"        asyncpg structlog "pydantic>=2.0" httpx
 package_lambda "validation"       "validation" asyncpg structlog "pydantic>=2.0"
 package_lambda "export"           "export"     asyncpg structlog "pydantic>=2.0" httpx
