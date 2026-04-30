@@ -133,11 +133,11 @@ def lambda_handler(event: dict, context) -> dict:
     if event.get("action") == "hitl_notify":
         try:
             result = asyncio.run(process_hitl_notify(
-                tour_id    = event["tour_id"],
-                tenant_id  = event["tenant_id"],
-                task_token = event["task_token"],
-                score      = float(event.get("score", 0)),
-                failed_rules = event.get("failed_rules", []),
+                tour_id=event["tour_id"],
+                tenant_id=event["tenant_id"],
+                task_token=event["task_token"],
+                score=float(event.get("score", 0)),
+                failed_rules=event.get("failed_rules", []),
             ))
             return result
         except Exception as e:
