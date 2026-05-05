@@ -207,12 +207,88 @@ async def trigger_rewrite(
             }),
             body.rewrite_language, body.seo_mode)
 
+    # P3-S9 fix: actually call LLM rewrite
+    import asyncio as _asyncio
+    import sys as _sys
+    _sys.path.insert(0, '/app')
+    from api.routers.v1_pipeline import _rewrite_tour as _do_rewrite
+
+    # Build tour dict from published tour
+    tour_dict = {
+        "name":        pt["aa_name"],
+        "subtitle":    pt.get("aa_subtitle", ""),
+        "summary":     pt.get("aa_summary", ""),
+        "description": pt.get("aa_description", ""),
+        "highlights":  pt.get("aa_highlights", ""),
+        "itineraries": pt.get("aa_itineraries", ""),
+        "seo_title":   pt.get("aa_seo_title", ""),
+        "seo_meta":    pt.get("aa_seo_meta", ""),
+        "country":     "",
+        "duration":    "",
+    }
+
+    # Fetch brand rules for this tenant
+    brand_rules = {}
+    try:
+        import json as _json2
+        br_row = await pool.acquire().__aenter__()
+        async with pool.acquire() as _conn2:
+            _br = await _conn2.fetchrow("""
+                SELECT system_prompt, style_guide, forbidden_words
+                FROM shared.tenant_brand_rules
+                WHERE tenant_id = $1::uuid AND is_active = true
+                ORDER BY version DESC LIMIT 1
+            """, tenant_id)
+        if _br:
+            brand_rules = {
+                "system_prompt":    _br["system_prompt"] or "",
+                "style_guide":      _br["style_guide"] or "",
+                "forbidden_words":  list(_br["forbidden_words"] or []),
+                "rewrite_language": body.rewrite_language,
+            }
+    except Exception:
+        brand_rules = {"rewrite_language": body.rewrite_language}
+
+    # Run LLM rewrite in background (don't block response)
+    async def _do_rewrite_and_save():
+        try:
+            result = await _do_rewrite(tour_dict, idx=0, total=1, brand_rules=brand_rules)
+            if result.get("status") == "success" and result.get("generated"):
+                import json as _j3
+                gen = result["generated"]
+                rewritten = {
+                    "name":       gen.get("name", tour_dict["name"]),
+                    "subtitle":   gen.get("subtitle", ""),
+                    "summary":    gen.get("summary", ""),
+                    "highlights": gen.get("highlights", []),
+                    "seo_title":  gen.get("seo_title", ""),
+                    "seo_meta":   gen.get("seo_meta", ""),
+                    "trip_type":  gen.get("trip_type", ""),
+                    "status":     "done",
+                }
+                new_status = "approved" if result.get("quality_score", 0) >= 7.0 else "pending"
+                async with pool.acquire() as _conn3:
+                    await _conn3.execute("""
+                        UPDATE gold_aa_internal.tenant_tour_versions
+                        SET rewritten_content = $1::jsonb,
+                            status = $2,
+                            quality_score = $3
+                        WHERE id = $4::uuid
+                    """,
+                        _j3.dumps(rewritten), new_status,
+                        result.get("quality_score"), version_id)
+        except Exception as _e:
+            import structlog as _sl
+            _sl.get_logger().error("tenant_rewrite_failed", error=str(_e))
+
+    _asyncio.create_task(_do_rewrite_and_save())
+
     return {
         "version_id": str(version_id),
         "published_tour_id": published_tour_id,
         "version_number": next_ver,
         "status": "pending",
-        "message": "Rewrite initiated — poll /v1/tours/versions/{id} for status",
+        "message": "Rewrite started — check My Catalog in ~30 seconds for results",
     }
 
 
