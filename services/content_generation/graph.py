@@ -50,7 +50,10 @@ def generate_node(state: ContentState) -> ContentState:
 
     system = SYSTEM_PROMPT
     if language == "en-GB":
-        system += "\n\nLANGUAGE: Use British English spelling and conventions (e.g. 'colour', 'travelling', 'organised')."
+        system += (
+            "\n\nLANGUAGE: Use British English spelling and conventions "
+            "(e.g. 'colour', 'travelling', 'organised')."
+        )
     else:
         system += "\n\nLANGUAGE: Use American English spelling and conventions."
     if brand_sp:
