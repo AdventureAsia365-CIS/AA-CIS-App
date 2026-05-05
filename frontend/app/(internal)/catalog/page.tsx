@@ -185,7 +185,6 @@ export default function CatalogPage() {
             style={{ ...selectStyle, opacity: tours.length < 20 ? 0.4 : 1 }}>Next →</button>
         </div>
       )}
-    </div>
 
       {/* Tour Detail Modal */}
       {selected && (
