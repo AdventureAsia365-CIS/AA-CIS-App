@@ -117,7 +117,7 @@ async def browse_pool(
                    pt.aa_highlights, pt.aa_itineraries, pt.aa_description,
                    pt.seo_title, pt.seo_meta, pt.seo_keywords_used,
                    pt.quality_score, pt.published_at,
-                   rt.country, rt.duration, rt.price_raw, rt.trip_type,
+                   rt.country, rt.duration, rt.price_raw,
                    EXISTS(
                        SELECT 1 FROM gold_aa_internal.tenant_tour_versions ttv
                        WHERE ttv.published_tour_id = pt.id
