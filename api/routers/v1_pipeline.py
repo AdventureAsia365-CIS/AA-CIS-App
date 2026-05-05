@@ -248,7 +248,8 @@ async def run_tour(req: TourRunRequest):
                 INSERT INTO silver_aa_internal.generated_content (
                     tour_id, tenant_id, version_num,
                     aa_name, aa_subtitle, aa_summary,
-                    aa_highlights, seo_title, seo_meta,
+                    aa_description, aa_highlights, aa_itineraries,
+                    seo_title, seo_meta, seo_keywords_used,
                     model_editorial, status
                 ) VALUES (
                     $1::uuid, $2::uuid,
@@ -256,8 +257,9 @@ async def run_tour(req: TourRunRequest):
                     FROM silver_aa_internal.generated_content
                     WHERE tour_id = $1::uuid), 1),
                     $3, $4, $5,
-                    $6::jsonb, $7, $8,
-                    $9, $10::content_status_enum
+                    $6, $7::jsonb, $8,
+                    $9, $10, $11::jsonb,
+                    $12, $13::content_status_enum
                 ) RETURNING id
             """,
                 req.tour_id,
@@ -265,9 +267,12 @@ async def run_tour(req: TourRunRequest):
                 generated.get("name"),
                 generated.get("subtitle"),
                 generated.get("summary"),
+                generated.get("description", ""),
                 _json.dumps(generated.get("highlights", [])),
+                generated.get("itineraries", ""),
                 generated.get("seo_title"),
                 generated.get("seo_meta"),
+                _json.dumps(generated.get("seo_keywords_used", [])),
                 result.get("model_used", ""),
                 status,
             )

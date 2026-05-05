@@ -114,9 +114,10 @@ async def browse_pool(
         tid_idx = len(params) + 3  # position of tenant_id in params_paged
         rows = await conn.fetch(f"""
             SELECT pt.id, pt.tour_id, pt.aa_name, pt.aa_subtitle, pt.aa_summary,
+                   pt.aa_highlights, pt.aa_itineraries, pt.aa_description,
                    pt.seo_title, pt.seo_meta, pt.seo_keywords_used,
                    pt.quality_score, pt.published_at,
-                   rt.country, rt.duration, rt.price_raw,
+                   rt.country, rt.duration, rt.price_raw, rt.trip_type,
                    EXISTS(
                        SELECT 1 FROM gold_aa_internal.tenant_tour_versions ttv
                        WHERE ttv.published_tour_id = pt.id
