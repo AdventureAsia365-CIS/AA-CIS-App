@@ -38,12 +38,14 @@ def _normalize_generated(generated: dict, tour: dict) -> dict:
     return generated
 
 
-async def _rewrite_tour(tour: dict, idx: int, total: int) -> dict:
+async def _rewrite_tour(tour: dict, idx: int, total: int, brand_rules: dict = None) -> dict:
     """Rewrite single tour using LangGraph."""
     logger.info("rewriting_tour", idx=idx, total=total, name=tour.get("name", ""))
 
     try:
         graph = build_graph()
+        # P3-S3: Merge brand_rules into initial_state
+        _br = brand_rules or {}
         initial_state = {
             "tour": tour,
             "seo": {},
@@ -55,6 +57,10 @@ async def _rewrite_tour(tour: dict, idx: int, total: int) -> dict:
             "error": "",
             "cost_usd": 0.0,
             "model_used": "",
+            "brand_system_prompt":  _br.get("system_prompt", ""),
+            "brand_style_guide":    _br.get("style_guide", ""),
+            "brand_forbidden_words": _br.get("forbidden_words", []),
+            "rewrite_language":     _br.get("rewrite_language", "en-US"),
         }
 
         def run_graph():
@@ -174,6 +180,8 @@ class TourRunRequest(BaseModel):
     tenant_id: str
     retry_count: int = 0
     validation_feedback: list = []
+    seo_mode: str = "standard"
+    rewrite_language: str = "en-US"  # en-US | en-GB
 
 
 @router.post("/run-tour")
@@ -203,7 +211,29 @@ async def run_tour(req: TourRunRequest):
             "exclusions":  row["exclusions"],
         }
 
-        result = await _rewrite_tour(tour, idx=0, total=1)
+
+        # P3-S3: Fetch tenant brand rules for customization layer
+        brand_rules = {}
+        try:
+            _tenant_uuid = "00000000-0000-0000-0000-000000000001"
+            br_row = await conn.fetchrow("""
+                SELECT system_prompt, style_guide, forbidden_words
+                FROM shared.tenant_brand_rules
+                WHERE tenant_id = $1::uuid AND is_active = true
+                ORDER BY version DESC LIMIT 1
+            """, _tenant_uuid)
+            if br_row:
+                brand_rules = {
+                    "system_prompt":    br_row["system_prompt"] or "",
+                    "style_guide":      br_row["style_guide"] or "",
+                    "forbidden_words":  list(br_row["forbidden_words"] or []),
+                    "rewrite_language": getattr(req, "rewrite_language", "en-US"),
+                }
+        except Exception as _br_err:
+            import structlog as _sl
+            _sl.get_logger().warning("brand_rules_fetch_failed", error=str(_br_err))
+
+        result = await _rewrite_tour(tour, idx=0, total=1, brand_rules=brand_rules)
 
         # Write to generated_content so Validation Lambda can read it
         version_id = None

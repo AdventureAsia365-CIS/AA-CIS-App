@@ -13,16 +13,20 @@ MAX_RETRIES = 3
 MIN_QUALITY = 7.0
 
 class ContentState(TypedDict):
-    tour:           dict
-    seo:            dict
-    few_shots:      list
-    generated:      dict
-    quality_score:  float
-    retry_count:    int
-    feedback:       str
-    error:          str
-    cost_usd:       float
-    model_used:     str
+    tour:                   dict
+    seo:                    dict
+    few_shots:              list
+    generated:              dict
+    quality_score:          float
+    retry_count:            int
+    feedback:               str
+    error:                  str
+    cost_usd:               float
+    model_used:             str
+    brand_system_prompt:    str
+    brand_style_guide:      str
+    brand_forbidden_words:  list
+    rewrite_language:       str
 
 def generate_node(state: ContentState) -> ContentState:
     """Node 1: Generate content via LLMClient."""
@@ -39,7 +43,22 @@ def generate_node(state: ContentState) -> ContentState:
     if state.get("feedback"):
         prompt += f"\n\nPREVIOUS ATTEMPT FEEDBACK:\n{state['feedback']}\nPlease fix these issues."
 
-    request = LLMRequest(system_prompt=SYSTEM_PROMPT, user_prompt=prompt)
+    # P3-S3: Build system prompt = AA core + tenant append
+    brand_sp   = state.get("brand_system_prompt", "") or ""
+    style_guide = state.get("brand_style_guide", "") or ""
+    language   = state.get("rewrite_language", "en-US") or "en-US"
+
+    system = SYSTEM_PROMPT
+    if language == "en-GB":
+        system += "\n\nLANGUAGE: Use British English spelling and conventions (e.g. 'colour', 'travelling', 'organised')."
+    else:
+        system += "\n\nLANGUAGE: Use American English spelling and conventions."
+    if brand_sp:
+        system += f"\n\nCLIENT BRAND CONTEXT (append only — do not override AA rules):\n{brand_sp}"
+    if style_guide:
+        prompt += f"\n\nSTYLE GUIDE FOR THIS CLIENT:\n{style_guide}"
+
+    request = LLMRequest(system_prompt=system, user_prompt=prompt)
 
     try:
         resp = asyncio.get_event_loop().run_until_complete(client.generate(request))
@@ -108,14 +127,18 @@ def validate_node(state: ContentState) -> ContentState:
             issues.append(f"Generic subtitle phrase: '{flag}'")
             score -= 1.0
 
-    # Forbidden words (brand flags + marketing)
+    # Forbidden words — AA core list + tenant custom list
     forbidden = [
         "curated", "pristine", "refined", "tailored", "bespoke",
         "stunning", "breathtaking", "magical", "paradise",
         "cheap", "deal", "book now", "instant booking", "discount",
     ]
+    # P3-S3: Merge tenant forbidden_words (lowercase, deduplicated)
+    tenant_forbidden = [w.lower().strip() for w in (state.get("brand_forbidden_words") or []) if w]
+    all_forbidden = list(dict.fromkeys(forbidden + tenant_forbidden))  # preserve order, dedupe
+
     content_text = json.dumps(generated).lower()
-    for word in forbidden:
+    for word in all_forbidden:
         if word in content_text:
             issues.append(f"Forbidden word: '{word}'")
             score -= 0.5
