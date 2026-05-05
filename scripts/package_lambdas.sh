@@ -8,7 +8,11 @@ DIST_DIR="$APP_DIR/dist/lambdas"
 BUILD_DIR="$APP_DIR/dist/build"
 VENV_PIP="$APP_DIR/.venv/bin/pip"
 
-[[ ! -f "$VENV_PIP" ]] && { echo "❌ venv pip not found: $VENV_PIP"; exit 1; }
+if [[ ! -f "$VENV_PIP" ]]; then
+  echo "⚠ venv not found, using system pip"
+  VENV_PIP="$(which pip3 2>/dev/null || which pip 2>/dev/null)"
+fi
+[[ -z "$VENV_PIP" ]] && { echo "❌ No pip found"; exit 1; }
 
 echo "📦 AA-CIS Lambda Packager v8"
 echo "App dir: $APP_DIR"
