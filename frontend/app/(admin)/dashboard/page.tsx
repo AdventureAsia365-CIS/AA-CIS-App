@@ -1,4 +1,5 @@
 "use client";
+import React from "react";
 import { useState, useEffect } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
@@ -77,8 +78,215 @@ const SPOT_WORKERS = [
   { id: "spot-2b", status: "idle", tours: 0, progress: 0, instance: "c5.xlarge" },
 ];
 
+// ── SEO Intelligence Tab ─────────────────────────────────────────────────────
+
+function SeoIntelligenceTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => string | null }) {
+  const [data, setData] = React.useState<any>(null);
+  const [loading, setLoading] = React.useState(true);
+
+  React.useEffect(() => {
+    const token = getToken();
+    if (!token) return;
+    fetch(`${apiUrl}/v1/pipeline/metrics/seo`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }).then(r => r.ok ? r.json() : null)
+      .then(d => setData(d))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [apiUrl, getToken]);
+
+  if (loading) return <div style={{ padding: 40, textAlign: "center", color: "var(--text-muted)" }}>Loading SEO data...</div>;
+  if (!data) return <div style={{ padding: 40, textAlign: "center", color: "#ef4444" }}>Failed to load SEO data</div>;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* KPI row */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 16 }}>
+        {[
+          { label: "Tours in Pool",    value: data.total_tours ?? 0 },
+          { label: "SEO Covered",      value: data.seo_covered ?? 0 },
+          { label: "Coverage",         value: `${data.coverage_pct ?? 0}%` },
+        ].map(c => (
+          <div key={c.label} style={{ background: "var(--bg-card)",
+            border: "1px solid var(--border)", borderRadius: 12, padding: "18px 20px" }}>
+            <div style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 600,
+              textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>{c.label}</div>
+            <div style={{ fontSize: 28, fontWeight: 800,
+              color: "var(--text-primary)" }}>{c.value}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        {/* Top keywords */}
+        <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)",
+          borderRadius: 12, padding: "18px 20px" }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)",
+            textTransform: "uppercase", letterSpacing: 1, marginBottom: 14 }}>
+            Top Keywords
+          </div>
+          {(data.top_keywords || []).slice(0, 10).map((k: any) => (
+            <div key={k.keyword} style={{ display: "flex", justifyContent: "space-between",
+              alignItems: "center", marginBottom: 8, fontSize: 13 }}>
+              <span style={{ color: "var(--text-primary)" }}>{k.keyword}</span>
+              <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 20,
+                background: "rgba(219,150,40,0.1)", color: "var(--brand-gold)",
+                fontWeight: 600 }}>{k.count}</span>
+            </div>
+          ))}
+          {(!data.top_keywords || data.top_keywords.length === 0) && (
+            <div style={{ color: "var(--text-muted)", fontSize: 13 }}>No keyword data yet</div>
+          )}
+        </div>
+
+        {/* Redis cache + countries */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)",
+            borderRadius: 12, padding: "18px 20px" }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)",
+              textTransform: "uppercase", letterSpacing: 1, marginBottom: 12 }}>
+              Redis Cache
+            </div>
+            {[
+              { label: "Hit Rate",  value: data.cache?.hit_rate ?? "N/A" },
+              { label: "Cached Keys", value: data.cache?.keys ?? 0 },
+              { label: "Hits",      value: data.cache?.hits ?? 0 },
+              { label: "Misses",    value: data.cache?.misses ?? 0 },
+            ].map(r => (
+              <div key={r.label} style={{ display: "flex", justifyContent: "space-between",
+                fontSize: 13, marginBottom: 6 }}>
+                <span style={{ color: "var(--text-muted)" }}>{r.label}</span>
+                <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>{r.value}</span>
+              </div>
+            ))}
+          </div>
+          <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)",
+            borderRadius: 12, padding: "18px 20px" }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)",
+              textTransform: "uppercase", letterSpacing: 1, marginBottom: 12 }}>
+              Countries Covered
+            </div>
+            {(data.countries || []).slice(0, 8).map((c: any) => (
+              <div key={c.country} style={{ display: "flex", justifyContent: "space-between",
+                fontSize: 13, marginBottom: 6 }}>
+                <span style={{ color: "var(--text-primary)" }}>{c.country || "Unknown"}</span>
+                <span style={{ color: "var(--text-muted)" }}>{c.count} tours</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Content Library Tab ───────────────────────────────────────────────────────
+
+function ContentLibraryTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => string | null }) {
+  const [data, setData] = React.useState<any>(null);
+  const [loading, setLoading] = React.useState(true);
+
+  React.useEffect(() => {
+    const token = getToken();
+    if (!token) return;
+    fetch(`${apiUrl}/v1/pipeline/metrics/library`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }).then(r => r.ok ? r.json() : null)
+      .then(d => setData(d))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [apiUrl, getToken]);
+
+  if (loading) return <div style={{ padding: 40, textAlign: "center", color: "var(--text-muted)" }}>Loading library data...</div>;
+  if (!data) return <div style={{ padding: 40, textAlign: "center", color: "#ef4444" }}>Failed to load library data</div>;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* KPI row */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 16 }}>
+        {[
+          { label: "Total Tours",      value: data.total ?? 0,              color: "var(--brand-gold)" },
+          { label: "Avg Quality",      value: data.avg_score ?? 0,          color: "#22c55e" },
+          { label: "Added (30d)",      value: data.published_last_30d ?? 0, color: "#a78bfa" },
+          { label: "Stale (>180d)",    value: data.stale_count ?? 0,        color: "#f59e0b" },
+        ].map(c => (
+          <div key={c.label} style={{ background: "var(--bg-card)",
+            border: "1px solid var(--border)", borderRadius: 12, padding: "18px 20px" }}>
+            <div style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 600,
+              textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>{c.label}</div>
+            <div style={{ fontSize: 26, fontWeight: 800, color: c.color }}>{c.value}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        {/* By country */}
+        <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)",
+          borderRadius: 12, padding: "18px 20px" }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)",
+            textTransform: "uppercase", letterSpacing: 1, marginBottom: 14 }}>
+            Coverage by Country
+          </div>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                {["Country", "Tours", "Avg Score"].map(h => (
+                  <th key={h} style={{ padding: "6px 8px", textAlign: "left",
+                    fontSize: 11, color: "var(--text-muted)", fontWeight: 600 }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {(data.by_country || []).slice(0, 12).map((r: any) => (
+                <tr key={r.country} style={{ borderBottom: "1px solid var(--border)" }}>
+                  <td style={{ padding: "7px 8px", color: "var(--text-primary)" }}>
+                    {r.country || "Unknown"}
+                  </td>
+                  <td style={{ padding: "7px 8px", color: "var(--text-secondary)" }}>{r.total}</td>
+                  <td style={{ padding: "7px 8px" }}>
+                    <span style={{ color: r.avg_score >= 9 ? "#22c55e" : r.avg_score >= 7 ? "#f59e0b" : "#ef4444",
+                      fontWeight: 600 }}>{r.avg_score}</span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Score distribution */}
+        <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)",
+          borderRadius: 12, padding: "18px 20px" }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)",
+            textTransform: "uppercase", letterSpacing: 1, marginBottom: 14 }}>
+            Score Distribution
+          </div>
+          {(data.score_distribution || []).map((r: any) => {
+            const total = data.total || 1;
+            const pct = Math.round(r.count / total * 100);
+            const color = r.range === "9-10" ? "#22c55e" : r.range === "8-9" ? "#a78bfa"
+              : r.range === "7-8" ? "#f59e0b" : "#ef4444";
+            return (
+              <div key={r.range} style={{ marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between",
+                  fontSize: 13, marginBottom: 4 }}>
+                  <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>{r.range}</span>
+                  <span style={{ color: "var(--text-muted)" }}>{r.count} tours ({pct}%)</span>
+                </div>
+                <div style={{ height: 8, background: "var(--border)", borderRadius: 4, overflow: "hidden" }}>
+                  <div style={{ height: "100%", width: `${pct}%`, background: color,
+                    borderRadius: 4, transition: "width 0.4s" }}/>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function DashboardPage() {
-  const [activeTab, setActiveTab] = useState<"metrics" | "health" | "spot" | "langfuse">("metrics");
+  const [activeTab, setActiveTab] = useState<"metrics" | "health" | "spot" | "langfuse" | "seo" | "library">("metrics");
   const [totalTours,  setTotalTours]  = useState(0);
   const [totalHITL,   setTotalHITL]   = useState(0);
   const [totalPassed, setTotalPassed] = useState(0);
@@ -137,11 +345,14 @@ export default function DashboardPage() {
           </p>
         </div>
         <div style={{ display: "flex", gap: 6 }}>
-          {(["metrics", "health", "spot", "langfuse"] as const).map(t => (
+          {(["metrics", "health", "spot", "seo", "library", "langfuse"] as const).map(t => (
             <button key={t} style={tabStyle(t)} onClick={() => setActiveTab(t)}>
               {t === "metrics" ? "📊 Metrics" :
                t === "health"  ? "🏥 Health" :
-               t === "spot"    ? "⚡ Spot Workers" : "🔍 Langfuse"}
+               t === "spot"    ? "⚡ Spot Workers"
+               : t === "seo"     ? "🔎 SEO Intelligence"
+               : t === "library" ? "📚 Content Library"
+               : "🔍 Langfuse"}
             </button>
           ))}
         </div>
@@ -302,6 +513,16 @@ export default function DashboardPage() {
             💡 Spot Workers run ECS Fargate Spot tasks for cost-efficient batch rewriting. On interruption, checkpoint is saved and work resumes on next available instance.
           </div>
         </ChartCard>
+      )}
+
+      {/* TAB: SEO Intelligence */}
+      {activeTab === "seo" && (
+        <SeoIntelligenceTab apiUrl={API_URL} getToken={getToken} />
+      )}
+
+      {/* TAB: Content Library */}
+      {activeTab === "library" && (
+        <ContentLibraryTab apiUrl={API_URL} getToken={getToken} />
       )}
 
       {/* TAB: Langfuse */}
