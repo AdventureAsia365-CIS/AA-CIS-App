@@ -802,11 +802,12 @@ async def get_brand_identity(
             WHERE tenant_id = $1
             ORDER BY version DESC
         """, tenant_id)
+
     def parse_fw(fw):
         if fw is None: return []
         if isinstance(fw, list): return fw
         try: return _json_br.loads(fw)
-        except: return []
+        except Exception:  # noqa: BLE001
     history = [{
         "version":       h["version"],
         "is_active":     h["is_active"],
