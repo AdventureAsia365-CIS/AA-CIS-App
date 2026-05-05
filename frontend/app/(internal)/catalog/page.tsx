@@ -48,6 +48,20 @@ interface Tour {
 export default function CatalogPage() {
   const [tours, setTours]       = useState<Tour[]>([]);
   const [loading, setLoading]   = useState(true);
+  const [selected, setSelected] = useState<Tour | null>(null);
+  const [detail, setDetail]     = useState<any>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+
+  const loadDetail = async (tour: Tour) => {
+    setSelected(tour); setDetailLoading(true); setDetail(null);
+    const token = getToken();
+    try {
+      const res = await fetch(`${API_URL}/v1/tours/${tour.id}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (res.ok) setDetail(await res.json());
+    } catch {} finally { setDetailLoading(false); }
+  };
   const [error, setError]       = useState("");
   const [search, setSearch]     = useState("");
   const [page, setPage]         = useState(1);
@@ -134,7 +148,8 @@ export default function CatalogPage() {
                 item.quality_score >= 9 ? "#22c55e" :
                 item.quality_score >= 8 ? "#DB9628" : "#f59e0b";
               return (
-                <tr key={item.id} style={{ borderBottom: "1px solid var(--border)" }}
+                <tr key={item.id} onClick={() => loadDetail(item)}
+                  style={{ borderBottom: "1px solid var(--border)", cursor: "pointer" }}
                   onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = "var(--bg-card-hover)"}
                   onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = "transparent"}>
                   <td style={{ padding: "14px 16px", fontWeight: 600, color: "var(--text-primary)", fontSize: 13, maxWidth: 200 }}>{item.aa_name}</td>
@@ -168,6 +183,112 @@ export default function CatalogPage() {
           <span style={{ padding:"8px 16px", color:"var(--text-muted)", fontSize:13 }}>Page {page}</span>
           <button onClick={() => setPage(p => p+1)} disabled={tours.length < 20}
             style={{ ...selectStyle, opacity: tours.length < 20 ? 0.4 : 1 }}>Next →</button>
+        </div>
+      )}
+    </div>
+
+      {/* Tour Detail Modal */}
+      {selected && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)",
+          zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center",
+          padding: 24 }} onClick={() => { setSelected(null); setDetail(null); }}>
+          <div onClick={e => e.stopPropagation()} style={{
+            background: "var(--bg-card)", borderRadius: 16,
+            border: "1px solid var(--border)", width: "100%", maxWidth: 720,
+            maxHeight: "85vh", overflowY: "auto",
+          }}>
+            {/* Header */}
+            <div style={{ padding: "18px 24px", borderBottom: "1px solid var(--border)",
+              display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 700,
+                  color: "var(--text-primary)" }}>{selected.aa_name}</div>
+                <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 4 }}>
+                  {selected.aa_subtitle}
+                </div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <span style={{ fontWeight: 800, fontSize: 20,
+                  color: (selected.quality_score ?? 0) >= 9 ? "#22c55e" : "#f59e0b" }}>
+                  {selected.quality_score?.toFixed(1) ?? "—"}
+                </span>
+                <button onClick={() => { setSelected(null); setDetail(null); }}
+                  style={{ background: "none", border: "none", cursor: "pointer",
+                    color: "var(--text-muted)", fontSize: 20 }}>×</button>
+              </div>
+            </div>
+
+            {detailLoading ? (
+              <div style={{ padding: 40, textAlign: "center",
+                color: "var(--text-muted)" }}>Loading...</div>
+            ) : detail ? (
+              <div style={{ padding: 24, display: "flex",
+                flexDirection: "column", gap: 16 }}>
+                {/* SEO Panel */}
+                <div style={{ background: "var(--bg-primary)", borderRadius: 10,
+                  padding: 16 }}>
+                  <div style={{ fontSize: 11, fontWeight: 600,
+                    color: "var(--text-muted)", textTransform: "uppercase",
+                    letterSpacing: 1, marginBottom: 10 }}>SEO</div>
+                  <div style={{ fontSize: 13, fontWeight: 600,
+                    color: "var(--text-primary)", marginBottom: 6 }}>
+                    {detail.seo_title}
+                  </div>
+                  <div style={{ fontSize: 12, color: "var(--text-secondary)",
+                    lineHeight: 1.6 }}>{detail.seo_meta}</div>
+                  {detail.seo_keywords_used && (
+                    <div style={{ marginTop: 8, display: "flex",
+                      flexWrap: "wrap", gap: 4 }}>
+                      {(typeof detail.seo_keywords_used === "string"
+                        ? JSON.parse(detail.seo_keywords_used)
+                        : detail.seo_keywords_used
+                      )?.slice(0,8).map((k: string) => (
+                        <span key={k} style={{ fontSize: 11, padding: "2px 8px",
+                          background: "rgba(219,150,40,0.1)",
+                          color: "var(--brand-gold)", borderRadius: 20 }}>{k}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                {/* Summary */}
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 600,
+                    color: "var(--text-muted)", textTransform: "uppercase",
+                    letterSpacing: 1, marginBottom: 8 }}>Summary</div>
+                  <div style={{ fontSize: 13, color: "var(--text-secondary)",
+                    lineHeight: 1.7 }}>{detail.aa_summary}</div>
+                </div>
+                {/* Highlights */}
+                {detail.aa_highlights && (
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 600,
+                      color: "var(--text-muted)", textTransform: "uppercase",
+                      letterSpacing: 1, marginBottom: 8 }}>Highlights</div>
+                    {(typeof detail.aa_highlights === "string"
+                      ? JSON.parse(detail.aa_highlights)
+                      : detail.aa_highlights
+                    )?.map((h: string, i: number) => (
+                      <div key={i} style={{ display: "flex", gap: 10,
+                        marginBottom: 6, fontSize: 13 }}>
+                        <span style={{ color: "var(--brand-gold)",
+                          fontWeight: 700, flexShrink: 0 }}>•</span>
+                        <span style={{ color: "var(--text-secondary)" }}>{h}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {/* Published info */}
+                <div style={{ fontSize: 12, color: "var(--text-muted)",
+                  paddingTop: 8, borderTop: "1px solid var(--border)" }}>
+                  Published: {selected.published_at
+                    ? new Date(selected.published_at).toLocaleString() : "—"}
+                </div>
+              </div>
+            ) : (
+              <div style={{ padding: 40, textAlign: "center",
+                color: "#ef4444" }}>Failed to load tour detail</div>
+            )}
+          </div>
         </div>
       )}
     </div>
