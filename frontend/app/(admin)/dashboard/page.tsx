@@ -78,6 +78,233 @@ const SPOT_WORKERS = [
   { id: "spot-2b", status: "idle", tours: 0, progress: 0, instance: "c5.xlarge" },
 ];
 
+
+// ── Volume Analytics Tab ──────────────────────────────────────────────────────
+
+function VolumeAnalyticsTab({ data }: { data: any }) {
+  const daily = data.daily_runs ?? [];
+  const totalTours  = daily.reduce((s: number, d: any) => s + (d.tours  ?? 0), 0);
+  const totalPassed = daily.reduce((s: number, d: any) => s + (d.passed ?? 0), 0);
+  const totalFailed = daily.reduce((s: number, d: any) => s + (d.failed ?? 0), 0);
+  const passRate = totalTours > 0 ? Math.round(totalPassed / totalTours * 100) : 0;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
+        {[
+          { label: "Total Tours",   value: totalTours,  color: "var(--brand-gold)" },
+          { label: "Auto-Passed",   value: totalPassed, color: "#22c55e" },
+          { label: "Failed",        value: totalFailed, color: "#ef4444" },
+          { label: "Pass Rate",     value: `${passRate}%`, color: "#a78bfa" },
+        ].map(c => (
+          <div key={c.label} style={{ background: "var(--bg-card)",
+            border: "1px solid var(--border)", borderRadius: 12, padding: "16px 20px" }}>
+            <div style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 600,
+              textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>{c.label}</div>
+            <div style={{ fontSize: 26, fontWeight: 800, color: c.color }}>{c.value}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)",
+        borderRadius: 12, padding: "20px 24px" }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)",
+          textTransform: "uppercase", letterSpacing: 1, marginBottom: 16 }}>
+          Daily Volume Breakdown
+        </div>
+        <ResponsiveContainer width="100%" height={240}>
+          <BarChart data={daily} margin={{ top: 4, right: 4, left: -20, bottom: 0 }}>
+            <XAxis dataKey="day" tick={{ fontSize: 11, fill: "#8B9BB4" }}
+              tickFormatter={(v: string) => v?.slice(5) ?? v}/>
+            <YAxis tick={{ fontSize: 11, fill: "#8B9BB4" }}/>
+            <Tooltip {...TOOLTIP_STYLE}/>
+            <Bar dataKey="passed" name="Passed" fill="#22c55e" radius={[3,3,0,0]}/>
+            <Bar dataKey="hitl"   name="HITL"   fill="#f59e0b" radius={[3,3,0,0]}/>
+            <Bar dataKey="failed" name="Failed"  fill="#ef4444" radius={[3,3,0,0]}/>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+
+// ── Quality Intelligence Tab ───────────────────────────────────────────────────
+
+function QualityIntelligenceTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => string | null }) {
+  const [data, setData] = React.useState<any>(null);
+  const [loading, setLoading] = React.useState(true);
+
+  React.useEffect(() => {
+    const token = getToken();
+    if (!token) return;
+    // Use existing metrics endpoint — extract quality data
+    fetch(`${apiUrl}/v1/pipeline/metrics?days=30`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }).then(r => r.ok ? r.json() : null)
+      .then(d => setData(d))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [apiUrl, getToken]);
+
+  if (loading) return <div style={{ padding: 40, textAlign: "center",
+    color: "var(--text-muted)" }}>Loading quality data...</div>;
+
+  const models = data?.model_usage ?? [];
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)",
+        borderRadius: 12, padding: "20px 24px" }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)",
+          textTransform: "uppercase", letterSpacing: 1, marginBottom: 16 }}>
+          Model Quality Scores (30d)
+        </div>
+        {models.length === 0 ? (
+          <div style={{ color: "var(--text-muted)", fontSize: 13 }}>No model data yet</div>
+        ) : (
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                {["Model", "Calls", "Avg Score", "Cost/Call"].map(h => (
+                  <th key={h} style={{ padding: "8px 12px", textAlign: "left",
+                    fontSize: 11, color: "var(--text-muted)", fontWeight: 600 }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {models.map((m: any) => {
+                const score = parseFloat(m.avg_score ?? 0);
+                const scoreColor = score >= 9 ? "#22c55e" : score >= 7 ? "#f59e0b" : "#ef4444";
+                return (
+                  <tr key={m.model} style={{ borderBottom: "1px solid var(--border)" }}>
+                    <td style={{ padding: "10px 12px" }}>
+                      <code style={{ fontSize: 12, color: "var(--brand-gold)" }}>{m.model}</code>
+                    </td>
+                    <td style={{ padding: "10px 12px",
+                      color: "var(--text-secondary)" }}>{m.calls}</td>
+                    <td style={{ padding: "10px 12px" }}>
+                      <span style={{ color: scoreColor, fontWeight: 700 }}>{score}</span>
+                    </td>
+                    <td style={{ padding: "10px 12px", color: "var(--text-muted)" }}>
+                      {m.calls > 0 && m.total_cost
+                        ? `$${(m.total_cost / m.calls).toFixed(4)}` : "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+      <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)",
+        borderRadius: 12, padding: "20px 24px" }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)",
+          textTransform: "uppercase", letterSpacing: 1, marginBottom: 14 }}>
+          Quality Score Trend (7d)
+        </div>
+        <ResponsiveContainer width="100%" height={200}>
+          <LineChart data={data?.daily_runs ?? []}
+            margin={{ top: 4, right: 4, left: -20, bottom: 0 }}>
+            <XAxis dataKey="day" tick={{ fontSize: 11, fill: "#8B9BB4" }}
+              tickFormatter={(v: string) => v?.slice(5) ?? v}/>
+            <YAxis domain={[0, 10]} tick={{ fontSize: 11, fill: "#8B9BB4" }}/>
+            <CartesianGrid strokeDasharray="3 3" stroke="#2A3547"/>
+            <Tooltip {...TOOLTIP_STYLE}/>
+            <Line type="monotone" dataKey="passed" name="Passed Tours"
+              stroke="#22c55e" strokeWidth={2} dot={false}/>
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+
+// ── Cost & Billing Tab ────────────────────────────────────────────────────────
+
+function CostBillingTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => string | null }) {
+  const [data, setData] = React.useState<any>(null);
+  const [loading, setLoading] = React.useState(true);
+
+  React.useEffect(() => {
+    const token = getToken();
+    if (!token) return;
+    fetch(`${apiUrl}/v1/pipeline/metrics?days=30`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }).then(r => r.ok ? r.json() : null)
+      .then(d => setData(d))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [apiUrl, getToken]);
+
+  if (loading) return <div style={{ padding: 40, textAlign: "center",
+    color: "var(--text-muted)" }}>Loading cost data...</div>;
+
+  const daily   = data?.daily_runs ?? [];
+  const models  = data?.model_usage ?? [];
+  const totalCost = daily.reduce((s: number, d: any) => s + parseFloat(d.cost ?? 0), 0);
+  const totalTours = daily.reduce((s: number, d: any) => s + (d.tours ?? 0), 0);
+  const costPerTour = totalTours > 0 ? totalCost / totalTours : 0;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
+        {[
+          { label: "Total LLM Cost (30d)", value: `$${totalCost.toFixed(2)}`,  color: "var(--brand-gold)" },
+          { label: "Tours Processed",      value: totalTours,                    color: "#a78bfa" },
+          { label: "Cost / Tour",          value: `$${costPerTour.toFixed(4)}`, color: "#22c55e" },
+        ].map(c => (
+          <div key={c.label} style={{ background: "var(--bg-card)",
+            border: "1px solid var(--border)", borderRadius: 12, padding: "16px 20px" }}>
+            <div style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 600,
+              textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>{c.label}</div>
+            <div style={{ fontSize: 24, fontWeight: 800, color: c.color }}>{c.value}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)",
+        borderRadius: 12, padding: "20px 24px" }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)",
+          textTransform: "uppercase", letterSpacing: 1, marginBottom: 16 }}>
+          Daily LLM Cost (30d)
+        </div>
+        <ResponsiveContainer width="100%" height={220}>
+          <LineChart data={daily} margin={{ top: 4, right: 4, left: -10, bottom: 0 }}>
+            <XAxis dataKey="day" tick={{ fontSize: 11, fill: "#8B9BB4" }}
+              tickFormatter={(v: string) => v?.slice(5) ?? v}/>
+            <YAxis tick={{ fontSize: 11, fill: "#8B9BB4" }}
+              tickFormatter={(v: number) => `$${v}`}/>
+            <CartesianGrid strokeDasharray="3 3" stroke="#2A3547"/>
+            <Tooltip {...TOOLTIP_STYLE} formatter={(v: number) => [`$${Number(v).toFixed(4)}`, "Cost"]}/>
+            <Line type="monotone" dataKey="cost" name="LLM Cost"
+              stroke="#DB9628" strokeWidth={2} dot={{ fill: "#DB9628", r: 3 }}/>
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+
+      <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)",
+        borderRadius: 12, padding: "20px 24px" }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)",
+          textTransform: "uppercase", letterSpacing: 1, marginBottom: 14 }}>
+          Cost by Model
+        </div>
+        {models.map((m: any) => (
+          <div key={m.model} style={{ display: "flex", justifyContent: "space-between",
+            alignItems: "center", padding: "8px 0",
+            borderBottom: "1px solid var(--border)", fontSize: 13 }}>
+            <code style={{ color: "var(--brand-gold)", fontSize: 12 }}>{m.model}</code>
+            <div style={{ display: "flex", gap: 24 }}>
+              <span style={{ color: "var(--text-muted)" }}>{m.calls} calls</span>
+              <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>
+                ${m.total_cost ? Number(m.total_cost).toFixed(4) : "0.0000"}
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ── SEO Intelligence Tab ─────────────────────────────────────────────────────
 
 function SeoIntelligenceTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => string | null }) {
@@ -286,7 +513,7 @@ function ContentLibraryTab({ apiUrl, getToken }: { apiUrl: string; getToken: () 
 }
 
 export default function DashboardPage() {
-  const [activeTab, setActiveTab] = useState<"metrics" | "health" | "spot" | "langfuse" | "seo" | "library">("metrics");
+  const [activeTab, setActiveTab] = useState<"metrics" | "health" | "spot" | "langfuse" | "seo" | "library" | "volume" | "quality" | "billing">("metrics");
   const [totalTours,  setTotalTours]  = useState(0);
   const [totalHITL,   setTotalHITL]   = useState(0);
   const [totalPassed, setTotalPassed] = useState(0);
@@ -345,13 +572,16 @@ export default function DashboardPage() {
           </p>
         </div>
         <div style={{ display: "flex", gap: 6 }}>
-          {(["metrics", "health", "spot", "seo", "library", "langfuse"] as const).map(t => (
+          {(["metrics", "volume", "quality", "billing", "health", "spot", "seo", "library", "langfuse"] as const).map(t => (
             <button key={t} style={tabStyle(t)} onClick={() => setActiveTab(t)}>
               {t === "metrics" ? "📊 Metrics" :
                t === "health"  ? "🏥 Health" :
                t === "spot"    ? "⚡ Spot Workers"
                : t === "seo"     ? "🔎 SEO Intelligence"
                : t === "library" ? "📚 Content Library"
+               : t === "volume"  ? "📊 Volume Analytics"
+               : t === "quality" ? "🎯 Quality Intelligence"
+               : t === "billing" ? "💰 Cost & Billing"
                : "🔍 Langfuse"}
             </button>
           ))}
@@ -523,6 +753,21 @@ export default function DashboardPage() {
       {/* TAB: Content Library */}
       {activeTab === "library" && (
         <ContentLibraryTab apiUrl={API_URL} getToken={getToken} />
+      )}
+
+      {/* TAB: Volume Analytics */}
+      {activeTab === "volume" && metrics && (
+        <VolumeAnalyticsTab data={metrics} />
+      )}
+
+      {/* TAB: Quality Intelligence */}
+      {activeTab === "quality" && (
+        <QualityIntelligenceTab apiUrl={API_URL} getToken={getToken} />
+      )}
+
+      {/* TAB: Cost & Billing */}
+      {activeTab === "billing" && (
+        <CostBillingTab apiUrl={API_URL} getToken={getToken} />
       )}
 
       {/* TAB: Langfuse */}
