@@ -67,27 +67,6 @@ async def list_tours(
     }
 
 
-@router.get("/{tour_id}")
-async def get_tour(
-    tour_id: str,
-    request: Request,
-    tenant=Depends(get_tenant),
-):
-    tenant_id = tenant["sub"]
-    pool = request.app.state.pool
-
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            SELECT * FROM gold_aa_internal.published_tours
-            WHERE id = $1 AND tenant_id = $2
-        """, tour_id, tenant_id)
-
-    if not row:
-        raise HTTPException(status_code=404, detail="Tour not found")
-
-    return dict(row)
-
-
 # ── P3-S4: Shared Pool Browse ─────────────────────────────────────────────────
 
 @router.get("/pool")
@@ -294,6 +273,27 @@ async def list_my_versions(
         "pagination": {"page": page, "page_size": page_size,
                        "total": total, "pages": -(-total // page_size)},
     }
+
+
+@router.get("/{tour_id}")
+async def get_tour(
+    tour_id: str,
+    request: Request,
+    tenant=Depends(get_tenant),
+):
+    tenant_id = tenant["sub"]
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT * FROM gold_aa_internal.published_tours
+            WHERE id = $1 AND tenant_id = $2
+        """, tour_id, tenant_id)
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Tour not found")
+
+    return dict(row)
 
 
 # ── P3-S4: Version Detail + Approve/Reject/Edit ───────────────────────────────
