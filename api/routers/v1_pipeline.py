@@ -859,3 +859,209 @@ async def upload_brand_file(
         ExpiresIn=300,
     )
     return {"upload_url": upload_url, "s3_key": s3_key}
+
+
+# ── P3-S8: SEO Intelligence metrics ──────────────────────────────────────────
+
+@router.get("/metrics/seo")
+async def get_seo_metrics(
+    request: Request,
+    tenant=Depends(_get_tenant),
+):
+    """SEO Intelligence tab: DataForSEO usage + Redis cache stats + top keywords."""
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        # Top keywords by country from seo_contexts
+        top_keywords = await conn.fetch("""
+            SELECT country, keywords_json, created_at
+            FROM silver_aa_internal.seo_contexts
+            ORDER BY created_at DESC
+            LIMIT 20
+        """)
+
+        # SEO coverage: how many tours have seo_contexts
+        total_tours = await conn.fetchval(
+            "SELECT COUNT(*) FROM gold_aa_internal.published_tours "
+            "WHERE tenant_id = '00000000-0000-0000-0000-000000000001'::uuid"
+        )
+        seo_covered = await conn.fetchval(
+            "SELECT COUNT(DISTINCT tour_id) FROM silver_aa_internal.seo_contexts"
+        )
+
+        # Countries covered
+        countries = await conn.fetch("""
+            SELECT DISTINCT country, COUNT(*) as count
+            FROM silver_aa_internal.seo_contexts
+            WHERE country IS NOT NULL
+            GROUP BY country ORDER BY count DESC
+        """)
+
+    # Redis cache stats
+    redis = request.app.state.redis
+    cache_stats = {"hit_rate": "N/A", "keys": 0}
+    try:
+        info = await redis.info("stats")
+        hits = int(info.get("keyspace_hits", 0))
+        misses = int(info.get("keyspace_misses", 0))
+        total = hits + misses
+        cache_stats["hit_rate"] = f"{round(hits/total*100, 1)}%" if total > 0 else "0%"
+        cache_stats["hits"] = hits
+        cache_stats["misses"] = misses
+        db_info = await redis.info("keyspace")
+        cache_stats["keys"] = sum(
+            int(v.split(",")[0].split("=")[1])
+            for v in db_info.values() if isinstance(v, str) and "keys=" in v
+        )
+    except Exception:
+        pass
+
+    # Parse keywords from seo_contexts
+    import json as _j
+    keyword_counts: dict = {}
+    for row in top_keywords:
+        try:
+            kw_data = _j.loads(row["keywords_json"]) if isinstance(
+                row["keywords_json"], str) else (row["keywords_json"] or {})
+            for kw in (kw_data.get("top_keywords") or [])[:5]:
+                keyword_counts[kw] = keyword_counts.get(kw, 0) + 1
+        except Exception:
+            pass
+
+    top_kw = sorted(keyword_counts.items(), key=lambda x: x[1], reverse=True)[:15]
+
+    return {
+        "total_tours":   total_tours,
+        "seo_covered":   seo_covered,
+        "coverage_pct":  round(seo_covered / total_tours * 100, 1) if total_tours else 0,
+        "countries":     [dict(r) for r in countries],
+        "top_keywords":  [{"keyword": k, "count": v} for k, v in top_kw],
+        "cache":         cache_stats,
+    }
+
+
+# ── P3-S8: Content Library metrics ───────────────────────────────────────────
+
+@router.get("/metrics/library")
+async def get_library_metrics(
+    request: Request,
+    tenant=Depends(_get_tenant),
+):
+    """Content Library tab: pool coverage by country/type, freshness."""
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        # Coverage by country
+        by_country = await conn.fetch("""
+            SELECT rt.country,
+                   COUNT(pt.id)                          AS total,
+                   ROUND(AVG(pt.quality_score)::numeric,2) AS avg_score,
+                   MAX(pt.published_at)                  AS last_published
+            FROM gold_aa_internal.published_tours pt
+            LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
+            WHERE pt.tenant_id = '00000000-0000-0000-0000-000000000001'::uuid
+            GROUP BY rt.country
+            ORDER BY total DESC
+        """)
+
+        # Overall stats
+        stats = await conn.fetchrow("""
+            SELECT
+                COUNT(*)                                     AS total,
+                ROUND(AVG(quality_score)::numeric, 2)        AS avg_score,
+                COUNT(CASE WHEN published_at >= NOW() - INTERVAL '30 days'
+                      THEN 1 END)                            AS published_last_30d,
+                COUNT(CASE WHEN published_at < NOW() - INTERVAL '180 days'
+                      THEN 1 END)                            AS stale_count
+            FROM gold_aa_internal.published_tours
+            WHERE tenant_id = '00000000-0000-0000-0000-000000000001'::uuid
+        """)
+
+        # Score distribution
+        score_dist = await conn.fetch("""
+            SELECT
+                CASE
+                    WHEN quality_score >= 9 THEN '9-10'
+                    WHEN quality_score >= 8 THEN '8-9'
+                    WHEN quality_score >= 7 THEN '7-8'
+                    ELSE '<7'
+                END AS range,
+                COUNT(*) AS count
+            FROM gold_aa_internal.published_tours
+            WHERE tenant_id = '00000000-0000-0000-0000-000000000001'::uuid
+            GROUP BY range ORDER BY range DESC
+        """)
+
+    return {
+        "total":            stats["total"],
+        "avg_score":        float(stats["avg_score"] or 0),
+        "published_last_30d": stats["published_last_30d"],
+        "stale_count":      stats["stale_count"],
+        "by_country":       [dict(r) for r in by_country],
+        "score_distribution": [dict(r) for r in score_dist],
+    }
+
+
+# ── P3-S8: Spot Workers real data ─────────────────────────────────────────────
+
+@router.get("/metrics/spot-workers")
+async def get_spot_workers(
+    request: Request,
+    tenant=Depends(_get_tenant),
+):
+    """Spot Workers tab: real ECS Fargate Spot task data."""
+    import boto3 as _boto3_sw
+    ecs = _boto3_sw.client(
+        "ecs", region_name=os.environ.get("AWS_REGION", "us-west-1")
+    )
+    cluster = os.environ.get("ECS_CLUSTER", "aa-cis-dev-cluster")
+
+    try:
+        # List running tasks
+        task_arns = ecs.list_tasks(
+            cluster=cluster, desiredStatus="RUNNING"
+        ).get("taskArns", [])
+
+        spot_tasks = []
+        on_demand_tasks = []
+
+        if task_arns:
+            tasks = ecs.describe_tasks(
+                cluster=cluster, tasks=task_arns
+            ).get("tasks", [])
+
+            for t in tasks:
+                cap = t.get("capacityProviderName", "FARGATE")
+                info = {
+                    "task_id":  t["taskArn"].split("/")[-1][:12],
+                    "status":   t.get("lastStatus", "UNKNOWN"),
+                    "cpu":      t.get("cpu", "256"),
+                    "memory":   t.get("memory", "512"),
+                    "started":  str(t.get("startedAt", "")),
+                    "capacity": cap,
+                }
+                if cap == "FARGATE_SPOT":
+                    spot_tasks.append(info)
+                else:
+                    on_demand_tasks.append(info)
+
+        # Cost saving estimate
+        spot_count = len(spot_tasks)
+        total_count = len(task_arns)
+        spot_pct = round(spot_count / total_count * 100) if total_count else 0
+        # Fargate: ~$0.04048/vCPU/hr, Spot: ~70% cheaper
+        saving_per_hr = spot_count * 0.04048 * 0.7
+
+        return {
+            "total_tasks":     total_count,
+            "spot_tasks":      spot_count,
+            "on_demand_tasks": len(on_demand_tasks),
+            "spot_pct":        spot_pct,
+            "saving_per_hr":   round(saving_per_hr, 4),
+            "tasks":           spot_tasks + on_demand_tasks,
+        }
+    except Exception as e:
+        return {
+            "total_tasks": 0, "spot_tasks": 0,
+            "on_demand_tasks": 0, "spot_pct": 0,
+            "saving_per_hr": 0, "tasks": [],
+            "error": str(e),
+        }
