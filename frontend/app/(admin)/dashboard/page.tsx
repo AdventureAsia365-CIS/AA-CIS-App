@@ -274,7 +274,7 @@ function CostBillingTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => 
             <YAxis tick={{ fontSize: 11, fill: "#8B9BB4" }}
               tickFormatter={(v: number) => `$${v}`}/>
             <CartesianGrid strokeDasharray="3 3" stroke="#2A3547"/>
-            <Tooltip {...TOOLTIP_STYLE} formatter={(v: number) => [`$${Number(v).toFixed(4)}`, "Cost"]}/>
+            <Tooltip {...TOOLTIP_STYLE} formatter={(v: unknown) => [`$${Number(v).toFixed(4)}`, "Cost"]}/>
             <Line type="monotone" dataKey="cost" name="LLM Cost"
               stroke="#DB9628" strokeWidth={2} dot={{ fill: "#DB9628", r: 3 }}/>
           </LineChart>
