@@ -15,6 +15,19 @@ const USERS = [
     role: "content",
     name: process.env.CONTENT_DISPLAY_NAME ?? "Content Staff",
   },
+  // Test accounts (optional — only active if env vars set)
+  ...(process.env.ADMIN2_USERNAME ? [{
+    username: process.env.ADMIN2_USERNAME,
+    password: process.env.ADMIN2_PASSWORD ?? "",
+    role: "admin" as const,
+    name: "Admin (Test)",
+  }] : []),
+  ...(process.env.CONTENT2_USERNAME ? [{
+    username: process.env.CONTENT2_USERNAME,
+    password: process.env.CONTENT2_PASSWORD ?? "",
+    role: "content" as const,
+    name: "Content (Test)",
+  }] : []),
 ];
 
 export async function POST(req: NextRequest) {
