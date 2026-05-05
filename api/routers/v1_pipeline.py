@@ -226,7 +226,10 @@ async def run_tour(req: TourRunRequest):
                 brand_rules = {
                     "system_prompt":    br_row["system_prompt"] or "",
                     "style_guide":      br_row["style_guide"] or "",
-                    "forbidden_words":  list(br_row["forbidden_words"] or []),
+                    "forbidden_words":  (
+                        list(br_row["forbidden_words"]) if isinstance(br_row["forbidden_words"], list)
+                        else __import__("json").loads(br_row["forbidden_words"] or "[]")
+                    ),
                     "rewrite_language": getattr(req, "rewrite_language", "en-US"),
                 }
         except Exception as _br_err:
@@ -794,7 +797,10 @@ async def get_brand_identity(
         "configured": True,
         "system_prompt":   row["system_prompt"],
         "style_guide":     row["style_guide"],
-        "forbidden_words": row["forbidden_words"] or [],
+        "forbidden_words": (
+            row["forbidden_words"] if isinstance(row["forbidden_words"], list)
+            else __import__("json").loads(row["forbidden_words"] or "[]")
+        ),
         "version":         row["version"],
         "updated_at":      row["updated_at"].isoformat() if row["updated_at"] else None,
     }
