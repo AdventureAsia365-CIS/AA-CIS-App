@@ -781,28 +781,49 @@ async def get_brand_identity(
     request: Request,
     tenant=Depends(_get_tenant),
 ):
-    """Get brand identity config for current tenant."""
+    """Get brand identity config for current tenant — includes all versions."""
+    import json as _json_br
     pool = request.app.state.pool
     tenant_id = tenant.get("sub", "00000000-0000-0000-0000-000000000001")
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            SELECT system_prompt, style_guide, forbidden_words, version, updated_at
+            SELECT system_prompt, style_guide, forbidden_words, version, updated_at, created_at
             FROM shared.tenant_brand_rules
             WHERE tenant_id = $1 AND is_active = true
             ORDER BY version DESC LIMIT 1
         """, tenant_id)
-    if not row:
-        return {"configured": False, "system_prompt": None, "style_guide": None, "forbidden_words": []}
+        if not row:
+            return {"configured": False, "system_prompt": None,
+                    "style_guide": None, "forbidden_words": [], "history": []}
+        history_rows = await conn.fetch("""
+            SELECT version, is_active, system_prompt, style_guide,
+                   forbidden_words, updated_at, created_at
+            FROM shared.tenant_brand_rules
+            WHERE tenant_id = $1
+            ORDER BY version DESC
+        """, tenant_id)
+    def parse_fw(fw):
+        if fw is None: return []
+        if isinstance(fw, list): return fw
+        try: return _json_br.loads(fw)
+        except: return []
+    history = [{
+        "version":       h["version"],
+        "is_active":     h["is_active"],
+        "system_prompt": h["system_prompt"] or "",
+        "style_guide":   h["style_guide"] or "",
+        "forbidden_words": parse_fw(h["forbidden_words"]),
+        "updated_at": h["updated_at"].isoformat() if h["updated_at"] else None,
+        "created_at": h["created_at"].isoformat() if h["created_at"] else None,
+    } for h in history_rows]
     return {
-        "configured": True,
-        "system_prompt":   row["system_prompt"],
-        "style_guide":     row["style_guide"],
-        "forbidden_words": (
-            row["forbidden_words"] if isinstance(row["forbidden_words"], list)
-            else __import__("json").loads(row["forbidden_words"] or "[]")
-        ),
-        "version":         row["version"],
-        "updated_at":      row["updated_at"].isoformat() if row["updated_at"] else None,
+        "configured":    True,
+        "system_prompt": row["system_prompt"],
+        "style_guide":   row["style_guide"],
+        "forbidden_words": parse_fw(row["forbidden_words"]),
+        "version":    row["version"],
+        "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+        "history":    history,
     }
 
 
