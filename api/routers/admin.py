@@ -108,15 +108,21 @@ async def list_tenants(
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT
-                t.tenant_id, t.name, t.slug, t.plan_tier,
+                t.tenant_id, t.name, t.slug, t.plan_tier::text,
                 t.rate_limit_rpm, t.is_active, t.created_at,
-                COALESCE(u.total_calls, 0)      AS total_calls,
-                COALESCE(u.successful_calls, 0) AS successful_calls,
-                COALESCE(u.avg_response_ms, 0)  AS avg_response_ms
+                COALESCE(u.tours_rewritten, 0)      AS tours_rewritten,
+                COALESCE(u.api_calls_used, 0)       AS api_calls_used,
+                COALESCE(u.quota_tours_pct, 0)      AS quota_tours_pct,
+                COALESCE(u.quota_calls_pct, 0)      AS quota_calls_pct,
+                COALESCE(u.tours_overage, 0)        AS tours_overage,
+                COALESCE(u.overage_usd, 0)          AS overage_usd,
+                COALESCE(u.llm_cost_usd, 0)         AS llm_cost_usd,
+                COALESCE(u.tours_quota_monthly, 0)  AS tours_quota_monthly,
+                COALESCE(u.api_calls_quota_monthly, 0) AS api_calls_quota_monthly,
+                COALESCE(u.price_usd_monthly, 0)    AS price_usd_monthly
             FROM shared.tenants t
             LEFT JOIN shared.v_tenant_monthly_usage u
                 ON u.tenant_id = t.tenant_id
-                AND DATE_TRUNC('month', u.month) = DATE_TRUNC('month', NOW())
             ORDER BY t.created_at
         """)
     return {
@@ -129,10 +135,19 @@ async def list_tenants(
                 "rate_limit_rpm":  r["rate_limit_rpm"],
                 "is_active":       r["is_active"],
                 "created_at":      r["created_at"].isoformat(),
+                "plan": {
+                    "tours_quota_monthly":    r["tours_quota_monthly"],
+                    "api_calls_quota_monthly": r["api_calls_quota_monthly"],
+                    "price_usd_monthly":      float(r["price_usd_monthly"]),
+                },
                 "this_month": {
-                    "total_calls":      r["total_calls"],
-                    "successful_calls": r["successful_calls"],
-                    "avg_response_ms":  float(r["avg_response_ms"]),
+                    "tours_rewritten":   r["tours_rewritten"],
+                    "api_calls_used":    r["api_calls_used"],
+                    "quota_tours_pct":   float(r["quota_tours_pct"]),
+                    "quota_calls_pct":   float(r["quota_calls_pct"]),
+                    "tours_overage":     r["tours_overage"],
+                    "overage_usd":       float(r["overage_usd"]),
+                    "llm_cost_usd":      float(r["llm_cost_usd"]),
                 },
             }
             for r in rows

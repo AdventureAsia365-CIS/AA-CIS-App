@@ -22,10 +22,19 @@ interface Tenant {
   rate_limit_rpm: number;
   is_active: boolean;
   created_at: string;
+  plan: {
+    tours_quota_monthly: number;
+    api_calls_quota_monthly: number;
+    price_usd_monthly: number;
+  };
   this_month: {
-    total_calls: number;
-    successful_calls: number;
-    avg_response_ms: number;
+    tours_rewritten: number;
+    api_calls_used: number;
+    quota_tours_pct: number;
+    quota_calls_pct: number;
+    tours_overage: number;
+    overage_usd: number;
+    llm_cost_usd: number;
   };
 }
 
@@ -243,12 +252,12 @@ function TenantRow({ tenant, onRotateKey }: {
         </td>
         {/* This month calls */}
         <td style={{ padding: "14px 16px", textAlign: "right" as const }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{tenant.this_month.total_calls.toLocaleString()}</div>
-          <div style={{ fontSize: 11, color: "#22c55e" }}>{tenant.this_month.successful_calls.toLocaleString()} ok</div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>{tenant.this_month.tours_rewritten} tours</div>
+          <div style={{ fontSize: 11, color: "#22c55e" }}>{tenant.this_month.api_calls_used.toLocaleString()} API calls</div>
         </td>
         {/* Avg latency */}
         <td style={{ padding: "14px 16px", fontSize: 12, color: "var(--text-muted)", textAlign: "right" as const }}>
-          {tenant.this_month.avg_response_ms > 0 ? `${Math.round(tenant.this_month.avg_response_ms)}ms` : "—"}
+          {tenant.plan ? `${tenant.this_month.quota_tours_pct}% quota used` : "—"}
         </td>
         {/* Status */}
         <td style={{ padding: "14px 16px" }}>
@@ -393,7 +402,7 @@ export default function TenantsPage() {
   };
 
   const totalActive = tenants.filter(t => t.is_active).length;
-  const totalCalls  = tenants.reduce((s, t) => s + t.this_month.total_calls, 0);
+  const totalCalls  = tenants.reduce((s, t) => s + t.this_month.api_calls_used, 0);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
