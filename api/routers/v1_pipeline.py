@@ -1065,3 +1065,71 @@ async def get_spot_workers(
             "saving_per_hr": 0, "tasks": [],
             "error": str(e),
         }
+
+
+# ── P3-S6: Tenant billing summary ────────────────────────────────────────────
+
+@router.get("/billing")
+async def get_tenant_billing(
+    request: Request,
+    tenant=Depends(_get_tenant),
+):
+    """Tenant billing summary — quota usage, spend, overage."""
+    tenant_id = tenant.get("sub", "00000000-0000-0000-0000-000000000001")
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT
+                v.tenant_name, v.plan_tier, v.billing_month,
+                v.tours_quota_monthly, v.api_calls_quota_monthly,
+                v.price_usd_monthly,
+                v.tours_rewritten, v.api_calls_used,
+                v.quota_tours_pct, v.quota_calls_pct,
+                v.tours_overage, v.overage_usd, v.llm_cost_usd,
+                v.overage_rate_usd_per_tour
+            FROM shared.v_tenant_monthly_usage v
+            WHERE v.tenant_id = $1::uuid
+        """, tenant_id)
+
+        # Recent activity — last 5 versions created
+        activity = await conn.fetch("""
+            SELECT ttv.id, ttv.created_at, ttv.status, ttv.edit_source,
+                   pt.aa_name, rt.country
+            FROM gold_aa_internal.tenant_tour_versions ttv
+            JOIN gold_aa_internal.published_tours pt ON pt.id = ttv.published_tour_id
+            LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
+            WHERE ttv.tenant_id = $1::uuid
+            ORDER BY ttv.created_at DESC LIMIT 5
+        """, tenant_id)
+
+    if not row:
+        return {
+            "plan_tier": "starter",
+            "tours_quota_monthly": 50,
+            "api_calls_quota_monthly": 5000,
+            "price_usd_monthly": 299.0,
+            "tours_rewritten": 0, "api_calls_used": 0,
+            "quota_tours_pct": 0.0, "quota_calls_pct": 0.0,
+            "tours_overage": 0, "overage_usd": 0.0,
+            "llm_cost_usd": 0.0, "overage_rate_usd_per_tour": 4.0,
+            "activity": [],
+        }
+
+    return {
+        **{k: (float(v) if hasattr(v, '__float__') and not isinstance(v, int)
+               else v)
+           for k, v in dict(row).items()
+           if k not in ("billing_month",)},
+        "billing_month": str(row["billing_month"])[:7] if row["billing_month"] else None,
+        "activity": [
+            {
+                "id": str(a["id"]),
+                "created_at": a["created_at"].isoformat(),
+                "status": a["status"],
+                "edit_source": a["edit_source"],
+                "tour_name": a["aa_name"],
+                "country": a["country"],
+            }
+            for a in activity
+        ],
+    }
