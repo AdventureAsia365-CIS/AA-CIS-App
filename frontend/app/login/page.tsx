@@ -3,15 +3,6 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { User, Lock } from "lucide-react";
 
-const MOCK_USERS = [
-  { username:"admin",   password:"admin2026",   role:"admin",   name:"Nghiep (DevOps)" },
-  { username:"content", password:"content2026", role:"content", name:"Trang (Content)" },
-];
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
-// aa_internal tenant API key — injected at build time or hardcoded for internal demo
-const INTERNAL_API_KEY = process.env.NEXT_PUBLIC_INTERNAL_API_KEY || "";
-
 export default function LoginPage() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -20,29 +11,32 @@ export default function LoginPage() {
   const router = useRouter();
 
   const login = async () => {
-    const user = MOCK_USERS.find(u => u.username === username && u.password === password);
-    if (!user) { setError("Invalid username or password"); return; }
-
+    if (!username || !password) { setError("Enter username and password"); return; }
     setLoading(true);
+    setError("");
+
     try {
-      // Fetch real JWT from API
-      const res = await fetch(`${API_URL}/auth/tenant-login`, {
+      const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ api_key: INTERNAL_API_KEY }),
+        body: JSON.stringify({ username, password }),
       });
 
-      if (!res.ok) throw new Error("Failed to authenticate with API");
       const data = await res.json();
 
-      // Store JWT + role cookies
-      document.cookie = `cis_api_token=${encodeURIComponent(data.token)}; path=/; max-age=86400`;
-      document.cookie = `cis_role=${user.role}; path=/; max-age=86400`;
-      document.cookie = `cis_user=${user.name}; path=/; max-age=86400`;
+      if (!res.ok) {
+        setError(data.detail || "Invalid username or password");
+        setLoading(false);
+        return;
+      }
 
-      router.push(user.role === "admin" ? "/dashboard" : "/upload");
-    } catch (e: any) {
-      setError("API connection failed — check network");
+      document.cookie = `cis_api_token=${encodeURIComponent(data.token)}; path=/; max-age=86400`;
+      document.cookie = `cis_role=${data.role}; path=/; max-age=86400`;
+      document.cookie = `cis_user=${encodeURIComponent(data.name)}; path=/; max-age=86400`;
+
+      router.push(data.role === "admin" ? "/dashboard" : "/upload");
+    } catch {
+      setError("Network error — check connection");
       setLoading(false);
     }
   };
@@ -63,7 +57,7 @@ export default function LoginPage() {
           <div style={{ position:"relative" }}>
             <User size={13} style={{ position:"absolute", left:12, top:"50%", transform:"translateY(-50%)", color:"var(--text-muted)" }} />
             <input type="text" value={username} onChange={e => { setUsername(e.target.value); setError(""); }}
-              placeholder="admin or content"
+              placeholder="Username"
               onKeyDown={e => e.key === "Enter" && login()}
               style={{ width:"100%", padding:"10px 12px 10px 34px", background:"var(--bg-primary)", border:`1px solid ${error ? "#ef4444" : "var(--border)"}`, borderRadius:8, color:"var(--text-primary)", fontSize:13, outline:"none" }} />
           </div>
@@ -85,11 +79,6 @@ export default function LoginPage() {
           style={{ width:"100%", padding:12, background:"var(--brand-gold)", border:"none", borderRadius:8, color:"white", fontSize:14, fontWeight:700, cursor: loading ? "not-allowed" : "pointer", opacity: loading ? 0.7 : 1 }}>
           {loading ? "Connecting..." : "Login"}
         </button>
-
-        <div style={{ marginTop:16, padding:12, background:"rgba(219,150,40,0.06)", border:"1px solid rgba(219,150,40,0.2)", borderRadius:8, fontSize:12, color:"var(--text-muted)", lineHeight:1.6 }}>
-          Demo: <code style={{ color:"var(--brand-gold)" }}>admin / admin2026</code><br/>
-          or: <code style={{ color:"var(--brand-gold)" }}>content / content2026</code>
-        </div>
 
         <div style={{ marginTop:16, textAlign:"center" as const }}>
           <a href="/tenant-login" style={{ fontSize:12, color:"var(--text-muted)", textDecoration:"none" }}>B2B Tenant login →</a>

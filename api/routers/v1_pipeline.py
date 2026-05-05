@@ -260,6 +260,31 @@ async def run_tour(req: TourRunRequest):
                 "00000000-0000-0000-0000-000000000001",
                 float(result.get("quality_score", 0.0)),
             )
+
+        # G-04: Write cost to pipeline_runs — accumulate per tour
+        cost_usd    = float(result.get("cost_usd") or 0.0)
+        tokens_in   = int(result.get("input_tokens") or 0)
+        tokens_out  = int(result.get("output_tokens") or 0)
+        tour_passed = float(result.get("quality_score") or 0.0) >= 7.0
+        if cost_usd > 0 or tokens_in > 0:
+            await conn.execute("""
+                UPDATE shared.pipeline_runs
+                SET
+                    cost_usd      = COALESCE(cost_usd, 0)      + $1,
+                    tokens_input  = COALESCE(tokens_input, 0)  + $2,
+                    tokens_output = COALESCE(tokens_output, 0) + $3,
+                    tours_passed  = tours_passed + $4,
+                    tours_failed  = tours_failed + $5
+                WHERE batch_id = $6::uuid
+            """,
+                cost_usd,
+                tokens_in,
+                tokens_out,
+                1 if tour_passed else 0,
+                0 if tour_passed else 1,
+                req.batch_id,
+            )
+
         return {
             "tour_id":       req.tour_id,
             "batch_id":      req.batch_id,
