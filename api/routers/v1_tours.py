@@ -257,14 +257,15 @@ async def trigger_rewrite(
                 import json as _j3
                 gen = result["generated"]
                 rewritten = {
-                    "name":       gen.get("name", tour_dict["name"]),
-                    "subtitle":   gen.get("subtitle", ""),
-                    "summary":    gen.get("summary", ""),
-                    "highlights": gen.get("highlights", []),
-                    "seo_title":  gen.get("seo_title", ""),
-                    "seo_meta":   gen.get("seo_meta", ""),
-                    "trip_type":  gen.get("trip_type", ""),
-                    "status":     "done",
+                    "name":        gen.get("name", tour_dict["name"]),
+                    "subtitle":    gen.get("subtitle", ""),
+                    "summary":     gen.get("summary", ""),
+                    "highlights":  gen.get("highlights", []),
+                    "itineraries": gen.get("itineraries", tour_dict.get("itineraries", "")),
+                    "seo_title":   gen.get("seo_title", ""),
+                    "seo_meta":    gen.get("seo_meta", ""),
+                    "trip_type":   gen.get("trip_type", ""),
+                    "status":      "done",
                 }
                 new_status = "approved" if result.get("quality_score", 0) >= 7.0 else "pending"
                 async with pool.acquire() as _conn3:
