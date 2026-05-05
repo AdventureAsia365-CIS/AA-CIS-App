@@ -314,6 +314,7 @@ def _get_tenant(credentials: _Creds = Depends(_security)):
 class UploadUrlRequest(BaseModel):
     filename: str
     content_type: str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    seo_mode: str = "standard"  # standard | aggressive | minimal
 
 
 class UploadUrlResponse(BaseModel):
@@ -337,7 +338,8 @@ async def get_upload_url(
     s3 = _boto3.client("s3", region_name=os.environ.get("AWS_REGION", "us-west-1"))
     upload_url = s3.generate_presigned_url(
         "put_object",
-        Params={"Bucket": bucket, "Key": s3_key, "ContentType": body.content_type},
+        Params={"Bucket": bucket, "Key": s3_key, "ContentType": body.content_type,
+                "Metadata": {"seo-mode": body.seo_mode}},
         ExpiresIn=300,
     )
     return UploadUrlResponse(upload_url=upload_url, s3_key=s3_key, bucket=bucket)

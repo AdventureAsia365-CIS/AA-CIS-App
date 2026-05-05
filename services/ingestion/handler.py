@@ -23,7 +23,7 @@ def compute_file_hash(file_bytes: bytes) -> str:
     return hashlib.sha256(file_bytes).hexdigest()
 
 
-async def process_file(s3_bucket: str, s3_key: str) -> dict:
+async def process_file(s3_bucket: str, s3_key: str, seo_mode: str = "standard") -> dict:
     """Download Excel từ S3, parse, insert bronze.raw_sources → bronze.raw_tours."""
 
     # Download về /tmp
@@ -36,7 +36,7 @@ async def process_file(s3_bucket: str, s3_key: str) -> dict:
     with open(tmp_path, "rb") as fh:
         file_bytes = fh.read()
     file_hash = compute_file_hash(file_bytes)
-    logger.info("file_downloaded", s3_key=s3_key, file_hash=file_hash[:12])
+    logger.info("file_downloaded", s3_key=s3_key, file_hash=file_hash[:12], seo_mode=seo_mode)
 
     # TD-2: Dedup check — skip if same file already processed
     conn_check = await asyncpg.connect(get_database_url())
@@ -132,6 +132,7 @@ async def process_file(s3_bucket: str, s3_key: str) -> dict:
                 tour_ids=[str(i) for i in ids],
                 tenant_id=tenant_slug,
                 s3_key=s3_key,
+                seo_mode=seo_mode,
             )
         else:
             logger.warning("sfn_not_configured", msg="STEP_FUNCTIONS_ARN not set — skipping pipeline trigger")
@@ -165,6 +166,7 @@ def _start_pipeline(
     tour_ids: list[str],
     tenant_id: str,
     s3_key: str,
+    seo_mode: str = "standard",
 ) -> None:
     """
     Start Step Functions execution with per-tour input.
@@ -179,6 +181,7 @@ def _start_pipeline(
             "tenant_id":           tenant_id,
             "retry_count":         0,
             "validation_feedback": [],
+            "seo_mode":            seo_mode,
         }
         for tid in tour_ids
     ]
@@ -189,6 +192,7 @@ def _start_pipeline(
         "batch_id":  batch_id,
         "s3_key":    s3_key,
         "tenant_id": tenant_id,
+        "seo_mode":  seo_mode,
         "tours":     tours_input,
     }
 
@@ -226,7 +230,14 @@ def lambda_handler(event: dict, context) -> dict:
         logger.info("processing", s3_bucket=s3_bucket, s3_key=s3_key)
 
         try:
-            result = asyncio.run(process_file(s3_bucket, s3_key))
+            # Read seo_mode from S3 object metadata (set by upload-url endpoint)
+            seo_mode = "standard"
+            try:
+                meta = s3.head_object(Bucket=s3_bucket, Key=s3_key)
+                seo_mode = meta.get("Metadata", {}).get("seo-mode", "standard")
+            except Exception:
+                pass
+            result = asyncio.run(process_file(s3_bucket, s3_key, seo_mode=seo_mode))
             results.append({"s3_key": s3_key, **result})
         except Exception as e:
             logger.error("lambda_record_failed", s3_key=s3_key, error=str(e))
