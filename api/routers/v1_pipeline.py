@@ -808,6 +808,7 @@ async def get_brand_identity(
         if isinstance(fw, list): return fw
         try: return _json_br.loads(fw)
         except Exception:  # noqa: BLE001
+            return []
     history = [{
         "version":       h["version"],
         "is_active":     h["is_active"],
