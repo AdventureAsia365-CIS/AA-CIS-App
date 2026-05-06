@@ -1,69 +1,38 @@
 "use client";
-import React from "react";
-import { useState, useEffect } from "react";
+// app/(admin)/dashboard/page.tsx
+// Design: Fraunces serif + IBM Plex Sans, light theme, red accent
+// API: same as before — /v1/pipeline/metrics, /v1/tours, /v1/pipeline/review-queue
+
+import React, { useState, useEffect } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   LineChart, Line, CartesianGrid,
 } from "recharts";
 import {
-  FileText, CheckCircle, Clock, DollarSign,
-  Activity, Cpu, AlertTriangle, ExternalLink,
+  FileText, CheckCircle, Clock, DollarSign, ExternalLink,
 } from "lucide-react";
+import AdminSidebar from "../_components/AdminSidebar";
+import {
+  A, serif, mono, sans,
+  Card, SLabel, StatCard, TabBar, ChartCard, Badge,
+  LoadingScreen, Btn, TH, TD, CHART_TOOLTIP,
+} from "../_components/adminUi";
 
-const TOOLTIP_STYLE = {
-  contentStyle: {
-    backgroundColor: "#1A2230", border: "1px solid #2A3547",
-    borderRadius: 8, fontSize: 12,
-  },
-  labelStyle: { color: "#F8F6F2" },
-};
-
-function StatCard({ icon: Icon, label, value, sub, accent = "#DB9628" }: {
-  icon: any; label: string; value: string; sub?: string; accent?: string;
-}) {
-  return (
-    <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 12, padding: "20px 24px" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
-        <div style={{ padding: 8, borderRadius: 8, background: `${accent}18`, color: accent }}>
-          <Icon size={16} />
-        </div>
-        <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>{label}</span>
-      </div>
-      <div style={{ fontSize: 28, fontWeight: 800, color: "var(--text-primary)" }}>{value}</div>
-      {sub && <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 4 }}>{sub}</div>}
-    </div>
-  );
-}
-
-function ChartCard({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 12, padding: "20px 24px" }}>
-      <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 20 }}>
-        {title}
-      </div>
-      {children}
-    </div>
-  );
-}
-
-const STATUS_DOT: Record<string, string> = {
-  healthy:     "#22c55e",
-  degraded:    "#f59e0b",
-  down:        "#ef4444",
-  running:     "#22c55e",
-  interrupted: "#ef4444",
-  idle:        "#4A5568",
-};
-
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
 
 function getToken(): string | null {
   if (typeof document === "undefined") return null;
-  const match = document.cookie.match(/cis_api_token=([^;]+)/);
-  return match ? decodeURIComponent(match[1]) : null;
+  const m = document.cookie.match(/cis_api_token=([^;]+)/);
+  return m ? decodeURIComponent(m[1]) : null;
 }
 
-const PIPELINE_HEALTH = [
+const STATUS_COLOR: Record<string, string> = {
+  healthy: "#22C55E", degraded: "#F59E0B", down: "#EF4444",
+  running: "#22C55E", interrupted: "#EF4444", idle: "#9099A6",
+};
+
+const PIPELINE_HEALTH_DEFAULT = [
   { name: "Ingestion Lambda",   status: "idle", latency: "—", errors: 0 },
   { name: "SEO Intelligence",   status: "idle", latency: "—", errors: 0 },
   { name: "Content Generation", status: "idle", latency: "—", errors: 0 },
@@ -78,738 +47,510 @@ const SPOT_WORKERS = [
   { id: "spot-2b", status: "idle", tours: 0, progress: 0, instance: "c5.xlarge" },
 ];
 
+// ─── Sub-tab components (logic unchanged, design updated) ─────────────────────
 
-// ── Volume Analytics Tab ──────────────────────────────────────────────────────
-
-function VolumeAnalyticsTab({ data }: { data: any }) {
-  const daily = data.daily_runs ?? [];
+function VolumeTab({ data }: { data: any }) {
+  const daily       = data?.daily_runs ?? [];
   const totalTours  = daily.reduce((s: number, d: any) => s + (d.tours  ?? 0), 0);
   const totalPassed = daily.reduce((s: number, d: any) => s + (d.passed ?? 0), 0);
   const totalFailed = daily.reduce((s: number, d: any) => s + (d.failed ?? 0), 0);
-  const passRate = totalTours > 0 ? Math.round(totalPassed / totalTours * 100) : 0;
+  const passRate    = totalTours > 0 ? Math.round((totalPassed / totalTours) * 100) : 0;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
         {[
-          { label: "Total Tours",   value: totalTours,  color: "var(--brand-gold)" },
-          { label: "Auto-Passed",   value: totalPassed, color: "#22c55e" },
-          { label: "Failed",        value: totalFailed, color: "#ef4444" },
-          { label: "Pass Rate",     value: `${passRate}%`, color: "#a78bfa" },
+          { label: "Total Tours",  value: totalTours,  color: A.gold  },
+          { label: "Auto-Passed",  value: totalPassed, color: "#22C55E" },
+          { label: "Failed",       value: totalFailed, color: A.red   },
+          { label: "Pass Rate",    value: `${passRate}%`, color: "#7C3AED" },
         ].map(c => (
-          <div key={c.label} style={{ background: "var(--bg-card)",
-            border: "1px solid var(--border)", borderRadius: 12, padding: "16px 20px" }}>
-            <div style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 600,
-              textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>{c.label}</div>
-            <div style={{ fontSize: 26, fontWeight: 800, color: c.color }}>{c.value}</div>
-          </div>
+          <Card key={c.label}>
+            <SLabel>{c.label}</SLabel>
+            <div style={{ fontFamily: serif, fontSize: 28, fontWeight: 500, color: c.color, letterSpacing: "-0.02em" }}>
+              {c.value}
+            </div>
+          </Card>
         ))}
       </div>
-      <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)",
-        borderRadius: 12, padding: "20px 24px" }}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)",
-          textTransform: "uppercase", letterSpacing: 1, marginBottom: 16 }}>
-          Daily Volume Breakdown
-        </div>
+      <ChartCard title="Daily Volume Breakdown">
         <ResponsiveContainer width="100%" height={240}>
           <BarChart data={daily} margin={{ top: 4, right: 4, left: -20, bottom: 0 }}>
-            <XAxis dataKey="day" tick={{ fontSize: 11, fill: "#8B9BB4" }}
-              tickFormatter={(v: string) => v?.slice(5) ?? v}/>
-            <YAxis tick={{ fontSize: 11, fill: "#8B9BB4" }}/>
-            <Tooltip {...TOOLTIP_STYLE}/>
-            <Bar dataKey="passed" name="Passed" fill="#22c55e" radius={[3,3,0,0]}/>
-            <Bar dataKey="hitl"   name="HITL"   fill="#f59e0b" radius={[3,3,0,0]}/>
-            <Bar dataKey="failed" name="Failed"  fill="#ef4444" radius={[3,3,0,0]}/>
+            <XAxis dataKey="date" tick={{ fontSize: 11, fill: A.muted }} tickFormatter={(v: string) => v?.slice(5) ?? v} />
+            <YAxis tick={{ fontSize: 11, fill: A.muted }} />
+            <Tooltip {...CHART_TOOLTIP} />
+            <Bar dataKey="passed" name="Passed" fill="#22C55E" radius={[3,3,0,0]} />
+            <Bar dataKey="hitl"   name="HITL"   fill={A.gold}  radius={[3,3,0,0]} />
+            <Bar dataKey="failed" name="Failed"  fill={A.red}   radius={[3,3,0,0]} />
           </BarChart>
         </ResponsiveContainer>
-      </div>
+      </ChartCard>
     </div>
   );
 }
 
-// ── Quality Intelligence Tab ───────────────────────────────────────────────────
+function QualityTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => string | null }) {
+  const [data, setData]     = useState<any>(null);
+  const [loading, setLoading] = useState(true);
 
-function QualityIntelligenceTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => string | null }) {
-  const [data, setData] = React.useState<any>(null);
-  const [loading, setLoading] = React.useState(true);
-
-  React.useEffect(() => {
+  useEffect(() => {
     const token = getToken();
     if (!token) return;
-    // Use existing metrics endpoint — extract quality data
-    fetch(`${apiUrl}/v1/pipeline/metrics?days=30`, {
-      headers: { Authorization: `Bearer ${token}` },
-    }).then(r => r.ok ? r.json() : null)
-      .then(d => setData(d))
-      .catch(() => {})
-      .finally(() => setLoading(false));
+    fetch(`${apiUrl}/v1/pipeline/metrics?days=30`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : null).then(setData).finally(() => setLoading(false));
   }, [apiUrl, getToken]);
 
-  if (loading) return <div style={{ padding: 40, textAlign: "center",
-    color: "var(--text-muted)" }}>Loading quality data...</div>;
-
+  if (loading) return <LoadingScreen msg="Loading quality data…" />;
   const models = data?.model_usage ?? [];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)",
-        borderRadius: 12, padding: "20px 24px" }}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)",
-          textTransform: "uppercase", letterSpacing: 1, marginBottom: 16 }}>
-          Model Quality Scores (30d)
-        </div>
+      <Card>
+        <SLabel>Model Quality Scores (30d)</SLabel>
         {models.length === 0 ? (
-          <div style={{ color: "var(--text-muted)", fontSize: 13 }}>No model data yet</div>
+          <div style={{ color: A.muted, fontSize: 13 }}>No model data yet</div>
         ) : (
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
-              <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                {["Model", "Calls", "Avg Score", "Cost/Call"].map(h => (
-                  <th key={h} style={{ padding: "8px 12px", textAlign: "left",
-                    fontSize: 11, color: "var(--text-muted)", fontWeight: 600 }}>{h}</th>
-                ))}
-              </tr>
+              <tr>{["Model","Calls","Avg Score","Cost/Call"].map(h => <th key={h} style={TH}>{h}</th>)}</tr>
             </thead>
             <tbody>
               {models.map((m: any) => {
                 const score = parseFloat(m.avg_score ?? 0);
-                const scoreColor = score >= 9 ? "#22c55e" : score >= 7 ? "#f59e0b" : "#ef4444";
+                const sc = score >= 9 ? "#22C55E" : score >= 7 ? A.gold : A.red;
                 return (
-                  <tr key={m.model} style={{ borderBottom: "1px solid var(--border)" }}>
-                    <td style={{ padding: "10px 12px" }}>
-                      <code style={{ fontSize: 12, color: "var(--brand-gold)" }}>{m.model}</code>
-                    </td>
-                    <td style={{ padding: "10px 12px",
-                      color: "var(--text-secondary)" }}>{m.calls}</td>
-                    <td style={{ padding: "10px 12px" }}>
-                      <span style={{ color: scoreColor, fontWeight: 700 }}>{score}</span>
-                    </td>
-                    <td style={{ padding: "10px 12px", color: "var(--text-muted)" }}>
-                      {m.calls > 0 && m.total_cost
-                        ? `$${(m.total_cost / m.calls).toFixed(4)}` : "—"}
-                    </td>
+                  <tr key={m.model}>
+                    <td style={TD}><code style={{ fontSize: 12, color: A.gold, fontFamily: mono }}>{m.model}</code></td>
+                    <td style={TD}>{m.calls}</td>
+                    <td style={TD}><span style={{ color: sc, fontWeight: 700 }}>{score}</span></td>
+                    <td style={TD}>{m.calls > 0 && m.total_cost ? `$${(m.total_cost / m.calls).toFixed(4)}` : "—"}</td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
         )}
-      </div>
-      <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)",
-        borderRadius: 12, padding: "20px 24px" }}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)",
-          textTransform: "uppercase", letterSpacing: 1, marginBottom: 14 }}>
-          Quality Score Trend (7d)
-        </div>
+      </Card>
+      <ChartCard title="Quality Score Trend (7d)">
         <ResponsiveContainer width="100%" height={200}>
-          <LineChart data={data?.daily_runs ?? []}
-            margin={{ top: 4, right: 4, left: -20, bottom: 0 }}>
-            <XAxis dataKey="day" tick={{ fontSize: 11, fill: "#8B9BB4" }}
-              tickFormatter={(v: string) => v?.slice(5) ?? v}/>
-            <YAxis domain={[0, 10]} tick={{ fontSize: 11, fill: "#8B9BB4" }}/>
-            <CartesianGrid strokeDasharray="3 3" stroke="#2A3547"/>
-            <Tooltip {...TOOLTIP_STYLE}/>
-            <Line type="monotone" dataKey="passed" name="Passed Tours"
-              stroke="#22c55e" strokeWidth={2} dot={false}/>
+          <LineChart data={data?.daily_runs ?? []} margin={{ top: 4, right: 4, left: -20, bottom: 0 }}>
+            <XAxis dataKey="date" tick={{ fontSize: 11, fill: A.muted }} tickFormatter={(v: string) => v?.slice(5) ?? v} />
+            <YAxis domain={[0, 10]} tick={{ fontSize: 11, fill: A.muted }} />
+            <CartesianGrid strokeDasharray="3 3" stroke={A.line} />
+            <Tooltip {...CHART_TOOLTIP} />
+            <Line type="monotone" dataKey="passed" name="Passed Tours" stroke="#22C55E" strokeWidth={2} dot={false} />
           </LineChart>
         </ResponsiveContainer>
-      </div>
+      </ChartCard>
     </div>
   );
 }
 
-// ── Cost & Billing Tab ────────────────────────────────────────────────────────
+function CostTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => string | null }) {
+  const [data, setData]     = useState<any>(null);
+  const [loading, setLoading] = useState(true);
 
-function CostBillingTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => string | null }) {
-  const [data, setData] = React.useState<any>(null);
-  const [loading, setLoading] = React.useState(true);
-
-  React.useEffect(() => {
+  useEffect(() => {
     const token = getToken();
     if (!token) return;
-    fetch(`${apiUrl}/v1/pipeline/metrics?days=30`, {
-      headers: { Authorization: `Bearer ${token}` },
-    }).then(r => r.ok ? r.json() : null)
-      .then(d => setData(d))
-      .catch(() => {})
-      .finally(() => setLoading(false));
+    fetch(`${apiUrl}/v1/pipeline/metrics?days=30`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : null).then(setData).finally(() => setLoading(false));
   }, [apiUrl, getToken]);
 
-  if (loading) return <div style={{ padding: 40, textAlign: "center",
-    color: "var(--text-muted)" }}>Loading cost data...</div>;
+  if (loading) return <LoadingScreen msg="Loading cost data…" />;
 
-  const daily   = data?.daily_runs ?? [];
-  const models  = data?.model_usage ?? [];
+  const daily     = data?.daily_runs ?? [];
+  const models    = data?.model_usage ?? [];
   const totalCost = daily.reduce((s: number, d: any) => s + parseFloat(d.cost ?? 0), 0);
   const totalTours = daily.reduce((s: number, d: any) => s + (d.tours ?? 0), 0);
-  const costPerTour = totalTours > 0 ? totalCost / totalTours : 0;
+  const cpt        = totalTours > 0 ? totalCost / totalTours : 0;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
         {[
-          { label: "Total LLM Cost (30d)", value: `$${totalCost.toFixed(2)}`,  color: "var(--brand-gold)" },
-          { label: "Tours Processed",      value: totalTours,                    color: "#a78bfa" },
-          { label: "Cost / Tour",          value: `$${costPerTour.toFixed(4)}`, color: "#22c55e" },
+          { label: "Total LLM Cost (30d)", value: `$${totalCost.toFixed(2)}`, color: A.gold },
+          { label: "Tours Processed",      value: String(totalTours),         color: "#7C3AED" },
+          { label: "Cost / Tour",          value: `$${cpt.toFixed(4)}`,       color: "#22C55E" },
         ].map(c => (
-          <div key={c.label} style={{ background: "var(--bg-card)",
-            border: "1px solid var(--border)", borderRadius: 12, padding: "16px 20px" }}>
-            <div style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 600,
-              textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>{c.label}</div>
-            <div style={{ fontSize: 24, fontWeight: 800, color: c.color }}>{c.value}</div>
-          </div>
+          <Card key={c.label}>
+            <SLabel>{c.label}</SLabel>
+            <div style={{ fontFamily: serif, fontSize: 26, fontWeight: 500, color: c.color, letterSpacing: "-0.02em" }}>{c.value}</div>
+          </Card>
         ))}
       </div>
-
-      <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)",
-        borderRadius: 12, padding: "20px 24px" }}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)",
-          textTransform: "uppercase", letterSpacing: 1, marginBottom: 16 }}>
-          Daily LLM Cost (30d)
-        </div>
+      <ChartCard title="Daily LLM Cost (30d)">
         <ResponsiveContainer width="100%" height={220}>
           <LineChart data={daily} margin={{ top: 4, right: 4, left: -10, bottom: 0 }}>
-            <XAxis dataKey="day" tick={{ fontSize: 11, fill: "#8B9BB4" }}
-              tickFormatter={(v: string) => v?.slice(5) ?? v}/>
-            <YAxis tick={{ fontSize: 11, fill: "#8B9BB4" }}
-              tickFormatter={(v: number) => `$${v}`}/>
-            <CartesianGrid strokeDasharray="3 3" stroke="#2A3547"/>
-            <Tooltip {...TOOLTIP_STYLE} formatter={(v: unknown) => [`$${Number(v).toFixed(4)}`, "Cost"]}/>
-            <Line type="monotone" dataKey="cost" name="LLM Cost"
-              stroke="#DB9628" strokeWidth={2} dot={{ fill: "#DB9628", r: 3 }}/>
+            <XAxis dataKey="date" tick={{ fontSize: 11, fill: A.muted }} tickFormatter={(v: string) => v?.slice(5) ?? v} />
+            <YAxis tick={{ fontSize: 11, fill: A.muted }} tickFormatter={(v: number) => `$${v}`} />
+            <CartesianGrid strokeDasharray="3 3" stroke={A.line} />
+            <Tooltip {...CHART_TOOLTIP} formatter={(v: unknown) => [`$${Number(v).toFixed(4)}`, "Cost"]} />
+            <Line type="monotone" dataKey="cost" stroke={A.gold} strokeWidth={2} dot={{ fill: A.gold, r: 3 }} />
           </LineChart>
         </ResponsiveContainer>
-      </div>
-
-      <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)",
-        borderRadius: 12, padding: "20px 24px" }}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)",
-          textTransform: "uppercase", letterSpacing: 1, marginBottom: 14 }}>
-          Cost by Model
-        </div>
+      </ChartCard>
+      <Card>
+        <SLabel>Cost by Model</SLabel>
         {models.map((m: any) => (
-          <div key={m.model} style={{ display: "flex", justifyContent: "space-between",
-            alignItems: "center", padding: "8px 0",
-            borderBottom: "1px solid var(--border)", fontSize: 13 }}>
-            <code style={{ color: "var(--brand-gold)", fontSize: 12 }}>{m.model}</code>
+          <div key={m.model} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 0", borderBottom: `1px solid ${A.line2}` }}>
+            <code style={{ color: A.gold, fontSize: 12, fontFamily: mono }}>{m.model}</code>
             <div style={{ display: "flex", gap: 24 }}>
-              <span style={{ color: "var(--text-muted)" }}>{m.calls} calls</span>
-              <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>
-                ${m.total_cost ? Number(m.total_cost).toFixed(4) : "0.0000"}
-              </span>
+              <span style={{ color: A.muted, fontSize: 12 }}>{m.calls} calls</span>
+              <span style={{ color: A.ink, fontWeight: 600, fontSize: 13 }}>${m.total_cost ? Number(m.total_cost).toFixed(4) : "0.0000"}</span>
             </div>
           </div>
         ))}
-      </div>
+      </Card>
     </div>
   );
 }
 
-// ── SEO Intelligence Tab ─────────────────────────────────────────────────────
-
-function SeoIntelligenceTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => string | null }) {
-  const [data, setData] = React.useState<any>(null);
-  const [loading, setLoading] = React.useState(true);
-
-  React.useEffect(() => {
+function SeoTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => string | null }) {
+  const [data, setData]     = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
     const token = getToken();
     if (!token) return;
-    fetch(`${apiUrl}/v1/pipeline/metrics/seo`, {
-      headers: { Authorization: `Bearer ${token}` },
-    }).then(r => r.ok ? r.json() : null)
-      .then(d => setData(d))
-      .catch(() => {})
-      .finally(() => setLoading(false));
+    fetch(`${apiUrl}/v1/pipeline/metrics/seo`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : null).then(setData).finally(() => setLoading(false));
   }, [apiUrl, getToken]);
-
-  if (loading) return <div style={{ padding: 40, textAlign: "center", color: "var(--text-muted)" }}>Loading SEO data...</div>;
-  if (!data) return <div style={{ padding: 40, textAlign: "center", color: "#ef4444" }}>Failed to load SEO data</div>;
-
+  if (loading) return <LoadingScreen msg="Loading SEO data…" />;
+  if (!data) return <div style={{ padding: 40, textAlign: "center", color: A.red }}>Failed to load SEO data</div>;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      {/* KPI row */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 16 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
         {[
-          { label: "Tours in Pool",    value: data.total_tours ?? 0 },
-          { label: "SEO Covered",      value: data.seo_covered ?? 0 },
-          { label: "Coverage",         value: `${data.coverage_pct ?? 0}%` },
+          { label: "Tours in Pool",  value: data.total_tours ?? 0 },
+          { label: "SEO Covered",    value: data.seo_covered ?? 0 },
+          { label: "Coverage",       value: `${data.coverage_pct ?? 0}%` },
         ].map(c => (
-          <div key={c.label} style={{ background: "var(--bg-card)",
-            border: "1px solid var(--border)", borderRadius: 12, padding: "18px 20px" }}>
-            <div style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 600,
-              textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>{c.label}</div>
-            <div style={{ fontSize: 28, fontWeight: 800,
-              color: "var(--text-primary)" }}>{c.value}</div>
-          </div>
+          <Card key={c.label}>
+            <SLabel>{c.label}</SLabel>
+            <div style={{ fontFamily: serif, fontSize: 26, fontWeight: 500, color: A.ink, letterSpacing: "-0.02em" }}>{c.value}</div>
+          </Card>
         ))}
       </div>
-
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-        {/* Top keywords */}
-        <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)",
-          borderRadius: 12, padding: "18px 20px" }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)",
-            textTransform: "uppercase", letterSpacing: 1, marginBottom: 14 }}>
-            Top Keywords
-          </div>
+        <Card>
+          <SLabel>Top Keywords</SLabel>
           {(data.top_keywords || []).slice(0, 10).map((k: any) => (
-            <div key={k.keyword} style={{ display: "flex", justifyContent: "space-between",
-              alignItems: "center", marginBottom: 8, fontSize: 13 }}>
-              <span style={{ color: "var(--text-primary)" }}>{k.keyword}</span>
-              <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 20,
-                background: "rgba(219,150,40,0.1)", color: "var(--brand-gold)",
-                fontWeight: 600 }}>{k.count}</span>
+            <div key={k.keyword} style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, fontSize: 13 }}>
+              <span style={{ color: A.ink }}>{k.keyword}</span>
+              <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 20, background: A.goldTint, color: A.gold, fontWeight: 600 }}>{k.count}</span>
             </div>
           ))}
           {(!data.top_keywords || data.top_keywords.length === 0) && (
-            <div style={{ color: "var(--text-muted)", fontSize: 13 }}>No keyword data yet</div>
+            <div style={{ color: A.muted, fontSize: 13 }}>No keyword data yet</div>
           )}
-        </div>
-
-        {/* Redis cache + countries */}
+        </Card>
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)",
-            borderRadius: 12, padding: "18px 20px" }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)",
-              textTransform: "uppercase", letterSpacing: 1, marginBottom: 12 }}>
-              Redis Cache
-            </div>
-            {[
-              { label: "Hit Rate",  value: data.cache?.hit_rate ?? "N/A" },
-              { label: "Cached Keys", value: data.cache?.keys ?? 0 },
-              { label: "Hits",      value: data.cache?.hits ?? 0 },
-              { label: "Misses",    value: data.cache?.misses ?? 0 },
-            ].map(r => (
-              <div key={r.label} style={{ display: "flex", justifyContent: "space-between",
-                fontSize: 13, marginBottom: 6 }}>
-                <span style={{ color: "var(--text-muted)" }}>{r.label}</span>
-                <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>{r.value}</span>
+          <Card>
+            <SLabel>Redis Cache</SLabel>
+            {[["Hit Rate", data.cache?.hit_rate ?? "N/A"], ["Cached Keys", data.cache?.keys ?? 0], ["Hits", data.cache?.hits ?? 0], ["Misses", data.cache?.misses ?? 0]].map(([l, v]) => (
+              <div key={l as string} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
+                <span style={{ color: A.muted }}>{l}</span>
+                <span style={{ color: A.ink, fontWeight: 600 }}>{v as string}</span>
               </div>
             ))}
-          </div>
-          <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)",
-            borderRadius: 12, padding: "18px 20px" }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)",
-              textTransform: "uppercase", letterSpacing: 1, marginBottom: 12 }}>
-              Countries Covered
-            </div>
+          </Card>
+          <Card>
+            <SLabel>Countries Covered</SLabel>
             {(data.countries || []).slice(0, 8).map((c: any) => (
-              <div key={c.country} style={{ display: "flex", justifyContent: "space-between",
-                fontSize: 13, marginBottom: 6 }}>
-                <span style={{ color: "var(--text-primary)" }}>{c.country || "Unknown"}</span>
-                <span style={{ color: "var(--text-muted)" }}>{c.count} tours</span>
+              <div key={c.country} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
+                <span style={{ color: A.ink }}>{c.country || "Unknown"}</span>
+                <span style={{ color: A.muted }}>{c.count} tours</span>
               </div>
             ))}
-          </div>
+          </Card>
         </div>
       </div>
     </div>
   );
 }
 
-// ── Content Library Tab ───────────────────────────────────────────────────────
-
-function ContentLibraryTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => string | null }) {
-  const [data, setData] = React.useState<any>(null);
-  const [loading, setLoading] = React.useState(true);
-
-  React.useEffect(() => {
+function LibraryTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => string | null }) {
+  const [data, setData]     = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
     const token = getToken();
     if (!token) return;
-    fetch(`${apiUrl}/v1/pipeline/metrics/library`, {
-      headers: { Authorization: `Bearer ${token}` },
-    }).then(r => r.ok ? r.json() : null)
-      .then(d => setData(d))
-      .catch(() => {})
-      .finally(() => setLoading(false));
+    fetch(`${apiUrl}/v1/pipeline/metrics/library`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : null).then(setData).finally(() => setLoading(false));
   }, [apiUrl, getToken]);
-
-  if (loading) return <div style={{ padding: 40, textAlign: "center", color: "var(--text-muted)" }}>Loading library data...</div>;
-  if (!data) return <div style={{ padding: 40, textAlign: "center", color: "#ef4444" }}>Failed to load library data</div>;
-
+  if (loading) return <LoadingScreen msg="Loading library data…" />;
+  if (!data) return <div style={{ padding: 40, textAlign: "center", color: A.red }}>Failed to load</div>;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      {/* KPI row */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 16 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
         {[
-          { label: "Total Tours",      value: data.total ?? 0,              color: "var(--brand-gold)" },
-          { label: "Avg Quality",      value: data.avg_score ?? 0,          color: "#22c55e" },
-          { label: "Added (30d)",      value: data.published_last_30d ?? 0, color: "#a78bfa" },
-          { label: "Stale (>180d)",    value: data.stale_count ?? 0,        color: "#f59e0b" },
+          { label: "Total Tours",   value: data.total ?? 0,              color: A.gold },
+          { label: "Avg Quality",   value: data.avg_score ?? 0,          color: "#22C55E" },
+          { label: "Added (30d)",   value: data.published_last_30d ?? 0, color: "#7C3AED" },
+          { label: "Stale (>180d)", value: data.stale_count ?? 0,        color: A.amber },
         ].map(c => (
-          <div key={c.label} style={{ background: "var(--bg-card)",
-            border: "1px solid var(--border)", borderRadius: 12, padding: "18px 20px" }}>
-            <div style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 600,
-              textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>{c.label}</div>
-            <div style={{ fontSize: 26, fontWeight: 800, color: c.color }}>{c.value}</div>
-          </div>
+          <Card key={c.label}>
+            <SLabel>{c.label}</SLabel>
+            <div style={{ fontFamily: serif, fontSize: 26, fontWeight: 500, color: c.color, letterSpacing: "-0.02em" }}>{c.value}</div>
+          </Card>
         ))}
       </div>
-
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-        {/* By country */}
-        <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)",
-          borderRadius: 12, padding: "18px 20px" }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)",
-            textTransform: "uppercase", letterSpacing: 1, marginBottom: 14 }}>
-            Coverage by Country
-          </div>
+        <Card>
+          <SLabel>Coverage by Country</SLabel>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-            <thead>
-              <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                {["Country", "Tours", "Avg Score"].map(h => (
-                  <th key={h} style={{ padding: "6px 8px", textAlign: "left",
-                    fontSize: 11, color: "var(--text-muted)", fontWeight: 600 }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
+            <thead><tr>{["Country","Tours","Avg Score"].map(h => <th key={h} style={TH}>{h}</th>)}</tr></thead>
             <tbody>
               {(data.by_country || []).slice(0, 12).map((r: any) => (
-                <tr key={r.country} style={{ borderBottom: "1px solid var(--border)" }}>
-                  <td style={{ padding: "7px 8px", color: "var(--text-primary)" }}>
-                    {r.country || "Unknown"}
-                  </td>
-                  <td style={{ padding: "7px 8px", color: "var(--text-secondary)" }}>{r.total}</td>
-                  <td style={{ padding: "7px 8px" }}>
-                    <span style={{ color: r.avg_score >= 9 ? "#22c55e" : r.avg_score >= 7 ? "#f59e0b" : "#ef4444",
-                      fontWeight: 600 }}>{r.avg_score}</span>
+                <tr key={r.country}>
+                  <td style={TD}>{r.country || "Unknown"}</td>
+                  <td style={TD}>{r.total}</td>
+                  <td style={TD}>
+                    <span style={{ color: r.avg_score >= 9 ? "#22C55E" : r.avg_score >= 7 ? A.gold : A.red, fontWeight: 600 }}>{r.avg_score}</span>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
-        </div>
-
-        {/* Score distribution */}
-        <div style={{ background: "var(--bg-card)", border: "1px solid var(--border)",
-          borderRadius: 12, padding: "18px 20px" }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)",
-            textTransform: "uppercase", letterSpacing: 1, marginBottom: 14 }}>
-            Score Distribution
-          </div>
+        </Card>
+        <Card>
+          <SLabel>Score Distribution</SLabel>
           {(data.score_distribution || []).map((r: any) => {
-            const total = data.total || 1;
-            const pct = Math.round(r.count / total * 100);
-            const color = r.range === "9-10" ? "#22c55e" : r.range === "8-9" ? "#a78bfa"
-              : r.range === "7-8" ? "#f59e0b" : "#ef4444";
+            const pct   = Math.round((r.count / (data.total || 1)) * 100);
+            const color = r.range === "9-10" ? "#22C55E" : r.range === "8-9" ? "#7C3AED" : r.range === "7-8" ? A.gold : A.red;
             return (
               <div key={r.range} style={{ marginBottom: 12 }}>
-                <div style={{ display: "flex", justifyContent: "space-between",
-                  fontSize: 13, marginBottom: 4 }}>
-                  <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>{r.range}</span>
-                  <span style={{ color: "var(--text-muted)" }}>{r.count} tours ({pct}%)</span>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
+                  <span style={{ color: A.ink, fontWeight: 600 }}>{r.range}</span>
+                  <span style={{ color: A.muted }}>{r.count} tours ({pct}%)</span>
                 </div>
-                <div style={{ height: 8, background: "var(--border)", borderRadius: 4, overflow: "hidden" }}>
-                  <div style={{ height: "100%", width: `${pct}%`, background: color,
-                    borderRadius: 4, transition: "width 0.4s" }}/>
+                <div style={{ height: 7, background: A.line2, borderRadius: 4, overflow: "hidden" }}>
+                  <div style={{ height: "100%", width: `${pct}%`, background: color, borderRadius: 4, transition: "width 0.4s" }} />
                 </div>
               </div>
             );
           })}
-        </div>
+        </Card>
       </div>
     </div>
   );
 }
 
+// ─── Main page ────────────────────────────────────────────────────────────────
+
+const TABS = [
+  { key: "metrics",  label: "📊 Metrics" },
+  { key: "volume",   label: "📈 Volume" },
+  { key: "quality",  label: "🎯 Quality" },
+  { key: "billing",  label: "💰 Cost" },
+  { key: "seo",      label: "🔎 SEO" },
+  { key: "library",  label: "📚 Library" },
+  { key: "health",   label: "🏥 Health" },
+  { key: "spot",     label: "⚡ Spot Workers" },
+  { key: "langfuse", label: "🔍 Langfuse" },
+];
+
 export default function DashboardPage() {
-  const [activeTab, setActiveTab] = useState<"metrics" | "health" | "spot" | "langfuse" | "seo" | "library" | "volume" | "quality" | "billing">("metrics");
+  const [activeTab, setActiveTab] = useState("metrics");
   const [totalTours,  setTotalTours]  = useState(0);
   const [totalHITL,   setTotalHITL]   = useState(0);
   const [totalPassed, setTotalPassed] = useState(0);
-  const [metrics, setMetrics] = useState<{
-    daily_runs: any[];
-    model_usage: any[];
-    last_run: any;
-    pipeline_health?: any[];
-  } | null>(null);
-  const [metricsLoading, setMetricsLoading] = useState(true);
+  const [metrics, setMetrics]         = useState<any>(null);
+  const [loading, setLoading]         = useState(true);
 
   useEffect(() => {
     const token = getToken();
     if (!token) return;
     const h = { Authorization: `Bearer ${token}` };
-
-    // Fetch stats
     fetch(`${API_URL}/v1/tours?page=1&page_size=1`, { headers: h })
-      .then(r => r.json())
-      .then(d => { const t = d.pagination?.total || 0; setTotalTours(t); setTotalPassed(t); })
-      .catch(() => {});
+      .then(r => r.json()).then(d => { const t = d.pagination?.total || 0; setTotalTours(t); setTotalPassed(t); }).catch(() => {});
     fetch(`${API_URL}/v1/pipeline/review-queue?page_size=1`, { headers: h })
-      .then(r => r.json())
-      .then(d => setTotalHITL(d.pagination?.total || 0))
-      .catch(() => {});
-
-    // Fetch real metrics
+      .then(r => r.json()).then(d => setTotalHITL(d.pagination?.total || 0)).catch(() => {});
     fetch(`${API_URL}/v1/pipeline/metrics?days=7`, { headers: h })
-      .then(r => r.ok ? r.json() : null)
-      .then(d => { if (d) setMetrics(d); })
-      .catch(() => {})
-      .finally(() => setMetricsLoading(false));
+      .then(r => r.ok ? r.json() : null).then(d => { if (d) setMetrics(d); }).catch(() => {}).finally(() => setLoading(false));
   }, []);
 
   const totalCost = metrics?.model_usage
     ? metrics.model_usage.reduce((s: number, m: any) => s + (m.cost || 0), 0).toFixed(2)
-    : (totalTours * 0.006).toFixed(2);
-  const passRate  = totalTours > 0 ? ((totalPassed / totalTours) * 100).toFixed(1) : "0.0";
-
-  const tabStyle = (t: string): React.CSSProperties => ({
-    padding: "8px 18px", borderRadius: 8, fontSize: 13, fontWeight: 500,
-    cursor: "pointer", border: "none",
-    background: activeTab === t ? "var(--brand-gold)" : "var(--bg-card)",
-    color: activeTab === t ? "white" : "var(--text-secondary)",
-    transition: "all 0.15s",
-  });
+    : (totalTours * 0.018).toFixed(2);
+  const passRate = totalTours > 0 ? ((totalPassed / totalTours) * 100).toFixed(1) : "0.0";
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
-      {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div>
-          <h1 style={{ fontSize: 24, fontWeight: 700, color: "var(--text-primary)", margin: 0 }}>Dev Dashboard</h1>
-          <p style={{ color: "var(--text-secondary)", fontSize: 13, marginTop: 6 }}>
-            Pipeline metrics · Live data
-          </p>
-        </div>
-        <div style={{ display: "flex", gap: 6 }}>
-          {(["metrics", "volume", "quality", "billing", "health", "spot", "seo", "library", "langfuse"] as const).map(t => (
-            <button key={t} style={tabStyle(t)} onClick={() => setActiveTab(t)}>
-              {t === "metrics" ? "📊 Metrics" :
-               t === "health"  ? "🏥 Health" :
-               t === "spot"    ? "⚡ Spot Workers"
-               : t === "seo"     ? "🔎 SEO Intelligence"
-               : t === "library" ? "📚 Content Library"
-               : t === "volume"  ? "📊 Volume Analytics"
-               : t === "quality" ? "🎯 Quality Intelligence"
-               : t === "billing" ? "💰 Cost & Billing"
-               : "🔍 Langfuse"}
-            </button>
-          ))}
-        </div>
-      </div>
+    <div style={{ display: "flex", minHeight: "100vh", fontFamily: sans, background: A.bg }}>
+      <AdminSidebar />
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+        {/* Topbar */}
+        <header style={{ height: 56, background: "#fff", borderBottom: `1px solid ${A.line}`, display: "flex", alignItems: "center", padding: "0 32px", gap: 8, position: "sticky", top: 0, zIndex: 10 }}>
+          <span style={{ fontSize: 12, color: A.muted2 }}>Admin /</span>
+          <span style={{ fontSize: 12, fontWeight: 500, color: A.body }}>Dashboard</span>
+        </header>
 
-      {/* Stat cards — always visible */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 16 }}>
-        <StatCard icon={FileText}    label="Tours Processed" value={String(totalTours)}         sub="Last 7 days"           accent="#DB9628" />
-        <StatCard icon={CheckCircle} label="Auto-Approved"   value={`${passRate}%`}             sub={`${totalPassed} tours`} accent="#22c55e" />
-        <StatCard icon={Clock}       label="HITL Queue"      value={String(totalHITL)}           sub="Awaiting human review" accent="#f59e0b" />
-        <StatCard icon={DollarSign}  label="Total LLM Cost"  value={`$${totalCost}`} sub="~$0.018 per tour avg"  accent="#ef4444" />
-      </div>
-
-      {/* TAB: Metrics */}
-      {activeTab === "metrics" && metricsLoading ? (
-        <div style={{ padding: 48, textAlign: "center", color: "var(--text-muted)" }}>Loading metrics…</div>
-      ) : activeTab === "metrics" && (
-        <>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-            <ChartCard title="Daily Pipeline Volume">
-              <ResponsiveContainer width="100%" height={220}>
-                <BarChart data={metrics?.daily_runs ?? []} barGap={2}>
-                  <XAxis dataKey="date" tick={{ fill: "#8B9BB4", fontSize: 11 }} axisLine={false} tickLine={false} />
-                  <YAxis tick={{ fill: "#8B9BB4", fontSize: 11 }} axisLine={false} tickLine={false} />
-                  <Tooltip {...TOOLTIP_STYLE} />
-                  <Bar dataKey="tours" name="Tours" fill="#22c55e" radius={[4,4,0,0]} />
-                  <Bar dataKey="hitl" name="HITL"          fill="#DB9628" radius={[4,4,0,0]} />
-                  <Bar dataKey="failed" name="Failed"        fill="#ef4444" radius={[4,4,0,0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </ChartCard>
-            <ChartCard title="Daily LLM Cost (USD)">
-              <ResponsiveContainer width="100%" height={220}>
-                <LineChart data={metrics?.daily_runs ?? []}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#2A3547" />
-                  <XAxis dataKey="date" tick={{ fill: "#8B9BB4", fontSize: 11 }} axisLine={false} tickLine={false} />
-                  <YAxis tick={{ fill: "#8B9BB4", fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={v => `$${v}`} />
-                  <Tooltip {...TOOLTIP_STYLE} formatter={(v: any) => [`$${v}`, "Cost"]} />
-                  <Line type="monotone" dataKey="cost" stroke="#DB9628" strokeWidth={2.5}
-                    dot={{ fill: "#DB9628", r: 4, strokeWidth: 0 }} activeDot={{ r: 6 }} />
-                </LineChart>
-              </ResponsiveContainer>
-            </ChartCard>
+        <main style={{ flex: 1, overflowY: "auto", padding: "28px 36px 56px" }}>
+          {/* Page header */}
+          <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 24 }}>
+            <div>
+              <h1 style={{ fontFamily: serif, fontSize: 24, fontWeight: 500, color: A.ink, margin: "0 0 6px", letterSpacing: "-0.01em" }}>
+                Dev Dashboard
+              </h1>
+              <p style={{ fontSize: 13, color: A.muted, margin: 0 }}>Pipeline metrics · Live data from ECS Task :78</p>
+            </div>
           </div>
 
-          <ChartCard title="LLM Model Usage">
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                  {["Model", "Calls", "Total Cost", "Avg Score", "Cost / Call"].map((h, i) => (
-                    <th key={h} style={{ padding: "6px 12px 10px", fontSize: 11, color: "var(--text-muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: 1, textAlign: i === 0 ? "left" : "right" }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {(metrics?.model_usage ?? []).map((m: any) => (
-                  <tr key={m.model} style={{ borderBottom: "1px solid var(--border)" }}>
-                    <td style={{ padding: 12, fontFamily: "monospace", fontSize: 13, color: "var(--brand-gold)" }}>{m.model}</td>
-                    <td style={{ padding: 12, textAlign: "right", color: "var(--text-secondary)", fontSize: 13 }}>{m.calls}</td>
-                    <td style={{ padding: 12, textAlign: "right", color: "var(--text-secondary)", fontSize: 13 }}>${m.cost.toFixed(2)}</td>
-                    <td style={{ padding: 12, textAlign: "right" }}>
-                      <span style={{ fontWeight: 700, fontSize: 13, color: m.avg_score >= 8.5 ? "#22c55e" : m.avg_score >= 7.5 ? "#DB9628" : "#f59e0b" }}>{m.avg_score}</span>
-                    </td>
-                    <td style={{ padding: 12, textAlign: "right", color: "var(--text-muted)", fontSize: 13 }}>${(m.cost / m.calls).toFixed(4)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </ChartCard>
-        </>
-      )}
+          {/* Stat cards */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 16, marginBottom: 24 }}>
+            <StatCard icon={<FileText size={16} />}    label="Tours Processed" value={String(totalTours)}  sub="Last 7 days"           />
+            <StatCard icon={<CheckCircle size={16} />} label="Auto-Approved"   value={`${passRate}%`}      sub={`${totalPassed} tours`} accent="#22C55E" />
+            <StatCard icon={<Clock size={16} />}       label="HITL Queue"      value={String(totalHITL)}   sub="Awaiting review"        accent={A.amber} />
+            <StatCard icon={<DollarSign size={16} />}  label="Total LLM Cost"  value={`$${totalCost}`}     sub="~$0.018 per tour avg"   />
+          </div>
 
-      {/* TAB: Pipeline Health */}
-      {activeTab === "health" && (
-        <ChartCard title="Pipeline Service Health">
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {((metrics?.pipeline_health as any[]) ?? PIPELINE_HEALTH).map((s: any) => (
-              <div key={s.name} style={{
-                display: "flex", alignItems: "center", gap: 16,
-                padding: "12px 16px", borderRadius: 10,
-                background: "var(--bg-primary)", border: "1px solid var(--border)",
-              }}>
-                <div style={{
-                  width: 10, height: 10, borderRadius: "50%", flexShrink: 0,
-                  background: STATUS_DOT[s.status] || "#4A5568",
-                  boxShadow: `0 0 6px ${STATUS_DOT[s.status] || "#4A5568"}`,
-                }} />
-                <div style={{ flex: 1, fontWeight: 500, fontSize: 13, color: "var(--text-primary)" }}>{s.name}</div>
-                <div style={{ fontSize: 12, color: "var(--text-muted)", width: 80, textAlign: "right" }}>
-                  {s.latency}
+          {/* Tab bar */}
+          <div style={{ marginBottom: 20, overflowX: "auto" }}>
+            <TabBar tabs={TABS} active={activeTab} onChange={setActiveTab} />
+          </div>
+
+          {/* Tab content */}
+          {activeTab === "metrics" && (
+            loading ? <LoadingScreen msg="Loading metrics…" /> : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                  <ChartCard title="Daily Pipeline Volume">
+                    <ResponsiveContainer width="100%" height={220}>
+                      <BarChart data={metrics?.daily_runs ?? []}>
+                        <XAxis dataKey="date" tick={{ fill: A.muted, fontSize: 11 }} axisLine={false} tickLine={false} />
+                        <YAxis tick={{ fill: A.muted, fontSize: 11 }} axisLine={false} tickLine={false} />
+                        <Tooltip {...CHART_TOOLTIP} />
+                        <Bar dataKey="tours"  name="Tours"  fill="#22C55E" radius={[4,4,0,0]} />
+                        <Bar dataKey="hitl"   name="HITL"   fill={A.gold}  radius={[4,4,0,0]} />
+                        <Bar dataKey="failed" name="Failed" fill={A.red}   radius={[4,4,0,0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </ChartCard>
+                  <ChartCard title="Daily LLM Cost (USD)">
+                    <ResponsiveContainer width="100%" height={220}>
+                      <LineChart data={metrics?.daily_runs ?? []}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={A.line} />
+                        <XAxis dataKey="date" tick={{ fill: A.muted, fontSize: 11 }} axisLine={false} tickLine={false} />
+                        <YAxis tick={{ fill: A.muted, fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={v => `$${v}`} />
+                        <Tooltip {...CHART_TOOLTIP} formatter={(v: any) => [`$${v}`, "Cost"]} />
+                        <Line type="monotone" dataKey="cost" stroke={A.gold} strokeWidth={2.5} dot={{ fill: A.gold, r: 4 }} activeDot={{ r: 6 }} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </ChartCard>
                 </div>
-                <div style={{ width: 60, textAlign: "right" }}>
-                  {s.errors > 0
-                    ? <span style={{ fontSize: 12, color: "#ef4444" }}>⚠ {s.errors} err</span>
-                    : <span style={{ fontSize: 12, color: "#22c55e" }}>✓ Clean</span>
-                  }
-                </div>
-                <span style={{
-                  fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20,
-                  background: `${STATUS_DOT[s.status]}18`, color: STATUS_DOT[s.status],
-                  border: `1px solid ${STATUS_DOT[s.status]}33`, textTransform: "capitalize",
-                }}>{s.status}</span>
+                <ChartCard title="LLM Model Usage">
+                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                    <thead>
+                      <tr>{["Model","Calls","Total Cost","Avg Score","Cost/Call"].map((h,i) => (
+                        <th key={h} style={{ ...TH, textAlign: i === 0 ? "left" : "right" }}>{h}</th>
+                      ))}</tr>
+                    </thead>
+                    <tbody>
+                      {(metrics?.model_usage ?? []).map((m: any) => (
+                        <tr key={m.model}>
+                          <td style={TD}><code style={{ fontFamily: mono, fontSize: 12, color: A.gold }}>{m.model}</code></td>
+                          <td style={{ ...TD, textAlign: "right" }}>{m.calls}</td>
+                          <td style={{ ...TD, textAlign: "right" }}>${m.cost.toFixed(2)}</td>
+                          <td style={{ ...TD, textAlign: "right" }}>
+                            <span style={{ fontWeight: 700, color: m.avg_score >= 8.5 ? "#22C55E" : m.avg_score >= 7.5 ? A.gold : A.amber }}>{m.avg_score}</span>
+                          </td>
+                          <td style={{ ...TD, textAlign: "right", color: A.muted }}>${(m.cost / m.calls).toFixed(4)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </ChartCard>
               </div>
-            ))}
-          </div>
-        </ChartCard>
-      )}
+            )
+          )}
 
-      {/* TAB: Spot Workers */}
-      {activeTab === "spot" && (
-        <ChartCard title="Batch Rewrite Spot Workers">
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            {SPOT_WORKERS.map((w) => (
-              <div key={w.id} style={{
-                padding: 16, borderRadius: 10,
-                background: "var(--bg-primary)", border: `1px solid ${STATUS_DOT[w.status]}33`,
-              }}>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
-                  <div>
-                    <div style={{ fontFamily: "monospace", fontSize: 13, color: "var(--text-primary)", fontWeight: 600 }}>{w.id}</div>
-                    <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{w.instance}</div>
+          {activeTab === "volume"  && <VolumeTab data={metrics} />}
+          {activeTab === "quality" && <QualityTab apiUrl={API_URL} getToken={getToken} />}
+          {activeTab === "billing" && <CostTab apiUrl={API_URL} getToken={getToken} />}
+          {activeTab === "seo"     && <SeoTab apiUrl={API_URL} getToken={getToken} />}
+          {activeTab === "library" && <LibraryTab apiUrl={API_URL} getToken={getToken} />}
+
+          {activeTab === "health" && (
+            <ChartCard title="Pipeline Service Health">
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {((metrics?.pipeline_health as any[]) ?? PIPELINE_HEALTH_DEFAULT).map((s: any) => (
+                  <div key={s.name} style={{
+                    display: "flex", alignItems: "center", gap: 16,
+                    padding: "12px 16px", borderRadius: 10, background: A.bg, border: `1px solid ${A.line}`,
+                  }}>
+                    <div style={{ width: 10, height: 10, borderRadius: "50%", flexShrink: 0, background: STATUS_COLOR[s.status] || A.muted2, boxShadow: `0 0 6px ${STATUS_COLOR[s.status] || A.muted2}` }} />
+                    <div style={{ flex: 1, fontWeight: 500, fontSize: 13, color: A.ink }}>{s.name}</div>
+                    <div style={{ fontSize: 12, color: A.muted, width: 80, textAlign: "right", fontFamily: mono }}>{s.latency}</div>
+                    <div style={{ width: 80, textAlign: "right" }}>
+                      {s.errors > 0
+                        ? <span style={{ fontSize: 12, color: A.red }}>⚠ {s.errors} err</span>
+                        : <span style={{ fontSize: 12, color: "#22C55E" }}>✓ Clean</span>}
+                    </div>
+                    <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 999, background: `${STATUS_COLOR[s.status]}18`, color: STATUS_COLOR[s.status], textTransform: "capitalize" }}>{s.status}</span>
                   </div>
-                  <span style={{
-                    fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20, alignSelf: "flex-start",
-                    background: `${STATUS_DOT[w.status]}18`, color: STATUS_DOT[w.status],
-                    border: `1px solid ${STATUS_DOT[w.status]}33`, textTransform: "capitalize",
-                  }}>{w.status}</span>
-                </div>
-                {w.status !== "idle" && (
-                  <>
-                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, fontSize: 12, color: "var(--text-secondary)" }}>
-                      <span>{w.tours} tours</span>
-                      <span>{w.progress}%</span>
-                    </div>
-                    <div style={{ height: 6, background: "var(--border)", borderRadius: 3, overflow: "hidden" }}>
-                      <div style={{
-                        height: "100%", width: `${w.progress}%`,
-                        background: w.status === "interrupted"
-                          ? "linear-gradient(90deg, #ef4444, #f87171)"
-                          : "linear-gradient(90deg, var(--brand-gold), #f59e0b)",
-                        borderRadius: 3, transition: "width 0.4s",
-                      }} />
-                    </div>
-                    {w.status === "interrupted" && (
-                      <div style={{ fontSize: 11, color: "#ef4444", marginTop: 6 }}>
-                        ⚠ Spot interruption — work saved, will resume
+                ))}
+              </div>
+            </ChartCard>
+          )}
+
+          {activeTab === "spot" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              <ChartCard title="Batch Rewrite Spot Workers">
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                  {SPOT_WORKERS.map(w => (
+                    <div key={w.id} style={{ padding: 16, borderRadius: 10, background: A.bg, border: `1px solid ${STATUS_COLOR[w.status]}33` }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
+                        <div>
+                          <div style={{ fontFamily: mono, fontSize: 13, color: A.ink, fontWeight: 600 }}>{w.id}</div>
+                          <div style={{ fontSize: 11, color: A.muted, marginTop: 2 }}>{w.instance}</div>
+                        </div>
+                        <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 999, background: `${STATUS_COLOR[w.status]}18`, color: STATUS_COLOR[w.status], textTransform: "capitalize" }}>{w.status}</span>
                       </div>
-                    )}
-                  </>
-                )}
-                {w.status === "idle" && (
-                  <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Waiting for batch job</div>
-                )}
-              </div>
-            ))}
-          </div>
-          <div style={{ marginTop: 16, padding: 12, background: "rgba(219,150,40,0.06)", borderRadius: 8, border: "1px solid rgba(219,150,40,0.2)", fontSize: 12, color: "var(--text-secondary)" }}>
-            💡 Spot Workers run ECS Fargate Spot tasks for cost-efficient batch rewriting. On interruption, checkpoint is saved and work resumes on next available instance.
-          </div>
-        </ChartCard>
-      )}
-
-      {/* TAB: SEO Intelligence */}
-      {activeTab === "seo" && (
-        <SeoIntelligenceTab apiUrl={API_URL} getToken={getToken} />
-      )}
-
-      {/* TAB: Content Library */}
-      {activeTab === "library" && (
-        <ContentLibraryTab apiUrl={API_URL} getToken={getToken} />
-      )}
-
-      {/* TAB: Volume Analytics */}
-      {activeTab === "volume" && metrics && (
-        <VolumeAnalyticsTab data={metrics} />
-      )}
-
-      {/* TAB: Quality Intelligence */}
-      {activeTab === "quality" && (
-        <QualityIntelligenceTab apiUrl={API_URL} getToken={getToken} />
-      )}
-
-      {/* TAB: Cost & Billing */}
-      {activeTab === "billing" && (
-        <CostBillingTab apiUrl={API_URL} getToken={getToken} />
-      )}
-
-      {/* TAB: Langfuse */}
-      {activeTab === "langfuse" && (
-        <ChartCard title="Langfuse LLM Observability">
-          <div style={{ marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: 0 }}>
-              Langfuse traces all LLM calls — prompts, completions, costs, latency per tour.
-            </p>
-            <a href="https://langfuse.lumiguides.it.com" target="_blank" rel="noreferrer"
-              style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 14px", background: "var(--brand-gold)", borderRadius: 8, color: "white", fontSize: 12, fontWeight: 600, textDecoration: "none" }}>
-              <ExternalLink size={12} /> Open Langfuse
-            </a>
-          </div>
-
-          {/* Langfuse feature cards */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12, marginTop: 8 }}>
-            {[
-              { label: "LLM Traces", desc: "Every prompt + completion logged with latency", icon: "🔍" },
-              { label: "Cost Breakdown", desc: "Per tour, per model, per batch", icon: "💰" },
-              { label: "Quality Trends", desc: "Score history + retry patterns over time", icon: "📈" },
-              { label: "Prompt Versions", desc: "A/B test prompt iterations", icon: "🧪" },
-            ].map(f => (
-              <div key={f.label} style={{ display: "flex", gap: 12, padding: "14px 16px", background: "var(--bg-primary)", borderRadius: 10, border: "1px solid var(--border)" }}>
-                <span style={{ fontSize: 20 }}>{f.icon}</span>
-                <div>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)", marginBottom: 4 }}>{f.label}</div>
-                  <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>{f.desc}</div>
+                      <div style={{ fontSize: 12, color: A.muted }}>Waiting for batch job</div>
+                    </div>
+                  ))}
                 </div>
+                <div style={{ marginTop: 14, padding: 12, background: A.goldTint, borderRadius: 8, border: `1px solid ${A.gold}33`, fontSize: 12, color: A.muted }}>
+                  💡 Spot Workers run ECS Fargate Spot for cost-efficient batch rewriting. On interruption, checkpoint is saved and work resumes.
+                </div>
+              </ChartCard>
+            </div>
+          )}
+
+          {activeTab === "langfuse" && (
+            <ChartCard title="Langfuse LLM Observability">
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+                <p style={{ fontSize: 13, color: A.muted, margin: 0 }}>
+                  Langfuse traces all LLM calls — prompts, completions, costs, latency per tour.
+                </p>
+                <a href="https://langfuse.lumiguides.it.com" target="_blank" rel="noreferrer"
+                  style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 16px", background: A.gold, borderRadius: 8, color: "#fff", fontSize: 12, fontWeight: 600, textDecoration: "none" }}>
+                  <ExternalLink size={12} /> Open Langfuse
+                </a>
               </div>
-            ))}
-          </div>
-          <div style={{ marginTop: 16, padding: "12px 16px", background: "rgba(219,150,40,0.06)", borderRadius: 8, fontSize: 12, color: "var(--text-muted)", textAlign: "center" }}>
-            Langfuse is live at{" "}
-            <a href="https://langfuse.lumiguides.it.com" target="_blank" rel="noreferrer"
-              style={{ color: "var(--brand-gold)", fontWeight: 600 }}>
-              langfuse.lumiguides.it.com
-            </a>
-            {" "}— open in a new tab to view traces (iframe blocked by browser security policy)
-          </div>
-        </ChartCard>
-      )}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 12 }}>
+                {[
+                  { label: "LLM Traces",      desc: "Every prompt + completion logged with latency",  icon: "🔍" },
+                  { label: "Cost Breakdown",   desc: "Per tour, per model, per batch",                 icon: "💰" },
+                  { label: "Quality Trends",   desc: "Score history + retry patterns over time",       icon: "📈" },
+                  { label: "Prompt Versions",  desc: "A/B test prompt iterations",                    icon: "🧪" },
+                ].map(f => (
+                  <div key={f.label} style={{ display: "flex", gap: 12, padding: "14px 16px", background: A.bg, borderRadius: 10, border: `1px solid ${A.line}` }}>
+                    <span style={{ fontSize: 20 }}>{f.icon}</span>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: A.ink, marginBottom: 4 }}>{f.label}</div>
+                      <div style={{ fontSize: 12, color: A.muted, lineHeight: 1.5 }}>{f.desc}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ marginTop: 14, padding: "10px 14px", background: A.goldTint, borderRadius: 8, fontSize: 12, color: A.muted, textAlign: "center" }}>
+                Live at <a href="https://langfuse.lumiguides.it.com" target="_blank" rel="noreferrer" style={{ color: A.gold, fontWeight: 600 }}>langfuse.lumiguides.it.com</a> — iframe blocked by browser security policy
+              </div>
+            </ChartCard>
+          )}
+        </main>
+      </div>
     </div>
   );
 }

@@ -908,7 +908,7 @@ async def get_seo_metrics(
         # Top keywords by country from seo_contexts
         top_keywords = await conn.fetch("""
             SELECT country, keywords_json, created_at
-            FROM silver_aa_internal.seo_contexts
+            FROM silver_aa_internal.seo_context
             ORDER BY created_at DESC
             LIMIT 20
         """)
@@ -919,13 +919,13 @@ async def get_seo_metrics(
             "WHERE tenant_id = '00000000-0000-0000-0000-000000000001'::uuid"
         )
         seo_covered = await conn.fetchval(
-            "SELECT COUNT(DISTINCT tour_id) FROM silver_aa_internal.seo_contexts"
+            "SELECT COUNT(DISTINCT tour_id) FROM silver_aa_internal.seo_context"
         )
 
         # Countries covered
         countries = await conn.fetch("""
             SELECT DISTINCT country, COUNT(*) as count
-            FROM silver_aa_internal.seo_contexts
+            FROM silver_aa_internal.seo_context
             WHERE country IS NOT NULL
             GROUP BY country ORDER BY count DESC
         """)

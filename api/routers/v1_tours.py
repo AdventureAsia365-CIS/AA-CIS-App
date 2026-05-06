@@ -482,3 +482,93 @@ async def update_version(
             """, new_status, version_id, tenant_id)
             return {"status": new_status, "version_id": version_id}
 # P3 complete Tue May  5 11:42:07 +07 2026
+
+
+# ── P4: Full review endpoint — before/after + inline edit + approve ───────────
+@router.get("/{tour_id}/full")
+async def get_tour_full(
+    tour_id: str,
+    request: Request,
+    tenant=Depends(get_tenant),
+):
+    """Full before/after data for catalog review panel."""
+    tenant_id = tenant["sub"]
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        pt = await conn.fetchrow("""
+            SELECT * FROM gold_aa_internal.published_tours
+            WHERE id = $1::uuid AND tenant_id = $2::uuid
+        """, tour_id, tenant_id)
+        if not pt:
+            raise HTTPException(status_code=404, detail="Tour not found")
+
+        # Raw source data (before)
+        raw = await conn.fetchrow("""
+            SELECT * FROM silver_aa_internal.raw_tours
+            WHERE tour_id = $1::uuid
+        """, pt["tour_id"])
+
+        # Generated content (AI output before export)
+        gen = await conn.fetchrow("""
+            SELECT * FROM silver_aa_internal.generated_content
+            WHERE tour_id = $1::uuid
+            ORDER BY version_num DESC LIMIT 1
+        """, pt["tour_id"])
+
+        # Quality scores
+        qs = await conn.fetchrow("""
+            SELECT * FROM silver_aa_internal.quality_scores
+            WHERE content_id = $1::uuid
+            ORDER BY created_at DESC LIMIT 1
+        """, gen["id"] if gen else None
+        ) if gen else None
+
+    def safe(row):
+        if not row: return {}
+        d = dict(row)
+        for k, v in d.items():
+            if hasattr(v, 'isoformat'):
+                d[k] = v.isoformat()
+        return d
+
+    return {
+        "published": safe(pt),
+        "raw": safe(raw),
+        "generated": safe(gen),
+        "quality": safe(qs),
+    }
+
+
+class TourEditRequest(_BM):
+    field: str
+    value: str
+    approved_by: Optional[str] = "content_team"
+
+
+@router.patch("/{tour_id}/approve")
+async def approve_tour_edit(
+    tour_id: str,
+    body: TourEditRequest,
+    request: Request,
+    tenant=Depends(get_tenant),
+):
+    """Inline edit + save a field on published_tour."""
+    tenant_id = tenant["sub"]
+    pool = request.app.state.pool
+
+    ALLOWED = {
+        "aa_name", "aa_subtitle", "aa_summary", "aa_description",
+        "aa_highlights", "aa_itineraries", "mobile_card_text",
+        "seo_title", "seo_meta",
+    }
+    if body.field not in ALLOWED:
+        raise HTTPException(status_code=400, detail=f"Field '{body.field}' not editable")
+
+    async with pool.acquire() as conn:
+        await conn.execute(f"""
+            UPDATE gold_aa_internal.published_tours
+            SET {body.field} = $1, approved_by = $2
+            WHERE id = $3::uuid AND tenant_id = $4::uuid
+        """, body.value, body.approved_by, tour_id, tenant_id)
+
+    return {"ok": True, "field": body.field}
