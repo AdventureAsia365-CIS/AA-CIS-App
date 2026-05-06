@@ -353,6 +353,72 @@ async def list_my_versions(
     }
 
 
+@router.get("/{tour_id}/full")
+async def get_tour_full(
+    tour_id: str,
+    request: Request,
+    tenant=Depends(get_tenant),
+):
+    """Full before/after data for catalog review panel."""
+    tenant_id = tenant["sub"]
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        pt = await conn.fetchrow("""
+            SELECT * FROM gold_aa_internal.published_tours
+            WHERE id = $1::uuid AND tenant_id = $2::uuid
+        """, tour_id, tenant_id)
+        if not pt:
+            raise HTTPException(status_code=404, detail="Tour not found")
+
+        # Raw source data (before)
+        raw = await conn.fetchrow("""
+            SELECT * FROM silver_aa_internal.raw_tours
+            WHERE tour_id = $1::uuid
+        """, pt["tour_id"])
+
+        # Generated content (AI output before export)
+        gen = await conn.fetchrow("""
+            SELECT * FROM silver_aa_internal.generated_content
+            WHERE tour_id = $1::uuid
+            ORDER BY version_num DESC LIMIT 1
+        """, pt["tour_id"])
+
+        # Quality scores
+        qs = await conn.fetchrow("""
+            SELECT * FROM silver_aa_internal.quality_scores
+            WHERE generated_content_id = $1::uuid
+            ORDER BY created_at DESC LIMIT 1
+        """, gen["id"] if gen else None
+        ) if gen else None
+
+    def safe(row):
+        from uuid import UUID
+        from decimal import Decimal
+        if not row: return {}
+        d = dict(row)
+        for k, v in d.items():
+            if isinstance(v, UUID):
+                d[k] = str(v)
+            elif isinstance(v, Decimal):
+                d[k] = float(v)
+            elif hasattr(v, 'isoformat'):
+                d[k] = v.isoformat()
+        return d
+
+    return {
+        "published": safe(pt),
+        "raw": safe(raw),
+        "generated": safe(gen),
+        "quality": safe(qs),
+    }
+
+
+class TourEditRequest(_BM):
+    field: str
+    value: str
+    approved_by: Optional[str] = "content_team"
+
+
 @router.get("/{tour_id}")
 async def get_tour(
     tour_id: str,
@@ -485,72 +551,6 @@ async def update_version(
 
 
 # ── P4: Full review endpoint — before/after + inline edit + approve ───────────
-@router.get("/{tour_id}/full")
-async def get_tour_full(
-    tour_id: str,
-    request: Request,
-    tenant=Depends(get_tenant),
-):
-    """Full before/after data for catalog review panel."""
-    tenant_id = tenant["sub"]
-    pool = request.app.state.pool
-    async with pool.acquire() as conn:
-        pt = await conn.fetchrow("""
-            SELECT * FROM gold_aa_internal.published_tours
-            WHERE id = $1::uuid AND tenant_id = $2::uuid
-        """, tour_id, tenant_id)
-        if not pt:
-            raise HTTPException(status_code=404, detail="Tour not found")
-
-        # Raw source data (before)
-        raw = await conn.fetchrow("""
-            SELECT * FROM silver_aa_internal.raw_tours
-            WHERE tour_id = $1::uuid
-        """, pt["tour_id"])
-
-        # Generated content (AI output before export)
-        gen = await conn.fetchrow("""
-            SELECT * FROM silver_aa_internal.generated_content
-            WHERE tour_id = $1::uuid
-            ORDER BY version_num DESC LIMIT 1
-        """, pt["tour_id"])
-
-        # Quality scores
-        qs = await conn.fetchrow("""
-            SELECT * FROM silver_aa_internal.quality_scores
-            WHERE generated_content_id = $1::uuid
-            ORDER BY created_at DESC LIMIT 1
-        """, gen["id"] if gen else None
-        ) if gen else None
-
-    def safe(row):
-        from uuid import UUID
-        from decimal import Decimal
-        if not row: return {}
-        d = dict(row)
-        for k, v in d.items():
-            if isinstance(v, UUID):
-                d[k] = str(v)
-            elif isinstance(v, Decimal):
-                d[k] = float(v)
-            elif hasattr(v, 'isoformat'):
-                d[k] = v.isoformat()
-        return d
-
-    return {
-        "published": safe(pt),
-        "raw": safe(raw),
-        "generated": safe(gen),
-        "quality": safe(qs),
-    }
-
-
-class TourEditRequest(_BM):
-    field: str
-    value: str
-    approved_by: Optional[str] = "content_team"
-
-
 @router.patch("/{tour_id}/approve")
 async def approve_tour_edit(
     tour_id: str,
