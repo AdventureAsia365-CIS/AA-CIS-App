@@ -93,8 +93,8 @@ function StepRow({ step, index, activeStep, progress }: {
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 function BrandIdentityPreview() {
-  const [rules, setRules] = React.useState<any>(null);
-  React.useEffect(() => {
+  const [rules, setRules] = useState<any>(null);
+  useEffect(() => {
     fetch("/api/tenant/pipeline/brand-identity")
       .then(r => r.ok ? r.json() : null)
       .then(d => setRules(d))
