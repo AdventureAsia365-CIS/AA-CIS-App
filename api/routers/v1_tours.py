@@ -524,10 +524,16 @@ async def get_tour_full(
         ) if gen else None
 
     def safe(row):
+        from uuid import UUID
+        from decimal import Decimal
         if not row: return {}
         d = dict(row)
         for k, v in d.items():
-            if hasattr(v, 'isoformat'):
+            if isinstance(v, UUID):
+                d[k] = str(v)
+            elif isinstance(v, Decimal):
+                d[k] = float(v)
+            elif hasattr(v, 'isoformat'):
                 d[k] = v.isoformat()
         return d
 
