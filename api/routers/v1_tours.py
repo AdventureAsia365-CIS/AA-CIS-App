@@ -398,7 +398,7 @@ async def get_tour_full(
         qs = await conn.fetchrow("""
             SELECT * FROM silver_aa_internal.quality_scores
             WHERE generated_content_id = $1::uuid
-            ORDER BY created_at DESC LIMIT 1
+            ORDER BY evaluated_at DESC LIMIT 1
         """, gen["id"] if gen else None
         ) if gen else None
 
