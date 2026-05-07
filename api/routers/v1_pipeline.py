@@ -967,7 +967,12 @@ async def get_seo_metrics(
         try:
             kw_data = row["top_keywords"]
 
-            items = kw_data if isinstance(kw_data, list) else (kw_data.get("top_keywords") or [] if isinstance(kw_data, dict) else [])
+            if isinstance(kw_data, list):
+                items = kw_data
+            elif isinstance(kw_data, dict):
+                items = kw_data.get("top_keywords") or []
+            else:
+                items = []
             for item in items[:5]:
                 kw = item.get("keyword") if isinstance(item, dict) else str(item)
                 if kw: keyword_counts[kw] = keyword_counts.get(kw, 0) + 1
