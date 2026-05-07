@@ -72,22 +72,29 @@ class ExportService:
         await self.conn.execute("""
             INSERT INTO gold_aa_internal.published_tours
                 (tour_id, tenant_id, generated_content_id, aa_name, aa_subtitle, aa_summary,
-                 aa_highlights, aa_itineraries, seo_title, seo_meta,
-                 country, slug, quality_score, is_active)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,TRUE)
+                 aa_description, aa_highlights, aa_itineraries, mobile_card_text,
+                 seo_title, seo_meta, seo_keywords_used, og_tags,
+                 country, slug, quality_score, quality_score_id, s3_gold_path, is_active)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,TRUE)
             ON CONFLICT (tour_id) DO NOTHING
         """,
             tour_id, tenant_id, generated_content_id,
             content["aa_name"],
             content.get("aa_subtitle", ""),
             content.get("aa_summary", ""),
+            content.get("aa_description", ""),
             json.dumps(content.get("aa_highlights", [])),
             content.get("aa_itineraries", ""),
+            content.get("mobile_card_text", ""),
             content.get("seo_title", ""),
             content.get("seo_meta", ""),
+            json.dumps(content.get("seo_keywords_used", [])),
+            json.dumps(content.get("og_tags", {})),
             content.get("country", ""),
             slug,
             quality_score,
+            content.get("quality_score_id"),
+            content.get("s3_gold_path"),
         )
 
         # Update pipeline status in silver

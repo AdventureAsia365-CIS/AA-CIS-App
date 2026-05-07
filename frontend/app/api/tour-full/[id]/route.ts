@@ -2,12 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 
 export async function GET(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
+  const { id } = await params;
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || "";
   const adminSecret = process.env.ADMIN_SECRET || "";
 
-  const res = await fetch(`${apiUrl}/v1/tours/${params.id}/full`, {
+  const res = await fetch(`${apiUrl}/v1/tours/${id}/full`, {
     headers: { "X-Admin-Secret": adminSecret },
     cache: "no-store",
   });
