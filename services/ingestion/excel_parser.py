@@ -83,19 +83,39 @@ class ExcelParser:
             if lower in active_map:
                 col_lookup[str(col)] = active_map[lower]
 
+        # Detect itineraries column for multi-row concat
+        itin_col = next(
+            (col for col, db in col_lookup.items() if db == "src_itineraries"),
+            None
+        )
+        name_col = next(
+            (col for col, db in col_lookup.items() if db == "src_name"),
+            None
+        )
+
         records = []
+        current = None
         for _, row in df.iterrows():
-            record = {}
-            for excel_col, db_field in col_lookup.items():
-                record[db_field] = self._clean(row.get(excel_col))
+            has_name = bool(self._clean(row.get(name_col)) if name_col else False)
 
-            # Must have src_name
-            if not record.get("src_name"):
-                continue
+            if has_name:
+                if current:
+                    records.append(current)
+                current = {}
+                for excel_col, db_field in col_lookup.items():
+                    current[db_field] = self._clean(row.get(excel_col))
+                current["source_file"] = self.source_file
+                current["raw_data"] = json.dumps(row.to_dict(), default=str)
+            else:
+                # Continuation row — concat itineraries only
+                if current and itin_col:
+                    extra = self._clean(row.get(itin_col))
+                    if extra:
+                        existing = current.get("src_itineraries") or ""
+                        current["src_itineraries"] = (existing + "\n" + extra).strip()
 
-            record["source_file"] = self.source_file
-            record["raw_data"] = json.dumps(row.to_dict(), default=str)
-            records.append(record)
+        if current and current.get("src_name"):
+            records.append(current)
 
         logger.info("excel_parse_complete",
                     file=self.source_file,
