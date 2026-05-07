@@ -107,7 +107,7 @@ function BrandIdentityPreview() {
     <Card style={{ marginTop: 24 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
         <SLabel>Active Brand Identity</SLabel>
-        <a href="/portal?tab=brand" style={{ fontSize: 11, color: A.gold, fontWeight: 600, textDecoration: "none" }}>
+        <a href="/brand" style={{ fontSize: 11, color: A.gold, fontWeight: 600, textDecoration: "none" }}>
           Edit →
         </a>
       </div>
@@ -138,7 +138,7 @@ function BrandIdentityPreview() {
           {!hasPrompt && !hasStyle && (
             <p style={{ fontSize: 12, color: A.muted, margin: 0, lineHeight: 1.5 }}>
               No brand rules configured — pipeline will use AA default standards.{" "}
-              <a href="/portal?tab=brand" style={{ color: A.gold }}>Set up Brand Identity</a> to customise output.
+              <a href="/brand" style={{ color: A.gold }}>Set up Brand Identity</a> to customise output.
             </p>
           )}
         </div>
