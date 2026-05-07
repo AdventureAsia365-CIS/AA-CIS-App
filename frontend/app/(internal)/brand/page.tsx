@@ -57,23 +57,23 @@ export default function BrandPage() {
 
   return (
     <div style={{ fontFamily: sans, background: A.bg, minHeight: "100vh" }}>
-      <TopBar title="Brand Identity" subtitle="AA core brand rules — applied to every pipeline rewrite" />
+      <TopBar breadcrumb={["Content", "Brand Identity"]} />
       <div style={{ maxWidth: 800, margin: "0 auto", padding: "32px 24px" }}>
         <Card style={{ marginBottom: 24 }}>
           <SLabel>Brand Context / System Prompt</SLabel>
           <textarea value={sp} onChange={e => setSp(e.target.value)} rows={5}
             placeholder="e.g. You are a travel editor for Adventure Asia. Write for senior professionals aged 40-60..."
-            style={{ width: "100%", fontFamily: sans, fontSize: 13, border: `1px solid ${A.border}`, borderRadius: 6, padding: "10px 12px", resize: "vertical", boxSizing: "border-box" }} />
+            style={{ width: "100%", fontFamily: sans, fontSize: 13, border: `1px solid ${A.line}`, borderRadius: 6, padding: "10px 12px", resize: "vertical", boxSizing: "border-box" }} />
 
-          <SLabel style={{ marginTop: 16 }}>Style Guide</SLabel>
+          <div style={{ marginTop: 16, fontSize: 11, fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: "0.08em", color: A.muted, marginBottom: 6 }}>Style Guide</div>
           <textarea value={sg} onChange={e => setSg(e.target.value)} rows={4}
             placeholder="e.g. Tone: calm, factual, editorial. Use active verbs. No superlatives..."
-            style={{ width: "100%", fontFamily: sans, fontSize: 13, border: `1px solid ${A.border}`, borderRadius: 6, padding: "10px 12px", resize: "vertical", boxSizing: "border-box" }} />
+            style={{ width: "100%", fontFamily: sans, fontSize: 13, border: `1px solid ${A.line}`, borderRadius: 6, padding: "10px 12px", resize: "vertical", boxSizing: "border-box" }} />
 
-          <SLabel style={{ marginTop: 16 }}>Forbidden Words (comma-separated)</SLabel>
+          <div style={{ marginTop: 16, fontSize: 11, fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: "0.08em", color: A.muted, marginBottom: 6 }}>Forbidden Words (comma-separated)</div>
           <input value={fw} onChange={e => setFw(e.target.value)}
             placeholder="e.g. curated, stunning, bespoke, paradise"
-            style={{ width: "100%", fontFamily: sans, fontSize: 13, border: `1px solid ${A.border}`, borderRadius: 6, padding: "8px 12px", boxSizing: "border-box" }} />
+            style={{ width: "100%", fontFamily: sans, fontSize: 13, border: `1px solid ${A.line}`, borderRadius: 6, padding: "8px 12px", boxSizing: "border-box" }} />
 
           <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 20 }}>
             <Btn onClick={save} disabled={saving}>{saving ? "Saving…" : "Save Brand Identity"}</Btn>
@@ -85,7 +85,7 @@ export default function BrandPage() {
           <Card>
             <SLabel>Version History</SLabel>
             {data.history.map(v => (
-              <div key={v.version} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${A.border}` }}>
+              <div key={v.version} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${A.line}` }}>
                 <div>
                   <span style={{ fontSize: 13, fontWeight: 500 }}>v{v.version}</span>
                   <span style={{ fontSize: 11, color: A.muted, marginLeft: 8 }}>{v.updated_at?.slice(0, 10)}</span>
