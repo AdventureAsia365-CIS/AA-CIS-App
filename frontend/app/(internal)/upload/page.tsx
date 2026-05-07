@@ -30,7 +30,7 @@ const STEPS = [
   { key: "ingestion",  label: "Parsing Excel",       desc: "Extracting tour rows from sheets" },
   { key: "seo",        label: "SEO Intelligence",    desc: "DataForSEO keyword fetch + cache" },
   { key: "generation", label: "Content Generation",  desc: "LLM rewrite via LangGraph" },
-  { key: "validation", label: "Brand Validation",    desc: "29 rules + quality score check" },
+  { key: "validation", label: "Brand Validation",    desc: "Rules + Quality score check" },
   { key: "export",     label: "Export to Catalog",   desc: "Promoting approved tours to gold layer" },
 ];
 

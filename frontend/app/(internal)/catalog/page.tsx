@@ -281,8 +281,8 @@ function ReviewPanel({ tour, onClose }: { tour: Tour; onClose: () => void }) {
               <DiffRow label="Name"        before={raw.src_name}        after={pt.aa_name}        field="aa_name"        tourId={tour.id} onSaved={handleSaved} />
               <DiffRow label="Subtitle"    before={raw.src_subtitle}    after={pt.aa_subtitle}    field="aa_subtitle"    tourId={tour.id} onSaved={handleSaved} />
               <DiffRow label="Summary"     before={raw.src_summary}     after={pt.aa_summary}     field="aa_summary"     tourId={tour.id} onSaved={handleSaved} multiline />
-              <DiffRow label="Description" before={raw.src_description} after={pt.aa_description} field="aa_description" tourId={tour.id} onSaved={handleSaved} multiline />
-              <DiffRow label="Mobile Card" before={null}                after={pt.mobile_card_text} field="mobile_card_text" tourId={tour.id} onSaved={handleSaved} />
+              {/* <DiffRow label="Description" before={raw.src_description} after={pt.aa_description} field="aa_description" tourId={tour.id} onSaved={handleSaved} multiline /> */}
+              {/* <DiffRow label="Mobile Card" before={null}                after={pt.mobile_card_text} field="mobile_card_text" tourId={tour.id} onSaved={handleSaved} /> */}
             </Section>
 
             {/* Highlights */}
