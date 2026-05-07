@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 from pydantic import BaseModel as _BM
@@ -357,10 +357,24 @@ async def list_my_versions(
 async def get_tour_full(
     tour_id: str,
     request: Request,
-    tenant=Depends(get_tenant),
+    x_admin_secret: Optional[str] = Header(None),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False)),
 ):
     """Full before/after data for catalog review panel."""
-    tenant_id = tenant["sub"]
+    import os
+    ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
+    is_admin = bool(ADMIN_SECRET and x_admin_secret == ADMIN_SECRET)
+    if is_admin:
+        tenant_id = "00000000-0000-0000-0000-000000000001"
+    elif credentials:
+        try:
+            payload = verify_jwt(credentials.credentials)
+            tenant_id = payload["sub"]
+        except Exception:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+    else:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
     pool = request.app.state.pool
     async with pool.acquire() as conn:
         pt = await conn.fetchrow("""
@@ -370,20 +384,17 @@ async def get_tour_full(
         if not pt:
             raise HTTPException(status_code=404, detail="Tour not found")
 
-        # Raw source data (before)
         raw = await conn.fetchrow("""
             SELECT * FROM silver_aa_internal.raw_tours
             WHERE tour_id = $1::uuid
         """, pt["tour_id"])
 
-        # Generated content (AI output before export)
         gen = await conn.fetchrow("""
             SELECT * FROM silver_aa_internal.generated_content
             WHERE tour_id = $1::uuid
             ORDER BY version_num DESC LIMIT 1
         """, pt["tour_id"])
 
-        # Quality scores
         qs = await conn.fetchrow("""
             SELECT * FROM silver_aa_internal.quality_scores
             WHERE generated_content_id = $1::uuid
