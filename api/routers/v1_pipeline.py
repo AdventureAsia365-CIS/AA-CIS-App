@@ -918,9 +918,9 @@ async def get_seo_metrics(
     async with pool.acquire() as conn:
         # Top keywords by country from seo_contexts
         top_keywords = await conn.fetch("""
-            SELECT country, keywords_json, created_at
+            SELECT keyword_search, top_keywords, fetched_at
             FROM silver_aa_internal.seo_context
-            ORDER BY created_at DESC
+            ORDER BY fetched_at DESC
             LIMIT 20
         """)
 
@@ -935,10 +935,10 @@ async def get_seo_metrics(
 
         # Countries covered
         countries = await conn.fetch("""
-            SELECT DISTINCT country, COUNT(*) as count
+            SELECT keyword_search, COUNT(*) as count
             FROM silver_aa_internal.seo_context
-            WHERE country IS NOT NULL
-            GROUP BY country ORDER BY count DESC
+            WHERE keyword_search IS NOT NULL
+            GROUP BY keyword_search ORDER BY count DESC
         """)
 
     # Redis cache stats
@@ -965,10 +965,12 @@ async def get_seo_metrics(
     keyword_counts: dict = {}
     for row in top_keywords:
         try:
-            kw_data = _j.loads(row["keywords_json"]) if isinstance(
-                row["keywords_json"], str) else (row["keywords_json"] or {})
-            for kw in (kw_data.get("top_keywords") or [])[:5]:
-                keyword_counts[kw] = keyword_counts.get(kw, 0) + 1
+            kw_data = row["top_keywords"]
+
+            items = kw_data if isinstance(kw_data, list) else (kw_data.get("top_keywords") or [] if isinstance(kw_data, dict) else [])
+            for item in items[:5]:
+                kw = item.get("keyword") if isinstance(item, dict) else str(item)
+                if kw: keyword_counts[kw] = keyword_counts.get(kw, 0) + 1
         except Exception:
             pass
 
@@ -978,7 +980,7 @@ async def get_seo_metrics(
         "total_tours":   total_tours,
         "seo_covered":   seo_covered,
         "coverage_pct":  round(seo_covered / total_tours * 100, 1) if total_tours else 0,
-        "countries":     [dict(r) for r in countries],
+        "countries":     [{"keyword_search": dict(r)["keyword_search"], "count": dict(r)["count"]} for r in countries],
         "top_keywords":  [{"keyword": k, "count": v} for k, v in top_kw],
         "cache":         cache_stats,
     }
