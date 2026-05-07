@@ -392,7 +392,7 @@ export default function DashboardPage() {
               <h1 style={{ fontFamily: serif, fontSize: 24, fontWeight: 500, color: A.ink, margin: "0 0 6px", letterSpacing: "-0.01em" }}>
                 Dev Dashboard
               </h1>
-              <p style={{ fontSize: 13, color: A.muted, margin: 0 }}>Pipeline metrics · Live data from ECS Task :78</p>
+              <p style={{ fontSize: 13, color: A.muted, margin: 0 }}>Pipeline metrics · API v0.3.0</p>
             </div>
           </div>
 

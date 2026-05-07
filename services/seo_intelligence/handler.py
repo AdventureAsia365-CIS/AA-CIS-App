@@ -12,6 +12,7 @@ from shared.cache.local_cache import LocalCache
 
 logger = structlog.get_logger()
 
+
 async def process_seo(tour_id: str, destination: str, activity: str = None, cache=None) -> dict:
     cache = cache or LocalCache()
     cache_key = RedisCache.make_key(destination, activity)
@@ -29,7 +30,7 @@ async def process_seo(tour_id: str, destination: str, activity: str = None, cach
     try:
         repo = SeoContextRepository(conn, tenant_slug="aa_internal")
         seo_id = await repo.insert({
-            "tour_id":       tour_id,
+            "tour_id":        tour_id,
             "keyword_search": destination,
             "keyword_ideas":  json.dumps(seo_data.get("keywords", [])),
             "demographics":   json.dumps(seo_data.get("demographics", {})),
@@ -46,6 +47,22 @@ async def process_seo(tour_id: str, destination: str, activity: str = None, cach
     return {"status": "fetched", "id": seo_id, "data": seo_data}
 
 
+async def _lookup_destination(tour_id: str) -> str:
+    """Lookup country/name from DB when destination not in SF payload."""
+    conn = await asyncpg.connect(get_database_url())
+    try:
+        row = await conn.fetchrow(
+            "SELECT country, src_name FROM silver_aa_internal.raw_tours "
+            "WHERE tour_id = $1::uuid",
+            tour_id
+        )
+        if row:
+            return row["country"] or row["src_name"] or ""
+        return ""
+    finally:
+        await conn.close()
+
+
 def lambda_handler(event: dict, context) -> dict:
     results = []
 
@@ -55,6 +72,9 @@ def lambda_handler(event: dict, context) -> dict:
     # Pattern 2: SQS trigger (Phase 2)
     elif "Records" in event:
         records = [json.loads(r["body"]) for r in event["Records"]]
+    elif "tour_id" in event:
+        # SF invoke without destination — lookup from DB
+        records = [event]
     else:
         logger.warning("unknown_event_format", keys=list(event.keys()))
         return {"processed": 0, "results": []}
@@ -64,9 +84,18 @@ def lambda_handler(event: dict, context) -> dict:
             tour_id     = body.get("tour_id", "unknown")
             destination = body.get("destination")
             activity    = body.get("activity")
+
+            # Lookup destination from DB if not provided
+            if not destination and tour_id != "unknown":
+                try:
+                    destination = asyncio.run(_lookup_destination(tour_id))
+                except Exception as _e:
+                    logger.warning("destination_lookup_failed", error=str(_e))
+
             if not destination:
-                logger.warning("missing_destination", body=body)
+                logger.warning("missing_destination", tour_id=tour_id)
                 continue
+
             result = asyncio.run(process_seo(tour_id, destination, activity))
             results.append({"destination": destination, **result})
         except Exception as e:
