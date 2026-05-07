@@ -28,6 +28,17 @@ class RawTourRepository:
 
     async def insert(self, data: dict) -> str:
         await self._set_tenant_context()
+        # Dedup check: if no tour_id_external, check by src_name + provider
+        if not data.get("tour_id_external"):
+            existing = await self.conn.fetchval(f"""
+                SELECT tour_id FROM {self.schema}.raw_tours
+                WHERE tenant_id = $1
+                AND src_name = $2
+                AND provider = $3
+                ORDER BY ingest_at DESC LIMIT 1
+            """, self.tenant_id, data["src_name"], data.get("provider"))
+            if existing:
+                return str(existing)
         row = await self.conn.fetchrow(f"""
             INSERT INTO {self.schema}.raw_tours (
                 tenant_id, batch_id, source_id,
