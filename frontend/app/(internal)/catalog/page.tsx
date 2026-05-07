@@ -186,8 +186,12 @@ function ReviewPanel({ tour, onClose }: { tour: Tour; onClose: () => void }) {
 
   useEffect(() => {
     const token = getToken();
-    fetch(`${API_URL}/v1/tours/${tour.id}/full`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    const adminSecret = process.env.NEXT_PUBLIC_ADMIN_SECRET || "";
+    fetch(`/api/tour-full/${tour.id}`, {
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(adminSecret ? { "X-Admin-Secret": adminSecret } : {}),
+      },
     })
       .then(r => r.ok ? r.json() : null)
       .then(d => { setData(d); setPublished(d?.published); setLoading(false); })
