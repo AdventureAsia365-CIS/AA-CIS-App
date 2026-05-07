@@ -2,13 +2,14 @@
 // app/(internal)/_components/InternalSidebar.tsx
 
 import { useRouter, usePathname } from "next/navigation";
-import { Upload, ClipboardList, BookOpen, LayoutDashboard, LogOut } from "lucide-react";
+import { Upload, ClipboardList, BookOpen, LayoutDashboard, LogOut, Palette } from "lucide-react";
 import { A, serif, sans } from "./internalUi";
 
 const NAV = [
   { href: "/upload",    icon: <Upload size={15} />,       label: "Upload" },
   { href: "/review",    icon: <ClipboardList size={15} />, label: "Review Queue" },
   { href: "/catalog",   icon: <BookOpen size={15} />,     label: "Catalog" },
+  { href: "/brand",     icon: <Palette size={15} />,      label: "Brand Identity" },
 ];
 
 export default function InternalSidebar({ isAdmin = false, userName = "Content" }: {
