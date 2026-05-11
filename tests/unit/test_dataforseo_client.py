@@ -3,11 +3,12 @@ from services.seo_intelligence.dataforseo_client import DataForSEOClient
 
 def test_parse_keywords_happy():
     client = DataForSEOClient(login="test", password="test")
+    # DataForSEO search_volume returns flat list of keyword objects
     mock_data = {
-        "tasks": [{"result": [{"items": [
+        "tasks": [{"result": [
             {"keyword": "vietnam tour",   "search_volume": 5000},
             {"keyword": "vietnam travel", "search_volume": 3000},
-        ]}]}]
+        ]}]
     }
     result = client._parse_keywords(mock_data)
     assert "vietnam tour" in result["top_keywords"]
