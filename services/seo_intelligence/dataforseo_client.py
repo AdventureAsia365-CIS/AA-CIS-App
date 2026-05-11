@@ -20,7 +20,7 @@ class DataForSEOClient:
         return (self.login, self.password)
 
     async def fetch_keywords(self, destination: str, activity: str = None) -> dict:
-        seed = f"{destination} {activity}".strip() if activity else destination
+        seed = f"{destination} {activity}".strip() if activity else f"{destination} tours"
         payload = [{
             "language_name": "English",
             "location_name": "United States",

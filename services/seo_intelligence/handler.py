@@ -32,10 +32,10 @@ async def process_seo(tour_id: str, destination: str, activity: str = None, cach
         seo_id = await repo.insert({
             "tour_id":        tour_id,
             "keyword_search": destination,
-            "keyword_ideas":  json.dumps(seo_data.get("keywords", [])),
+            "keyword_ideas":  json.dumps(seo_data.get("keywords", {}).get("search_volumes", {})),
             "demographics":   json.dumps(seo_data.get("demographics", {})),
             "trends":         json.dumps(seo_data.get("trends", {})),
-            "top_keywords":   json.dumps(seo_data.get("top_keywords", [])),
+            "top_keywords":   json.dumps(seo_data.get("keywords", {}).get("top_keywords", [])),
             "cache_key":      cache_key,
             "expires_at":     datetime.utcnow() + timedelta(hours=24),
         })

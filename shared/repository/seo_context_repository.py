@@ -18,6 +18,14 @@ class SeoContextRepository:
                 keyword_ideas, demographics, trends, top_keywords,
                 cache_key, expires_at
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (cache_key) DO UPDATE SET
+                tour_id        = EXCLUDED.tour_id,
+                keyword_ideas  = EXCLUDED.keyword_ideas,
+                top_keywords   = EXCLUDED.top_keywords,
+                demographics   = EXCLUDED.demographics,
+                trends         = EXCLUDED.trends,
+                expires_at     = EXCLUDED.expires_at,
+                fetched_at     = NOW()
             RETURNING id::text
         """,
             data["tour_id"],
