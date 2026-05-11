@@ -189,6 +189,9 @@ class TourRunRequest(BaseModel):
 async def run_tour(req: TourRunRequest):
     """Per-tour endpoint for Step Functions — load tour from DB, rewrite, return result."""
     conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+    # Resolve tenant slug → UUID (SF passes slug, API expects UUID)
+    TENANT_SLUG_MAP = {"aa_internal": "00000000-0000-0000-0000-000000000001"}
+    tenant_uuid = TENANT_SLUG_MAP.get(req.tenant_id, req.tenant_id)
     try:
         row = await conn.fetchrow(
             """SELECT * FROM silver_aa_internal.raw_tours
@@ -216,7 +219,7 @@ async def run_tour(req: TourRunRequest):
         # P3-S3: Fetch tenant brand rules for customization layer
         brand_rules = {}
         try:
-            _tenant_uuid = "00000000-0000-0000-0000-000000000001"
+            _tenant_uuid = tenant_uuid
             br_row = await conn.fetchrow("""
                 SELECT system_prompt, style_guide, forbidden_words
                 FROM shared.tenant_brand_rules
@@ -264,7 +267,7 @@ async def run_tour(req: TourRunRequest):
                 ) RETURNING id
             """,
                 req.tour_id,
-                "00000000-0000-0000-0000-000000000001",
+                tenant_uuid,
                 generated.get("name"),
                 generated.get("subtitle"),
                 generated.get("summary"),

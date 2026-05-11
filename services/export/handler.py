@@ -12,11 +12,12 @@ logger = structlog.get_logger()
 async def process_export(version_id: str) -> dict:
     conn = await asyncpg.connect(get_database_url())
     tenant_slug = os.environ.get("TENANT_SLUG", "aa_internal")
-    silver      = f"silver_{tenant_slug}"
+    silver = f"silver_{tenant_slug}"
     try:
+        # 1. Fetch generated content + tour info
         row = await conn.fetchrow(f"""
-            SELECT gc.*, rt.country, rt.duration,
-                   qs.id        AS quality_score_id,
+            SELECT gc.*, rt.country, rt.duration, rt.batch_id,
+                   qs.id            AS quality_score_id,
                    qs.score_overall AS quality_score
             FROM {silver}.generated_content gc
             JOIN {silver}.raw_tours rt ON rt.tour_id = gc.tour_id
@@ -29,9 +30,13 @@ async def process_export(version_id: str) -> dict:
             raise ValueError(f"Version not approved or not found: {version_id}")
 
         row = dict(row)
+        batch_id = row["batch_id"]
+        tour_id  = row["tour_id"]
+
+        # 2. Insert into published catalog (gold)
         repo = PublishedCatalogRepository(conn, tenant_slug)
         catalog_id = await repo.insert({
-            "tour_id":              row["tour_id"],
+            "tour_id":              tour_id,
             "generated_content_id": row["id"],
             "tenant_id":            row["tenant_id"],
             "aa_name":              row.get("aa_name"),
@@ -50,8 +55,37 @@ async def process_export(version_id: str) -> dict:
             "s3_gold_path":         None,
             "approved_by":          "pipeline",
         })
-
         logger.info("export_done", catalog_id=catalog_id, version_id=version_id)
+
+        # 3. Mark tour as exported
+        await conn.execute(f"""
+            UPDATE {silver}.raw_tours
+            SET pipeline_status = 'published'
+            WHERE tour_id = $1::uuid
+        """, tour_id)
+
+        # 4. Check if all tours in batch are done → update pipeline_runs
+        if batch_id:
+            pending = await conn.fetchval(f"""
+                SELECT COUNT(*) FROM {silver}.raw_tours
+                WHERE batch_id = $1::uuid
+                  AND pipeline_status != 'published'
+            """, batch_id)
+
+            if pending == 0:
+                await conn.execute("""
+                    UPDATE shared.pipeline_runs
+                    SET status       = 'completed',
+                        completed_at = NOW(),
+                        tours_passed = (
+                            SELECT COUNT(*) FROM silver_aa_internal.raw_tours
+                            WHERE batch_id = $1::uuid
+                              AND pipeline_status = 'published'
+                        )
+                    WHERE batch_id = $1::uuid
+                """, batch_id)
+                logger.info("batch_completed", batch_id=str(batch_id))
+
         return {
             "status":     "exported",
             "catalog_id": catalog_id,

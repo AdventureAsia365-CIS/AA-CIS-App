@@ -105,6 +105,8 @@ class ExcelParser:
                 for excel_col, db_field in col_lookup.items():
                     current[db_field] = self._clean(row.get(excel_col))
                 current["source_file"] = self.source_file
+                if not current.get("country"):
+                    current["country"] = detect_country_from_filename(self.source_file)
                 current["raw_data"] = json.dumps(row.to_dict(), default=str)
             else:
                 # Continuation row — concat itineraries only
@@ -130,3 +132,32 @@ class ExcelParser:
             return None
         cleaned = str(value).strip()
         return cleaned if cleaned and cleaned.lower() != "nan" else None
+
+# Country keyword map — dùng cho auto-detect từ filename
+_COUNTRY_KEYWORDS = {
+    "srilanka": "Sri Lanka", "sri_lanka": "Sri Lanka", "lanka": "Sri Lanka",
+    "vietnam": "Vietnam", "viet_nam": "Vietnam",
+    "thailand": "Thailand", "thai": "Thailand",
+    "indonesia": "Indonesia", "bali": "Indonesia",
+    "japan": "Japan",
+    "nepal": "Nepal",
+    "india": "India",
+    "cambodia": "Cambodia",
+    "myanmar": "Myanmar",
+    "malaysia": "Malaysia",
+    "singapore": "Singapore",
+    "philippines": "Philippines",
+    "laos": "Laos",
+}
+
+def detect_country_from_filename(filename: str) -> str | None:
+    """Extract country từ filename nếu khớp keyword — fallback khi Excel thiếu country column."""
+    if not filename:
+        return None
+    name = filename.split("/")[-1].lower().replace("-", "_").replace(" ", "_")
+    # Remove extension
+    name = name.rsplit(".", 1)[0]
+    for keyword, country in _COUNTRY_KEYWORDS.items():
+        if keyword in name:
+            return country
+    return None
