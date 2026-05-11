@@ -74,7 +74,11 @@ class DataForSEOClient:
 
     def _parse_keywords(self, data: dict) -> dict:
         try:
-            items = data["tasks"][0]["result"][0]["items"]
+            results = data["tasks"][0]["result"] or []
+            # DataForSEO search_volume returns list of keyword objects directly
+            items = [r for r in results if isinstance(r, dict) and "keyword" in r]
+            if not items:
+                return {}
             return {
                 "top_keywords":   [i["keyword"] for i in items[:10]],
                 "search_volumes": {i["keyword"]: i.get("search_volume", 0) for i in items[:10]},
