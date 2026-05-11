@@ -19,6 +19,7 @@ function getToken() {
 interface Tour {
   id: string; tour_id: string; aa_name: string; aa_subtitle: string;
   seo_title: string; quality_score: number | null; published_at: string;
+  country?: string;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -206,6 +207,7 @@ function ReviewPanel({ tour, onClose }: { tour: Tour; onClose: () => void }) {
   const pt  = published ?? data?.published ?? {};
   const gen = data?.generated ?? {};
   const qs  = data?.quality ?? {};
+  const seo = data?.seo ?? {};
   const sc  = tour.quality_score;
 
   return (
@@ -299,7 +301,7 @@ function ReviewPanel({ tour, onClose }: { tour: Tour; onClose: () => void }) {
             <Section title="SEO">
               <DiffRow label="SEO Title"  before={raw.src_name}  after={pt.seo_title} field="seo_title" tourId={tour.id} onSaved={handleSaved} />
               <DiffRow label="Meta Desc"  before={raw.src_summary?.slice(0, 160)} after={pt.seo_meta} field="seo_meta" tourId={tour.id} onSaved={handleSaved} multiline />
-              <DiffRow label="Keywords"   before={null}          after={pt.seo_keywords_used} field="seo_meta" tourId={tour.id} onSaved={handleSaved} isJson />
+              <DiffRow label="Keywords"   before={null}          after={seo.top_keywords} field="seo_meta" tourId={tour.id} onSaved={handleSaved} isJson />
             </Section>
 
             {/* Raw supplier extras */}
@@ -422,7 +424,7 @@ export default function CatalogPage() {
                         <td style={{ ...TD, color: A.muted, fontSize: 12, maxWidth: 200 }}>
                           <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.aa_subtitle}</div>
                         </td>
-                        <td style={{ ...TD, fontSize: 12, color: A.muted2 }}>—</td>
+                        <td style={{ ...TD, fontSize: 12, color: A.muted2 }}>{item.country ?? "—"}</td>
                         <td style={{ ...TD, color: A.muted2, fontSize: 11, fontFamily: mono, maxWidth: 180 }}>
                           <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.seo_title}</div>
                         </td>

@@ -31,27 +31,31 @@ async def list_tours(
     pool = request.app.state.pool
     offset = (page - 1) * page_size
 
-    conditions = ["tenant_id = $1"]
+    conditions = ["pt.tenant_id = $1"]
     params = [tenant_id]
 
     if min_quality is not None:
         params.append(min_quality)
-        conditions.append(f"quality_score >= ${len(params)}")
+        conditions.append(f"pt.quality_score >= ${len(params)}")
 
     where = "WHERE " + " AND ".join(conditions)
 
     async with pool.acquire() as conn:
-        total = await conn.fetchval(
-            f"SELECT COUNT(*) FROM gold_aa_internal.published_tours {where}",
-            *params
-        )
+        total = await conn.fetchval(f"""
+            SELECT COUNT(*)
+            FROM gold_aa_internal.published_tours pt
+            LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
+            {where}
+        """, *params)
         params_paged = params + [page_size, offset]
         rows = await conn.fetch(f"""
-            SELECT id, tour_id, aa_name, aa_subtitle, aa_summary,
-                   seo_title, quality_score, published_at
-            FROM gold_aa_internal.published_tours
+            SELECT pt.id, pt.tour_id, pt.aa_name, pt.aa_subtitle, pt.aa_summary,
+                   pt.seo_title, pt.quality_score, pt.published_at,
+                   rt.country
+            FROM gold_aa_internal.published_tours pt
+            LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
             {where}
-            ORDER BY published_at DESC
+            ORDER BY pt.published_at DESC
             LIMIT ${len(params)+1} OFFSET ${len(params)+2}
         """, *params_paged)
 
@@ -402,6 +406,13 @@ async def get_tour_full(
         """, gen["id"] if gen else None
         ) if gen else None
 
+        sc = await conn.fetchrow("""
+            SELECT top_keywords, keyword_search, keyword_ideas, fetched_at
+            FROM silver_aa_internal.seo_context
+            WHERE tour_id = $1::uuid
+            ORDER BY fetched_at DESC LIMIT 1
+        """, pt["tour_id"])
+
     def safe(row):
         from uuid import UUID
         from decimal import Decimal
@@ -421,6 +432,7 @@ async def get_tour_full(
         "raw": safe(raw),
         "generated": safe(gen),
         "quality": safe(qs),
+        "seo": safe(sc),
     }
 
 
