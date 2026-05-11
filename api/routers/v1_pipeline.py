@@ -932,16 +932,26 @@ async def get_seo_metrics(
             "SELECT COUNT(*) FROM gold_aa_internal.published_tours "
             "WHERE tenant_id = '00000000-0000-0000-0000-000000000001'::uuid"
         )
-        seo_covered = await conn.fetchval(
-            "SELECT COUNT(DISTINCT tour_id) FROM silver_aa_internal.seo_context"
-        )
+        # seo_context is cached per destination (not per tour) — count tours whose
+        # country has a seo_context entry
+        seo_covered = await conn.fetchval("""
+            SELECT COUNT(DISTINCT pt.tour_id)
+            FROM gold_aa_internal.published_tours pt
+            JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
+            WHERE pt.tenant_id = '00000000-0000-0000-0000-000000000001'::uuid
+              AND EXISTS (
+                  SELECT 1 FROM silver_aa_internal.seo_context sc
+                  WHERE sc.keyword_search = rt.country
+              )
+        """)
 
-        # Countries covered
+        # Countries covered — join raw_tours for actual country name
         countries = await conn.fetch("""
-            SELECT keyword_search, COUNT(*) as count
-            FROM silver_aa_internal.seo_context
-            WHERE keyword_search IS NOT NULL
-            GROUP BY keyword_search ORDER BY count DESC
+            SELECT rt.country, COUNT(sc.id) as count
+            FROM silver_aa_internal.seo_context sc
+            JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = sc.tour_id
+            WHERE rt.country IS NOT NULL
+            GROUP BY rt.country ORDER BY count DESC
         """)
 
     # Redis cache stats
@@ -964,12 +974,14 @@ async def get_seo_metrics(
         pass
 
     # Parse keywords from seo_contexts
+    # asyncpg returns JSONB columns as raw JSON strings — must parse explicitly
     import json as _j
     keyword_counts: dict = {}
     for row in top_keywords:
         try:
             kw_data = row["top_keywords"]
-
+            if isinstance(kw_data, str):
+                kw_data = _j.loads(kw_data)
             if isinstance(kw_data, list):
                 items = kw_data
             elif isinstance(kw_data, dict):
@@ -988,7 +1000,7 @@ async def get_seo_metrics(
         "total_tours":   total_tours,
         "seo_covered":   seo_covered,
         "coverage_pct":  round(seo_covered / total_tours * 100, 1) if total_tours else 0,
-        "countries":     [{"keyword_search": dict(r)["keyword_search"], "count": dict(r)["count"]} for r in countries],
+        "countries":     [{"country": dict(r)["country"], "count": dict(r)["count"]} for r in countries],
         "top_keywords":  [{"keyword": k, "count": v} for k, v in top_kw],
         "cache":         cache_stats,
     }
