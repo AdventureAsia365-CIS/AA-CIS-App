@@ -320,6 +320,9 @@ async def run_tour(req: TourRunRequest):
         tokens_in   = int(result.get("input_tokens") or 0)
         tokens_out  = int(result.get("output_tokens") or 0)
         tour_passed = float(result.get("quality_score") or 0.0) >= 7.0
+        model_name = result.get("model_used") or None
+        if isinstance(model_name, str) and not model_name:
+            model_name = None
         if cost_usd > 0 or tokens_in > 0:
             await conn.execute("""
                 UPDATE shared.pipeline_runs
@@ -327,7 +330,9 @@ async def run_tour(req: TourRunRequest):
                     cost_usd      = COALESCE(cost_usd, 0)      + $1,
                     tokens_input  = COALESCE(tokens_input, 0)  + $2,
                     tokens_output = COALESCE(tokens_output, 0) + $3,
-                    tours_failed  = tours_failed + $4
+                    tours_failed  = tours_failed + $4,
+                    llm_model     = COALESCE($6, llm_model),
+                    llm_provider  = COALESCE(llm_provider, 'bedrock')
                 WHERE batch_id = $5::uuid
             """,
                 cost_usd,
@@ -335,6 +340,7 @@ async def run_tour(req: TourRunRequest):
                 tokens_out,
                 0 if tour_passed else 1,
                 req.batch_id,
+                model_name,
             )
 
         return {
@@ -755,18 +761,36 @@ async def get_pipeline_metrics(
             ORDER BY day ASC
         """, str(days))
 
-        # Model usage
+        # Cost by model — actual billed cost from pipeline_runs
+        cost_by_model = await conn.fetch("""
+            SELECT
+                COALESCE(llm_model, 'claude-haiku') AS model,
+                COUNT(*)                             AS batches,
+                COALESCE(SUM(cost_usd), 0)           AS total_cost
+            FROM shared.pipeline_runs
+            WHERE cost_usd > 0
+            GROUP BY COALESCE(llm_model, 'claude-haiku')
+            ORDER BY total_cost DESC
+        """)
+
+        # LLM call quality — from generated_content (per-call granularity)
         models = await conn.fetch(f"""
             SELECT
-                gc.model_editorial          AS model,
-                COUNT(*)                    AS calls,
-                ROUND(AVG(qs.score_overall)::numeric, 1) AS avg_score
+                COALESCE(gc.model_editorial, 'claude-haiku') AS model,
+                COUNT(*)                                      AS calls,
+                ROUND(AVG(qs.score_overall)::numeric, 1)     AS avg_score
             FROM silver_{tenant_slug}.generated_content gc
             LEFT JOIN silver_{tenant_slug}.quality_scores qs
                 ON qs.generated_content_id = gc.id
-            WHERE gc.model_editorial IS NOT NULL
-            GROUP BY gc.model_editorial
+            GROUP BY COALESCE(gc.model_editorial, 'claude-haiku')
             ORDER BY calls DESC
+        """)
+
+        # Header KPI — avg cost per pipeline run from real data
+        avg_cost_per_run = await conn.fetchval("""
+            SELECT ROUND(SUM(cost_usd) / NULLIF(COUNT(*), 0)::numeric, 6)
+            FROM shared.pipeline_runs
+            WHERE cost_usd > 0
         """)
 
         # Canonical tour count — source of truth for all "Tours Processed" metrics
@@ -854,13 +878,33 @@ async def get_pipeline_metrics(
                     "latency": "—", "errors": 0, "calls": 0,
                 })
 
-    # Build cost estimate for models (Bedrock pricing)
-    COST_PER_CALL = {
-        "claude-sonnet-4-20250514":    0.027,
-        "us.anthropic.claude-sonnet-4-5-20250929-v1:0": 0.018,
-        "gpt-4.1":                     0.074,
-        "claude-3-5-sonnet":           0.027,
-    }
+    # Merge cost (pipeline_runs) + quality (generated_content) by model name
+    cost_map = {r["model"]: float(r["total_cost"]) for r in cost_by_model}
+    seen_models: set = set()
+    model_usage = []
+    for r in models:
+        model      = r["model"]
+        calls      = int(r["calls"])
+        total_cost = cost_map.get(model, 0.0)
+        model_usage.append({
+            "model":         model,
+            "calls":         calls,
+            "avg_score":     float(r["avg_score"]) if r["avg_score"] else None,
+            "total_cost":    round(total_cost, 4),
+            "cost_per_call": round(total_cost / calls, 6) if calls > 0 else 0.0,
+        })
+        seen_models.add(model)
+    # Include models that appear only in pipeline_runs (no generated_content match)
+    for r in cost_by_model:
+        if r["model"] not in seen_models:
+            total_cost = float(r["total_cost"])
+            model_usage.append({
+                "model":         r["model"],
+                "calls":         int(r["batches"]),
+                "avg_score":     None,
+                "total_cost":    round(total_cost, 4),
+                "cost_per_call": 0.0,
+            })
 
     return {
         "daily_runs": [
@@ -875,16 +919,8 @@ async def get_pipeline_metrics(
             }
             for r in daily
         ],
-        "model_usage": [
-            {
-                "model":     r["model"],
-                "calls":     r["calls"],
-                "avg_score": float(r["avg_score"]) if r["avg_score"] else None,
-                "cost":      round(r["calls"] * COST_PER_CALL.get(r["model"], 0.027), 2),
-                "cost_per_call": COST_PER_CALL.get(r["model"], 0.027),
-            }
-            for r in models
-        ],
+        "model_usage": model_usage,
+        "avg_cost_per_run": float(avg_cost_per_run) if avg_cost_per_run else 0.0,
         "last_run": {
             "tours_total":  last_run["tours_total"]  if last_run else 0,
             "tours_passed": last_run["tours_passed"] if last_run else 0,

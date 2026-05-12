@@ -169,20 +169,19 @@ function CostTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => string 
 
   if (loading) return <LoadingScreen msg="Loading cost data…" />;
 
-  const daily      = data?.daily_runs ?? [];
-  const models     = data?.model_usage ?? [];
-  const totalCost  = daily.reduce((s: number, d: any) => s + parseFloat(d.cost ?? 0), 0);
-  const totalTours = data?.published_count ?? daily.reduce((s: number, d: any) => s + (d.tours ?? 0), 0);
-  const llmCalls   = data?.llm_calls ?? models.reduce((s: number, m: any) => s + (m.calls ?? 0), 0);
-  const cpt        = llmCalls > 0 ? totalCost / llmCalls : 0;
+  const daily         = data?.daily_runs ?? [];
+  const models        = data?.model_usage ?? [];
+  const totalCost     = daily.reduce((s: number, d: any) => s + parseFloat(d.cost ?? 0), 0);
+  const totalTours    = data?.published_count ?? 0;
+  const avgCostPerRun = data?.avg_cost_per_run ?? 0;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
         {[
-          { label: "Total LLM Cost (30d)", value: `$${totalCost.toFixed(2)}`, color: A.gold,    src: "pipeline_runs · accumulated" },
-          { label: "Tours Processed",      value: String(totalTours),         color: "#7C3AED", src: "published_tours · all time" },
-          { label: "Cost / LLM Call",      value: `$${cpt.toFixed(4)}`,       color: "#22C55E", src: "generated_content · LLM calls" },
+          { label: "Total LLM Cost (30d)", value: `$${totalCost.toFixed(4)}`,      color: A.gold,    src: "pipeline_runs · 30d window" },
+          { label: "Tours Processed",      value: String(totalTours),              color: "#7C3AED", src: "published_tours · all time" },
+          { label: "Avg Cost / Run",       value: `$${avgCostPerRun.toFixed(4)}`,  color: "#22C55E", src: "pipeline_runs · SUM/COUNT" },
         ].map(c => (
           <Card key={c.label}>
             <SLabel>{c.label}</SLabel>
@@ -462,11 +461,11 @@ export default function DashboardPage() {
                         <tr key={m.model}>
                           <td style={TD}><code style={{ fontFamily: mono, fontSize: 12, color: A.gold }}>{m.model}</code></td>
                           <td style={{ ...TD, textAlign: "right" }}>{m.calls}</td>
-                          <td style={{ ...TD, textAlign: "right" }}>${m.cost.toFixed(2)}</td>
+                          <td style={{ ...TD, textAlign: "right" }}>${Number(m.total_cost ?? 0).toFixed(4)}</td>
                           <td style={{ ...TD, textAlign: "right" }}>
-                            <span style={{ fontWeight: 700, color: m.avg_score >= 8.5 ? "#22C55E" : m.avg_score >= 7.5 ? A.gold : A.amber }}>{m.avg_score}</span>
+                            <span style={{ fontWeight: 700, color: m.avg_score >= 8.5 ? "#22C55E" : m.avg_score >= 7.5 ? A.gold : A.amber }}>{m.avg_score ?? "—"}</span>
                           </td>
-                          <td style={{ ...TD, textAlign: "right", color: A.muted }}>${(m.cost / m.calls).toFixed(4)}</td>
+                          <td style={{ ...TD, textAlign: "right", color: A.muted }}>${Number(m.cost_per_call ?? 0).toFixed(4)}</td>
                         </tr>
                       ))}
                     </tbody>
