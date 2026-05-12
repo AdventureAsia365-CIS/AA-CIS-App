@@ -54,14 +54,14 @@ OUTPUT JSON FORMAT:
 {{
   "name": "exact source tour name, title-cased only — do NOT rename",
   "subtitle": "concrete subtitle: include route, duration, or defining feature",
-  "summary": "2-3 sentences, factual and specific, no generic openers like 'Journey into...'",
+  "summary": "Factual editorial prose, specific to this tour's destinations and activities. No generic openers like 'Journey into...'. Write as many sentences as needed to represent the tour accurately.",
   "highlights": [
     "Specific activity at Named Location (include altitude if trekking)",
     "Specific activity at Named Location",
-    "Specific activity at Named Location"
+    "Add as many highlights as the source supports — minimum 3, no maximum"
   ],
-  "itineraries": "Day-by-day reformatted from source. Do not invent. Preserve all named places.",
-  "seo_title": "SEO title under 60 chars",
-  "seo_meta": "SEO meta description under 160 chars, opens with a concrete editorial sentence",
+  "itineraries": "Full day-by-day narrative reformatted from source. Preserve all named places, distances, and durations. Do not truncate or summarise — reproduce the complete itinerary.",
+  "seo_title": "SEO title — MUST be under 70 chars",
+  "seo_meta": "SEO meta description — MUST be under 170 chars, opens with a concrete editorial sentence",
   "trip_type": "cultural|adventure|wellness|culinary|wildlife|trekking|festival|river_journey"
 }}"""

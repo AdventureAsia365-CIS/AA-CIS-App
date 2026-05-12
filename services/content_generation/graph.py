@@ -158,11 +158,11 @@ def validate_node(state: ContentState) -> ContentState:
             score -= 0.5
 
     # SEO field lengths
-    if len(generated.get("seo_title", "")) > 60:
-        issues.append("seo_title exceeds 60 chars")
+    if len(generated.get("seo_title", "")) > 70:
+        issues.append("seo_title exceeds 70 chars")
         score -= 0.5
-    if len(generated.get("seo_meta", "")) > 160:
-        issues.append("seo_meta exceeds 160 chars")
+    if len(generated.get("seo_meta", "")) > 170:
+        issues.append("seo_meta exceeds 170 chars")
         score -= 0.5
 
     # Summary generic opener check

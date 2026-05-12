@@ -39,6 +39,51 @@ function scoreBg(s: number | null) {
   return s >= 9 ? "#DCFCE7" : s >= 8 ? "#FEF9C3" : s >= 7 ? "#FEF3C7" : "#FEE2E2";
 }
 
+// ─── Supplier value renderer: JSON arrays, pipe-separated, newline-split ─────
+function renderSupplierValue(v: any) {
+  if (v === null || v === undefined || v === "")
+    return <span style={{ color: A.muted2, fontStyle: "italic" }}>—</span>;
+
+  let parsed: any = v;
+  if (typeof v === "string") { try { parsed = JSON.parse(v); } catch { parsed = v; } }
+
+  // Flatten everything into a string[] of items
+  const items: string[] = [];
+  if (Array.isArray(parsed)) {
+    for (const el of parsed) {
+      const s = typeof el === "object" ? JSON.stringify(el) : String(el);
+      // pipe-separated within array element
+      s.split("|").map(x => x.trim()).filter(Boolean).forEach(x => items.push(x));
+    }
+  } else {
+    const s = String(parsed);
+    if (s.includes("|")) {
+      s.split("|").map(x => x.trim()).filter(Boolean).forEach(x => items.push(x));
+    } else if (s.includes("\n")) {
+      s.split("\n").map(x => x.trim()).filter(Boolean).forEach(x => items.push(x));
+    } else {
+      // sentence-split for long strings
+      const sentences = s.match(/[^.!?]+[.!?]+(?:\s|$)/g);
+      if (sentences && sentences.length > 1) {
+        sentences.map(x => x.trim()).filter(Boolean).forEach(x => items.push(x));
+      } else {
+        items.push(s);
+      }
+    }
+  }
+
+  if (items.length > 1) {
+    return (
+      <ul style={{ margin: 0, paddingLeft: 16 }}>
+        {items.map((item, i) => (
+          <li key={i} style={{ fontSize: 12.5, color: A.body, marginBottom: 3, lineHeight: 1.5 }}>{item}</li>
+        ))}
+      </ul>
+    );
+  }
+  return <span style={{ fontSize: 12.5, color: A.body, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{items[0] ?? ""}</span>;
+}
+
 // ─── Diff Field Row ───────────────────────────────────────────────────────────
 function DiffRow({
   label, before, after, field, tourId, onSaved,
@@ -300,7 +345,7 @@ function ReviewPanel({ tour, onClose }: { tour: Tour; onClose: () => void }) {
             {/* SEO */}
             <Section title="SEO">
               <DiffRow label="SEO Title"  before={raw.src_name}  after={pt.seo_title} field="seo_title" tourId={tour.id} onSaved={handleSaved} />
-              <DiffRow label="Meta Desc"  before={raw.src_summary?.slice(0, 160)} after={pt.seo_meta} field="seo_meta" tourId={tour.id} onSaved={handleSaved} multiline />
+              <DiffRow label="Meta Desc"  before={null} after={pt.seo_meta} field="seo_meta" tourId={tour.id} onSaved={handleSaved} multiline />
               <DiffRow label="Keywords"   before={null}          after={seo.top_keywords} field="seo_meta" tourId={tour.id} onSaved={handleSaved} isJson />
             </Section>
 
@@ -317,9 +362,7 @@ function ReviewPanel({ tour, onClose }: { tour: Tour; onClose: () => void }) {
               ].map(({ l, v }) => (
                 <div key={l} style={{ display: "grid", gridTemplateColumns: "120px 1fr", borderBottom: `1px solid ${A.line}` }}>
                   <div style={{ padding: "8px 12px", fontSize: 11, fontWeight: 700, color: A.muted, textTransform: "uppercase", letterSpacing: "0.08em", background: A.bg, borderRight: `1px solid ${A.line}` }}>{l}</div>
-                  <div style={{ padding: "8px 14px", fontSize: 12.5, color: A.body, lineHeight: 1.6 }}>
-                    {v ? (typeof v === "object" ? JSON.stringify(v) : String(v)) : <span style={{ color: A.muted2, fontStyle: "italic" }}>—</span>}
-                  </div>
+                  <div style={{ padding: "8px 14px" }}>{renderSupplierValue(v)}</div>
                 </div>
               ))}
             </Section>
