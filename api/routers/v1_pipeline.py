@@ -403,6 +403,47 @@ class IngestS3Request(_BaseModel):
     seo_mode: str = "standard"
 
 
+async def _run_tour_safe(tour_req: TourRunRequest) -> None:
+    """Background task wrapper — logs errors and keeps pipeline_runs status accurate."""
+    try:
+        await run_tour(tour_req)
+        # Mark batch completed when all tours have finished
+        conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+        try:
+            row = await conn.fetchrow(
+                """SELECT tours_passed + tours_failed AS done, tours_total
+                   FROM shared.pipeline_runs WHERE batch_id = $1::uuid""",
+                tour_req.batch_id,
+            )
+            if row and row["tours_total"] and row["done"] >= row["tours_total"]:
+                await conn.execute(
+                    """UPDATE shared.pipeline_runs
+                       SET status = 'completed', completed_at = NOW()
+                       WHERE batch_id = $1::uuid AND status = 'ingesting'""",
+                    tour_req.batch_id,
+                )
+                logger.info("batch_completed", batch_id=tour_req.batch_id)
+        finally:
+            await conn.close()
+    except Exception as exc:
+        logger.error(
+            "background_run_tour_failed",
+            tour_id=tour_req.tour_id,
+            batch_id=tour_req.batch_id,
+            error=str(exc),
+        )
+        try:
+            conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+            await conn.execute(
+                """UPDATE shared.pipeline_runs SET status = 'failed'
+                   WHERE batch_id = $1::uuid AND status = 'ingesting'""",
+                tour_req.batch_id,
+            )
+            await conn.close()
+        except Exception as db_exc:
+            logger.error("failed_to_mark_pipeline_failed", error=str(db_exc))
+
+
 @router.post("/ingest-s3")
 async def ingest_s3(
     req: IngestS3Request,
@@ -434,7 +475,7 @@ async def ingest_s3(
             tenant_id="00000000-0000-0000-0000-000000000001",
             seo_mode=req.seo_mode,
         )
-        background_tasks.add_task(run_tour, tour_req)
+        background_tasks.add_task(_run_tour_safe, tour_req)
 
     logger.info("ingest_s3_triggered", batch_id=batch_id, tour_count=len(rows), seo_mode=req.seo_mode)
     return {"status": "triggered", "batch_id": batch_id, "tour_count": len(rows)}

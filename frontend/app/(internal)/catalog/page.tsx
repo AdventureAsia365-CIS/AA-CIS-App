@@ -40,12 +40,22 @@ function scoreBg(s: number | null) {
 }
 
 // ─── Supplier value renderer: JSON arrays, pipe-separated, newline-split ─────
+function tryParseJson(v: string): any {
+  try { return JSON.parse(v); } catch {}
+  // Sanitize unescaped control chars (e.g. real \n inside JSON strings) then retry
+  try { return JSON.parse(v.replace(/[\r\n\t]+/g, " ")); } catch {}
+  return null;
+}
+
 function renderSupplierValue(v: any) {
   if (v === null || v === undefined || v === "")
     return <span style={{ color: A.muted2, fontStyle: "italic" }}>—</span>;
 
   let parsed: any = v;
-  if (typeof v === "string") { try { parsed = JSON.parse(v); } catch { parsed = v; } }
+  if (typeof v === "string") {
+    const p = tryParseJson(v);
+    parsed = p !== null ? p : v;
+  }
 
   // Flatten everything into a string[] of items
   const items: string[] = [];
@@ -100,19 +110,28 @@ function DiffRow({
 
   const renderVal = (v: any) => {
     if (v === null || v === undefined || v === "") return <span style={{ color: A.muted2, fontStyle: "italic" }}>—</span>;
-    const parsed = isJson ? parseJson(v) : v;
-    if (Array.isArray(parsed)) {
-      return (
-        <ul style={{ margin: 0, paddingLeft: 16 }}>
-          {parsed.map((item: any, i: number) => (
-            <li key={i} style={{ fontSize: 12.5, color: A.body, marginBottom: 3, lineHeight: 1.5 }}>
-              {typeof item === "object" ? JSON.stringify(item) : String(item)}
-            </li>
-          ))}
-        </ul>
-      );
+    if (isJson) {
+      // Try parse with newline sanitization fallback
+      let parsed: any = v;
+      if (typeof v === "string") {
+        const p = tryParseJson(v);
+        parsed = p !== null ? p : v;
+      }
+      if (Array.isArray(parsed)) {
+        return (
+          <ul style={{ margin: 0, paddingLeft: 16 }}>
+            {parsed.map((item: any, i: number) => (
+              <li key={i} style={{ fontSize: 12.5, color: A.body, marginBottom: 3, lineHeight: 1.5 }}>
+                {typeof item === "object" ? JSON.stringify(item) : String(item)}
+              </li>
+            ))}
+          </ul>
+        );
+      }
+      // Parsed but not an array (e.g. invalid JSON stays as string) — use full supplier renderer
+      return renderSupplierValue(parsed);
     }
-    return <span style={{ fontSize: 12.5, color: A.body, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{String(parsed)}</span>;
+    return <span style={{ fontSize: 12.5, color: A.body, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{String(v)}</span>;
   };
 
   const changed = JSON.stringify(before) !== JSON.stringify(after) && after !== null && after !== undefined;
