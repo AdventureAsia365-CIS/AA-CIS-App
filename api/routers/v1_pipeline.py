@@ -314,6 +314,8 @@ async def run_tour(req: TourRunRequest):
                              version_id=str(version_id), error=str(_exp_err))
 
         # G-04: Write cost to pipeline_runs — accumulate per tour
+        # tours_passed is NOT incremented here — process_export owns that counter
+        # (it sets tours_passed = COUNT(published) which is always accurate)
         cost_usd    = float(result.get("cost_usd") or 0.0)
         tokens_in   = int(result.get("input_tokens") or 0)
         tokens_out  = int(result.get("output_tokens") or 0)
@@ -325,14 +327,12 @@ async def run_tour(req: TourRunRequest):
                     cost_usd      = COALESCE(cost_usd, 0)      + $1,
                     tokens_input  = COALESCE(tokens_input, 0)  + $2,
                     tokens_output = COALESCE(tokens_output, 0) + $3,
-                    tours_passed  = tours_passed + $4,
-                    tours_failed  = tours_failed + $5
-                WHERE batch_id = $6::uuid
+                    tours_failed  = tours_failed + $4
+                WHERE batch_id = $5::uuid
             """,
                 cost_usd,
                 tokens_in,
                 tokens_out,
-                1 if tour_passed else 0,
                 0 if tour_passed else 1,
                 req.batch_id,
             )
@@ -413,41 +413,47 @@ class IngestS3Request(_BaseModel):
     seo_mode: str = "standard"
 
 
+# Limit concurrent LLM runs to avoid DB pool exhaustion and Bedrock throttling
+_pipeline_semaphore = asyncio.Semaphore(2)
+
+
 async def _run_tour_safe(tour_req: TourRunRequest) -> None:
-    """Background task wrapper — logs errors and keeps pipeline_runs status accurate."""
-    try:
-        await run_tour(tour_req)
-        # Mark batch completed when all tours have finished
-        conn = await asyncpg.connect(os.environ["DATABASE_URL"])
-        try:
-            row = await conn.fetchrow(
-                """SELECT tours_passed + tours_failed AS done, tours_total
-                   FROM shared.pipeline_runs WHERE batch_id = $1::uuid""",
-                tour_req.batch_id,
-            )
-            if row and row["tours_total"] and row["done"] >= row["tours_total"]:
-                await conn.execute(
-                    """UPDATE shared.pipeline_runs
-                       SET status = 'completed', completed_at = NOW()
-                       WHERE batch_id = $1::uuid AND status = 'ingesting'""",
-                    tour_req.batch_id,
+    """Background task: semaphore-gated, 3-attempt retry, full error capture."""
+    async with _pipeline_semaphore:
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            if attempt > 0:
+                await asyncio.sleep(2 ** attempt)  # 2s, 4s backoff
+            try:
+                await run_tour(tour_req)
+                # process_export (called inside run_tour) owns tours_passed and
+                # batch completion. Nothing more to do on success.
+                return
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "run_tour_attempt_failed",
+                    tour_id=tour_req.tour_id,
+                    attempt=attempt + 1,
+                    error=str(exc),
                 )
-                logger.info("batch_completed", batch_id=tour_req.batch_id)
-        finally:
-            await conn.close()
-    except Exception as exc:
+
+        # All retries exhausted — mark failed and capture error_message
         logger.error(
             "background_run_tour_failed",
             tour_id=tour_req.tour_id,
             batch_id=tour_req.batch_id,
-            error=str(exc),
+            error=str(last_exc),
         )
         try:
             conn = await asyncpg.connect(os.environ["DATABASE_URL"])
             await conn.execute(
-                """UPDATE shared.pipeline_runs SET status = 'failed'
+                """UPDATE shared.pipeline_runs
+                   SET status = 'failed',
+                       error_message = $2
                    WHERE batch_id = $1::uuid AND status = 'ingesting'""",
                 tour_req.batch_id,
+                str(last_exc)[:1000],
             )
             await conn.close()
         except Exception as db_exc:

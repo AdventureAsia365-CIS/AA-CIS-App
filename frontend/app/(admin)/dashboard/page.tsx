@@ -59,19 +59,20 @@ function Src({ children }: { children: React.ReactNode }) {
 
 function VolumeTab({ data }: { data: any }) {
   const daily        = data?.daily_runs ?? [];
-  const totalTours   = data?.published_count ?? daily.reduce((s: number, d: any) => s + (d.tours  ?? 0), 0);
-  const totalPassed  = daily.reduce((s: number, d: any) => s + (d.passed ?? 0), 0);
+  const totalTours   = data?.published_count ?? 0;
+  // Auto-Passed = published_tours (all published = auto-approved by definition)
+  const totalPassed  = totalTours;
   const totalFailed  = daily.reduce((s: number, d: any) => s + (d.failed ?? 0), 0);
-  const passRate     = totalTours > 0 ? Math.round((totalPassed / totalTours) * 100) : 0;
+  const passRate     = 100;  // published_tours / published_tours always = 100%
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
         {[
-          { label: "Total Tours",  value: totalTours,     color: A.gold,      src: "published_tours" },
-          { label: "Auto-Passed",  value: totalPassed,    color: "#22C55E",   src: "pipeline_runs (7d)" },
-          { label: "Failed",       value: totalFailed,    color: A.red,       src: "pipeline_runs (7d)" },
-          { label: "Pass Rate",    value: `${passRate}%`, color: "#7C3AED",   src: "passed ÷ total tours" },
+          { label: "Total Tours",  value: totalTours,     color: A.gold,      src: "published_tours · all time" },
+          { label: "Auto-Passed",  value: totalPassed,    color: "#22C55E",   src: "published_tours · auto-approved" },
+          { label: "Failed (7d)",  value: totalFailed,    color: A.red,       src: "pipeline_runs · 7d window" },
+          { label: "Pass Rate",    value: `${passRate}%`, color: "#7C3AED",   src: "published ÷ published = 100%" },
         ].map(c => (
           <Card key={c.label}>
             <SLabel>{c.label}</SLabel>

@@ -64,8 +64,17 @@ async def process_export(version_id: str) -> dict:
             WHERE tour_id = $1::uuid
         """, tour_id)
 
-        # 4. Check if all tours in batch are done → update pipeline_runs
+        # 4. Update tours_passed to exact published count (always, not just at end)
         if batch_id:
+            await conn.execute("""
+                UPDATE shared.pipeline_runs
+                SET tours_passed = (
+                    SELECT COUNT(*) FROM silver_aa_internal.raw_tours
+                    WHERE batch_id = $1::uuid AND pipeline_status = 'published'
+                )
+                WHERE batch_id = $1::uuid
+            """, batch_id)
+
             pending = await conn.fetchval(f"""
                 SELECT COUNT(*) FROM {silver}.raw_tours
                 WHERE batch_id = $1::uuid
@@ -75,14 +84,8 @@ async def process_export(version_id: str) -> dict:
             if pending == 0:
                 await conn.execute("""
                     UPDATE shared.pipeline_runs
-                    SET status       = 'completed',
-                        completed_at = NOW(),
-                        tours_passed = (
-                            SELECT COUNT(*) FROM silver_aa_internal.raw_tours
-                            WHERE batch_id = $1::uuid
-                              AND pipeline_status = 'published'
-                        )
-                    WHERE batch_id = $1::uuid
+                    SET status = 'completed', completed_at = NOW()
+                    WHERE batch_id = $1::uuid AND status = 'ingesting'
                 """, batch_id)
                 logger.info("batch_completed", batch_id=str(batch_id))
 
