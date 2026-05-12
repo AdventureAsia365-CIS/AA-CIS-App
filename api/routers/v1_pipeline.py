@@ -303,6 +303,16 @@ async def run_tour(req: TourRunRequest):
                 float(result.get("quality_score", 0.0)),
             )
 
+        # Export to gold layer if quality passed — bypasses Step Functions (AA-22)
+        if version_id and status == "approved":
+            from services.export.handler import process_export
+            try:
+                await process_export(str(version_id))
+                logger.info("export_completed", tour_id=req.tour_id, version_id=str(version_id))
+            except Exception as _exp_err:
+                logger.error("export_failed", tour_id=req.tour_id,
+                             version_id=str(version_id), error=str(_exp_err))
+
         # G-04: Write cost to pipeline_runs — accumulate per tour
         cost_usd    = float(result.get("cost_usd") or 0.0)
         tokens_in   = int(result.get("input_tokens") or 0)
