@@ -7,9 +7,10 @@ class LLMRequest(BaseModel):
     few_shots:     list[dict] = []
     max_tokens:    int = 2000
     temperature:   float = 0.7
-    # model_hint is unused — LLMClient always tries T1 (Sonnet) then T2 (Haiku)
-    # regardless of this field. Kept for API compatibility only.
-    model_hint:    str = "sonnet"
+    # model_tier controls which Bedrock model to start from:
+    #   "haiku"  → skip T1, go directly to T2 (Haiku) — fast/cheap
+    #   "sonnet" → try T1 (Sonnet) first, fall back to T2 then T3
+    model_tier:    str = "haiku"
 
 class LLMResponse(BaseModel):
     content:       str

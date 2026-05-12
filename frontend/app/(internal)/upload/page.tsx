@@ -25,6 +25,11 @@ const SEO_MODES = [
   { value: "minimal",    label: "Minimal",     desc: "Light SEO — brand voice first" },
 ];
 
+const MODEL_TIERS = [
+  { value: "haiku",  label: "Haiku",  desc: "Fast · $0.002/tour",  badge: "Default" },
+  { value: "sonnet", label: "Sonnet", desc: "Quality · $0.02/tour", badge: "Premium" },
+];
+
 const STEPS = [
   { key: "upload",     label: "Uploading to S3",    desc: "Secure upload to Bronze layer" },
   { key: "ingestion",  label: "Parsing Excel",       desc: "Extracting tour rows from sheets" },
@@ -151,6 +156,7 @@ export default function UploadPage() {
   const [dragOver, setDragOver]   = useState(false);
   const [files, setFiles]         = useState<FileEntry[]>([]);
   const [seoMode, setSeoMode]     = useState("standard");
+  const [modelTier, setModelTier] = useState("haiku");
   const [isRunning, setIsRunning] = useState(false);
   const [sources, setSources]     = useState<SourceEntry[]>([]);
   const [loadingSrc, setLoadingSrc] = useState(false);
@@ -201,7 +207,7 @@ export default function UploadPage() {
     updateFile(index, { status: "uploading", activeStep: 0, progress: 10 });
     const urlRes = await fetch(`${API_URL}/v1/pipeline/upload-url`, {
       method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ filename: entry.file.name, content_type: entry.file.type || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", seo_mode: seoMode }),
+      body: JSON.stringify({ filename: entry.file.name, content_type: entry.file.type || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", seo_mode: seoMode, model_tier: modelTier }),
     });
     if (!urlRes.ok) throw new Error("Failed to get upload URL");
     const { upload_url, s3_key, bucket } = await urlRes.json();
@@ -214,7 +220,7 @@ export default function UploadPage() {
     await fetch(`${API_URL}/v1/pipeline/ingest-s3`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ s3_key, bucket, seo_mode: seoMode }),
+      body: JSON.stringify({ s3_key, bucket, seo_mode: seoMode, model_tier: modelTier }),
     });
 
     await new Promise(r => setTimeout(r, 4000));
@@ -262,6 +268,41 @@ export default function UploadPage() {
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
             {/* LEFT */}
             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              {/* Model Tier */}
+              <Card>
+                <SLabel>Model Tier</SLabel>
+                <div style={{ display: "flex", gap: 8 }}>
+                  {MODEL_TIERS.map(t => {
+                    const active = modelTier === t.value;
+                    return (
+                      <button key={t.value} onClick={() => setModelTier(t.value)} style={{
+                        flex: 1, padding: "8px 10px", borderRadius: 8, cursor: "pointer", fontFamily: sans,
+                        border: `1px solid ${active ? A.gold : A.line}`,
+                        background: active ? A.goldTint : A.bg,
+                        color: active ? A.gold : A.muted,
+                        fontSize: 12, fontWeight: active ? 700 : 400, textAlign: "left",
+                      }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <span style={{ fontWeight: 600 }}>{t.label}</span>
+                          <span style={{
+                            fontSize: 9, padding: "1px 5px", borderRadius: 4,
+                            background: active ? A.gold : A.line2,
+                            color: active ? "#fff" : A.muted2,
+                            fontWeight: 700, letterSpacing: "0.04em",
+                          }}>{t.badge}</span>
+                        </div>
+                        <div style={{ fontSize: 10, marginTop: 2, opacity: 0.8 }}>{t.desc}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+                {modelTier === "sonnet" && (
+                  <div style={{ marginTop: 8, fontSize: 11, color: A.muted, lineHeight: 1.5 }}>
+                    Auto-upgrade also active: Haiku runs scoring below 8.5 are retried with Sonnet.
+                  </div>
+                )}
+              </Card>
+
               {/* SEO Mode */}
               <Card>
                 <SLabel>SEO Mode</SLabel>
@@ -348,7 +389,7 @@ export default function UploadPage() {
                   ? <><Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> Processing {files.filter(f => f.status === "uploading").length} file(s)…</>
                   : allDone
                   ? <><CheckCircle size={15} /> Complete — {doneCount} file(s) processed</>
-                  : <>Start Pipeline · {readyCount} file{readyCount !== 1 ? "s" : ""} · SEO: {seoMode}</>}
+                  : <>Start Pipeline · {readyCount} file{readyCount !== 1 ? "s" : ""} · {modelTier === "sonnet" ? "Sonnet" : "Haiku"} · SEO: {seoMode}</>}
               </button>
             </div>
 

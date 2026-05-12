@@ -56,36 +56,32 @@ class LLMClient:
 
     async def generate(self, request: LLMRequest) -> LLMResponse:
         trace_id = self._start_trace(request)
+        tier = request.model_tier  # "haiku" | "sonnet"
 
-        # T1: Claude Sonnet via Bedrock
+        if tier == "sonnet":
+            # T1: Claude Sonnet — premium quality
+            try:
+                resp = self._call_bedrock(request, model=BEDROCK_SONNET, use_cache=True)
+                self._end_trace(trace_id, resp, "t1_success")
+                return resp
+            except Exception as e:
+                logger.warning("t1_failed_trying_t2", model=BEDROCK_SONNET, error=str(e))
+
+        # T2: Claude Haiku — fast / default tier, or Sonnet fallback
         try:
-            resp = self._call_bedrock(
-                request, model=BEDROCK_SONNET, use_cache=True
-            )
-            self._end_trace(trace_id, resp, "t1_success")
+            resp = self._call_bedrock(request, model=BEDROCK_HAIKU, use_cache=True)
+            resp.fallback_used = tier == "sonnet"  # only a fallback when Sonnet was intended
+            self._end_trace(trace_id, resp, "t2_success" if tier == "haiku" else "t2_fallback")
             return resp
         except Exception as e:
-            logger.warning("t1_failed_trying_t2",
-                           model=BEDROCK_SONNET, error=str(e))
+            logger.warning("t2_failed_trying_t3", model=BEDROCK_HAIKU, error=str(e))
 
-        # T2: Claude Haiku via Bedrock
-        try:
-            resp = self._call_bedrock(
-                request, model=BEDROCK_HAIKU, use_cache=True
-            )
-            resp.fallback_used = True
-            self._end_trace(trace_id, resp, "t2_fallback")
-            return resp
-        except Exception as e:
-            logger.warning("t2_failed_trying_t3",
-                           model=BEDROCK_HAIKU, error=str(e))
-
-        # T3: GPT-4.1
+        # T3: GPT-4.1 — last resort for all tiers
         try:
             resp = self._call_openai(request, model="gpt-4.1")
             resp.fallback_used = True
-            logger.warning("t3_fallback_used",
-                           model="gpt-4.1", reason="T1 and T2 both failed")
+            logger.warning("t3_fallback_used", model="gpt-4.1",
+                           reason=f"T2 failed (tier={tier})")
             self._end_trace(trace_id, resp, "t3_fallback")
             return resp
         except Exception as e:

@@ -27,6 +27,7 @@ class ContentState(TypedDict):
     brand_style_guide:      str
     brand_forbidden_words:  list
     rewrite_language:       str
+    model_tier:             str
 
 def generate_node(state: ContentState) -> ContentState:
     """Node 1: Generate content via LLMClient."""
@@ -61,7 +62,11 @@ def generate_node(state: ContentState) -> ContentState:
     if style_guide:
         prompt += f"\n\nSTYLE GUIDE FOR THIS CLIENT:\n{style_guide}"
 
-    request = LLMRequest(system_prompt=system, user_prompt=prompt)
+    request = LLMRequest(
+        system_prompt=system,
+        user_prompt=prompt,
+        model_tier=state.get("model_tier", "haiku"),
+    )
 
     try:
         resp = asyncio.get_event_loop().run_until_complete(client.generate(request))

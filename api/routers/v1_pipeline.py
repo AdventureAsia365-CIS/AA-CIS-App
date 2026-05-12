@@ -43,6 +43,7 @@ async def _rewrite_tour(
     tour: dict, idx: int, total: int,
     brand_rules: dict = None,
     seo: dict = None,
+    model_tier: str = "haiku",
 ) -> dict:
     """Rewrite single tour using LangGraph."""
     logger.info("rewriting_tour", idx=idx, total=total, name=tour.get("name", ""))
@@ -54,6 +55,7 @@ async def _rewrite_tour(
         initial_state = {
             "tour": tour,
             "seo": seo or {},
+            "model_tier": model_tier,
             "few_shots": [],
             "generated": {},
             "quality_score": 0.0,
@@ -187,6 +189,7 @@ class TourRunRequest(BaseModel):
     validation_feedback: list = []
     seo_mode: str = "standard"
     rewrite_language: str = "en-US"  # en-US | en-GB
+    model_tier: str = "haiku"        # "haiku" | "sonnet"
 
 
 @router.post("/run-tour")
@@ -261,7 +264,36 @@ async def run_tour(req: TourRunRequest):
         except Exception as _seo_err:
             logger.warning("seo_step_failed", tour_id=req.tour_id, error=str(_seo_err))
 
-        result = await _rewrite_tour(tour, idx=0, total=1, brand_rules=brand_rules, seo=seo_data)
+        result = await _rewrite_tour(
+            tour, idx=0, total=1,
+            brand_rules=brand_rules,
+            seo=seo_data,
+            model_tier=req.model_tier,
+        )
+
+        # Auto-upgrade: Haiku score below threshold → retry with Sonnet
+        _UPGRADE_THRESHOLD = float(os.environ.get("AUTO_UPGRADE_THRESHOLD", "8.5"))
+        _score = result.get("quality_score", 0.0)
+        _model = result.get("model_used", "")
+        if (
+            result.get("status") == "success"
+            and 0 < _score < _UPGRADE_THRESHOLD
+            and "haiku" in _model.lower()
+        ):
+            logger.info("auto_upgrade_sonnet", tour_id=req.tour_id,
+                        score=_score, threshold=_UPGRADE_THRESHOLD, model=_model)
+            _upgraded = await _rewrite_tour(
+                tour, idx=0, total=1,
+                brand_rules=brand_rules,
+                seo=seo_data,
+                model_tier="sonnet",
+            )
+            _new_score = _upgraded.get("quality_score", 0.0)
+            logger.info("auto_upgrade_result", tour_id=req.tour_id,
+                        old_score=_score, new_score=_new_score,
+                        upgraded=_new_score > _score)
+            if _new_score > _score:
+                result = _upgraded
 
         # Write to generated_content so Validation Lambda can read it
         version_id = None
@@ -444,6 +476,7 @@ class IngestS3Request(_BaseModel):
     s3_key: str
     bucket: str
     seo_mode: str = "standard"
+    model_tier: str = "haiku"
 
 
 # Limit concurrent LLM runs to avoid DB pool exhaustion and Bedrock throttling
@@ -523,10 +556,12 @@ async def ingest_s3(
             batch_id=batch_id,
             tenant_id="00000000-0000-0000-0000-000000000001",
             seo_mode=req.seo_mode,
+            model_tier=req.model_tier,
         )
         background_tasks.add_task(_run_tour_safe, tour_req)
 
-    logger.info("ingest_s3_triggered", batch_id=batch_id, tour_count=len(rows), seo_mode=req.seo_mode)
+    logger.info("ingest_s3_triggered", batch_id=batch_id, tour_count=len(rows),
+                seo_mode=req.seo_mode, model_tier=req.model_tier)
     return {"status": "triggered", "batch_id": batch_id, "tour_count": len(rows)}
 
 
