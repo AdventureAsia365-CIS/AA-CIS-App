@@ -9,7 +9,7 @@ import asyncio
 import tempfile
 import structlog
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from typing import Optional
 
@@ -395,6 +395,49 @@ async def get_upload_url(
         ExpiresIn=300,
     )
     return UploadUrlResponse(upload_url=upload_url, s3_key=s3_key, bucket=bucket)
+
+
+class IngestS3Request(_BaseModel):
+    s3_key: str
+    bucket: str
+    seo_mode: str = "standard"
+
+
+@router.post("/ingest-s3")
+async def ingest_s3(
+    req: IngestS3Request,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    tenant=Depends(_get_tenant),
+):
+    """Parse uploaded S3 Excel → insert raw_tours → trigger run_tour per tour."""
+    from services.ingestion.handler import process_file
+
+    result = await process_file(req.bucket, req.s3_key, seo_mode=req.seo_mode)
+
+    if result.get("status") == "skipped_duplicate":
+        return {"status": "duplicate", "batch_id": None, "tour_count": 0}
+
+    batch_id = result.get("source_id")  # process_file returns batch_id as source_id
+
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT tour_id FROM silver_aa_internal.raw_tours WHERE batch_id = $1::uuid",
+            batch_id,
+        )
+
+    for row in rows:
+        tour_req = TourRunRequest(
+            tour_id=str(row["tour_id"]),
+            batch_id=batch_id,
+            tenant_id="00000000-0000-0000-0000-000000000001",
+            seo_mode=req.seo_mode,
+        )
+        background_tasks.add_task(run_tour, tour_req)
+
+    logger.info("ingest_s3_triggered", batch_id=batch_id, tour_count=len(rows), seo_mode=req.seo_mode)
+    return {"status": "triggered", "batch_id": batch_id, "tour_count": len(rows)}
 
 
 # ── Step Functions Execution Status ──────────────────────────────────────────

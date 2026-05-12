@@ -204,11 +204,19 @@ export default function UploadPage() {
       body: JSON.stringify({ filename: entry.file.name, content_type: entry.file.type || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", seo_mode: seoMode }),
     });
     if (!urlRes.ok) throw new Error("Failed to get upload URL");
-    const { upload_url } = await urlRes.json();
+    const { upload_url, s3_key, bucket } = await urlRes.json();
     updateFile(index, { progress: 50 });
     const upRes = await fetch(upload_url, { method: "PUT", headers: { "Content-Type": entry.file.type }, body: entry.file });
     if (!upRes.ok) throw new Error("S3 upload failed");
     updateFile(index, { activeStep: 0, progress: 100 });
+
+    // Trigger pipeline — parse Excel from S3 + run LLM per tour in background
+    await fetch(`${API_URL}/v1/pipeline/ingest-s3`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ s3_key, bucket, seo_mode: seoMode }),
+    });
+
     await new Promise(r => setTimeout(r, 4000));
     const stepDurations = [5000, 5000, 30000, 10000, 8000];
     for (let s = 1; s < STEPS.length; s++) {
