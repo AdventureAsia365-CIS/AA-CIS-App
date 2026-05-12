@@ -10,9 +10,11 @@ logger = structlog.get_logger()
 
 BEDROCK_REGION = os.environ.get("BEDROCK_REGION", "us-west-1")
 
-# Bedrock model IDs — base model IDs (not cross-region inference profiles)
-BEDROCK_SONNET = "anthropic.claude-sonnet-4-5-20250929-v1:0"
-BEDROCK_HAIKU  = "anthropic.claude-haiku-4-5-20251001-v1:0"
+# Bedrock model IDs
+# T2 Haiku: cross-region inference profile — ACTIVE (verified working)
+# T1 Sonnet: cross-region inference profile — needs AWS Marketplace subscription (AA-50)
+BEDROCK_SONNET = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+BEDROCK_HAIKU  = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 COST_TABLE = {
     BEDROCK_SONNET: {"in": 0.003,   "out": 0.015},
