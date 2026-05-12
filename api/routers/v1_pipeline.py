@@ -39,7 +39,11 @@ def _normalize_generated(generated: dict, tour: dict) -> dict:
     return generated
 
 
-async def _rewrite_tour(tour: dict, idx: int, total: int, brand_rules: dict = None) -> dict:
+async def _rewrite_tour(
+    tour: dict, idx: int, total: int,
+    brand_rules: dict = None,
+    seo: dict = None,
+) -> dict:
     """Rewrite single tour using LangGraph."""
     logger.info("rewriting_tour", idx=idx, total=total, name=tour.get("name", ""))
 
@@ -49,7 +53,7 @@ async def _rewrite_tour(tour: dict, idx: int, total: int, brand_rules: dict = No
         _br = brand_rules or {}
         initial_state = {
             "tour": tour,
-            "seo": {},
+            "seo": seo or {},
             "few_shots": [],
             "generated": {},
             "quality_score": 0.0,
@@ -240,7 +244,24 @@ async def run_tour(req: TourRunRequest):
             import structlog as _sl
             _sl.get_logger().warning("brand_rules_fetch_failed", error=str(_br_err))
 
-        result = await _rewrite_tour(tour, idx=0, total=1, brand_rules=brand_rules)
+        # SEO Intelligence step — fetch keywords before content generation (AA-50)
+        # Seed keyword: "{country} tours" per BUG-3 fix
+        seo_data: dict = {}
+        try:
+            from services.seo_intelligence.handler import process_seo
+            destination = (
+                f"{row['country']} tours" if row.get("country")
+                else row.get("src_name", "")
+            )
+            if destination:
+                seo_result = await process_seo(tour_id=req.tour_id, destination=destination)
+                seo_data = seo_result.get("data", {})
+                logger.info("seo_step_done", tour_id=req.tour_id,
+                            status=seo_result.get("status"), destination=destination)
+        except Exception as _seo_err:
+            logger.warning("seo_step_failed", tour_id=req.tour_id, error=str(_seo_err))
+
+        result = await _rewrite_tour(tour, idx=0, total=1, brand_rules=brand_rules, seo=seo_data)
 
         # Write to generated_content so Validation Lambda can read it
         version_id = None
@@ -332,7 +353,8 @@ async def run_tour(req: TourRunRequest):
                     tokens_output = COALESCE(tokens_output, 0) + $3,
                     tours_failed  = tours_failed + $4,
                     llm_model     = COALESCE($6, llm_model),
-                    llm_provider  = COALESCE(llm_provider, 'bedrock')
+                    llm_provider  = COALESCE(llm_provider, 'bedrock'),
+                    step_name     = 'content_generation'
                 WHERE batch_id = $5::uuid
             """,
                 cost_usd,
