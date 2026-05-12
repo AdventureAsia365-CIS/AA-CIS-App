@@ -249,6 +249,124 @@ async def update_tenant(
 
     return {"status": "updated", "tenant_id": str(tenant_id)}
 
+# ── GET /admin/tenants/{id}/details — 4-tab detail view ─────────────────────
+
+
+@router.get("/tenants/{tenant_id}/details", summary="Tenant 4-tab detail view")
+async def get_tenant_details(
+    tenant_id: UUID,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        tenant = await conn.fetchrow("""
+            SELECT name, slug, plan_tier::text, rate_limit_rpm, created_at
+            FROM shared.tenants WHERE tenant_id = $1
+        """, tenant_id)
+        if not tenant:
+            raise HTTPException(status_code=404, detail="Tenant not found")
+
+        total_rewrites = await conn.fetchval("""
+            SELECT COUNT(*) FROM gold_aa_internal.tenant_tour_versions
+            WHERE tenant_id = $1
+        """, tenant_id)
+
+        total_cost = await conn.fetchval("""
+            SELECT COALESCE(SUM(cost_usd), 0)
+            FROM shared.pipeline_runs WHERE tenant_id = $1
+        """, tenant_id)
+
+        # v_tenant_monthly_usage has one aggregate row per tenant per month;
+        # grab the current-month row (or NULL if none)
+        usage = await conn.fetchrow("""
+            SELECT api_calls_used, quota_calls_pct, api_calls_quota_monthly
+            FROM shared.v_tenant_monthly_usage WHERE tenant_id = $1
+            LIMIT 1
+        """, tenant_id)
+
+        tours = await conn.fetch("""
+            SELECT ttv.id, pt.aa_name, rt.country,
+                   ttv.quality_score, ttv.version_number, ttv.status, ttv.created_at
+            FROM gold_aa_internal.tenant_tour_versions ttv
+            JOIN gold_aa_internal.published_tours pt ON pt.id = ttv.published_tour_id
+            LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
+            WHERE ttv.tenant_id = $1
+            ORDER BY ttv.created_at DESC LIMIT 50
+        """, tenant_id)
+
+        runs = await conn.fetch("""
+            SELECT batch_id, started_at, tours_total, tours_passed,
+                   llm_model, cost_usd, status
+            FROM shared.pipeline_runs
+            WHERE tenant_id = $1
+            ORDER BY started_at DESC LIMIT 20
+        """, tenant_id)
+
+        brand_rows = await conn.fetch("""
+            SELECT system_prompt, style_guide, forbidden_words,
+                   version, created_at
+            FROM shared.tenant_brand_rules
+            WHERE tenant_id = $1
+            ORDER BY version DESC
+        """, tenant_id)
+
+    brand         = brand_rows[0] if brand_rows else None
+    api_calls     = int(usage["api_calls_used"])            if usage else 0
+    quota_total   = int(usage["api_calls_quota_monthly"])   if usage else 0
+    quota_pct     = float(usage["quota_calls_pct"])         if usage else 0.0
+
+    return {
+        "summary": {
+            "total_rewrites":       int(total_rewrites or 0),
+            "total_llm_cost_usd":   float(total_cost or 0),
+            "api_calls_this_month": api_calls,
+            "quota_pct":            quota_pct,
+            "plan_name":            str(tenant["plan_tier"]).title(),
+            "member_since":         tenant["created_at"].isoformat()[:10],
+        },
+        "rewritten_tours": [
+            {
+                "version_id":     str(r["id"]),
+                "tour_name":      r["aa_name"] or "—",
+                "country":        r["country"],
+                "quality_score":  float(r["quality_score"]) if r["quality_score"] is not None else None,
+                "version_number": r["version_number"],
+                "status":         r["status"],
+                "created_at":     r["created_at"].isoformat(),
+            }
+            for r in tours
+        ],
+        "pipeline_runs": [
+            {
+                "run_id":          str(r["batch_id"]),
+                "started_at":      r["started_at"].isoformat(),
+                "tours_processed": int(r["tours_total"] or 0),
+                "tours_passed":    int(r["tours_passed"] or 0),
+                "llm_model":       r["llm_model"],
+                "llm_cost_usd":    float(r["cost_usd"] or 0),
+                "status":          r["status"],
+            }
+            for r in runs
+        ],
+        "api_usage": {
+            "total_calls":        api_calls,
+            "quota_used":         api_calls,
+            "quota_total":        quota_total,
+            "rate_limit_per_min": tenant["rate_limit_rpm"],
+        },
+        "brand_rules": {
+            "system_prompt":   brand["system_prompt"]               if brand else None,
+            "style_guide":     brand["style_guide"]                 if brand else None,
+            "forbidden_words": list(brand["forbidden_words"] or []) if brand else [],
+            "version_count":   len(brand_rows),
+            "last_updated":    brand["created_at"].isoformat()      if brand else None,
+        },
+    }
+
+
 # ── POST /admin/tenants/{id}/generate-key ────────────────────────────────────
 
 

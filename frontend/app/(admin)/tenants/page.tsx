@@ -137,46 +137,228 @@ function ApiKeyModal({ keyData, onClose }: { keyData: NewApiKey; onClose: () => 
   );
 }
 
-// ─── Usage Detail ─────────────────────────────────────────────────────────────
-function UsageDetail({ tenantId }: { tenantId: string }) {
-  const [usage, setUsage]   = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    fetch(`/api/admin/tenants/${tenantId}/usage?months=3`)
-      .then(r => r.json()).then(setUsage).catch(() => setUsage(null)).finally(() => setLoading(false));
-  }, [tenantId]);
-  if (loading) return <div style={{ padding: "10px 0", fontSize: 12, color: A.muted }}>Loading…</div>;
-  if (!usage)  return <div style={{ padding: "10px 0", fontSize: 12, color: A.red }}>Failed to load</div>;
+// ─── Detail types ─────────────────────────────────────────────────────────────
+interface RewrittenTour {
+  version_id: string; tour_name: string; country: string | null;
+  quality_score: number | null; version_number: number;
+  status: string; created_at: string;
+}
+interface PipelineRun {
+  run_id: string; started_at: string; tours_processed: number;
+  tours_passed: number; llm_model: string | null;
+  llm_cost_usd: number; status: string;
+}
+interface TenantDetails {
+  summary: {
+    total_rewrites: number; total_llm_cost_usd: number;
+    api_calls_this_month: number; quota_pct: number;
+    plan_name: string; member_since: string;
+  };
+  rewritten_tours: RewrittenTour[];
+  pipeline_runs: PipelineRun[];
+  api_usage: { total_calls: number; quota_used: number; quota_total: number; rate_limit_per_min: number };
+  brand_rules: { system_prompt: string | null; style_guide: string | null; forbidden_words: string[]; version_count: number; last_updated: string | null };
+}
+
+// ─── Shared helpers ───────────────────────────────────────────────────────────
+const SCORE_COLOR = (s: number | null) =>
+  s == null ? A.muted2 : s >= 9 ? "#22C55E" : s >= 7 ? A.gold : A.red;
+
+const STATUS_STYLE: Record<string, { bg: string; col: string }> = {
+  approved:     { bg: "#DCFCE7", col: "#16A34A" },
+  ai_generated: { bg: "#EFF6FF", col: "#2563EB" },
+  rejected:     { bg: "#FEE2E2", col: "#DC2626" },
+  needs_review: { bg: "#FEF3C7", col: "#D97706" },
+  pending:      { bg: "#FEF9C3", col: "#B45309" },
+  completed:    { bg: "#DCFCE7", col: "#16A34A" },
+  failed:       { bg: "#FEE2E2", col: "#DC2626" },
+  ingesting:    { bg: "#EFF6FF", col: "#2563EB" },
+};
+function StatusChip({ status }: { status: string }) {
+  const s = STATUS_STYLE[status] ?? { bg: A.line2, col: A.muted2 };
+  return <span style={{ fontSize: 10.5, padding: "2px 8px", borderRadius: 20, fontWeight: 600, background: s.bg, color: s.col, whiteSpace: "nowrap" }}>{status}</span>;
+}
+function EmptyRow({ cols, msg }: { cols: number; msg: string }) {
+  return <tr><td colSpan={cols} style={{ padding: "20px 0", textAlign: "center", fontSize: 12, color: A.muted }}>{msg}</td></tr>;
+}
+function fmtD(s: string) { return new Date(s).toLocaleDateString("en-GB", { day: "2-digit", month: "short" }); }
+function fmtDT(s: string) { return new Date(s).toLocaleDateString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }); }
+
+// ─── Tab content components ───────────────────────────────────────────────────
+function ToursTabContent({ tours }: { tours: RewrittenTour[] }) {
   return (
-    <div style={{ background: A.bg, borderRadius: 10, padding: 16, border: `1px solid ${A.line}`, marginTop: 4 }}>
-      <div style={{ display: "flex", gap: 24, marginBottom: 14 }}>
-        {[
-          ["Tours Published", usage.tours_published, A.gold],
-          ["Rate Limit", `${usage.limits?.rate_limit_rpm}/min`, A.body],
-          ["Tours/Month", usage.limits?.tours_per_month === 999999 ? "∞" : usage.limits?.tours_per_month?.toLocaleString(), A.body],
-        ].map(([l, v, c]) => (
-          <div key={l as string}>
-            <div style={{ fontSize: 10.5, color: A.muted, marginBottom: 2 }}>{l}</div>
-            <div style={{ fontFamily: serif, fontSize: 20, fontWeight: 500, color: c as string }}>{v}</div>
+    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+      <thead><tr>{["Name","Country","Score","Status","Version","Date"].map((h, i) => (
+        <th key={h} style={{ ...TH, fontSize: 10, textAlign: i >= 2 ? "right" : "left" }}>{h}</th>
+      ))}</tr></thead>
+      <tbody>
+        {tours.length === 0 ? <EmptyRow cols={6} msg="No rewrites yet" /> : tours.map(t => (
+          <tr key={t.version_id}>
+            <td style={{ ...TD, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.tour_name}</td>
+            <td style={{ ...TD, color: A.muted }}>{t.country ?? "—"}</td>
+            <td style={{ ...TD, textAlign: "right", fontWeight: 700, color: SCORE_COLOR(t.quality_score) }}>
+              {t.quality_score != null ? t.quality_score.toFixed(1) : "—"}
+            </td>
+            <td style={{ ...TD, textAlign: "right" }}><StatusChip status={t.status} /></td>
+            <td style={{ ...TD, textAlign: "right", fontFamily: mono, color: A.muted2 }}>v{t.version_number}</td>
+            <td style={{ ...TD, textAlign: "right", fontFamily: mono, color: A.muted2 }}>{fmtD(t.created_at)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+function PipelineTabContent({ runs }: { runs: PipelineRun[] }) {
+  return (
+    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+      <thead><tr>{["Started","Tours","Passed","Model","Cost","Status"].map((h, i) => (
+        <th key={h} style={{ ...TH, fontSize: 10, textAlign: i >= 1 ? "right" : "left" }}>{h}</th>
+      ))}</tr></thead>
+      <tbody>
+        {runs.length === 0 ? <EmptyRow cols={6} msg="No pipeline runs" /> : runs.map(r => (
+          <tr key={r.run_id}>
+            <td style={{ ...TD, fontFamily: mono, fontSize: 11, color: A.muted }}>{fmtDT(r.started_at)}</td>
+            <td style={{ ...TD, textAlign: "right" }}>{r.tours_processed}</td>
+            <td style={{ ...TD, textAlign: "right", color: "#22C55E" }}>{r.tours_passed}</td>
+            <td style={{ ...TD, textAlign: "right", fontFamily: mono, fontSize: 10, color: A.muted2 }}>
+              {r.llm_model ? r.llm_model.replace(/us\.anthropic\./,"").replace(/-v1:0$/,"") : "—"}
+            </td>
+            <td style={{ ...TD, textAlign: "right", color: A.gold }}>${r.llm_cost_usd.toFixed(4)}</td>
+            <td style={{ ...TD, textAlign: "right" }}><StatusChip status={r.status} /></td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+function ApiTabContent({ usage }: { usage: TenantDetails["api_usage"] }) {
+  const pct      = usage.quota_total > 0 ? Math.min(100, Math.round((usage.quota_used / usage.quota_total) * 100)) : 0;
+  const barColor = pct > 90 ? A.red : pct > 70 ? A.amber : "#22C55E";
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 6 }}>
+          <span style={{ color: A.muted }}>API Calls Quota (this month)</span>
+          <span style={{ fontWeight: 700, color: barColor }}>{usage.quota_used.toLocaleString()} / {usage.quota_total.toLocaleString()} ({pct}%)</span>
+        </div>
+        <div style={{ height: 8, background: A.line2, borderRadius: 4, overflow: "hidden" }}>
+          <div style={{ height: "100%", width: `${pct}%`, background: barColor, borderRadius: 4, transition: "width .4s" }} />
+        </div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10 }}>
+        {([["Total Calls", usage.total_calls.toLocaleString()], ["Rate Limit", `${usage.rate_limit_per_min}/min`], ["Quota Used", `${pct}%`]] as [string, string][]).map(([l, v]) => (
+          <div key={l} style={{ padding: "10px 14px", background: "#fff", border: `1px solid ${A.line}`, borderRadius: 8 }}>
+            <div style={{ fontSize: 10, color: A.muted2, marginBottom: 3 }}>{l}</div>
+            <div style={{ fontFamily: serif, fontSize: 18, fontWeight: 500, color: A.ink }}>{v}</div>
           </div>
         ))}
       </div>
-      {usage.monthly_usage?.length > 0 && (
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-          <thead><tr>{["Month","Total Calls","Successful","Rate Limited","Avg Latency"].map((h,i) => (
-            <th key={h} style={{ ...TH, fontSize: 10, textAlign: i === 0 ? "left" : "right" }}>{h}</th>
-          ))}</tr></thead>
-          <tbody>{usage.monthly_usage.map((m: any) => (
-            <tr key={m.month}>
-              <td style={TD}>{m.month}</td>
-              <td style={{ ...TD, textAlign: "right" }}>{m.total_calls.toLocaleString()}</td>
-              <td style={{ ...TD, textAlign: "right", color: "#22C55E" }}>{m.successful_calls.toLocaleString()}</td>
-              <td style={{ ...TD, textAlign: "right", color: m.rate_limited_calls > 0 ? A.amber : A.muted }}>{m.rate_limited_calls}</td>
-              <td style={{ ...TD, textAlign: "right", color: A.muted }}>{Math.round(m.avg_response_ms)}ms</td>
-            </tr>
-          ))}</tbody>
-        </table>
+    </div>
+  );
+}
+function BrandTabContent({ rules }: { rules: TenantDetails["brand_rules"] }) {
+  if (!rules.system_prompt && !rules.style_guide && rules.forbidden_words.length === 0) {
+    return <div style={{ padding: "20px 0", textAlign: "center", fontSize: 12, color: A.muted }}>No brand rules configured</div>;
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ display: "flex", gap: 16, fontSize: 11, color: A.muted2 }}>
+        <span>{rules.version_count} version{rules.version_count !== 1 ? "s" : ""}</span>
+        {rules.last_updated && <span>Last updated: {fmtD(rules.last_updated)}</span>}
+      </div>
+      {rules.system_prompt && (
+        <div>
+          <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: A.muted, marginBottom: 6 }}>System Prompt</div>
+          <div style={{ padding: "10px 12px", background: "#fff", border: `1px solid ${A.line}`, borderRadius: 8, fontSize: 12, color: A.body, fontFamily: mono, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
+            {rules.system_prompt.slice(0, 200)}{rules.system_prompt.length > 200 ? "…" : ""}
+          </div>
+        </div>
       )}
+      {rules.style_guide && (
+        <div>
+          <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: A.muted, marginBottom: 6 }}>Style Guide</div>
+          <div style={{ padding: "10px 12px", background: "#fff", border: `1px solid ${A.line}`, borderRadius: 8, fontSize: 12, color: A.body, lineHeight: 1.6 }}>
+            {rules.style_guide.slice(0, 200)}{rules.style_guide.length > 200 ? "…" : ""}
+          </div>
+        </div>
+      )}
+      {rules.forbidden_words.length > 0 && (
+        <div>
+          <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: A.muted, marginBottom: 6 }}>Forbidden Words ({rules.forbidden_words.length})</div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {rules.forbidden_words.map((w, i) => (
+              <span key={i} style={{ fontSize: 11, padding: "2px 8px", background: A.redSoft, color: A.red, borderRadius: 20, fontWeight: 600 }}>{w}</span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Tenant Detail (4 tabs — replaces UsageDetail) ───────────────────────────
+type DTab = "tours" | "pipeline" | "api" | "brand";
+
+function TenantDetail({ tenantId }: { tenantId: string }) {
+  const [data, setData]     = useState<TenantDetails | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [tab, setTab]       = useState<DTab>("tours");
+
+  useEffect(() => {
+    setLoading(true);
+    fetch(`/api/admin/tenants/${tenantId}/details`)
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(r.statusText)))
+      .then((d: TenantDetails) => setData(d))
+      .catch(() => setData(null))
+      .finally(() => setLoading(false));
+  }, [tenantId]);
+
+  if (loading) return <div style={{ padding: "12px 0", fontSize: 12, color: A.muted }}>Loading…</div>;
+  if (!data)   return <div style={{ padding: "12px 0", fontSize: 12, color: A.red }}>Failed to load tenant details</div>;
+
+  const s = data.summary;
+  const TABS: { key: DTab; label: string }[] = [
+    { key: "tours",    label: `Tours (${data.rewritten_tours.length})` },
+    { key: "pipeline", label: `Pipeline (${data.pipeline_runs.length})` },
+    { key: "api",      label: "API Usage" },
+    { key: "brand",    label: "Brand" },
+  ];
+
+  return (
+    <div style={{ background: A.bg, borderRadius: 10, padding: 16, border: `1px solid ${A.line}`, marginTop: 4 }}>
+      {/* Summary bar */}
+      <div style={{ display: "flex", gap: 20, marginBottom: 14, flexWrap: "wrap" }}>
+        {([
+          ["Total Rewrites",    String(s.total_rewrites),                       A.gold  ],
+          ["LLM Cost",          `$${s.total_llm_cost_usd.toFixed(3)}`,          A.body  ],
+          ["API Calls (Mo)",    s.api_calls_this_month.toLocaleString(),        A.body  ],
+          ["Quota",             `${s.quota_pct}%`,                              s.quota_pct > 80 ? A.red : A.body],
+          ["Plan",              s.plan_name,                                    A.body  ],
+          ["Member Since",      s.member_since,                                 A.muted ],
+        ] as [string, string, string][]).map(([l, v, c]) => (
+          <div key={l} style={{ minWidth: 80 }}>
+            <div style={{ fontSize: 10, color: A.muted2, marginBottom: 2 }}>{l}</div>
+            <div style={{ fontFamily: serif, fontSize: 17, fontWeight: 500, color: c }}>{v}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Tab bar */}
+      <div style={{ display: "flex", borderBottom: `1px solid ${A.line}`, marginBottom: 14 }}>
+        {TABS.map(t => (
+          <button key={t.key} onClick={() => setTab(t.key)} style={{
+            padding: "7px 14px", fontSize: 12, fontWeight: tab === t.key ? 700 : 400,
+            color: tab === t.key ? A.red : A.muted,
+            border: "none", borderBottom: `2px solid ${tab === t.key ? A.red : "transparent"}`,
+            background: "none", cursor: "pointer", fontFamily: sans, transition: "color .15s",
+          }}>{t.label}</button>
+        ))}
+      </div>
+
+      {tab === "tours"    && <ToursTabContent    tours={data.rewritten_tours} />}
+      {tab === "pipeline" && <PipelineTabContent runs={data.pipeline_runs}    />}
+      {tab === "api"      && <ApiTabContent      usage={data.api_usage}       />}
+      {tab === "brand"    && <BrandTabContent    rules={data.brand_rules}     />}
     </div>
   );
 }
@@ -239,7 +421,7 @@ function TenantRow({ tenant, onRotateKey }: { tenant: Tenant; onRotateKey: (t: T
       {expanded && (
         <tr>
           <td colSpan={7} style={{ padding: "0 16px 14px", background: A.bg }}>
-            <UsageDetail tenantId={tenant.tenant_id} />
+            <TenantDetail tenantId={tenant.tenant_id} />
           </td>
         </tr>
       )}
