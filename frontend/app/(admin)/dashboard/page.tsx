@@ -126,13 +126,14 @@ function QualityTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => stri
             </thead>
             <tbody>
               {models.map((m: any) => {
-                const score = parseFloat(m.avg_score ?? 0);
-                const sc = score >= 9 ? "#22C55E" : score >= 7 ? A.gold : A.red;
+                const score     = m.avg_score != null ? parseFloat(m.avg_score) : null;
+                const scoreLabel = score != null ? score.toFixed(1) : "—";
+                const sc = score == null ? A.muted2 : score >= 9 ? "#22C55E" : score >= 7 ? A.gold : A.red;
                 return (
                   <tr key={m.model}>
                     <td style={TD}><code style={{ fontSize: 12, color: A.gold, fontFamily: mono }}>{m.model}</code></td>
                     <td style={TD}>{m.calls}</td>
-                    <td style={TD}><span style={{ color: sc, fontWeight: 700 }}>{score}</span></td>
+                    <td style={TD}><span style={{ color: sc, fontWeight: 700 }}>{scoreLabel}</span></td>
                     <td style={TD}>{m.calls > 0 && m.total_cost ? `$${(m.total_cost / m.calls).toFixed(4)}` : "—"}</td>
                   </tr>
                 );

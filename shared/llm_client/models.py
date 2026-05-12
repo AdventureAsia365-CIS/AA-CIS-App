@@ -7,6 +7,8 @@ class LLMRequest(BaseModel):
     few_shots:     list[dict] = []
     max_tokens:    int = 2000
     temperature:   float = 0.7
+    # model_hint is unused — LLMClient always tries T1 (Sonnet) then T2 (Haiku)
+    # regardless of this field. Kept for API compatibility only.
     model_hint:    str = "sonnet"
 
 class LLMResponse(BaseModel):

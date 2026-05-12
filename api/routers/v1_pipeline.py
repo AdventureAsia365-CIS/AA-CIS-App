@@ -762,27 +762,39 @@ async def get_pipeline_metrics(
         """, str(days))
 
         # Cost by model — actual billed cost from pipeline_runs
+        # CASE normalizes "us.anthropic.claude-haiku-4-5-...-v1:0" and "claude-haiku"
+        # to the same display name so old + new runs group together.
         cost_by_model = await conn.fetch("""
             SELECT
-                COALESCE(llm_model, 'claude-haiku') AS model,
-                COUNT(*)                             AS batches,
-                COALESCE(SUM(cost_usd), 0)           AS total_cost
+                CASE
+                    WHEN COALESCE(llm_model,'') LIKE '%haiku%'  THEN 'claude-haiku-4-5'
+                    WHEN COALESCE(llm_model,'') LIKE '%sonnet%' THEN 'claude-sonnet-4-5'
+                    WHEN COALESCE(llm_model,'') LIKE '%gpt-4%'  THEN 'gpt-4.1'
+                    ELSE 'claude-haiku-4-5'
+                END                              AS model,
+                COUNT(*)                         AS batches,
+                COALESCE(SUM(cost_usd), 0)       AS total_cost
             FROM shared.pipeline_runs
             WHERE cost_usd > 0
-            GROUP BY COALESCE(llm_model, 'claude-haiku')
+            GROUP BY 1
             ORDER BY total_cost DESC
         """)
 
         # LLM call quality — from generated_content (per-call granularity)
         models = await conn.fetch(f"""
             SELECT
-                COALESCE(gc.model_editorial, 'claude-haiku') AS model,
-                COUNT(*)                                      AS calls,
+                CASE
+                    WHEN COALESCE(gc.model_editorial,'') LIKE '%haiku%'  THEN 'claude-haiku-4-5'
+                    WHEN COALESCE(gc.model_editorial,'') LIKE '%sonnet%' THEN 'claude-sonnet-4-5'
+                    WHEN COALESCE(gc.model_editorial,'') LIKE '%gpt-4%'  THEN 'gpt-4.1'
+                    ELSE 'claude-haiku-4-5'
+                END                                          AS model,
+                COUNT(*)                                     AS calls,
                 ROUND(AVG(qs.score_overall)::numeric, 1)     AS avg_score
             FROM silver_{tenant_slug}.generated_content gc
             LEFT JOIN silver_{tenant_slug}.quality_scores qs
                 ON qs.generated_content_id = gc.id
-            GROUP BY COALESCE(gc.model_editorial, 'claude-haiku')
+            GROUP BY 1
             ORDER BY calls DESC
         """)
 
