@@ -308,7 +308,16 @@ function TenantDetail({ tenantId }: { tenantId: string }) {
     setLoading(true);
     fetch(`/api/admin/tenants/${tenantId}/details`)
       .then(r => r.ok ? r.json() : Promise.reject(new Error(r.statusText)))
-      .then((d: TenantDetails) => setData(d))
+      .then((d: TenantDetails) => {
+        // Safety: forbidden_words may arrive as a raw JSON string if asyncpg
+        // returns the JSONB column unparsed
+        const fw = d.brand_rules?.forbidden_words;
+        if (fw && typeof fw === "string") {
+          try { d.brand_rules.forbidden_words = JSON.parse(fw as unknown as string); }
+          catch { d.brand_rules.forbidden_words = []; }
+        }
+        setData(d);
+      })
       .catch(() => setData(null))
       .finally(() => setLoading(false));
   }, [tenantId]);

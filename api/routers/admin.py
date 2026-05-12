@@ -249,6 +249,22 @@ async def update_tenant(
 
     return {"status": "updated", "tenant_id": str(tenant_id)}
 
+def _parse_fw(value) -> list:
+    """Parse forbidden_words from asyncpg — may be list (pg array) or JSON string (JSONB)."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        import json as _j
+        try:
+            parsed = _j.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return list(value)
+
+
 # ── GET /admin/tenants/{id}/details — 4-tab detail view ─────────────────────
 
 
@@ -360,7 +376,7 @@ async def get_tenant_details(
         "brand_rules": {
             "system_prompt":   brand["system_prompt"]               if brand else None,
             "style_guide":     brand["style_guide"]                 if brand else None,
-            "forbidden_words": list(brand["forbidden_words"] or []) if brand else [],
+            "forbidden_words": _parse_fw(brand["forbidden_words"]) if brand else [],
             "version_count":   len(brand_rows),
             "last_updated":    (brand["updated_at"] or brand["created_at"]).isoformat() if brand else None,
         },
