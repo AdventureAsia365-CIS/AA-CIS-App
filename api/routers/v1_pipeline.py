@@ -941,7 +941,7 @@ async def get_seo_metrics(
             WHERE pt.tenant_id = '00000000-0000-0000-0000-000000000001'::uuid
               AND EXISTS (
                   SELECT 1 FROM silver_aa_internal.seo_context sc
-                  WHERE sc.keyword_search = rt.country
+                  WHERE sc.tour_id = rt.tour_id
               )
         """)
 
