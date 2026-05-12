@@ -49,27 +49,36 @@ const SPOT_WORKERS = [
 
 // ─── Sub-tab components (logic unchanged, design updated) ─────────────────────
 
+function Src({ children }: { children: string }) {
+  return (
+    <div style={{ fontSize: 10, color: A.muted2, marginTop: 4, letterSpacing: "0.02em" }}>
+      {children}
+    </div>
+  );
+}
+
 function VolumeTab({ data }: { data: any }) {
-  const daily       = data?.daily_runs ?? [];
-  const totalTours  = daily.reduce((s: number, d: any) => s + (d.tours  ?? 0), 0);
-  const totalPassed = daily.reduce((s: number, d: any) => s + (d.passed ?? 0), 0);
-  const totalFailed = daily.reduce((s: number, d: any) => s + (d.failed ?? 0), 0);
-  const passRate    = totalTours > 0 ? Math.round((totalPassed / totalTours) * 100) : 0;
+  const daily        = data?.daily_runs ?? [];
+  const totalTours   = data?.published_count ?? daily.reduce((s: number, d: any) => s + (d.tours  ?? 0), 0);
+  const totalPassed  = daily.reduce((s: number, d: any) => s + (d.passed ?? 0), 0);
+  const totalFailed  = daily.reduce((s: number, d: any) => s + (d.failed ?? 0), 0);
+  const passRate     = totalTours > 0 ? Math.round((totalPassed / totalTours) * 100) : 0;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
         {[
-          { label: "Total Tours",  value: totalTours,  color: A.gold  },
-          { label: "Auto-Passed",  value: totalPassed, color: "#22C55E" },
-          { label: "Failed",       value: totalFailed, color: A.red   },
-          { label: "Pass Rate",    value: `${passRate}%`, color: "#7C3AED" },
+          { label: "Total Tours",  value: totalTours,     color: A.gold,      src: "published_tours" },
+          { label: "Auto-Passed",  value: totalPassed,    color: "#22C55E",   src: "pipeline_runs (7d)" },
+          { label: "Failed",       value: totalFailed,    color: A.red,       src: "pipeline_runs (7d)" },
+          { label: "Pass Rate",    value: `${passRate}%`, color: "#7C3AED",   src: "passed ÷ total tours" },
         ].map(c => (
           <Card key={c.label}>
             <SLabel>{c.label}</SLabel>
             <div style={{ fontFamily: serif, fontSize: 28, fontWeight: 500, color: c.color, letterSpacing: "-0.02em" }}>
               {c.value}
             </div>
+            <Src>↳ {c.src}</Src>
           </Card>
         ))}
       </div>
@@ -159,23 +168,25 @@ function CostTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => string 
 
   if (loading) return <LoadingScreen msg="Loading cost data…" />;
 
-  const daily     = data?.daily_runs ?? [];
-  const models    = data?.model_usage ?? [];
-  const totalCost = daily.reduce((s: number, d: any) => s + parseFloat(d.cost ?? 0), 0);
-  const totalTours = daily.reduce((s: number, d: any) => s + (d.tours ?? 0), 0);
-  const cpt        = totalTours > 0 ? totalCost / totalTours : 0;
+  const daily      = data?.daily_runs ?? [];
+  const models     = data?.model_usage ?? [];
+  const totalCost  = daily.reduce((s: number, d: any) => s + parseFloat(d.cost ?? 0), 0);
+  const totalTours = data?.published_count ?? daily.reduce((s: number, d: any) => s + (d.tours ?? 0), 0);
+  const llmCalls   = data?.llm_calls ?? models.reduce((s: number, m: any) => s + (m.calls ?? 0), 0);
+  const cpt        = llmCalls > 0 ? totalCost / llmCalls : 0;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
         {[
-          { label: "Total LLM Cost (30d)", value: `$${totalCost.toFixed(2)}`, color: A.gold },
-          { label: "Tours Processed",      value: String(totalTours),         color: "#7C3AED" },
-          { label: "Cost / Tour",          value: `$${cpt.toFixed(4)}`,       color: "#22C55E" },
+          { label: "Total LLM Cost (30d)", value: `$${totalCost.toFixed(2)}`, color: A.gold,    src: "pipeline_runs · accumulated" },
+          { label: "Tours Processed",      value: String(totalTours),         color: "#7C3AED", src: "published_tours · all time" },
+          { label: "Cost / LLM Call",      value: `$${cpt.toFixed(4)}`,       color: "#22C55E", src: "generated_content · LLM calls" },
         ].map(c => (
           <Card key={c.label}>
             <SLabel>{c.label}</SLabel>
             <div style={{ fontFamily: serif, fontSize: 26, fontWeight: 500, color: c.color, letterSpacing: "-0.02em" }}>{c.value}</div>
+            <Src>↳ {c.src}</Src>
           </Card>
         ))}
       </div>
@@ -398,10 +409,10 @@ export default function DashboardPage() {
 
           {/* Stat cards */}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 16, marginBottom: 24 }}>
-            <StatCard icon={<FileText size={16} />}    label="Tours Processed" value={String(totalTours)}  sub="Last 7 days"           />
-            <StatCard icon={<CheckCircle size={16} />} label="Auto-Approved"   value={`${passRate}%`}      sub={`${totalPassed} tours`} accent="#22C55E" />
-            <StatCard icon={<Clock size={16} />}       label="HITL Queue"      value={String(totalHITL)}   sub="Awaiting review"        accent={A.amber} />
-            <StatCard icon={<DollarSign size={16} />}  label="Total LLM Cost"  value={`$${totalCost}`}     sub="~$0.018 per tour avg"   />
+            <StatCard icon={<FileText size={16} />}    label="Tours Processed" value={String(totalTours)}  sub="↳ published_tours · all time" />
+            <StatCard icon={<CheckCircle size={16} />} label="Auto-Approved"   value={`${passRate}%`}      sub={`${totalPassed} tours · pipeline_runs (7d)`} accent="#22C55E" />
+            <StatCard icon={<Clock size={16} />}       label="HITL Queue"      value={String(totalHITL)}   sub="↳ review_queue · pending"     accent={A.amber} />
+            <StatCard icon={<DollarSign size={16} />}  label="Total LLM Cost"  value={`$${totalCost}`}     sub="↳ pipeline_runs · accumulated" />
           </div>
 
           {/* Tab bar */}

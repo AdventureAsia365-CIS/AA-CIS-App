@@ -763,6 +763,17 @@ async def get_pipeline_metrics(
             ORDER BY calls DESC
         """)
 
+        # Canonical tour count — source of truth for all "Tours Processed" metrics
+        published_count = await conn.fetchval("""
+            SELECT COUNT(*) FROM gold_aa_internal.published_tours
+            WHERE tenant_id = '00000000-0000-0000-0000-000000000001'::uuid
+        """)
+
+        # LLM call count — from generated_content (accurate for cost attribution)
+        llm_calls = await conn.fetchval(f"""
+            SELECT COUNT(*) FROM silver_{tenant_slug}.generated_content
+        """)
+
         # Pipeline health — check last run per service via pipeline_runs
         last_run = await conn.fetchrow("""
             SELECT
@@ -875,6 +886,8 @@ async def get_pipeline_metrics(
             "duration_sec": float(last_run["duration_sec"]) if last_run and last_run["duration_sec"] else 0,
         } if last_run else None,
         "pipeline_health": pipeline_health,
+        "published_count": int(published_count or 0),
+        "llm_calls":       int(llm_calls or 0),
     }
 
 
