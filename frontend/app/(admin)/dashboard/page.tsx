@@ -49,7 +49,7 @@ const SPOT_WORKERS = [
 
 // ─── Sub-tab components (logic unchanged, design updated) ─────────────────────
 
-function Src({ children }: { children: string }) {
+function Src({ children }: { children: React.ReactNode }) {
   return (
     <div style={{ fontSize: 10, color: A.muted2, marginTop: 4, letterSpacing: "0.02em" }}>
       {children}
