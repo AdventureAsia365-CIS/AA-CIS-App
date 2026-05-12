@@ -344,6 +344,10 @@ async def run_tour(req: TourRunRequest):
         model_name = result.get("model_used") or None
         if isinstance(model_name, str) and not model_name:
             model_name = None
+        # Derive actual provider from model name — gpt-* is openai, everything else bedrock
+        actual_provider = (
+            "openai" if model_name and "gpt" in model_name.lower() else "bedrock"
+        )
         if cost_usd > 0 or tokens_in > 0:
             await conn.execute("""
                 UPDATE shared.pipeline_runs
@@ -353,7 +357,7 @@ async def run_tour(req: TourRunRequest):
                     tokens_output = COALESCE(tokens_output, 0) + $3,
                     tours_failed  = tours_failed + $4,
                     llm_model     = COALESCE($6, llm_model),
-                    llm_provider  = COALESCE(llm_provider, 'bedrock'),
+                    llm_provider  = $7,
                     step_name     = 'content_generation'
                 WHERE batch_id = $5::uuid
             """,
@@ -363,6 +367,7 @@ async def run_tour(req: TourRunRequest):
                 0 if tour_passed else 1,
                 req.batch_id,
                 model_name,
+                actual_provider,
             )
 
         return {

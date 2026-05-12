@@ -65,7 +65,8 @@ class LLMClient:
             self._end_trace(trace_id, resp, "t1_success")
             return resp
         except Exception as e:
-            logger.warning("t1_failed", error=str(e))
+            logger.warning("t1_failed_trying_t2",
+                           model=BEDROCK_SONNET, error=str(e))
 
         # T2: Claude Haiku via Bedrock
         try:
@@ -76,12 +77,15 @@ class LLMClient:
             self._end_trace(trace_id, resp, "t2_fallback")
             return resp
         except Exception as e:
-            logger.warning("t2_failed", error=str(e))
+            logger.warning("t2_failed_trying_t3",
+                           model=BEDROCK_HAIKU, error=str(e))
 
-        # T3: GPT-4.1 (unchanged)
+        # T3: GPT-4.1
         try:
             resp = self._call_openai(request, model="gpt-4.1")
             resp.fallback_used = True
+            logger.warning("t3_fallback_used",
+                           model="gpt-4.1", reason="T1 and T2 both failed")
             self._end_trace(trace_id, resp, "t3_fallback")
             return resp
         except Exception as e:
