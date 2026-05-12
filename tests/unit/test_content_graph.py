@@ -65,15 +65,19 @@ def test_validate_forbidden_word():
     assert "cheap" in result["feedback"].lower() or "deal" in result["feedback"].lower()
 
 def test_validate_seo_title_too_long():
-    state = make_state(generated={
-        "name":      "Tour",
-        "subtitle":  "Sub",
-        "summary":   "Summary text here",
-        "highlights": ["h1"],
-        "seo_title": "A" * 61,
-        "seo_meta":  "Meta description",
-        "trip_type": "cultural",
-    })
+    state = make_state(
+        tour={"name": "Halong Bay Cruise", "country": "Vietnam"},
+        generated={
+            "name":        "Halong Bay Cruise",
+            "subtitle":    "3-night private cruise through karst islands",
+            "summary":     "Summary text here",
+            "highlights":  ["h1", "h2", "h3"],
+            "itineraries": "Day 1: board. Day 2: kayak. Day 3: return.",
+            "seo_title":   "A" * 71,  # 71 chars — exceeds 70-char limit
+            "seo_meta":    "Meta description",
+            "trip_type":   "cultural",
+        }
+    )
     result = validate_node(state)
     assert "seo_title" in result["feedback"]
 
