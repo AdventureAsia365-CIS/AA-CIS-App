@@ -257,7 +257,11 @@ async def trigger_rewrite(
     # Run LLM rewrite in background (don't block response)
     async def _do_rewrite_and_save():
         try:
-            result = await _do_rewrite(tour_dict, idx=0, total=1, brand_rules=brand_rules)
+            result = await _do_rewrite(
+                tour_dict, idx=0, total=1,
+                brand_rules=brand_rules,
+                is_tenant_rewrite=True,  # skips name-match check in validate_node
+            )
             if result.get("status") == "success" and result.get("generated"):
                 import json as _j3
                 gen = result["generated"]
@@ -272,7 +276,14 @@ async def trigger_rewrite(
                     "trip_type":   gen.get("trip_type", ""),
                     "status":      "done",
                 }
-                new_status = "approved" if result.get("quality_score", 0) >= 7.0 else "pending"
+                score = float(result.get("quality_score") or 0)
+                # Status must leave 'pending' so the CatalogTab polling detects completion
+                if score >= 7.0:
+                    new_status = "ai_generated"   # ready for tenant to review
+                elif score > 0:
+                    new_status = "needs_review"   # LLM finished but low quality
+                else:
+                    new_status = "needs_review"   # hitl / score=0 — needs human
                 async with pool.acquire() as _conn3:
                     await _conn3.execute("""
                         UPDATE gold_aa_internal.tenant_tour_versions
@@ -281,11 +292,23 @@ async def trigger_rewrite(
                             quality_score = $3
                         WHERE id = $4::uuid
                     """,
-                        _j3.dumps(rewritten), new_status,
-                        result.get("quality_score"), version_id)
+                        _j3.dumps(rewritten), new_status, score, version_id)
+                import structlog as _sl2
+                _sl2.get_logger().info("tenant_rewrite_done",
+                    version_id=str(version_id), score=score, status=new_status)
         except Exception as _e:
             import structlog as _sl
             _sl.get_logger().error("tenant_rewrite_failed", error=str(_e))
+            # Mark as needs_review so polling detects completion even on error
+            try:
+                async with pool.acquire() as _conn_err:
+                    await _conn_err.execute("""
+                        UPDATE gold_aa_internal.tenant_tour_versions
+                        SET status = 'needs_review'
+                        WHERE id = $1::uuid AND status = 'pending'
+                    """, version_id)
+            except Exception:
+                pass
 
     _asyncio.create_task(_do_rewrite_and_save())
 

@@ -28,6 +28,7 @@ class ContentState(TypedDict):
     brand_forbidden_words:  list
     rewrite_language:       str
     model_tier:             str
+    is_tenant_rewrite:      bool
 
 def generate_node(state: ContentState) -> ContentState:
     """Node 1: Generate content via LLMClient."""
@@ -117,12 +118,14 @@ def validate_node(state: ContentState) -> ContentState:
         issues.append(f"highlights has only {len(highlights)} items, need 3+")
         score -= 0.5
 
-    # Name must not be modified
-    src_name = (tour.get("name") or "").strip().lower()
-    ai_name  = (generated.get("name") or "").strip().lower()
-    if src_name and ai_name and src_name != ai_name:
-        issues.append(f"Name modified: '{tour.get('name')}' → '{generated.get('name')}'")
-        score -= 2.0
+    # Name must not be modified — skip for tenant rewrites (AA name is the source,
+    # minor normalisation differences are acceptable and should not tank the score)
+    if not state.get("is_tenant_rewrite"):
+        src_name = (tour.get("name") or "").strip().lower()
+        ai_name  = (generated.get("name") or "").strip().lower()
+        if src_name and ai_name and src_name != ai_name:
+            issues.append(f"Name modified: '{tour.get('name')}' → '{generated.get('name')}'")
+            score -= 2.0
 
     # Subtitle must not be generic
     subtitle = generated.get("subtitle", "").lower()

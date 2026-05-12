@@ -44,6 +44,7 @@ async def _rewrite_tour(
     brand_rules: dict = None,
     seo: dict = None,
     model_tier: str = "haiku",
+    is_tenant_rewrite: bool = False,
 ) -> dict:
     """Rewrite single tour using LangGraph."""
     logger.info("rewriting_tour", idx=idx, total=total, name=tour.get("name", ""))
@@ -56,6 +57,7 @@ async def _rewrite_tour(
             "tour": tour,
             "seo": seo or {},
             "model_tier": model_tier,
+            "is_tenant_rewrite": is_tenant_rewrite,
             "few_shots": [],
             "generated": {},
             "quality_score": 0.0,
