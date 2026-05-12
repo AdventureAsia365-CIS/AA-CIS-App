@@ -279,12 +279,12 @@ async def get_tenant_details(
             FROM shared.pipeline_runs WHERE tenant_id = $1
         """, tenant_id)
 
-        # v_tenant_monthly_usage has one aggregate row per tenant per month;
-        # grab the current-month row (or NULL if none)
+        # v_tenant_monthly_usage has one row per tenant per billing_month;
+        # ORDER BY DESC so we always get the current/most-recent month
         usage = await conn.fetchrow("""
             SELECT api_calls_used, quota_calls_pct, api_calls_quota_monthly
             FROM shared.v_tenant_monthly_usage WHERE tenant_id = $1
-            LIMIT 1
+            ORDER BY billing_month DESC LIMIT 1
         """, tenant_id)
 
         tours = await conn.fetch("""
@@ -307,7 +307,7 @@ async def get_tenant_details(
 
         brand_rows = await conn.fetch("""
             SELECT system_prompt, style_guide, forbidden_words,
-                   version, created_at
+                   version, updated_at, created_at
             FROM shared.tenant_brand_rules
             WHERE tenant_id = $1
             ORDER BY version DESC
@@ -362,7 +362,7 @@ async def get_tenant_details(
             "style_guide":     brand["style_guide"]                 if brand else None,
             "forbidden_words": list(brand["forbidden_words"] or []) if brand else [],
             "version_count":   len(brand_rows),
-            "last_updated":    brand["created_at"].isoformat()      if brand else None,
+            "last_updated":    (brand["updated_at"] or brand["created_at"]).isoformat() if brand else None,
         },
     }
 
