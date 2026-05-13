@@ -383,8 +383,10 @@ export default function DashboardPage() {
   }, []);
 
   const totalCost = metrics?.model_usage
-    ? metrics.model_usage.reduce((s: number, m: any) => s + (m.cost || 0), 0).toFixed(2)
-    : (totalTours * 0.018).toFixed(2);
+    ? metrics.model_usage.reduce((s: number, m: any) => s + (Number(m.total_cost) || 0), 0).toFixed(4)
+    : metrics?.daily_runs
+      ? metrics.daily_runs.reduce((s: number, d: any) => s + (Number(d.cost) || 0), 0).toFixed(4)
+      : "0.0000";
   const passRate = totalTours > 0 ? ((totalPassed / totalTours) * 100).toFixed(1) : "0.0";
 
   return (
