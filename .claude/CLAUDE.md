@@ -105,3 +105,10 @@ Commit range: 3847850→9509a77 (12 commits)
 - AA-36: No char limits on rewrite fields — Backlog
 - Bug 3: quality_score=0.00 all rewrites — needs investigation
 - api_task_def_arn hardcoded :21 in main.tf — AA-CIS-Infra (AA-22 tech debt)
+## Session 10 Close — 13/05/2026
+- ECS desired=0, RDS stopped
+- Task def: api:127 | CI #208 | Commit: f070fb4
+- M1 COMPLETE: AA-40/42/39 done
+- UI Backlog done: AA-27/29/24/28
+- Vercel auto-deploy: main → production, develop → preview (Deploy Hook set)
+- Next: AA-13 API Gateway (due 31/5)
