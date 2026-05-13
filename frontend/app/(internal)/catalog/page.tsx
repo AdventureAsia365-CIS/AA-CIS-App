@@ -4,6 +4,7 @@
 // Inline editing + field-level save
 
 import { useState, useEffect, useCallback } from "react";
+import * as XLSX from "xlsx";
 import { Search, X, ChevronDown, ChevronUp, Edit2, Check, RotateCcw } from "lucide-react";
 import InternalSidebar from "../_components/InternalSidebar";
 import { A, serif, mono, sans, Card, SLabel, Btn, LoadingScreen, TopBar, TH, TD } from "../_components/internalUi";
@@ -521,10 +522,11 @@ export default function CatalogPage() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a"); a.href = url; a.download = "catalog-export.csv"; a.click(); URL.revokeObjectURL(url);
     } else {
-      const tsv = [headers, ...rows.map(t => cols.map(c => cellVal(t, c)))].map(r => r.join("\t")).join("\n");
-      const blob = new Blob(["﻿" + tsv], { type: "application/vnd.ms-excel" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a"); a.href = url; a.download = "catalog-export.xls"; a.click(); URL.revokeObjectURL(url);
+      const data = rows.map(t => Object.fromEntries(headers.map((h, i) => [h, cellVal(t, cols[i])])));
+      const ws = XLSX.utils.json_to_sheet(data, { header: headers });
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Catalog");
+      XLSX.writeFile(wb, "catalog-export.xlsx");
     }
   }
 
@@ -628,7 +630,7 @@ export default function CatalogPage() {
                   </button>
                   <button onClick={() => exportSelected("xlsx")}
                     style={{ padding: "7px 14px", background: A.gold, border: "none", borderRadius: 6, fontSize: 12, fontWeight: 600, color: "#fff", cursor: "pointer", fontFamily: sans }}>
-                    ↓ Excel ({selectedIds.size})
+                    ↓ XLSX ({selectedIds.size})
                   </button>
                 </div>
               )}
