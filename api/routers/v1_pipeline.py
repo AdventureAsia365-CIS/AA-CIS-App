@@ -189,7 +189,7 @@ class TourRunRequest(BaseModel):
     tenant_id: str
     retry_count: int = 0
     validation_feedback: list = []
-    seo_mode: str = "standard"
+    seo_mode: str = "dataforseo"  # "dataforseo" | "custom_keywords" | "disabled"
     rewrite_language: str = "en-US"  # en-US | en-GB
     model_tier: str = "haiku"        # "haiku" | "sonnet"
 
@@ -259,7 +259,10 @@ async def run_tour(req: TourRunRequest):
                 else row.get("src_name", "")
             )
             if destination:
-                seo_result = await process_seo(tour_id=req.tour_id, destination=destination)
+                seo_result = await process_seo(
+                    tour_id=req.tour_id, destination=destination,
+                    seo_mode=req.seo_mode,
+                )
                 seo_data = seo_result.get("data", {})
                 logger.info("seo_step_done", tour_id=req.tour_id,
                             status=seo_result.get("status"), destination=destination)
@@ -443,7 +446,7 @@ def _get_tenant(
 class UploadUrlRequest(BaseModel):
     filename: str
     content_type: str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    seo_mode: str = "standard"  # standard | aggressive | minimal
+    seo_mode: str = "dataforseo"  # dataforseo | custom_keywords | disabled
 
 
 class UploadUrlResponse(BaseModel):
@@ -477,7 +480,7 @@ async def get_upload_url(
 class IngestS3Request(_BaseModel):
     s3_key: str
     bucket: str
-    seo_mode: str = "standard"
+    seo_mode: str = "dataforseo"  # dataforseo | custom_keywords | disabled
     model_tier: str = "haiku"
 
 

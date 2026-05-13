@@ -20,9 +20,9 @@ function getToken(): string | null {
 }
 
 const SEO_MODES = [
-  { value: "standard",   label: "Standard",   desc: "Balanced keyword density" },
-  { value: "aggressive", label: "Aggressive",  desc: "Max keyword integration + PAA" },
-  { value: "minimal",    label: "Minimal",     desc: "Light SEO — brand voice first" },
+  { value: "dataforseo",      label: "DataForSEO",      desc: "Live keyword fetch (default)" },
+  { value: "custom_keywords", label: "Custom Keywords",  desc: "Tenant keywords, no API call" },
+  { value: "disabled",        label: "Disabled",         desc: "Skip SEO step entirely" },
 ];
 
 const MODEL_TIERS = [
@@ -155,7 +155,7 @@ function BrandIdentityPreview() {
 export default function UploadPage() {
   const [dragOver, setDragOver]   = useState(false);
   const [files, setFiles]         = useState<FileEntry[]>([]);
-  const [seoMode, setSeoMode]     = useState("standard");
+  const [seoMode, setSeoMode]     = useState("dataforseo");
   const [modelTier, setModelTier] = useState("haiku");
   const [isRunning, setIsRunning] = useState(false);
   const [sources, setSources]     = useState<SourceEntry[]>([]);
