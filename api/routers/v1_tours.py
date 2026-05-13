@@ -82,6 +82,9 @@ async def browse_pool(
     country: Optional[str] = Query(None),
     min_quality: Optional[float] = Query(None, ge=0, le=10),
     search: Optional[str] = Query(None),
+    duration_min: Optional[int] = Query(None, ge=1),
+    duration_max: Optional[int] = Query(None),
+    sort: str = Query("newest"),
 ):
     """Browse AA shared pool (published_tours from aa_internal).
     All active tenants can read the pool — RLS bypassed via aa_internal filter.
@@ -102,7 +105,18 @@ async def browse_pool(
     if search:
         params.append(f"%{search}%")
         conditions.append(f"pt.aa_name ILIKE ${len(params)}")
+    if duration_min is not None:
+        params.append(duration_min)
+        conditions.append(
+            f"CAST(NULLIF(REGEXP_REPLACE(COALESCE(rt.duration,''),'[^0-9]','','g'),'') AS INTEGER) >= ${len(params)}"
+        )
+    if duration_max is not None:
+        params.append(duration_max)
+        conditions.append(
+            f"CAST(NULLIF(REGEXP_REPLACE(COALESCE(rt.duration,''),'[^0-9]','','g'),'') AS INTEGER) <= ${len(params)}"
+        )
 
+    order_by = "pt.published_at DESC" if sort == "newest" else "pt.quality_score DESC, pt.published_at DESC"
     where = "WHERE " + " AND ".join(conditions)
 
     async with pool.acquire() as conn:
@@ -130,7 +144,7 @@ async def browse_pool(
             FROM gold_aa_internal.published_tours pt
             LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
             {where}
-            ORDER BY pt.quality_score DESC, pt.published_at DESC
+            ORDER BY {order_by}
             LIMIT ${len(params)+1} OFFSET ${len(params)+2}
         """, *params_paged)
 
