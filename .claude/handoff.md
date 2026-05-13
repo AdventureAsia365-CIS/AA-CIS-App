@@ -1,36 +1,66 @@
-# AA-CIS-App — Handoff Session 8 (12/05/2026)
+# AA-CIS-App — Handoff Session 10 (13/05/2026)
 
 ## State
-- ECS: api:118 | CI #195 | Deploy #114 | STOPPED (desired=0)
+- ECS: api:127 | CI #208 | STOPPED (desired=0)
 - RDS: aa-cis-dev-db STOPPED
-- Vercel: https://aa-cis.lumiguides.it.com (latest deploy)
-- Branch: develop | Last commit: 5adf517
+- Vercel: https://aa-cis.lumiguides.it.com (Production: Hn6pUVzWr)
+- Branch: develop | Last commit: f070fb4
+- M1 milestone: COMPLETE
 
 ## Done this session
 
-### AA-52 — Tenant Portal polling + validator fix
-- ba80b99: polling + status badges + toast
-- b1a8bb0: is_tenant_rewrite=True → skip name-match, quality_score write fixed
-- 030f400: polling stop condition, approve/reject disable, AA original column fix
+### AA-40 — Terraform EventBridge + S3 medallion (AA-CIS-Infra)
+- EventBridge bus `aa-cis-dev-acp-events` + Scheduler rules + S3 bronze/silver/gold buckets + Secrets Manager
+- Terraform applied, CI green
+- IAM additions: aa-cis-dev-role (CI) + aa-cis-dev-ecs-task-role (PutEvents)
 
-### AA-25 — Admin Tenants detail view
-- 05988c8: fix Failed to load + 4-tab view (Tours/Pipeline/API Usage/Brand)
-  - Root cause: v_tenant_monthly_usage wrong columns (total_calls → api_calls_used)
-- 0dba680: ORDER BY billing_month DESC
-- 5adf517: forbidden_words JSONB parse (backend + frontend)
-- DB: lumitest plan_id fixed, INTERNAL_API_KEY rotated
+### AA-42 — CIS publish EventBridge event + manifest.json
+- EventBridge publish after pipeline complete
+- manifest.json → S3 gold path
+- GET /v1/acp/s1-keywords endpoint
+- DB: shared.acp_runs table (migration 009 applied)
+
+### AA-39 — seo_mode dropdown
+- Wired seo_mode to pipeline run API
+- 3 modes: dataforseo / custom_keywords / disabled
+
+### AA-28 — Multi-select export CSV + XLSX
+- CSV: tab-delimited (\t), UTF-8 BOM, no quotes, replaces \n in values
+- XLSX: SheetJS (xlsx package), 21 columns full for Admin, 14 for Tenant
+- Admin: fetches /api/tour-full/{id} per tour → includes supplier extras + SEO keywords
+- Tenant: fetches /api/tenant/v1/tours/versions/{id} → includes subtitle, itineraries, SEO fields
+- Async export with loading state on buttons
+
+### AA-27 — Admin Catalog UI
+- Filter bar (country, status, score range, date range)
+- Highlights as bullet list
+- SEO keywords section + Audit/Validation panel
+- Inclusions/Exclusions rendered per line
+
+### AA-29 — Tenant itinerary format
+- Newlines per day preserved in My Catalog view
+
+### AA-24 — Dashboard Cost tab
+- Fixed m.total_cost (was m.cost → undefined → $0)
+
+### Vercel auto-deploy
+- main → Production (Deploy Hook set in CI)
+- develop → Preview
+
+### AA-1/2/3/4 — Linear onboarding issues: closed
+### AA-54 — Cancelled (wrong diagnosis)
 
 ## Next priorities
-1. AA-40: Terraform ACP (EventBridge + S3) — AA-CIS-Infra repo
-2. AA-42: CIS EventBridge publish + manifest.json (blocked by AA-40)
-3. AA-57: Tenant Portal bugs (wait Ms. Thu feedback)
+1. AA-13: API Gateway REST + per-tenant rate limiting + Terraform (due 31/5)
+2. Phase 3 Report DOCX for Ms. Thu (overdue)
+3. Bug 3: quality_score=0.00 all rewrites — CloudWatch investigate (ECS must be running first)
+4. AA-28: Full column export — Backlog (done for both Admin + Tenant)
+5. AA-36: No char limits on rewrite fields — Backlog
 
-## Schema notes
+## Schema notes (carried forward)
 - tenants PK = tenant_id (NOT id)
 - v_tenant_monthly_usage: billing_month, api_calls_used, quota_calls_pct
 - tenant_tour_versions.published_tour_id → published_tours.id
 - forbidden_words: asyncpg returns JSONB as string → always json.loads()
 - pool rewrites do NOT create pipeline_runs rows
-
-## CRITICAL
-INTERNAL_API_KEY was rotated this session — new key in Vercel production.
+- acp_runs table: shared.acp_runs (migration 009)
