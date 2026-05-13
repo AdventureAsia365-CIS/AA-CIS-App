@@ -71,24 +71,24 @@ function renderSupplierValue(v: any) {
       s.split("|").map(x => x.trim()).filter(Boolean).forEach(x => items.push(x));
     } else if (s.includes("\n")) {
       s.split("\n").map(x => x.trim()).filter(Boolean).forEach(x => items.push(x));
+    } else if (s.includes(",") && s.split(",").length > 1) {
+      // comma-delimited (common in Excel inclusions/exclusions cells)
+      s.split(",").map(x => x.trim()).filter(Boolean).forEach(x => items.push(x));
     } else {
-      // sentence-split for long strings
-      const sentences = s.match(/[^.!?]+[.!?]+(?:\s|$)/g);
-      if (sentences && sentences.length > 1) {
-        sentences.map(x => x.trim()).filter(Boolean).forEach(x => items.push(x));
-      } else {
-        items.push(s);
-      }
+      items.push(s);
     }
   }
 
   if (items.length > 1) {
     return (
-      <ul style={{ margin: 0, paddingLeft: 16 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
         {items.map((item, i) => (
-          <li key={i} style={{ fontSize: 12.5, color: A.body, marginBottom: 3, lineHeight: 1.5 }}>{item}</li>
+          <div key={i} style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
+            <span style={{ color: A.gold, fontWeight: 700, flexShrink: 0, lineHeight: 1.5 }}>•</span>
+            <span style={{ fontSize: 12.5, color: A.body, lineHeight: 1.5 }}>{item}</span>
+          </div>
         ))}
-      </ul>
+      </div>
     );
   }
   return <span style={{ fontSize: 12.5, color: A.body, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{items[0] ?? ""}</span>;
@@ -111,7 +111,6 @@ function DiffRow({
   const renderVal = (v: any) => {
     if (v === null || v === undefined || v === "") return <span style={{ color: A.muted2, fontStyle: "italic" }}>—</span>;
     if (isJson) {
-      // Try parse with newline sanitization fallback
       let parsed: any = v;
       if (typeof v === "string") {
         const p = tryParseJson(v);
@@ -119,16 +118,18 @@ function DiffRow({
       }
       if (Array.isArray(parsed)) {
         return (
-          <ul style={{ margin: 0, paddingLeft: 16 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             {parsed.map((item: any, i: number) => (
-              <li key={i} style={{ fontSize: 12.5, color: A.body, marginBottom: 3, lineHeight: 1.5 }}>
-                {typeof item === "object" ? JSON.stringify(item) : String(item)}
-              </li>
+              <div key={i} style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
+                <span style={{ color: A.gold, fontWeight: 700, flexShrink: 0, lineHeight: 1.5 }}>•</span>
+                <span style={{ fontSize: 12.5, color: A.body, lineHeight: 1.5 }}>
+                  {typeof item === "object" ? JSON.stringify(item) : String(item)}
+                </span>
+              </div>
             ))}
-          </ul>
+          </div>
         );
       }
-      // Parsed but not an array (e.g. invalid JSON stays as string) — use full supplier renderer
       return renderSupplierValue(parsed);
     }
     return <span style={{ fontSize: 12.5, color: A.body, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{String(v)}</span>;
@@ -363,10 +364,54 @@ function ReviewPanel({ tour, onClose }: { tour: Tour; onClose: () => void }) {
 
             {/* SEO */}
             <Section title="SEO">
-              <DiffRow label="SEO Title"  before={raw.src_name}  after={pt.seo_title} field="seo_title" tourId={tour.id} onSaved={handleSaved} />
-              <DiffRow label="Meta Desc"  before={null} after={pt.seo_meta} field="seo_meta" tourId={tour.id} onSaved={handleSaved} multiline />
-              <DiffRow label="Keywords"   before={null}          after={seo.top_keywords} field="seo_meta" tourId={tour.id} onSaved={handleSaved} isJson />
+              <DiffRow label="SEO Title"       before={raw.src_name}       after={pt.seo_title}       field="seo_title" tourId={tour.id} onSaved={handleSaved} />
+              <DiffRow label="Meta Desc"       before={null}               after={pt.seo_meta}        field="seo_meta"  tourId={tour.id} onSaved={handleSaved} multiline />
+              <DiffRow label="Keyword Search"  before={null}               after={seo.keyword_search} field="seo_meta"  tourId={tour.id} onSaved={handleSaved} />
+              <DiffRow label="Top Keywords"    before={null}               after={seo.top_keywords}   field="seo_meta"  tourId={tour.id} onSaved={handleSaved} isJson />
+              <DiffRow label="Keyword Ideas"   before={null}               after={seo.keyword_ideas}  field="seo_meta"  tourId={tour.id} onSaved={handleSaved} isJson />
+              {seo.fetched_at && (
+                <div style={{ padding: "6px 14px", fontSize: 10.5, color: A.muted2, borderTop: `1px solid ${A.line}`, fontFamily: mono }}>
+                  SEO data fetched: {new Date(seo.fetched_at).toLocaleString("en-GB")}
+                </div>
+              )}
             </Section>
+
+            {/* Audit / Validation */}
+            {qs && Object.keys(qs).length > 0 && (
+              <Section title="Audit / Validation" defaultOpen={false}>
+                <div style={{ padding: "14px 16px", display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", gap: 12 }}>
+                  {[
+                    { l: "Overall",   v: qs.score_overall },
+                    { l: "Brand",     v: qs.score_brand },
+                    { l: "SEO",       v: qs.score_seo },
+                    { l: "Structure", v: qs.score_structure },
+                    { l: "Quality",   v: qs.score_quality },
+                  ].map(({ l, v }) => {
+                    const score = typeof v === "number" ? v : parseFloat(v ?? 0);
+                    const color = score >= 9 ? "#16A34A" : score >= 7 ? A.gold : "#DC2626";
+                    return (
+                      <div key={l} style={{ background: A.bg, border: `1px solid ${A.line}`, borderRadius: 8, padding: "10px 12px" }}>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: A.muted2, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>{l}</div>
+                        <div style={{ fontFamily: mono, fontSize: 20, fontWeight: 700, color }}>{score.toFixed(1)}</div>
+                      </div>
+                    );
+                  })}
+                  <div style={{ background: A.bg, border: `1px solid ${A.line}`, borderRadius: 8, padding: "10px 12px" }}>
+                    <div style={{ fontSize: 10, fontWeight: 700, color: A.muted2, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Passed</div>
+                    <div style={{ fontFamily: mono, fontSize: 20, fontWeight: 700, color: "#16A34A" }}>{qs.passed_count ?? 0}</div>
+                  </div>
+                  <div style={{ background: A.bg, border: `1px solid ${A.line}`, borderRadius: 8, padding: "10px 12px" }}>
+                    <div style={{ fontSize: 10, fontWeight: 700, color: A.muted2, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Failed</div>
+                    <div style={{ fontFamily: mono, fontSize: 20, fontWeight: 700, color: qs.failed_count > 0 ? "#DC2626" : A.muted2 }}>{qs.failed_count ?? 0}</div>
+                  </div>
+                </div>
+                {qs.evaluated_at && (
+                  <div style={{ padding: "6px 14px 10px", fontSize: 10.5, color: A.muted2, fontFamily: mono }}>
+                    Evaluated: {new Date(qs.evaluated_at).toLocaleString("en-GB")}
+                  </div>
+                )}
+              </Section>
+            )}
 
             {/* Raw supplier extras */}
             <Section title="Supplier Data (Read Only)" defaultOpen={false}>
@@ -405,6 +450,18 @@ export default function CatalogPage() {
   const [isAdmin, setIsAdmin]   = useState(false);
   const [userName, setUserName] = useState("Content");
 
+  // ── AA-27 filters ──────────────────────────────────────────────────────────
+  const [filterCountry,  setFilterCountry]  = useState("");
+  const [filterStatus,   setFilterStatus]   = useState("");   // quality tier
+  const [filterProvider, setFilterProvider] = useState("");   // UI only (not in list response)
+  const [filterMinScore, setFilterMinScore] = useState("");
+  const [filterMaxScore, setFilterMaxScore] = useState("");
+  const [filterDateFrom, setFilterDateFrom] = useState("");
+  const [filterDateTo,   setFilterDateTo]   = useState("");
+
+  // ── AA-28 multi-select ─────────────────────────────────────────────────────
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
   useEffect(() => {
     const role = document.cookie.split(";").find(c => c.trim().startsWith("cis_role="))?.split("=")[1];
     const name = document.cookie.split(";").find(c => c.trim().startsWith("cis_user="))?.split("=")[1];
@@ -421,10 +478,48 @@ export default function CatalogPage() {
       .catch(e => { setError(e.message); setLoading(false); });
   }, [page]);
 
-  const filtered = tours.filter(t =>
-    t.aa_name?.toLowerCase().includes(search.toLowerCase()) ||
-    t.aa_subtitle?.toLowerCase().includes(search.toLowerCase())
-  );
+  const filtered = tours.filter(t => {
+    if (search && !t.aa_name?.toLowerCase().includes(search.toLowerCase()) &&
+        !t.aa_subtitle?.toLowerCase().includes(search.toLowerCase())) return false;
+    if (filterCountry && !(t.country ?? "").toLowerCase().includes(filterCountry.toLowerCase())) return false;
+    const sc = t.quality_score;
+    if (filterStatus === "excellent"    && (sc == null || sc < 9))  return false;
+    if (filterStatus === "good"         && (sc == null || sc < 8 || sc >= 9)) return false;
+    if (filterStatus === "needs_review" && (sc != null && sc >= 8)) return false;
+    if (filterMinScore !== "" && (sc == null || sc < parseFloat(filterMinScore))) return false;
+    if (filterMaxScore !== "" && (sc == null || sc > parseFloat(filterMaxScore))) return false;
+    if (filterDateFrom && t.published_at < filterDateFrom) return false;
+    if (filterDateTo   && t.published_at > filterDateTo + "T23:59:59") return false;
+    return true;
+  });
+
+  function exportSelected(fmt: "csv" | "xlsx") {
+    const rows = filtered.filter(t => selectedIds.has(t.id));
+    const cols = ["aa_name","aa_subtitle","country","seo_title","quality_score","published_at"] as const;
+    const headers = ["Name","Subtitle","Country","SEO Title","Quality Score","Published At"];
+    if (fmt === "csv") {
+      const csv = [headers, ...rows.map(t => cols.map(c => `"${String(t[c as keyof Tour] ?? "").replace(/"/g,'""')}"`))].map(r => r.join(",")).join("\n");
+      const blob = new Blob([csv], { type: "text/csv" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url; a.download = "catalog-export.csv"; a.click(); URL.revokeObjectURL(url);
+    } else {
+      // XLSX: tab-separated with BOM so Excel opens correctly
+      const tsv = [headers, ...rows.map(t => cols.map(c => String(t[c as keyof Tour] ?? "")))].map(r => r.join("\t")).join("\n");
+      const blob = new Blob(["﻿" + tsv], { type: "application/vnd.ms-excel" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url; a.download = "catalog-export.xls"; a.click(); URL.revokeObjectURL(url);
+    }
+  }
+
+  const allPageSelected = filtered.length > 0 && filtered.every(t => selectedIds.has(t.id));
+
+  function toggleAll() {
+    if (allPageSelected) {
+      setSelectedIds(prev => { const n = new Set(prev); filtered.forEach(t => n.delete(t.id)); return n; });
+    } else {
+      setSelectedIds(prev => { const n = new Set(prev); filtered.forEach(t => n.add(t.id)); return n; });
+    }
+  }
 
   return (
     <div style={{ display: "flex", minHeight: "100vh", fontFamily: sans, background: A.bg }}>
@@ -451,12 +546,75 @@ export default function CatalogPage() {
             </div>
           </div>
 
-          {/* Search */}
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ position: "relative", maxWidth: 360 }}>
-              <Search size={13} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: A.muted2 }} />
-              <input type="text" placeholder="Search tours…" value={search} onChange={e => setSearch(e.target.value)}
-                style={{ width: "100%", padding: "9px 12px 9px 34px", background: A.card, border: `1px solid ${A.line}`, borderRadius: 8, color: A.body, fontSize: 13, outline: "none", fontFamily: sans, boxSizing: "border-box" }} />
+          {/* Filter bar — AA-27 */}
+          <div style={{ background: A.card, border: `1px solid ${A.line}`, borderRadius: 10, padding: "14px 16px", marginBottom: 16, display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end" }}>
+            {/* Search */}
+            <div style={{ flex: "1 1 200px", minWidth: 160 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: A.muted2, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Search</div>
+              <div style={{ position: "relative" }}>
+                <Search size={12} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: A.muted2 }} />
+                <input type="text" placeholder="Name or subtitle…" value={search} onChange={e => setSearch(e.target.value)}
+                  style={{ width: "100%", padding: "7px 10px 7px 28px", background: A.bg, border: `1px solid ${A.line}`, borderRadius: 6, color: A.body, fontSize: 12, outline: "none", fontFamily: sans, boxSizing: "border-box" }} />
+              </div>
+            </div>
+            {/* Country */}
+            <div style={{ flex: "0 1 130px", minWidth: 100 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: A.muted2, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Country</div>
+              <input type="text" placeholder="e.g. Sri Lanka" value={filterCountry} onChange={e => setFilterCountry(e.target.value)}
+                style={{ width: "100%", padding: "7px 10px", background: A.bg, border: `1px solid ${A.line}`, borderRadius: 6, color: A.body, fontSize: 12, outline: "none", fontFamily: sans, boxSizing: "border-box" }} />
+            </div>
+            {/* Status (quality tier) */}
+            <div style={{ flex: "0 1 150px", minWidth: 120 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: A.muted2, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Status</div>
+              <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)}
+                style={{ width: "100%", padding: "7px 10px", background: A.bg, border: `1px solid ${A.line}`, borderRadius: 6, color: A.body, fontSize: 12, outline: "none", fontFamily: sans, boxSizing: "border-box" }}>
+                <option value="">All</option>
+                <option value="excellent">Excellent (9+)</option>
+                <option value="good">Good (8–9)</option>
+                <option value="needs_review">Needs Review (&lt;8)</option>
+              </select>
+            </div>
+            {/* Quality score range */}
+            <div style={{ flex: "0 1 160px", minWidth: 130 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: A.muted2, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Score Range</div>
+              <div style={{ display: "flex", gap: 4 }}>
+                <input type="number" placeholder="Min" min={0} max={10} step={0.1} value={filterMinScore} onChange={e => setFilterMinScore(e.target.value)}
+                  style={{ flex: 1, padding: "7px 8px", background: A.bg, border: `1px solid ${A.line}`, borderRadius: 6, color: A.body, fontSize: 12, outline: "none", fontFamily: sans, boxSizing: "border-box" }} />
+                <input type="number" placeholder="Max" min={0} max={10} step={0.1} value={filterMaxScore} onChange={e => setFilterMaxScore(e.target.value)}
+                  style={{ flex: 1, padding: "7px 8px", background: A.bg, border: `1px solid ${A.line}`, borderRadius: 6, color: A.body, fontSize: 12, outline: "none", fontFamily: sans, boxSizing: "border-box" }} />
+              </div>
+            </div>
+            {/* Date range */}
+            <div style={{ flex: "0 1 240px", minWidth: 200 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: A.muted2, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Published Date</div>
+              <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                <input type="date" value={filterDateFrom} onChange={e => setFilterDateFrom(e.target.value)}
+                  style={{ flex: 1, padding: "6px 8px", background: A.bg, border: `1px solid ${A.line}`, borderRadius: 6, color: A.body, fontSize: 11, outline: "none", fontFamily: sans, boxSizing: "border-box" }} />
+                <span style={{ color: A.muted2, fontSize: 11 }}>–</span>
+                <input type="date" value={filterDateTo} onChange={e => setFilterDateTo(e.target.value)}
+                  style={{ flex: 1, padding: "6px 8px", background: A.bg, border: `1px solid ${A.line}`, borderRadius: 6, color: A.body, fontSize: 11, outline: "none", fontFamily: sans, boxSizing: "border-box" }} />
+              </div>
+            </div>
+            {/* Clear + export */}
+            <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexShrink: 0 }}>
+              {(search || filterCountry || filterStatus || filterMinScore || filterMaxScore || filterDateFrom || filterDateTo) && (
+                <button onClick={() => { setSearch(""); setFilterCountry(""); setFilterStatus(""); setFilterProvider(""); setFilterMinScore(""); setFilterMaxScore(""); setFilterDateFrom(""); setFilterDateTo(""); }}
+                  style={{ padding: "7px 14px", background: A.bg, border: `1px solid ${A.line}`, borderRadius: 6, fontSize: 12, color: A.muted, cursor: "pointer", fontFamily: sans }}>
+                  ✕ Clear
+                </button>
+              )}
+              {selectedIds.size > 0 && (
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button onClick={() => exportSelected("csv")}
+                    style={{ padding: "7px 14px", background: "#22C55E", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 600, color: "#fff", cursor: "pointer", fontFamily: sans }}>
+                    ↓ CSV ({selectedIds.size})
+                  </button>
+                  <button onClick={() => exportSelected("xlsx")}
+                    style={{ padding: "7px 14px", background: A.gold, border: "none", borderRadius: 6, fontSize: 12, fontWeight: 600, color: "#fff", cursor: "pointer", fontFamily: sans }}>
+                    ↓ Excel ({selectedIds.size})
+                  </button>
+                </div>
+              )}
             </div>
           </div>
 
@@ -467,6 +625,10 @@ export default function CatalogPage() {
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead>
                   <tr>
+                    <th style={{ ...TH, width: 36, paddingRight: 0 }}>
+                      <input type="checkbox" checked={allPageSelected} onChange={toggleAll}
+                        style={{ cursor: "pointer", accentColor: A.gold }} />
+                    </th>
                     {["Tour Name", "Subtitle", "Country", "SEO Title", "Score", "Published"].map((h, i) => (
                       <th key={h} style={{ ...TH, textAlign: i >= 4 ? "right" : "left" }}>{h}</th>
                     ))}
@@ -475,35 +637,41 @@ export default function CatalogPage() {
                 <tbody>
                   {filtered.map(item => {
                     const sc = item.quality_score;
+                    const isChecked = selectedIds.has(item.id);
                     return (
-                      <tr key={item.id} onClick={() => setSelected(item)}
-                        style={{ cursor: "pointer", transition: "background .1s" }}
-                        onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = "#FFFDF7"}
-                        onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = "transparent"}>
-                        <td style={{ ...TD, fontWeight: 600, color: A.ink, maxWidth: 180 }}>
+                      <tr key={item.id}
+                        style={{ cursor: "pointer", transition: "background .1s", background: isChecked ? "#FFFDF7" : undefined }}
+                        onMouseEnter={e => { if (!isChecked) (e.currentTarget as HTMLElement).style.background = "#FFFDF7"; }}
+                        onMouseLeave={e => { if (!isChecked) (e.currentTarget as HTMLElement).style.background = "transparent"; }}>
+                        <td style={{ ...TD, paddingRight: 0, width: 36 }} onClick={e => e.stopPropagation()}>
+                          <input type="checkbox" checked={isChecked}
+                            onChange={() => setSelectedIds(prev => { const n = new Set(prev); isChecked ? n.delete(item.id) : n.add(item.id); return n; })}
+                            style={{ cursor: "pointer", accentColor: A.gold }} />
+                        </td>
+                        <td style={{ ...TD, fontWeight: 600, color: A.ink, maxWidth: 180 }} onClick={() => setSelected(item)}>
                           <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.aa_name}</div>
                         </td>
-                        <td style={{ ...TD, color: A.muted, fontSize: 12, maxWidth: 200 }}>
+                        <td style={{ ...TD, color: A.muted, fontSize: 12, maxWidth: 200 }} onClick={() => setSelected(item)}>
                           <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.aa_subtitle}</div>
                         </td>
-                        <td style={{ ...TD, fontSize: 12, color: A.muted2 }}>{item.country ?? "—"}</td>
-                        <td style={{ ...TD, color: A.muted2, fontSize: 11, fontFamily: mono, maxWidth: 180 }}>
+                        <td style={{ ...TD, fontSize: 12, color: A.muted2 }} onClick={() => setSelected(item)}>{item.country ?? "—"}</td>
+                        <td style={{ ...TD, color: A.muted2, fontSize: 11, fontFamily: mono, maxWidth: 180 }} onClick={() => setSelected(item)}>
                           <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.seo_title}</div>
                         </td>
-                        <td style={{ ...TD, textAlign: "right" }}>
+                        <td style={{ ...TD, textAlign: "right" }} onClick={() => setSelected(item)}>
                           <span style={{ fontFamily: mono, fontWeight: 700, fontSize: 13, color: scoreColor(sc),
                             background: scoreBg(sc), padding: "2px 8px", borderRadius: 6 }}>
                             ★ {sc?.toFixed(1) ?? "—"}
                           </span>
                         </td>
-                        <td style={{ ...TD, textAlign: "right", fontSize: 11.5, color: A.muted, fontFamily: mono }}>
+                        <td style={{ ...TD, textAlign: "right", fontSize: 11.5, color: A.muted, fontFamily: mono }} onClick={() => setSelected(item)}>
                           {item.published_at ? new Date(item.published_at).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "—"}
                         </td>
                       </tr>
                     );
                   })}
                   {filtered.length === 0 && (
-                    <tr><td colSpan={6} style={{ padding: "48px 0", textAlign: "center", color: A.muted, fontSize: 13 }}>No tours found</td></tr>
+                    <tr><td colSpan={7} style={{ padding: "48px 0", textAlign: "center", color: A.muted, fontSize: 13 }}>No tours found</td></tr>
                   )}
                 </tbody>
               </table>
