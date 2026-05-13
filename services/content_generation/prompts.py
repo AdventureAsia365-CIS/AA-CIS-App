@@ -12,7 +12,9 @@ STRICT RULES:
 2. Name field: preserve the source tour name exactly — do not rename or add taglines
 3. Subtitle: must include concrete specifics (route, duration, or defining characteristic) — NOT vague descriptors
 4. Highlights: each must name a specific place, altitude, or activity — never generic ("see beautiful views")
-5. Itineraries: reformat day-by-day from source, do not invent new days or activities
+5. Itineraries: rewrite each day in the client's brand voice using the style guide.
+   Preserve all factual details (day numbers, named places, activities).
+   Do not invent days or activities not present in the source.
 6. Do not make factual claims you cannot verify from the source data
 
 Output ONLY valid JSON. No preamble, no markdown, no explanation.
@@ -60,7 +62,7 @@ OUTPUT JSON FORMAT:
     "Specific activity at Named Location",
     "Add as many highlights as the source supports — minimum 3, no maximum"
   ],
-  "itineraries": "Full day-by-day from source. Preserve all named places. No truncation.",
+  "itineraries": "Rewrite each day in brand voice from the style guide. Keep all factual details (day numbers, named places, activities). Do not add or remove days.",
   "seo_title": "SEO title — MUST be under 70 chars",
   "seo_meta": "SEO meta description — MUST be under 170 chars, opens with a concrete editorial sentence",
   "trip_type": "cultural|adventure|wellness|culinary|wildlife|trekking|festival|river_journey"

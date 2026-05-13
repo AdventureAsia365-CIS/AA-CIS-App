@@ -192,10 +192,14 @@ async def trigger_rewrite(
     async with pool.acquire() as conn:
         # Check published tour exists
         pt = await conn.fetchrow("""
-            SELECT id, aa_name, aa_summary, aa_description, aa_highlights,
-                   aa_itineraries, seo_title, seo_meta, seo_keywords_used
-            FROM gold_aa_internal.published_tours
-            WHERE id = $1::uuid
+            SELECT pt.id, pt.tour_id, pt.aa_name, pt.aa_subtitle,
+                   pt.aa_summary, pt.aa_description, pt.aa_highlights,
+                   pt.aa_itineraries, pt.seo_title, pt.seo_meta,
+                   pt.seo_keywords_used,
+                   rt.country, rt.duration
+            FROM gold_aa_internal.published_tours pt
+            LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
+            WHERE pt.id = $1::uuid
         """, published_tour_id)
         if not pt:
             raise HTTPException(status_code=404, detail="Tour not found in pool")
@@ -235,15 +239,15 @@ async def trigger_rewrite(
     # Build tour dict from published tour
     tour_dict = {
         "name":        pt["aa_name"],
-        "subtitle":    pt.get("aa_subtitle", ""),
-        "summary":     pt.get("aa_summary", ""),
-        "description": pt.get("aa_description", ""),
-        "highlights":  pt.get("aa_highlights", ""),
-        "itineraries": pt.get("aa_itineraries", ""),
-        "seo_title":   pt.get("aa_seo_title", ""),
-        "seo_meta":    pt.get("aa_seo_meta", ""),
-        "country":     "",
-        "duration":    "",
+        "subtitle":    pt.get("aa_subtitle") or "",
+        "summary":     pt.get("aa_summary") or "",
+        "description": pt.get("aa_description") or "",
+        "highlights":  pt.get("aa_highlights") or "",
+        "itineraries": pt.get("aa_itineraries") or "",
+        "seo_title":   pt.get("seo_title") or "",    # fixed: was "aa_seo_title"
+        "seo_meta":    pt.get("seo_meta") or "",     # fixed: was "aa_seo_meta"
+        "country":     pt.get("country") or "",       # now from raw_tours JOIN
+        "duration":    pt.get("duration") or "",      # now from raw_tours JOIN
     }
 
     # Fetch brand rules for this tenant
