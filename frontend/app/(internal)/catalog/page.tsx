@@ -19,7 +19,8 @@ function getToken() {
 interface Tour {
   id: string; tour_id: string; aa_name: string; aa_subtitle: string;
   seo_title: string; quality_score: number | null; published_at: string;
-  country?: string;
+  country?: string; duration?: string; seo_meta?: string;
+  aa_summary?: string; aa_highlights?: string;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -66,7 +67,9 @@ function renderSupplierValue(v: any) {
       s.split("|").map(x => x.trim()).filter(Boolean).forEach(x => items.push(x));
     }
   } else {
-    const s = String(parsed);
+    const s = (typeof parsed === "object" && parsed !== null)
+      ? JSON.stringify(parsed, null, 2)
+      : String(parsed);
     if (s.includes("|")) {
       s.split("|").map(x => x.trim()).filter(Boolean).forEach(x => items.push(x));
     } else if (s.includes("\n")) {
@@ -495,16 +498,29 @@ export default function CatalogPage() {
 
   function exportSelected(fmt: "csv" | "xlsx") {
     const rows = filtered.filter(t => selectedIds.has(t.id));
-    const cols = ["aa_name","aa_subtitle","country","seo_title","quality_score","published_at"] as const;
-    const headers = ["Name","Subtitle","Country","SEO Title","Quality Score","Published At"];
+    const cols: (keyof Tour)[] = ["aa_name","aa_subtitle","country","duration","seo_title","seo_meta","aa_summary","aa_highlights","quality_score","published_at"];
+    const headers = ["Name","Subtitle","Country","Duration","SEO Title","SEO Meta","Summary","Highlights","Quality Score","Published At"];
+
+    function cellVal(t: Tour, col: keyof Tour): string {
+      const v = t[col];
+      if (col === "aa_highlights" && v) {
+        try {
+          const parsed = typeof v === "string" ? JSON.parse(v as string) : v;
+          if (Array.isArray(parsed)) return parsed.map((x: any) => (typeof x === "string" ? x : JSON.stringify(x))).join(" | ");
+        } catch {}
+      }
+      if (col === "quality_score") return v != null ? String(v) : "";
+      if (col === "published_at" && v) return new Date(v as string).toLocaleDateString("en-GB");
+      return String(v ?? "");
+    }
+
     if (fmt === "csv") {
-      const csv = [headers, ...rows.map(t => cols.map(c => `"${String(t[c as keyof Tour] ?? "").replace(/"/g,'""')}"`))].map(r => r.join(",")).join("\n");
-      const blob = new Blob([csv], { type: "text/csv" });
+      const csv = [headers, ...rows.map(t => cols.map(c => `"${cellVal(t, c).replace(/"/g,'""')}"`))].map(r => r.join(",")).join("\n");
+      const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a"); a.href = url; a.download = "catalog-export.csv"; a.click(); URL.revokeObjectURL(url);
     } else {
-      // XLSX: tab-separated with BOM so Excel opens correctly
-      const tsv = [headers, ...rows.map(t => cols.map(c => String(t[c as keyof Tour] ?? "")))].map(r => r.join("\t")).join("\n");
+      const tsv = [headers, ...rows.map(t => cols.map(c => cellVal(t, c)))].map(r => r.join("\t")).join("\n");
       const blob = new Blob(["﻿" + tsv], { type: "application/vnd.ms-excel" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a"); a.href = url; a.download = "catalog-export.xls"; a.click(); URL.revokeObjectURL(url);
