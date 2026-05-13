@@ -62,7 +62,7 @@ OUTPUT JSON FORMAT:
     "Specific activity at Named Location",
     "Add as many highlights as the source supports — minimum 3, no maximum"
   ],
-  "itineraries": "Rewrite each day in brand voice from the style guide. Keep all factual details (day numbers, named places, activities). Do not add or remove days.",
+  "itineraries": "Rewrite in brand voice. Keep facts: day numbers, places, activities. Do not add or remove days.",
   "seo_title": "SEO title — MUST be under 70 chars",
   "seo_meta": "SEO meta description — MUST be under 170 chars, opens with a concrete editorial sentence",
   "trip_type": "cultural|adventure|wellness|culinary|wildlife|trekking|festival|river_journey"
