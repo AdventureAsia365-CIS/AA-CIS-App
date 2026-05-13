@@ -465,6 +465,7 @@ export default function CatalogPage() {
 
   // ── AA-28 multi-select ─────────────────────────────────────────────────────
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [isExporting, setIsExporting] = useState(false);
 
   useEffect(() => {
     const role = document.cookie.split(";").find(c => c.trim().startsWith("cis_role="))?.split("=")[1];
@@ -497,37 +498,99 @@ export default function CatalogPage() {
     return true;
   });
 
-  function exportSelected(fmt: "csv" | "xlsx") {
-    const rows = filtered.filter(t => selectedIds.has(t.id));
-    const cols: (keyof Tour)[] = ["aa_name","aa_subtitle","country","duration","seo_title","seo_meta","aa_summary","aa_highlights","quality_score","published_at"];
-    const headers = ["Name","Subtitle","Country","Duration","SEO Title","SEO Meta","Summary","Highlights","Quality Score","Published At"];
+  function flattenVal(v: any): string {
+    if (v == null || v === "") return "";
+    if (typeof v === "string") {
+      try { return flattenVal(JSON.parse(v)); } catch {}
+      return v.replace(/[\t\n\r]+/g, " ").trim();
+    }
+    if (Array.isArray(v)) {
+      return v.map((x: any) => {
+        if (x == null) return "";
+        if (typeof x === "string") return x.replace(/[\t\n\r]+/g, " ").trim();
+        if (typeof x === "object") return String(x.keyword ?? x.text ?? x.description ?? x.title ?? x.value ?? JSON.stringify(x));
+        return String(x);
+      }).filter(Boolean).join(" | ");
+    }
+    if (typeof v === "object") {
+      return Object.values(v).filter(x => x != null && x !== "").map(x => String(x)).join(" | ");
+    }
+    return String(v);
+  }
 
-    function cellVal(t: Tour, col: keyof Tour): string {
-      const v = t[col];
-      if (col === "aa_highlights" && v) {
-        try {
-          const parsed = typeof v === "string" ? JSON.parse(v as string) : v;
-          if (Array.isArray(parsed)) return parsed.map((x: any) => (typeof x === "string" ? x : JSON.stringify(x))).join(" | ");
-        } catch {}
+  async function exportSelected(fmt: "csv" | "xlsx") {
+    const selectedTours = filtered.filter(t => selectedIds.has(t.id));
+    if (selectedTours.length === 0) return;
+    setIsExporting(true);
+    try {
+      const token = getToken();
+      const adminSecret = process.env.NEXT_PUBLIC_ADMIN_SECRET || "";
+      const fullData = await Promise.all(
+        selectedTours.map(async t => {
+          try {
+            const r = await fetch(`/api/tour-full/${t.id}`, {
+              headers: {
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                ...(adminSecret ? { "X-Admin-Secret": adminSecret } : {}),
+              },
+            });
+            return r.ok ? await r.json() : null;
+          } catch { return null; }
+        })
+      );
+
+      const headers = [
+        "Name", "Subtitle", "Country", "Duration",
+        "SEO Title", "SEO Meta", "Summary", "Highlights", "Itineraries",
+        "Keyword Search", "Top Keywords", "Keyword Ideas",
+        "Inclusions", "Exclusions", "Activities", "Group Size", "Period", "Best Time", "Feature",
+        "Quality Score", "Published At",
+      ];
+
+      const rows: Record<string, string>[] = fullData.map((d, i) => {
+        const pt  = d?.published ?? {};
+        const raw = d?.raw      ?? {};
+        const seo = d?.seo      ?? {};
+        const t   = selectedTours[i];
+        return {
+          "Name":           String(pt.aa_name        || t.aa_name        || ""),
+          "Subtitle":       String(pt.aa_subtitle    || t.aa_subtitle    || ""),
+          "Country":        String(raw.country       || t.country        || ""),
+          "Duration":       String(raw.duration      || t.duration       || ""),
+          "SEO Title":      String(pt.seo_title      || t.seo_title      || ""),
+          "SEO Meta":       String(pt.seo_meta       || t.seo_meta       || ""),
+          "Summary":        String(pt.aa_summary     || t.aa_summary     || ""),
+          "Highlights":     flattenVal(pt.aa_highlights  || t.aa_highlights),
+          "Itineraries":    flattenVal(pt.aa_itineraries),
+          "Keyword Search": String(seo.keyword_search ?? ""),
+          "Top Keywords":   flattenVal(seo.top_keywords),
+          "Keyword Ideas":  flattenVal(seo.keyword_ideas),
+          "Inclusions":     flattenVal(raw.inclusions),
+          "Exclusions":     flattenVal(raw.exclusions),
+          "Activities":     flattenVal(raw.activities),
+          "Group Size":     String(raw.group_size       ?? ""),
+          "Period":         String(raw.period           ?? ""),
+          "Best Time":      String(raw.best_time_to_go  ?? ""),
+          "Feature":        String(raw.feature          ?? ""),
+          "Quality Score":  pt.quality_score != null ? String(pt.quality_score) : (t.quality_score != null ? String(t.quality_score) : ""),
+          "Published At":   (pt.published_at || t.published_at) ? new Date(pt.published_at || t.published_at).toLocaleDateString("en-GB") : "",
+        };
+      });
+
+      if (fmt === "csv") {
+        const san = (s: string) => s.replace(/[\t\n\r]+/g, " ");
+        const tsv = [headers.join("\t"), ...rows.map(r => headers.map(h => san(r[h] ?? "")).join("\t"))].join("\n");
+        const blob = new Blob(["﻿" + tsv], { type: "text/csv;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a"); a.href = url; a.download = "catalog-export.csv"; a.click(); URL.revokeObjectURL(url);
+      } else {
+        const ws = XLSX.utils.json_to_sheet(rows, { header: headers });
+        ws["!cols"] = [30,30,15,12,40,50,60,60,80,30,50,50,40,40,30,15,20,30,20,12,15].map(w => ({ wch: w }));
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, "Catalog");
+        XLSX.writeFile(wb, "catalog-export.xlsx");
       }
-      if (col === "quality_score") return v != null ? String(v) : "";
-      if (col === "published_at" && v) return new Date(v as string).toLocaleDateString("en-GB");
-      return String(v ?? "");
-    }
-
-    if (fmt === "csv") {
-      const san = (s: string) => s.replace(/[\t\n\r]+/g, " ");
-      const tsv = [headers, ...rows.map(t => cols.map(c => san(cellVal(t, c))))].map(r => r.join("\t")).join("\n");
-      const blob = new Blob(["﻿" + tsv], { type: "text/csv;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a"); a.href = url; a.download = "catalog-export.csv"; a.click(); URL.revokeObjectURL(url);
-    } else {
-      const data = rows.map(t => Object.fromEntries(headers.map((h, i) => [h, cellVal(t, cols[i])])));
-      const ws = XLSX.utils.json_to_sheet(data, { header: headers });
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, "Catalog");
-      XLSX.writeFile(wb, "catalog-export.xlsx");
-    }
+    } finally { setIsExporting(false); }
   }
 
   const allPageSelected = filtered.length > 0 && filtered.every(t => selectedIds.has(t.id));
@@ -624,13 +687,13 @@ export default function CatalogPage() {
               )}
               {selectedIds.size > 0 && (
                 <div style={{ display: "flex", gap: 6 }}>
-                  <button onClick={() => exportSelected("csv")}
-                    style={{ padding: "7px 14px", background: "#22C55E", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 600, color: "#fff", cursor: "pointer", fontFamily: sans }}>
-                    ↓ CSV ({selectedIds.size})
+                  <button onClick={() => exportSelected("csv")} disabled={isExporting}
+                    style={{ padding: "7px 14px", background: isExporting ? "#86EFAC" : "#22C55E", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 600, color: "#fff", cursor: isExporting ? "default" : "pointer", fontFamily: sans }}>
+                    {isExporting ? "Fetching…" : `↓ CSV (${selectedIds.size})`}
                   </button>
-                  <button onClick={() => exportSelected("xlsx")}
-                    style={{ padding: "7px 14px", background: A.gold, border: "none", borderRadius: 6, fontSize: 12, fontWeight: 600, color: "#fff", cursor: "pointer", fontFamily: sans }}>
-                    ↓ XLSX ({selectedIds.size})
+                  <button onClick={() => exportSelected("xlsx")} disabled={isExporting}
+                    style={{ padding: "7px 14px", background: A.gold, border: "none", borderRadius: 6, fontSize: 12, fontWeight: 600, color: "#fff", cursor: isExporting ? "default" : "pointer", fontFamily: sans, opacity: isExporting ? 0.6 : 1 }}>
+                    {isExporting ? "Fetching…" : `↓ XLSX (${selectedIds.size})`}
                   </button>
                 </div>
               )}
