@@ -15,6 +15,7 @@ from api.routers.auth import (
 from api.routers.v1_tours import router as v1_tours_router
 from api.routers.v1_exports import router as v1_exports_router
 from api.routers.v1_pipeline import router as v1_pipeline_router
+from api.routers.v1_acp import router as v1_acp_router
 from api.routers.admin import router as admin_router
 from api.middleware.rate_limit import rate_limit_middleware
 pool: asyncpg.Pool = None
@@ -58,6 +59,7 @@ app.add_middleware(
 app.include_router(v1_tours_router)
 app.include_router(v1_exports_router)
 app.include_router(v1_pipeline_router)
+app.include_router(v1_acp_router)
 app.include_router(admin_router)
 
 app.middleware("http")(rate_limit_middleware)

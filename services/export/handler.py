@@ -89,6 +89,64 @@ async def process_export(version_id: str) -> dict:
                 """, batch_id)
                 logger.info("batch_completed", batch_id=str(batch_id))
 
+                # ACP-S1: manifest.json + EventBridge on batch completion
+                try:
+                    from services.acp.handler import upload_manifest, publish_s1_completed
+                    from collections import Counter
+
+                    tour_rows = await conn.fetch("""
+                        SELECT pt.tour_id, pt.aa_name, pt.quality_score, rt.country
+                        FROM gold_aa_internal.published_tours pt
+                        JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
+                        WHERE rt.batch_id = $1::uuid
+                    """, batch_id)
+
+                    country_counts = Counter(r["country"] for r in tour_rows if r["country"])
+                    country = country_counts.most_common(1)[0][0] if country_counts else "unknown"
+
+                    tour_list = [
+                        {
+                            "tour_id":       str(r["tour_id"]),
+                            "aa_name":       r["aa_name"],
+                            "quality_score": float(r["quality_score"] or 0),
+                            "country":       r["country"],
+                        }
+                        for r in tour_rows
+                    ]
+                    tc = len(tour_list)
+                    qs_avg = sum(t["quality_score"] for t in tour_list) / tc if tc else 0.0
+
+                    tenant_row = await conn.fetchrow(
+                        "SELECT tenant_id FROM shared.pipeline_runs WHERE batch_id = $1::uuid",
+                        batch_id,
+                    )
+                    tenant_id_str = (
+                        str(tenant_row["tenant_id"]) if tenant_row
+                        else "00000000-0000-0000-0000-000000000001"
+                    )
+                    run_id = str(batch_id)
+
+                    manifest_key = upload_manifest(run_id, country, tenant_id_str, tour_list, qs_avg)
+
+                    await conn.execute("""
+                        INSERT INTO shared.acp_runs
+                            (batch_id, country, tenant_id, manifest_s3_key,
+                             tour_count, quality_score_avg, status, completed_at)
+                        VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, 's1_done', NOW())
+                        ON CONFLICT (batch_id) DO UPDATE SET
+                            status            = 's1_done',
+                            manifest_s3_key   = EXCLUDED.manifest_s3_key,
+                            tour_count        = EXCLUDED.tour_count,
+                            quality_score_avg = EXCLUDED.quality_score_avg,
+                            completed_at      = NOW()
+                    """, batch_id, country, tenant_id_str, manifest_key, tc, round(qs_avg, 2))
+
+                    publish_s1_completed(run_id, country, tenant_id_str, manifest_key, tc, qs_avg)
+
+                except Exception as _acp_err:
+                    logger.error("acp_s1_publish_failed",
+                                 batch_id=str(batch_id), error=str(_acp_err))
+
         return {
             "status":     "exported",
             "catalog_id": catalog_id,
