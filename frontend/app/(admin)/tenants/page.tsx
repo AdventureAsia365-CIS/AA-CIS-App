@@ -320,21 +320,57 @@ function BrandTabContent({ rules }: { rules: TenantDetails["brand_rules"] }) {
   );
 }
 
-// ─── Tenant Detail (4 tabs — replaces UsageDetail) ───────────────────────────
-type DTab = "tours" | "pipeline" | "api" | "brand";
+// ─── Activity tab type ────────────────────────────────────────────────────────
+interface RewriteActivityItem {
+  version_id: string; tour_name: string; country: string | null;
+  version_number: number; status: string; quality_score: number | null;
+  edit_source: string | null; created_at: string;
+}
+function ActivityTabContent({ items }: { items: RewriteActivityItem[] }) {
+  return (
+    <div>
+      <div style={{ fontSize: 11, color: A.muted2, marginBottom: 10 }}>Rewrite activity for this tenant</div>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+        <thead><tr>{["Tour Name","Country","Version","Status","Score","Date"].map((h, i) => (
+          <th key={h} style={{ ...TH, fontSize: 10, textAlign: i >= 2 ? "right" : "left" }}>{h}</th>
+        ))}</tr></thead>
+        <tbody>
+          {items.length === 0
+            ? <EmptyRow cols={6} msg="No rewrite activity yet" />
+            : items.map(r => (
+              <tr key={r.version_id}>
+                <td style={{ ...TD, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.tour_name}</td>
+                <td style={{ ...TD, color: A.muted }}>{r.country ?? "—"}</td>
+                <td style={{ ...TD, textAlign: "right", fontFamily: mono, color: A.muted2 }}>v{r.version_number}</td>
+                <td style={{ ...TD, textAlign: "right" }}><StatusChip status={r.status} /></td>
+                <td style={{ ...TD, textAlign: "right", fontWeight: 700, color: SCORE_COLOR(r.quality_score) }}>
+                  {r.quality_score != null ? r.quality_score.toFixed(1) : "—"}
+                </td>
+                <td style={{ ...TD, textAlign: "right", fontFamily: mono, color: A.muted2 }}>{fmtD(r.created_at)}</td>
+              </tr>
+            ))
+          }
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
-function TenantDetail({ tenantId }: { tenantId: string }) {
+// ─── Tenant Detail (4 tabs — replaces UsageDetail) ───────────────────────────
+type DTab = "tours" | "pipeline" | "activity" | "api" | "brand";
+
+function TenantDetail({ tenantId, planTier }: { tenantId: string; planTier: string }) {
+  const isInternal = planTier === "internal";
   const [data, setData]     = useState<TenantDetails | null>(null);
   const [loading, setLoading] = useState(true);
   const [tab, setTab]       = useState<DTab>("tours");
+  const [activity, setActivity] = useState<RewriteActivityItem[]>([]);
 
   useEffect(() => {
     setLoading(true);
-    fetch(`/api/admin/tenants/${tenantId}/details`)
+    const p1 = fetch(`/api/admin/tenants/${tenantId}/details`)
       .then(r => r.ok ? r.json() : Promise.reject(new Error(r.statusText)))
       .then((d: TenantDetails) => {
-        // Safety: forbidden_words may arrive as a raw JSON string if asyncpg
-        // returns the JSONB column unparsed
         const fw = d.brand_rules?.forbidden_words;
         if (fw && typeof fw === "string") {
           try { d.brand_rules.forbidden_words = JSON.parse(fw as unknown as string); }
@@ -342,9 +378,17 @@ function TenantDetail({ tenantId }: { tenantId: string }) {
         }
         setData(d);
       })
-      .catch(() => setData(null))
-      .finally(() => setLoading(false));
-  }, [tenantId]);
+      .catch(() => setData(null));
+
+    const p2 = !isInternal
+      ? fetch(`/api/admin/tenants/${tenantId}/rewrite-activity`)
+          .then(r => r.ok ? r.json() : Promise.reject())
+          .then(d => setActivity(d.rewrite_activity ?? []))
+          .catch(() => setActivity([]))
+      : Promise.resolve();
+
+    Promise.all([p1, p2]).finally(() => setLoading(false));
+  }, [tenantId, isInternal]);
 
   if (loading) return <div style={{ padding: "12px 0", fontSize: 12, color: A.muted }}>Loading…</div>;
   if (!data)   return <div style={{ padding: "12px 0", fontSize: 12, color: A.red }}>Failed to load tenant details</div>;
@@ -352,7 +396,10 @@ function TenantDetail({ tenantId }: { tenantId: string }) {
   const s = data.summary;
   const TABS: { key: DTab; label: string }[] = [
     { key: "tours",    label: `Tours (${data.rewritten_tours.length})` },
-    { key: "pipeline", label: `Pipeline (${data.pipeline_runs.length})` },
+    ...(isInternal
+      ? [{ key: "pipeline" as DTab, label: `Pipeline (${data.pipeline_runs.length})` }]
+      : [{ key: "activity" as DTab, label: `Activity (${activity.length})` }]
+    ),
     { key: "api",      label: "API Usage" },
     { key: "brand",    label: "Brand" },
   ];
@@ -390,8 +437,9 @@ function TenantDetail({ tenantId }: { tenantId: string }) {
 
       {tab === "tours"    && <ToursTabContent    tours={data.rewritten_tours} toursView={data.summary.tours_view} />}
       {tab === "pipeline" && <PipelineTabContent runs={data.pipeline_runs}   pipelineNote={data.summary.pipeline_note} />}
-      {tab === "api"      && <ApiTabContent      usage={data.api_usage}       />}
-      {tab === "brand"    && <BrandTabContent    rules={data.brand_rules}     />}
+      {tab === "activity" && <ActivityTabContent items={activity}                         />}
+      {tab === "api"      && <ApiTabContent      usage={data.api_usage}                  />}
+      {tab === "brand"    && <BrandTabContent    rules={data.brand_rules}                />}
     </div>
   );
 }
@@ -454,7 +502,7 @@ function TenantRow({ tenant, onRotateKey }: { tenant: Tenant; onRotateKey: (t: T
       {expanded && (
         <tr>
           <td colSpan={7} style={{ padding: "0 16px 14px", background: A.bg }}>
-            <TenantDetail tenantId={tenant.tenant_id} />
+            <TenantDetail tenantId={tenant.tenant_id} planTier={tenant.plan_tier} />
           </td>
         </tr>
       )}

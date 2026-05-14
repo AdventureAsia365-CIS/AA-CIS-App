@@ -415,6 +415,53 @@ async def get_tenant_details(
     }
 
 
+# ── GET /admin/tenants/{id}/rewrite-activity ─────────────────────────────────
+
+
+@router.get("/tenants/{tenant_id}/rewrite-activity")
+async def get_rewrite_activity(
+    tenant_id: UUID,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT
+                ttv.id,
+                pt.aa_name AS tour_name,
+                rt.country,
+                ttv.version_number,
+                ttv.status,
+                ttv.quality_score,
+                ttv.edit_source,
+                ttv.created_at
+            FROM gold_aa_internal.tenant_tour_versions ttv
+            JOIN gold_aa_internal.published_tours pt ON pt.id = ttv.published_tour_id
+            LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
+            WHERE ttv.tenant_id = $1
+            ORDER BY ttv.created_at DESC
+        """, tenant_id)
+
+    return {
+        "rewrite_activity": [
+            {
+                "version_id":     str(r["id"]),
+                "tour_name":      r["tour_name"] or "—",
+                "country":        r["country"],
+                "version_number": r["version_number"],
+                "status":         r["status"],
+                "quality_score":  float(r["quality_score"]) if r["quality_score"] is not None else None,
+                "edit_source":    r["edit_source"],
+                "created_at":     r["created_at"].isoformat(),
+            }
+            for r in rows
+        ]
+    }
+
+
 # ── POST /admin/tenants/{id}/generate-key ────────────────────────────────────
 
 
