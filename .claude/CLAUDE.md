@@ -1,11 +1,12 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 13/05/2026 | ECS api:121 | CI #199
+# Updated: 14/05/2026 | ECS api:137 | CI #218
 
 ## LIVE STATE
-- API: https://api-cis.lumiguides.it.com ✅
+- API: https://api-cis.lumiguides.it.com ✅ (via API Gateway owq9as3wjl)
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel)
-- ECS task def: api:121 | CI #199 green
-- ECS task ARN: arn:aws:ecs:us-west-1:867490540162:task/aa-cis-dev-cluster/079caf732a524670a20382ccbcb1a026
+- ECS task def: api:137 | CI #218 green | Deploy Dev #130
+- AWS: STOPPED (ECS 0/0, RDS stopped)
+- API Gateway: owq9as3wjl | Lambda Authorizer: aa-cis-dev-authorizer
 - DB: PostgreSQL 15, aa_cis_dev, secret: aa-cis/dev/rds (plain DSN)
 - Tours: 7 in catalog (WanderLux dev session, 15 published Sri Lanka) | 5 tenants | avg quality 9.9
 - Models: Bedrock Haiku 4.5 (primary) → Sonnet 4.5 (quality fallback)
@@ -85,30 +86,29 @@ S3 Bronze upload → Ingestion Lambda → shared.pipeline_runs (status=ingesting
 pytest tests/ -v
 104 integration tests + 23 E2E Playwright tests baseline
 
-## ACTIVE WORK — 13/05/2026
-Session 9 COMPLETE. All Tenant Portal work done.
-Commit range: 3847850→9509a77 (12 commits)
+## ACTIVE WORK — 14/05/2026
+Session 11 COMPLETE. Phase 4 COMPLETE.
+Last commit: 85ed50d
 
-### ✅ Done Session 9
-- B1 b0cf6a4 | B2 00ed8cc,9509a77 | B3 7f969bd | B4 3847850 | B5 ff138f7
-- C1 fa4cbb9 | C2 a6f1426 | C3 1f7fd13 | C4 61e67a9 | C5 3d69941 | C6 bcd992d
-- D1 c5dbe83 | D2 2c02ec3 | D3 754e995
+### ✅ Done Session 11
+- AA-57: Tenant detail bugs (quality_score, pipeline→activity tab, aa_internal tours)
+- AA-23: Remove Langfuse (~$8/mo saved)
+- AA-22: SF fallback router (threshold=15) + HITL IAM fix
+- AA-13: API Gateway REST + Lambda Authorizer + 4 usage plans + custom domain
+- AA-60: Dashboard all-tenant metrics + all X-API-Key routing fixes
 
 ### 🔴 Next Session Priority
-1. AA-40: Terraform EventBridge + S3 (AA-CIS-Infra repo) — M0 blocker
-2. AA-42: CIS publish EventBridge event + manifest.json — M1 gate
-3. AA-13: API Gateway — due 31/5
-4. Bug 3: quality_score=0.00 — CloudWatch investigate (ECS must be running)
+1. AA-11: Phase 3 Report DOCX → Ms. Thu (Claude Chat, no AWS needed)
+2. Regenerate aa_internal API key: POST /admin/tenants/{id}/rotate-key
+3. Disable WAF after verifying API GW rate limiting stable
+4. Phase 5 planning: Webhook notifications, B2B self-signup
 
 ### ⚠️ Open Issues
-- AA-28: Multi-select export (Admin+Tenant) — Backlog
 - AA-36: No char limits on rewrite fields — Backlog
-- Bug 3: quality_score=0.00 all rewrites — needs investigation
 - api_task_def_arn hardcoded :21 in main.tf — AA-CIS-Infra (AA-22 tech debt)
-## Session 10 Close — 13/05/2026
+
+## Session 11 Close — 14/05/2026
 - ECS desired=0, RDS stopped
-- Task def: api:127 | CI #208 | Commit: f070fb4
-- M1 COMPLETE: AA-40/42/39 done
-- UI Backlog done: AA-27/29/24/28
-- Vercel auto-deploy: main → production, develop → preview (Deploy Hook set)
-- Next: AA-13 API Gateway (due 31/5)
+- Task def: api:137 | CI #218 | Deploy #130 | Commit: 85ed50d
+- Phase 4 COMPLETE: AA-13 API Gateway done
+- API Gateway: owq9as3wjl | custom domain: api-cis.lumiguides.it.com
