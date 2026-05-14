@@ -294,14 +294,21 @@ async def trigger_rewrite(
                     "trip_type":   gen.get("trip_type", ""),
                     "status":      "done",
                 }
-                score = float(result.get("quality_score") or 0)
-                # Status must leave 'pending' so the CatalogTab polling detects completion
-                if score >= 7.0:
+                rewrite_score = float(result.get("quality_score") or 0)
+                # Status based on LLM rewrite quality
+                if rewrite_score >= 7.0:
                     new_status = "ai_generated"   # ready for tenant to review
-                elif score > 0:
+                elif rewrite_score > 0:
                     new_status = "needs_review"   # LLM finished but low quality
                 else:
                     new_status = "needs_review"   # hitl / score=0 — needs human
+                # Never write 0.0 — fall back to source published_tours quality_score
+                async with pool.acquire() as _conn_qs:
+                    source_score = await _conn_qs.fetchval(
+                        "SELECT quality_score FROM gold_aa_internal.published_tours WHERE id = $1::uuid",
+                        published_tour_id
+                    )
+                final_score = rewrite_score if rewrite_score else float(source_score or 0)
                 async with pool.acquire() as _conn3:
                     await _conn3.execute("""
                         UPDATE gold_aa_internal.tenant_tour_versions
@@ -310,10 +317,10 @@ async def trigger_rewrite(
                             quality_score = $3
                         WHERE id = $4::uuid
                     """,
-                        _j3.dumps(rewritten), new_status, score, version_id)
+                        _j3.dumps(rewritten), new_status, final_score, version_id)
                 import structlog as _sl2
                 _sl2.get_logger().info("tenant_rewrite_done",
-                    version_id=str(version_id), score=score, status=new_status)
+                    version_id=str(version_id), score=final_score, status=new_status)
         except Exception as _e:
             import structlog as _sl
             _sl.get_logger().error("tenant_rewrite_failed", error=str(_e))
