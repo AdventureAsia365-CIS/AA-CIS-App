@@ -143,11 +143,10 @@ function DiffRow({
 
   async function save() {
     setSaving(true);
-    const token = getToken();
     try {
-      const r = await fetch(`${API_URL}/v1/tours/${tourId}/approve`, {
+      const r = await fetch(`/api/tenant/v1/tours/${tourId}/approve`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ field, value: val }),
       });
       if (r.ok) { setSaved(true); onSaved(field, val); setEditing(false); setTimeout(() => setSaved(false), 2000); }
@@ -475,9 +474,7 @@ export default function CatalogPage() {
   }, []);
 
   useEffect(() => {
-    const token = getToken();
-    if (!token) { setError("Not authenticated"); setLoading(false); return; }
-    fetch(`${API_URL}/v1/tours?page=${page}&page_size=20`, { headers: { Authorization: `Bearer ${token}` } })
+    fetch(`/api/tenant/v1/tours?page=${page}&page_size=20`)
       .then(r => r.json())
       .then(d => { setTours(d.data || []); setTotal(d.pagination?.total || 0); setLoading(false); })
       .catch(e => { setError(e.message); setLoading(false); });

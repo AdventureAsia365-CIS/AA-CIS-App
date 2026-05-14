@@ -9,7 +9,7 @@ import {
   LineChart, Line, CartesianGrid,
 } from "recharts";
 import {
-  FileText, CheckCircle, Clock, DollarSign, ExternalLink,
+  FileText, CheckCircle, Clock, DollarSign,
 } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
 import {
@@ -58,21 +58,19 @@ function Src({ children }: { children: React.ReactNode }) {
 }
 
 function VolumeTab({ data }: { data: any }) {
-  const daily        = data?.daily_runs ?? [];
-  const totalTours   = data?.published_count ?? 0;
-  // Auto-Passed = published_tours (all published = auto-approved by definition)
-  const totalPassed  = totalTours;
-  const totalFailed  = daily.reduce((s: number, d: any) => s + (d.failed ?? 0), 0);
-  const passRate     = 100;  // published_tours / published_tours always = 100%
+  const daily         = data?.daily_runs ?? [];
+  const totalTours    = data?.published_count ?? 0;
+  const totalRewrites = data?.tenant_rewrite_count ?? 0;
+  const totalFailed   = daily.reduce((s: number, d: any) => s + (d.failed ?? 0), 0);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
         {[
-          { label: "Total Tours",  value: totalTours,     color: A.gold,      src: "published_tours · all time" },
-          { label: "Auto-Passed",  value: totalPassed,    color: "#22C55E",   src: "published_tours · auto-approved" },
-          { label: "Failed (7d)",  value: totalFailed,    color: A.red,       src: "pipeline_runs · 7d window" },
-          { label: "Pass Rate",    value: `${passRate}%`, color: "#7C3AED",   src: "published ÷ published = 100%" },
+          { label: "Tours in Pool",    value: totalTours,    color: A.gold,    src: "gold_aa_internal.published_tours" },
+          { label: "Tenant Rewrites",  value: totalRewrites, color: "#7C3AED", src: "gold_aa_internal.tenant_tour_versions" },
+          { label: "Failed (7d)",      value: totalFailed,   color: A.red,     src: "pipeline_runs · 7d window" },
+          { label: "Pass Rate",        value: totalTours > 0 ? `${(((totalTours - totalFailed) / totalTours) * 100).toFixed(0)}%` : "—", color: "#22C55E", src: "published ÷ total" },
         ].map(c => (
           <Card key={c.label}>
             <SLabel>{c.label}</SLabel>
@@ -83,15 +81,16 @@ function VolumeTab({ data }: { data: any }) {
           </Card>
         ))}
       </div>
-      <ChartCard title="Daily Volume Breakdown">
+      <ChartCard title="Daily Volume — Pipeline + Tenant Rewrites">
         <ResponsiveContainer width="100%" height={240}>
           <BarChart data={daily} margin={{ top: 4, right: 4, left: -20, bottom: 0 }}>
             <XAxis dataKey="date" tick={{ fontSize: 11, fill: A.muted }} tickFormatter={(v: string) => v?.slice(5) ?? v} />
             <YAxis tick={{ fontSize: 11, fill: A.muted }} />
             <Tooltip {...CHART_TOOLTIP} />
-            <Bar dataKey="passed" name="Passed" fill="#22C55E" radius={[3,3,0,0]} />
-            <Bar dataKey="hitl"   name="HITL"   fill={A.gold}  radius={[3,3,0,0]} />
-            <Bar dataKey="failed" name="Failed"  fill={A.red}   radius={[3,3,0,0]} />
+            <Bar dataKey="passed"  name="Passed"  fill="#22C55E" radius={[3,3,0,0]} />
+            <Bar dataKey="rewrites" name="Rewrites" fill="#7C3AED" radius={[3,3,0,0]} />
+            <Bar dataKey="hitl"    name="HITL"    fill={A.gold}  radius={[3,3,0,0]} />
+            <Bar dataKey="failed"  name="Failed"  fill={A.red}   radius={[3,3,0,0]} />
           </BarChart>
         </ResponsiveContainer>
       </ChartCard>
@@ -99,16 +98,14 @@ function VolumeTab({ data }: { data: any }) {
   );
 }
 
-function QualityTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => string | null }) {
+function QualityTab() {
   const [data, setData]     = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const token = getToken();
-    if (!token) return;
-    fetch(`${apiUrl}/v1/pipeline/metrics?days=30`, { headers: { Authorization: `Bearer ${token}` } })
+    fetch("/api/tenant/v1/pipeline/metrics?days=30")
       .then(r => r.ok ? r.json() : null).then(setData).finally(() => setLoading(false));
-  }, [apiUrl, getToken]);
+  }, []);
 
   if (loading) return <LoadingScreen msg="Loading quality data…" />;
   const models = data?.model_usage ?? [];
@@ -157,16 +154,14 @@ function QualityTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => stri
   );
 }
 
-function CostTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => string | null }) {
+function CostTab() {
   const [data, setData]     = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const token = getToken();
-    if (!token) return;
-    fetch(`${apiUrl}/v1/pipeline/metrics?days=30`, { headers: { Authorization: `Bearer ${token}` } })
+    fetch("/api/tenant/v1/pipeline/metrics?days=30")
       .then(r => r.ok ? r.json() : null).then(setData).finally(() => setLoading(false));
-  }, [apiUrl, getToken]);
+  }, []);
 
   if (loading) return <LoadingScreen msg="Loading cost data…" />;
 
@@ -218,15 +213,13 @@ function CostTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => string 
   );
 }
 
-function SeoTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => string | null }) {
+function SeoTab() {
   const [data, setData]     = useState<any>(null);
   const [loading, setLoading] = useState(true);
   useEffect(() => {
-    const token = getToken();
-    if (!token) return;
-    fetch(`${apiUrl}/v1/pipeline/metrics/seo`, { headers: { Authorization: `Bearer ${token}` } })
+    fetch("/api/tenant/v1/pipeline/metrics/seo")
       .then(r => r.ok ? r.json() : null).then(setData).finally(() => setLoading(false));
-  }, [apiUrl, getToken]);
+  }, []);
   if (loading) return <LoadingScreen msg="Loading SEO data…" />;
   if (!data) return <div style={{ padding: 40, textAlign: "center", color: A.red }}>Failed to load SEO data</div>;
   return (
@@ -281,15 +274,13 @@ function SeoTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => string |
   );
 }
 
-function LibraryTab({ apiUrl, getToken }: { apiUrl: string; getToken: () => string | null }) {
+function LibraryTab() {
   const [data, setData]     = useState<any>(null);
   const [loading, setLoading] = useState(true);
   useEffect(() => {
-    const token = getToken();
-    if (!token) return;
-    fetch(`${apiUrl}/v1/pipeline/metrics/library`, { headers: { Authorization: `Bearer ${token}` } })
+    fetch("/api/tenant/v1/pipeline/metrics/library")
       .then(r => r.ok ? r.json() : null).then(setData).finally(() => setLoading(false));
-  }, [apiUrl, getToken]);
+  }, []);
   if (loading) return <LoadingScreen msg="Loading library data…" />;
   if (!data) return <div style={{ padding: 40, textAlign: "center", color: A.red }}>Failed to load</div>;
   return (
@@ -359,7 +350,6 @@ const TABS = [
   { key: "library",  label: "📚 Library" },
   { key: "health",   label: "🏥 Health" },
   { key: "spot",     label: "⚡ Spot Workers" },
-  { key: "langfuse", label: "🔍 Langfuse" },
 ];
 
 export default function DashboardPage() {
@@ -371,14 +361,11 @@ export default function DashboardPage() {
   const [loading, setLoading]         = useState(true);
 
   useEffect(() => {
-    const token = getToken();
-    if (!token) return;
-    const h = { Authorization: `Bearer ${token}` };
-    fetch(`${API_URL}/v1/tours?page=1&page_size=1`, { headers: h })
+    fetch("/api/tenant/v1/tours?page=1&page_size=1")
       .then(r => r.json()).then(d => { const t = d.pagination?.total || 0; setTotalTours(t); setTotalPassed(t); }).catch(() => {});
-    fetch(`${API_URL}/v1/pipeline/review-queue?page_size=1`, { headers: h })
+    fetch("/api/tenant/v1/pipeline/review-queue?page_size=1")
       .then(r => r.json()).then(d => setTotalHITL(d.pagination?.total || 0)).catch(() => {});
-    fetch(`${API_URL}/v1/pipeline/metrics?days=7`, { headers: h })
+    fetch("/api/tenant/v1/pipeline/metrics?days=7")
       .then(r => r.ok ? r.json() : null).then(d => { if (d) setMetrics(d); }).catch(() => {}).finally(() => setLoading(false));
   }, []);
 
@@ -479,10 +466,10 @@ export default function DashboardPage() {
           )}
 
           {activeTab === "volume"  && <VolumeTab data={metrics} />}
-          {activeTab === "quality" && <QualityTab apiUrl={API_URL} getToken={getToken} />}
-          {activeTab === "billing" && <CostTab apiUrl={API_URL} getToken={getToken} />}
-          {activeTab === "seo"     && <SeoTab apiUrl={API_URL} getToken={getToken} />}
-          {activeTab === "library" && <LibraryTab apiUrl={API_URL} getToken={getToken} />}
+          {activeTab === "quality" && <QualityTab />}
+          {activeTab === "billing" && <CostTab />}
+          {activeTab === "seo"     && <SeoTab />}
+          {activeTab === "library" && <LibraryTab />}
 
           {activeTab === "health" && (
             <ChartCard title="Pipeline Service Health">
@@ -531,38 +518,6 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {activeTab === "langfuse" && (
-            <ChartCard title="Langfuse LLM Observability">
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-                <p style={{ fontSize: 13, color: A.muted, margin: 0 }}>
-                  Langfuse traces all LLM calls — prompts, completions, costs, latency per tour.
-                </p>
-                <a href="https://langfuse.lumiguides.it.com" target="_blank" rel="noreferrer"
-                  style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 16px", background: A.gold, borderRadius: 8, color: "#fff", fontSize: 12, fontWeight: 600, textDecoration: "none" }}>
-                  <ExternalLink size={12} /> Open Langfuse
-                </a>
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 12 }}>
-                {[
-                  { label: "LLM Traces",      desc: "Every prompt + completion logged with latency",  icon: "🔍" },
-                  { label: "Cost Breakdown",   desc: "Per tour, per model, per batch",                 icon: "💰" },
-                  { label: "Quality Trends",   desc: "Score history + retry patterns over time",       icon: "📈" },
-                  { label: "Prompt Versions",  desc: "A/B test prompt iterations",                    icon: "🧪" },
-                ].map(f => (
-                  <div key={f.label} style={{ display: "flex", gap: 12, padding: "14px 16px", background: A.bg, borderRadius: 10, border: `1px solid ${A.line}` }}>
-                    <span style={{ fontSize: 20 }}>{f.icon}</span>
-                    <div>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: A.ink, marginBottom: 4 }}>{f.label}</div>
-                      <div style={{ fontSize: 12, color: A.muted, lineHeight: 1.5 }}>{f.desc}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div style={{ marginTop: 14, padding: "10px 14px", background: A.goldTint, borderRadius: 8, fontSize: 12, color: A.muted, textAlign: "center" }}>
-                Live at <a href="https://langfuse.lumiguides.it.com" target="_blank" rel="noreferrer" style={{ color: A.gold, fontWeight: 600 }}>langfuse.lumiguides.it.com</a> — iframe blocked by browser security policy
-              </div>
-            </ChartCard>
-          )}
         </main>
       </div>
     </div>

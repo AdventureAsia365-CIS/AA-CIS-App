@@ -21,9 +21,11 @@ async function handler(
   const search = req.nextUrl.search;
   const url = `${API_URL}/${pathStr}${search}`;
 
+  const internalApiKey = process.env.INTERNAL_API_KEY ?? "";
   const headers: Record<string, string> = {
     "Authorization": `Bearer ${token}`,
     "Content-Type": "application/json",
+    ...(internalApiKey ? { "X-API-Key": internalApiKey } : {}),
   };
 
   let body: string | undefined;

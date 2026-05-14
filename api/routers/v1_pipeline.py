@@ -906,6 +906,19 @@ async def get_pipeline_metrics(
             WHERE tenant_id = '00000000-0000-0000-0000-000000000001'::uuid
         """)
 
+        # AA-60: all-tenant rewrite volume
+        tenant_rewrite_count = await conn.fetchval("""
+            SELECT COUNT(*) FROM gold_aa_internal.tenant_tour_versions
+        """)
+
+        # AA-60: per-day rewrites for the volume chart (same window as pipeline daily)
+        daily_rewrites = await conn.fetch("""
+            SELECT DATE(created_at) AS day, COUNT(*) AS rewrites
+            FROM gold_aa_internal.tenant_tour_versions
+            WHERE created_at >= NOW() - ($1 || ' days')::interval
+            GROUP BY DATE(created_at)
+        """, str(days))
+
         # LLM call count — from generated_content (accurate for cost attribution)
         llm_calls = await conn.fetchval(f"""
             SELECT COUNT(*) FROM silver_{tenant_slug}.generated_content
@@ -1013,16 +1026,18 @@ async def get_pipeline_metrics(
                 "cost_per_call": 0.0,
             })
 
+    rewrite_by_day = {str(r["day"]): int(r["rewrites"]) for r in daily_rewrites}
     return {
         "daily_runs": [
             {
-                "date":   str(r["day"]),
-                "runs":   r["runs"],
-                "tours":  r["tours"],
-                "passed": r["passed"],
-                "hitl":   r["hitl"],
-                "failed": r["failed"],
-                "cost":   float(r["cost"]),
+                "date":     str(r["day"]),
+                "runs":     r["runs"],
+                "tours":    r["tours"],
+                "passed":   r["passed"],
+                "hitl":     r["hitl"],
+                "failed":   r["failed"],
+                "cost":     float(r["cost"]),
+                "rewrites": rewrite_by_day.get(str(r["day"]), 0),
             }
             for r in daily
         ],
@@ -1035,8 +1050,9 @@ async def get_pipeline_metrics(
             "duration_sec": float(last_run["duration_sec"]) if last_run and last_run["duration_sec"] else 0,
         } if last_run else None,
         "pipeline_health": pipeline_health,
-        "published_count": int(published_count or 0),
-        "llm_calls":       int(llm_calls or 0),
+        "published_count":       int(published_count or 0),
+        "tenant_rewrite_count":  int(tenant_rewrite_count or 0),
+        "llm_calls":             int(llm_calls or 0),
     }
 
 
