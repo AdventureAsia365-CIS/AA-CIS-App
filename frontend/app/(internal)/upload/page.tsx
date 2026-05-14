@@ -182,7 +182,7 @@ export default function UploadPage() {
     const token = getToken(); if (!token) return;
     setLoadingSrc(true);
     try {
-      const r = await fetch(`${API_URL}/v1/pipeline/sources?limit=20`, { headers: { Authorization: `Bearer ${token}` } });
+      const r = await fetch("/api/tenant/v1/pipeline/sources?limit=20");
       if (r.ok) { const d = await r.json(); setSources(d.sources || []); }
     } finally { setLoadingSrc(false); }
   }, []);
@@ -205,8 +205,8 @@ export default function UploadPage() {
 
   const uploadOne = async (entry: FileEntry, index: number, token: string) => {
     updateFile(index, { status: "uploading", activeStep: 0, progress: 10 });
-    const urlRes = await fetch(`${API_URL}/v1/pipeline/upload-url`, {
-      method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    const urlRes = await fetch("/api/tenant/v1/pipeline/upload-url", {
+      method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ filename: entry.file.name, content_type: entry.file.type || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", seo_mode: seoMode, model_tier: modelTier }),
     });
     if (!urlRes.ok) throw new Error("Failed to get upload URL");
@@ -217,9 +217,9 @@ export default function UploadPage() {
     updateFile(index, { activeStep: 0, progress: 100 });
 
     // Trigger pipeline — parse Excel from S3 + run LLM per tour in background
-    await fetch(`${API_URL}/v1/pipeline/ingest-s3`, {
+    await fetch("/api/tenant/v1/pipeline/ingest-s3", {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ s3_key, bucket, seo_mode: seoMode, model_tier: modelTier }),
     });
 

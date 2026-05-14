@@ -1,33 +1,34 @@
 import { NextRequest, NextResponse } from "next/server";
 
-export async function GET(req: NextRequest) {
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "";
-  const adminSecret = process.env.ADMIN_SECRET || "";
+const API_URL      = process.env.API_URL      ?? "https://api-cis.lumiguides.it.com";
+const ADMIN_SECRET = process.env.ADMIN_SECRET  ?? "";
+const API_KEY      = process.env.INTERNAL_API_KEY ?? "";
 
-  const res = await fetch(`${apiUrl}/v1/pipeline/brand-identity`, {
-    headers: { "X-Admin-Secret": adminSecret },
+function apiHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  return {
+    "X-Admin-Secret": ADMIN_SECRET,
+    ...(API_KEY ? { "X-API-Key": API_KEY } : {}),
+    ...extra,
+  };
+}
+
+export async function GET(_req: NextRequest) {
+  const res = await fetch(`${API_URL}/v1/pipeline/brand-identity`, {
+    headers: apiHeaders(),
     cache: "no-store",
   });
-
   if (!res.ok) return NextResponse.json({ error: "Failed" }, { status: res.status });
   return NextResponse.json(await res.json());
 }
 
 export async function POST(req: NextRequest) {
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "";
-  const adminSecret = process.env.ADMIN_SECRET || "";
   const body = await req.json();
-
-  const res = await fetch(`${apiUrl}/v1/pipeline/brand-identity`, {
+  const res = await fetch(`${API_URL}/v1/pipeline/brand-identity`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Admin-Secret": adminSecret,
-    },
+    headers: apiHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
     cache: "no-store",
   });
-
   if (!res.ok) return NextResponse.json({ error: "Failed" }, { status: res.status });
   return NextResponse.json(await res.json());
 }
