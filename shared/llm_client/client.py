@@ -22,27 +22,12 @@ COST_TABLE = {
     "gpt-4.1":      {"in": 0.002,   "out": 0.008},
 }
 
-# Langfuse optional
-try:
-    from langfuse import Langfuse
-    _langfuse = Langfuse(
-        public_key=os.environ.get("LANGFUSE_PUBLIC_KEY", ""),
-        secret_key=os.environ.get("LANGFUSE_SECRET_KEY", ""),
-        host=os.environ.get("LANGFUSE_HOST", "http://localhost:3000"),
-    )
-    LANGFUSE_ENABLED = True
-except Exception:
-    LANGFUSE_ENABLED = False
-    logger.info("langfuse_disabled", reason="not configured or not reachable")
-
-
 class LLMClient:
     """
     Fallback chain:
     T1: Claude Sonnet 4.5 (AWS Bedrock) + prompt caching
     T2: Claude Haiku 4.5  (AWS Bedrock) + prompt caching
     T3: GPT-4.1           (OpenAI)
-    + Langfuse tracing (optional)
     """
 
     def __init__(self):
@@ -55,14 +40,12 @@ class LLMClient:
         )
 
     async def generate(self, request: LLMRequest) -> LLMResponse:
-        trace_id = self._start_trace(request)
         tier = request.model_tier  # "haiku" | "sonnet"
 
         if tier == "sonnet":
             # T1: Claude Sonnet — premium quality
             try:
                 resp = self._call_bedrock(request, model=BEDROCK_SONNET, use_cache=True)
-                self._end_trace(trace_id, resp, "t1_success")
                 return resp
             except Exception as e:
                 logger.warning("t1_failed_trying_t2", model=BEDROCK_SONNET, error=str(e))
@@ -71,7 +54,6 @@ class LLMClient:
         try:
             resp = self._call_bedrock(request, model=BEDROCK_HAIKU, use_cache=True)
             resp.fallback_used = tier == "sonnet"  # only a fallback when Sonnet was intended
-            self._end_trace(trace_id, resp, "t2_success" if tier == "haiku" else "t2_fallback")
             return resp
         except Exception as e:
             logger.warning("t2_failed_trying_t3", model=BEDROCK_HAIKU, error=str(e))
@@ -82,7 +64,6 @@ class LLMClient:
             resp.fallback_used = True
             logger.warning("t3_fallback_used", model="gpt-4.1",
                            reason=f"T2 failed (tier={tier})")
-            self._end_trace(trace_id, resp, "t3_fallback")
             return resp
         except Exception as e:
             logger.error("t3_failed_all_providers_down", error=str(e))
@@ -164,26 +145,3 @@ class LLMClient:
         rates = COST_TABLE.get(model, {"in": 0.003, "out": 0.015})
         return round((in_tok * rates["in"] + out_tok * rates["out"]) / 1000, 6)
 
-    def _start_trace(self, request: LLMRequest) -> str | None:
-        if not LANGFUSE_ENABLED:
-            return None
-        try:
-            trace = _langfuse.trace(name="llm_generate",
-                                    input={"prompt": request.user_prompt[:200]})
-            return trace.id
-        except Exception:
-            return None
-
-    def _end_trace(self, trace_id: str | None, resp: LLMResponse, status: str):
-        if not LANGFUSE_ENABLED or not trace_id:
-            return
-        try:
-            _langfuse.generation(
-                trace_id=trace_id,
-                name=status,
-                model=resp.model_used,
-                usage={"input": resp.input_tokens, "output": resp.output_tokens},
-                output=resp.content[:200],
-            )
-        except Exception:
-            pass
