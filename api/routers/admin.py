@@ -285,10 +285,17 @@ async def get_tenant_details(
         if not tenant:
             raise HTTPException(status_code=404, detail="Tenant not found")
 
-        total_rewrites = await conn.fetchval("""
-            SELECT COUNT(*) FROM gold_aa_internal.tenant_tour_versions
-            WHERE tenant_id = $1
-        """, tenant_id)
+        is_internal = tenant["plan_tier"] == "internal"
+
+        if is_internal:
+            total_rewrites = await conn.fetchval(
+                "SELECT COUNT(*) FROM gold_aa_internal.published_tours"
+            )
+        else:
+            total_rewrites = await conn.fetchval("""
+                SELECT COUNT(*) FROM gold_aa_internal.tenant_tour_versions
+                WHERE tenant_id = $1
+            """, tenant_id)
 
         total_cost = await conn.fetchval("""
             SELECT COALESCE(SUM(cost_usd), 0)
@@ -303,21 +310,44 @@ async def get_tenant_details(
             ORDER BY billing_month DESC LIMIT 1
         """, tenant_id)
 
-        tours = await conn.fetch("""
-            SELECT ttv.id, pt.aa_name, rt.country,
-                   ttv.quality_score, ttv.version_number, ttv.status, ttv.created_at
-            FROM gold_aa_internal.tenant_tour_versions ttv
-            JOIN gold_aa_internal.published_tours pt ON pt.id = ttv.published_tour_id
-            LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
-            WHERE ttv.tenant_id = $1
-            ORDER BY ttv.created_at DESC LIMIT 50
-        """, tenant_id)
+        if is_internal:
+            # Show published_tours for the internal catalog
+            tours = await conn.fetch("""
+                SELECT pt.id, pt.aa_name, rt.country,
+                       pt.quality_score, NULL::int AS version_number,
+                       'published'::text AS status, pt.published_at AS created_at
+                FROM gold_aa_internal.published_tours pt
+                LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
+                ORDER BY pt.published_at DESC LIMIT 50
+            """)
+        else:
+            tours = await conn.fetch("""
+                SELECT ttv.id, pt.aa_name, rt.country,
+                       ttv.quality_score, ttv.version_number, ttv.status, ttv.created_at
+                FROM gold_aa_internal.tenant_tour_versions ttv
+                JOIN gold_aa_internal.published_tours pt ON pt.id = ttv.published_tour_id
+                LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
+                WHERE ttv.tenant_id = $1
+                ORDER BY ttv.created_at DESC LIMIT 50
+            """, tenant_id)
 
+        # UNION: direct tenant runs + runs containing this tenant's tours (covers B2B tenants
+        # whose tours were processed under aa_internal pipeline)
         runs = await conn.fetch("""
-            SELECT batch_id, started_at, tours_total, tours_passed,
-                   llm_model, cost_usd, status
-            FROM shared.pipeline_runs
-            WHERE tenant_id = $1
+            SELECT * FROM (
+                SELECT pr.batch_id, pr.started_at, pr.tours_total, pr.tours_passed,
+                       pr.llm_model, pr.cost_usd, pr.status
+                FROM shared.pipeline_runs pr
+                WHERE pr.tenant_id = $1
+                UNION
+                SELECT pr.batch_id, pr.started_at, pr.tours_total, pr.tours_passed,
+                       pr.llm_model, pr.cost_usd, pr.status
+                FROM shared.pipeline_runs pr
+                JOIN silver_aa_internal.raw_tours rt ON rt.batch_id = pr.batch_id
+                JOIN gold_aa_internal.published_tours pt ON pt.tour_id = rt.tour_id
+                JOIN gold_aa_internal.tenant_tour_versions ttv ON ttv.published_tour_id = pt.id
+                WHERE ttv.tenant_id = $1
+            ) _combined
             ORDER BY started_at DESC LIMIT 20
         """, tenant_id)
 
@@ -342,6 +372,8 @@ async def get_tenant_details(
             "quota_pct":            quota_pct,
             "plan_name":            str(tenant["plan_tier"]).title(),
             "member_since":         tenant["created_at"].isoformat()[:10],
+            "tours_view":           "published" if is_internal else "rewrites",
+            "pipeline_note":        None if is_internal else "Showing pipeline runs for tours in your catalog",
         },
         "rewritten_tours": [
             {

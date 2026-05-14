@@ -153,6 +153,7 @@ interface TenantDetails {
     total_rewrites: number; total_llm_cost_usd: number;
     api_calls_this_month: number; quota_pct: number;
     plan_name: string; member_since: string;
+    tours_view?: string; pipeline_note?: string | null;
   };
   rewritten_tours: RewrittenTour[];
   pipeline_runs: PipelineRun[];
@@ -181,54 +182,77 @@ function StatusChip({ status }: { status: string }) {
 function EmptyRow({ cols, msg }: { cols: number; msg: string }) {
   return <tr><td colSpan={cols} style={{ padding: "20px 0", textAlign: "center", fontSize: 12, color: A.muted }}>{msg}</td></tr>;
 }
-function fmtD(s: string) { return new Date(s).toLocaleDateString("en-GB", { day: "2-digit", month: "short" }); }
-function fmtDT(s: string) { return new Date(s).toLocaleDateString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }); }
+function fmtD(s: string) { return new Date(s).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }); }
+function fmtDT(s: string) { return new Date(s).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }); }
 
 // ─── Tab content components ───────────────────────────────────────────────────
-function ToursTabContent({ tours }: { tours: RewrittenTour[] }) {
+function ToursTabContent({ tours, toursView }: { tours: RewrittenTour[]; toursView?: string }) {
+  const isPublished = toursView === "published";
+  const headers = isPublished
+    ? ["Name", "Country", "Score", "Status", "Published At"]
+    : ["Name", "Country", "Score", "Status", "Version", "Date"];
+  const emptyMsg = isPublished ? "No published tours yet" : "No rewrites yet";
   return (
-    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-      <thead><tr>{["Name","Country","Score","Status","Version","Date"].map((h, i) => (
-        <th key={h} style={{ ...TH, fontSize: 10, textAlign: i >= 2 ? "right" : "left" }}>{h}</th>
-      ))}</tr></thead>
-      <tbody>
-        {tours.length === 0 ? <EmptyRow cols={6} msg="No rewrites yet" /> : tours.map(t => (
-          <tr key={t.version_id}>
-            <td style={{ ...TD, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.tour_name}</td>
-            <td style={{ ...TD, color: A.muted }}>{t.country ?? "—"}</td>
-            <td style={{ ...TD, textAlign: "right", fontWeight: 700, color: SCORE_COLOR(t.quality_score) }}>
-              {t.quality_score != null ? t.quality_score.toFixed(1) : "—"}
-            </td>
-            <td style={{ ...TD, textAlign: "right" }}><StatusChip status={t.status} /></td>
-            <td style={{ ...TD, textAlign: "right", fontFamily: mono, color: A.muted2 }}>v{t.version_number}</td>
-            <td style={{ ...TD, textAlign: "right", fontFamily: mono, color: A.muted2 }}>{fmtD(t.created_at)}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <>
+      {isPublished && (
+        <div style={{ fontSize: 11, color: A.muted, marginBottom: 10, fontStyle: "italic" }}>
+          Internal catalog — showing all published tours
+        </div>
+      )}
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+        <thead><tr>{headers.map((h, i) => (
+          <th key={h} style={{ ...TH, fontSize: 10, textAlign: i >= 2 ? "right" : "left" }}>{h}</th>
+        ))}</tr></thead>
+        <tbody>
+          {tours.length === 0 ? <EmptyRow cols={headers.length} msg={emptyMsg} /> : tours.map(t => (
+            <tr key={t.version_id}>
+              <td style={{ ...TD, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.tour_name}</td>
+              <td style={{ ...TD, color: A.muted }}>{t.country ?? "—"}</td>
+              <td style={{ ...TD, textAlign: "right", fontWeight: 700, color: SCORE_COLOR(t.quality_score) }}>
+                {t.quality_score != null ? t.quality_score.toFixed(1) : "—"}
+              </td>
+              <td style={{ ...TD, textAlign: "right" }}><StatusChip status={t.status} /></td>
+              {!isPublished && (
+                <td style={{ ...TD, textAlign: "right", fontFamily: mono, color: A.muted2 }}>
+                  {t.version_number != null ? `v${t.version_number}` : "—"}
+                </td>
+              )}
+              <td style={{ ...TD, textAlign: "right", fontFamily: mono, color: A.muted2 }}>{fmtD(t.created_at)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </>
   );
 }
-function PipelineTabContent({ runs }: { runs: PipelineRun[] }) {
+function PipelineTabContent({ runs, pipelineNote }: { runs: PipelineRun[]; pipelineNote?: string | null }) {
   return (
-    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-      <thead><tr>{["Started","Tours","Passed","Model","Cost","Status"].map((h, i) => (
-        <th key={h} style={{ ...TH, fontSize: 10, textAlign: i >= 1 ? "right" : "left" }}>{h}</th>
-      ))}</tr></thead>
-      <tbody>
-        {runs.length === 0 ? <EmptyRow cols={6} msg="No pipeline runs" /> : runs.map(r => (
-          <tr key={r.run_id}>
-            <td style={{ ...TD, fontFamily: mono, fontSize: 11, color: A.muted }}>{fmtDT(r.started_at)}</td>
-            <td style={{ ...TD, textAlign: "right" }}>{r.tours_processed}</td>
-            <td style={{ ...TD, textAlign: "right", color: "#22C55E" }}>{r.tours_passed}</td>
-            <td style={{ ...TD, textAlign: "right", fontFamily: mono, fontSize: 10, color: A.muted2 }}>
-              {r.llm_model ? r.llm_model.replace(/us\.anthropic\./,"").replace(/-v1:0$/,"") : "—"}
-            </td>
-            <td style={{ ...TD, textAlign: "right", color: A.gold }}>${r.llm_cost_usd.toFixed(4)}</td>
-            <td style={{ ...TD, textAlign: "right" }}><StatusChip status={r.status} /></td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <>
+      {pipelineNote && (
+        <div style={{ fontSize: 11, color: A.muted, marginBottom: 10, fontStyle: "italic" }}>
+          {pipelineNote}
+        </div>
+      )}
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+        <thead><tr>{["Started","Tours","Passed","Model","Cost","Status"].map((h, i) => (
+          <th key={h} style={{ ...TH, fontSize: 10, textAlign: i >= 1 ? "right" : "left" }}>{h}</th>
+        ))}</tr></thead>
+        <tbody>
+          {runs.length === 0 ? <EmptyRow cols={6} msg="No pipeline runs" /> : runs.map(r => (
+            <tr key={r.run_id}>
+              <td style={{ ...TD, fontFamily: mono, fontSize: 11, color: A.muted }}>{fmtDT(r.started_at)}</td>
+              <td style={{ ...TD, textAlign: "right" }}>{r.tours_processed}</td>
+              <td style={{ ...TD, textAlign: "right", color: "#22C55E" }}>{r.tours_passed}</td>
+              <td style={{ ...TD, textAlign: "right", fontFamily: mono, fontSize: 10, color: A.muted2 }}>
+                {r.llm_model ? r.llm_model.replace(/us\.anthropic\./,"").replace(/-v1:0$/,"") : "—"}
+              </td>
+              <td style={{ ...TD, textAlign: "right", color: A.gold }}>${r.llm_cost_usd.toFixed(4)}</td>
+              <td style={{ ...TD, textAlign: "right" }}><StatusChip status={r.status} /></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </>
   );
 }
 function ApiTabContent({ usage }: { usage: TenantDetails["api_usage"] }) {
@@ -364,8 +388,8 @@ function TenantDetail({ tenantId }: { tenantId: string }) {
         ))}
       </div>
 
-      {tab === "tours"    && <ToursTabContent    tours={data.rewritten_tours} />}
-      {tab === "pipeline" && <PipelineTabContent runs={data.pipeline_runs}    />}
+      {tab === "tours"    && <ToursTabContent    tours={data.rewritten_tours} toursView={data.summary.tours_view} />}
+      {tab === "pipeline" && <PipelineTabContent runs={data.pipeline_runs}   pipelineNote={data.summary.pipeline_note} />}
       {tab === "api"      && <ApiTabContent      usage={data.api_usage}       />}
       {tab === "brand"    && <BrandTabContent    rules={data.brand_rules}     />}
     </div>

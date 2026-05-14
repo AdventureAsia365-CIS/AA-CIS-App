@@ -294,14 +294,12 @@ async def trigger_rewrite(
                     "trip_type":   gen.get("trip_type", ""),
                     "status":      "done",
                 }
-                score = float(result.get("quality_score") or 0)
-                # Status must leave 'pending' so the CatalogTab polling detects completion
-                if score >= 7.0:
-                    new_status = "ai_generated"   # ready for tenant to review
-                elif score > 0:
-                    new_status = "needs_review"   # LLM finished but low quality
+                _qs = result.get("quality_score")
+                score = float(_qs) if _qs else None
+                if score is not None and score >= 7.0:
+                    new_status = "ai_generated"
                 else:
-                    new_status = "needs_review"   # hitl / score=0 — needs human
+                    new_status = "needs_review"
                 async with pool.acquire() as _conn3:
                     await _conn3.execute("""
                         UPDATE gold_aa_internal.tenant_tour_versions
