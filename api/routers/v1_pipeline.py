@@ -555,6 +555,34 @@ async def ingest_s3(
             batch_id,
         )
 
+    sf_threshold = int(os.environ.get("SF_BATCH_THRESHOLD", "15"))
+    tour_ids = [str(r["tour_id"]) for r in rows]
+
+    if len(tour_ids) > sf_threshold:
+        sf_arn = os.environ.get("STEP_FUNCTIONS_ARN", "")
+        if not sf_arn:
+            logger.error("sf_arn_missing_fallback_direct", tour_count=len(tour_ids))
+        else:
+            sfn = _boto3.client("stepfunctions", region_name=os.environ.get("AWS_REGION", "us-west-1"))
+            try:
+                sfn.start_execution(
+                    stateMachineArn=sf_arn,
+                    name=f"pipeline-{batch_id}",
+                    input=json.dumps({
+                        "tour_ids": tour_ids,
+                        "tenant_id": "00000000-0000-0000-0000-000000000001",
+                        "batch_id": str(batch_id),
+                        "seo_mode": req.seo_mode,
+                        "model_tier": req.model_tier,
+                    }),
+                )
+                logger.info("ingest_s3_sf_triggered", batch_id=batch_id,
+                            tour_count=len(rows), sf_arn=sf_arn)
+                return {"status": "sf_triggered", "batch_id": batch_id, "tour_count": len(rows)}
+            except Exception as sf_err:
+                logger.error("sf_start_execution_failed", error=str(sf_err), batch_id=batch_id)
+                # Fall through to direct path on SF error
+
     for row in rows:
         tour_req = TourRunRequest(
             tour_id=str(row["tour_id"]),
