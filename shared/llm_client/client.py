@@ -144,4 +144,3 @@ class LLMClient:
     def _calc_cost(self, model: str, in_tok: int, out_tok: int) -> float:
         rates = COST_TABLE.get(model, {"in": 0.003, "out": 0.015})
         return round((in_tok * rates["in"] + out_tok * rates["out"]) / 1000, 6)
-
