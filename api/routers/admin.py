@@ -379,6 +379,21 @@ async def get_tenant_details(
     if brand and brand["updated_at"]:
         last_updated = brand["updated_at"].isoformat()
 
+    def _parse_jsonb(value) -> dict:
+        """Parse JSONB field — asyncpg may return dict or JSON string."""
+        if not value:
+            return {}
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            import json as _j
+            try:
+                parsed = _j.loads(value)
+                return parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                return {}
+        return {}
+
     return {
         "summary": {
             "total_rewrites":       int(total_rewrites or 0),
@@ -430,7 +445,7 @@ async def get_tenant_details(
             "core_idea":        brand["core_idea"]        if brand else "",
             "customer_segment": brand["customer_segment"] if brand else "",
             "customer_mindset": brand["customer_mindset"] if brand else "",
-            "voice_examples":   dict(brand["voice_examples"]) if brand and brand["voice_examples"] else {},
+            "voice_examples":   _parse_jsonb(brand["voice_examples"]) if brand else {},
             "rewrite_language": brand["rewrite_language"] if brand else "en",
             "target_markets":   list(brand["target_markets"]) if brand else [],
         },
