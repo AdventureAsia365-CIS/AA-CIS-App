@@ -25,6 +25,10 @@ def make_state(**kwargs) -> ContentState:
         "model_tier":            "haiku",
         "is_tenant_rewrite":     False,
         "is_branded":            True,
+        "failure_codes":         [],
+        "sub_scores":            {},
+        "passed_count":          0,
+        "failed_count":          0,
     }
     base.update(kwargs)
     return base

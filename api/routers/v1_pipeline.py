@@ -92,8 +92,12 @@ async def _rewrite_tour(
             "model_used": result.get("model_used", ""),
             "cost_usd": result.get("cost_usd", 0.0),
             "retry_count": result.get("retry_count", 0),
-            "error": result.get("error", ""),
-            "is_branded": result.get("is_branded", True),
+            "error":         result.get("error", ""),
+            "is_branded":    result.get("is_branded", True),
+            "failure_codes": result.get("failure_codes", []),
+            "sub_scores":    result.get("sub_scores", {}),
+            "passed_count":  result.get("passed_count", 0),
+            "failed_count":  result.get("failed_count", 0),
             "status": "success" if result.get("generated") else "failed",
         }
 
@@ -345,24 +349,36 @@ async def run_tour(req: TourRunRequest):
 
         # Write quality score to quality_scores table
         if version_id and result.get("quality_score") is not None:
+            _sub = result.get("sub_scores", {})
+            _fc  = result.get("failure_codes", [])
             await conn.execute("""
                 INSERT INTO silver_aa_internal.quality_scores (
                     generated_content_id, tour_id, tenant_id,
                     score_overall, score_brand, score_seo,
                     score_structure, score_quality,
                     passed_count, failed_count,
+                    failure_codes,
                     validator_fn_version, evaluated_at
                 ) VALUES (
                     $1::uuid, $2::uuid, $3::uuid,
-                    $4, $4, $4, $4, $4,
-                    0, 0, 'v1', NOW()
+                    $4, $5, $6, $7, $8,
+                    $9, $10,
+                    $11::jsonb,
+                    'v2', NOW()
                 )
                 ON CONFLICT DO NOTHING
             """,
                 version_id,
                 req.tour_id,
                 "00000000-0000-0000-0000-000000000001",
-                float(result.get("quality_score", 0.0)),
+                float(result.get("quality_score", 0.0)),        # $4 overall
+                float(_sub.get("brand", 0.0)),                  # $5 brand
+                float(_sub.get("seo", 0.0)),                    # $6 seo
+                float(_sub.get("structure", 0.0)),              # $7 structure
+                float(_sub.get("quality", 0.0)),                # $8 quality
+                int(result.get("passed_count", 0)),             # $9
+                int(result.get("failed_count", 0)),             # $10
+                _json.dumps(_fc),                               # $11
             )
 
         # Export to gold layer if quality passed — bypasses Step Functions (AA-22)

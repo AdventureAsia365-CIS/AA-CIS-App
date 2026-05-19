@@ -1,4 +1,5 @@
 import json
+import re
 import structlog
 from typing import TypedDict, Annotated
 from langgraph.graph import StateGraph, END
@@ -30,6 +31,27 @@ class ContentState(TypedDict):
     model_tier:             str
     is_tenant_rewrite:      bool
     is_branded:             bool
+    failure_codes:          list
+    sub_scores:             dict
+    passed_count:           int
+    failed_count:           int
+
+# code → (dimension, deduction)
+_FAILURE_MAP: dict[str, tuple[str, float]] = {
+    "MISSING_FIELD":            ("structure", 1.5),
+    "HIGHLIGHTS_NOT_LIST":      ("structure", 1.0),
+    "HIGHLIGHTS_TOO_FEW":       ("structure", 0.5),
+    "NAME_MODIFIED":            ("structure", 2.0),
+    "SUBTITLE_GENERIC":         ("brand",     1.0),
+    "SUMMARY_OFF_BRAND":        ("brand",     1.0),
+    "FORBIDDEN_WORD":           ("quality",   0.5),
+    "HIGHLIGHTS_TOO_GENERIC":   ("quality",   0.5),
+    "SEO_TITLE_TOO_LONG":       ("seo",       0.5),
+    "SEO_META_TOO_LONG":        ("seo",       0.5),
+    "META_INCOMPLETE_SENTENCE": ("seo",       1.0),
+    "ITINERARY_STRUCTURE_WEAK": ("structure", 1.0),
+    "DFS_INTENT_UNDERUSED":     ("seo",       1.0),
+}
 
 def generate_node(state: ContentState) -> ContentState:
     """Node 1: Generate content via LLMClient."""
@@ -105,26 +127,30 @@ def generate_node(state: ContentState) -> ContentState:
         return {**state, "generated": {}, "is_branded": is_branded, "error": str(e)}
 
 def validate_node(state: ContentState) -> ContentState:
-    """Node 2: Quality check — score 0-10."""
+    """Node 2: Quality check — structured failure codes, 4 sub-dimensions, score 0-10."""
     generated = state.get("generated", {})
     tour      = state.get("tour", {})
-    issues    = []
-    score     = 10.0
+    issues: list[str] = []
+    fired:  list[str] = []
+    score = 10.0
 
     # Required fields
     for field in ["name", "subtitle", "summary", "highlights", "itineraries",
                   "seo_title", "seo_meta"]:
         if not generated.get(field):
             issues.append(f"Missing field: {field}")
+            fired.append("MISSING_FIELD")
             score -= 1.5
 
     # highlights must be list with 3+ items
     highlights = generated.get("highlights", [])
     if not isinstance(highlights, list):
         issues.append("highlights must be a list")
+        fired.append("HIGHLIGHTS_NOT_LIST")
         score -= 1.0
     elif len(highlights) < 3:
         issues.append(f"highlights has only {len(highlights)} items, need 3+")
+        fired.append("HIGHLIGHTS_TOO_FEW")
         score -= 0.5
 
     # Name must not be modified — skip for tenant rewrites (AA name is the source,
@@ -134,6 +160,7 @@ def validate_node(state: ContentState) -> ContentState:
         ai_name  = (generated.get("name") or "").strip().lower()
         if src_name and ai_name and src_name != ai_name:
             issues.append(f"Name modified: '{tour.get('name')}' → '{generated.get('name')}'")
+            fired.append("NAME_MODIFIED")
             score -= 2.0
 
     # Subtitle must not be generic
@@ -145,6 +172,7 @@ def validate_node(state: ContentState) -> ContentState:
     for flag in generic_subtitle_flags:
         if flag in subtitle:
             issues.append(f"Generic subtitle phrase: '{flag}'")
+            fired.append("SUBTITLE_GENERIC")
             score -= 1.0
 
     # Forbidden words — AA core list + tenant custom list
@@ -161,6 +189,7 @@ def validate_node(state: ContentState) -> ContentState:
     for word in all_forbidden:
         if word in content_text:
             issues.append(f"Forbidden word: '{word}'")
+            fired.append("FORBIDDEN_WORD")
             score -= 0.5
 
     # Highlights specificity — must not be pure generic
@@ -168,18 +197,21 @@ def validate_node(state: ContentState) -> ContentState:
         "panoramic views", "beautiful landscapes", "stunning scenery",
         "breathtaking views", "pristine nature", "gross national happiness",
     ]
-    highlights_text = " ".join(highlights).lower()
+    highlights_text = " ".join(highlights).lower() if isinstance(highlights, list) else ""
     for pattern in generic_highlight_patterns:
         if pattern in highlights_text:
             issues.append(f"Generic highlight phrase: '{pattern}'")
+            fired.append("HIGHLIGHTS_TOO_GENERIC")
             score -= 0.5
 
     # SEO field lengths
     if len(generated.get("seo_title", "")) > 70:
         issues.append("seo_title exceeds 70 chars")
+        fired.append("SEO_TITLE_TOO_LONG")
         score -= 0.5
     if len(generated.get("seo_meta", "")) > 170:
         issues.append("seo_meta exceeds 170 chars")
+        fired.append("SEO_META_TOO_LONG")
         score -= 0.5
 
     # Summary generic opener check
@@ -192,16 +224,69 @@ def validate_node(state: ContentState) -> ContentState:
     for opener in generic_openers:
         if summary.lower().startswith(opener):
             issues.append(f"Generic summary opener: '{opener}'")
+            fired.append("SUMMARY_OFF_BRAND")
             score -= 1.0
             break
 
+    # META_INCOMPLETE_SENTENCE: seo_meta must end with sentence-terminating punctuation
+    meta = generated.get("seo_meta", "").strip()
+    if meta and meta[-1] not in (".", "!", "?"):
+        issues.append("seo_meta does not end with sentence-terminating punctuation")
+        fired.append("META_INCOMPLETE_SENTENCE")
+        score -= 1.0
+
+    # ITINERARY_STRUCTURE_WEAK: must have day markers and be substantive
+    itinerary = generated.get("itineraries", "") or ""
+    has_day_marker = bool(re.search(r'\bday\s*[1-9one two three]\b', itinerary.lower()))
+    if not has_day_marker or len(itinerary) < 80:
+        issues.append("Itinerary lacks day structure or is too short")
+        fired.append("ITINERARY_STRUCTURE_WEAK")
+        score -= 1.0
+
+    # DFS_INTENT_UNDERUSED: if SEO keywords exist, at least one should appear in title+meta
+    seo_kws = state.get("seo", {}).get("top_keywords", [])
+    if seo_kws:
+        kw_texts = [
+            (kw["keyword"] if isinstance(kw, dict) else str(kw)).lower()
+            for kw in seo_kws if kw
+        ]
+        seo_field_text = (
+            (generated.get("seo_title", "") or "") + " " +
+            (generated.get("seo_meta", "") or "")
+        ).lower()
+        if kw_texts and not any(kw in seo_field_text for kw in kw_texts):
+            issues.append("SEO keywords not reflected in seo_title or seo_meta")
+            fired.append("DFS_INTENT_UNDERUSED")
+            score -= 1.0
+
+    # Sub-score computation — each dimension starts at 10, deducts its own codes
     score = max(0.0, score)
-    feedback = "; ".join(issues) if issues else ""
+    sub_scores = {
+        dim: max(0.0, 10.0 - sum(
+            _FAILURE_MAP[code][1] for code in fired
+            if code in _FAILURE_MAP and _FAILURE_MAP[code][0] == dim
+        ))
+        for dim in ("brand", "seo", "structure", "quality")
+    }
+    quality_score = sum(sub_scores.values()) / 4
+    failure_codes = list(dict.fromkeys(fired))   # unique, first-seen order
+    passed_count  = sum(1 for d in sub_scores.values() if d == 10.0)
+    failed_count  = len(failure_codes)
+    feedback      = "; ".join(issues) if issues else ""
 
-    logger.info("validation_done", score=score, issues=len(issues),
-                retry=state.get("retry_count", 0))
+    logger.info("validation_done", score=quality_score, issues=len(issues),
+                retry=state.get("retry_count", 0),
+                failure_codes=failure_codes, sub_scores=sub_scores)
 
-    return {**state, "quality_score": score, "feedback": feedback}
+    return {
+        **state,
+        "quality_score": quality_score,
+        "feedback":      feedback,
+        "failure_codes": failure_codes,
+        "sub_scores":    sub_scores,
+        "passed_count":  passed_count,
+        "failed_count":  failed_count,
+    }
 
 def should_retry(state: ContentState) -> str:
     """Edge: decide retry / done / hitl."""
