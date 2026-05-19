@@ -4,8 +4,8 @@
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway owq9as3wjl)
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel)
-- ECS task def: api:137 | CI #218 green | Deploy Dev #130
-- AWS: STOPPED (ECS 0/0, RDS stopped)
+- ECS task def: api:138 | CI #220 green | Deploy Dev #132
+- AWS: STOPPED (ECS 0/0, RDS stopping)
 - API Gateway: owq9as3wjl | Lambda Authorizer: aa-cis-dev-authorizer
 - DB: PostgreSQL 15, aa_cis_dev, secret: aa-cis/dev/rds (plain DSN)
 - Tours: 7 in catalog (WanderLux dev session, 15 published Sri Lanka) | 5 tenants | avg quality 9.9
@@ -86,29 +86,58 @@ S3 Bronze upload → Ingestion Lambda → shared.pipeline_runs (status=ingesting
 pytest tests/ -v
 104 integration tests + 23 E2E Playwright tests baseline
 
-## ACTIVE WORK — 14/05/2026
-Session 11 COMPLETE. Phase 4 COMPLETE.
-Last commit: 85ed50d
+## ACTIVE WORK — 19/05/2026
+Session 12 COMPLETE. AA-85 COMPLETE.
+Last commit: 2b9ea74
 
-### ✅ Done Session 11
-- AA-57: Tenant detail bugs (quality_score, pipeline→activity tab, aa_internal tours)
-- AA-23: Remove Langfuse (~$8/mo saved)
-- AA-22: SF fallback router (threshold=15) + HITL IAM fix
-- AA-13: API Gateway REST + Lambda Authorizer + 4 usage plans + custom domain
-- AA-60: Dashboard all-tenant metrics + all X-API-Key routing fixes
+### ✅ Done Session 12 (AA-85)
+- Root cause: int(None) crash when v_tenant_monthly_usage has no quota row
+- Fix: COALESCE guards on usage query + voice_examples JSONB parse fix
+- Migration 018: 8 new brand identity columns on tenant_brand_rules
+- Seeded full brand identity for 4 new tenants (atlas-hearth, terra-family-expeditions, trail-pulse, wildkind-travel)
+- CatalogTab UI overflow: flex column layout so SEO Health/Actions scroll properly
 
 ### 🔴 Next Session Priority
 1. AA-11: Phase 3 Report DOCX → Ms. Thu (Claude Chat, no AWS needed)
 2. Regenerate aa_internal API key: POST /admin/tenants/{id}/rotate-key
 3. Disable WAF after verifying API GW rate limiting stable
 4. Phase 5 planning: Webhook notifications, B2B self-signup
+5. Add quota rows to membership_plans for 4 new tenants (quota% shows 0% currently)
 
 ### ⚠️ Open Issues
 - AA-36: No char limits on rewrite fields — Backlog
 - api_task_def_arn hardcoded :21 in main.tf — AA-CIS-Infra (AA-22 tech debt)
+- New tenant quota_pct always 0% (no membership_plans row) — cosmetic only
 
-## Session 11 Close — 14/05/2026
-- ECS desired=0, RDS stopped
-- Task def: api:137 | CI #218 | Deploy #130 | Commit: 85ed50d
-- Phase 4 COMPLETE: AA-13 API Gateway done
-- API Gateway: owq9as3wjl | custom domain: api-cis.lumiguides.it.com
+## Session 12 Close — 19/05/2026
+- ECS desired=0, RDS stopping
+- Task def: api:138 | CI #220 | Deploy #132 | Commits: d09a786, 2b9ea74
+- 4 new tenant brand identities seeded + detail panel fixed
+- CatalogTab scroll layout fixed
+
+
+## Implementation Notes Pattern
+
+For every Linear issue involving code changes, maintain a parallel notes file
+**while implementing** (not after).
+
+**Path:** `docs/implementation-notes/<ISSUE-ID>.md`
+
+### Required sections
+- **Decisions** — choices made that were not specified in the Linear issue
+- **Changed** — what was modified vs. the original requirement
+- **Tradeoffs** — what was weighed and why
+- **Should know** — anything the reviewer needs before reading the diff
+
+### Example
+```md
+## AA-87: S1 Brand Injection Fix
+- Decision: inject system_prompt at invoke_model(), not LangGraph node (node cached)
+- Changed: _call_llm() signature 2→3 args (added brand_context)
+- Tradeoff: prompt_len logging adds ~$0.02/mo CloudWatch cost — accepted
+- Should know: empty system_prompt → flag "unbranded", do not raise exception
+```
+
+### Trigger
+Create the file when starting any task: "implement AA-XX", "fix AA-XX", "build AA-XX"
+Update incrementally as decisions are made — not in one batch at the end.

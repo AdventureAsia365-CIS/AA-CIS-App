@@ -1,66 +1,77 @@
-# AA-CIS-App — Handoff Session 10 (13/05/2026)
+# CIS Session 12 Handoff — 19/05/2026
 
-## State
-- ECS: api:127 | CI #208 | STOPPED (desired=0)
-- RDS: aa-cis-dev-db STOPPED
-- Vercel: https://aa-cis.lumiguides.it.com (Production: Hn6pUVzWr)
-- Branch: develop | Last commit: f070fb4
-- M1 milestone: COMPLETE
+## Status: AA-85 COMPLETE ✅
 
-## Done this session
+## AWS State
+- ECS aa-cis-dev-api: desired=0, running=0 (STOPPED)
+- RDS aa-cis-dev-db: stopping
+- API Gateway: owq9as3wjl (ALWAYS ON — no cost when idle)
+- Lambda Authorizer: aa-cis-dev-authorizer (ALWAYS ON — no cost when idle)
 
-### AA-40 — Terraform EventBridge + S3 medallion (AA-CIS-Infra)
-- EventBridge bus `aa-cis-dev-acp-events` + Scheduler rules + S3 bronze/silver/gold buckets + Secrets Manager
-- Terraform applied, CI green
-- IAM additions: aa-cis-dev-role (CI) + aa-cis-dev-ecs-task-role (PutEvents)
+## Last Deploy
+- ECS task def: api:138 (new image from this session)
+- CI #220 ✅ | Deploy Dev #132 ✅
+- Commits: d09a786, 2b9ea74
 
-### AA-42 — CIS publish EventBridge event + manifest.json
-- EventBridge publish after pipeline complete
-- manifest.json → S3 gold path
-- GET /v1/acp/s1-keywords endpoint
-- DB: shared.acp_runs table (migration 009 applied)
+## Root Cause of "Failed to load tenant details" — FOUND & FIXED
 
-### AA-39 — seo_mode dropdown
-- Wired seo_mode to pipeline run API
-- 3 modes: dataforseo / custom_keywords / disabled
+**Primary crash (AA-85):**
+`v_tenant_monthly_usage` returns `api_calls_quota_monthly = NULL` for new tenants
+(no quota row in membership_plans). `int(None)` → `TypeError` → 500.
 
-### AA-28 — Multi-select export CSV + XLSX
-- CSV: tab-delimited (\t), UTF-8 BOM, no quotes, replaces \n in values
-- XLSX: SheetJS (xlsx package), 21 columns full for Admin, 14 for Tenant
-- Admin: fetches /api/tour-full/{id} per tour → includes supplier extras + SEO keywords
-- Tenant: fetches /api/tenant/v1/tours/versions/{id} → includes subtitle, itineraries, SEO fields
-- Async export with loading state on buttons
+**Secondary crash:**
+`voice_examples` JSONB returned as raw JSON string by asyncpg. `dict(string)` → 
+`ValueError`. Fixed with `_parse_jsonb()` helper.
 
-### AA-27 — Admin Catalog UI
-- Filter bar (country, status, score range, date range)
-- Highlights as bullet list
-- SEO keywords section + Audit/Validation panel
-- Inclusions/Exclusions rendered per line
+**Existing tenants (WanderLux etc.) were not affected** because they have rows in
+the view (from API usage), so `api_calls_quota_monthly` was always an integer.
 
-### AA-29 — Tenant itinerary format
-- Newlines per day preserved in My Catalog view
+## Completed This Session (AA-85)
 
-### AA-24 — Dashboard Cost tab
-- Fixed m.total_cost (was m.cost → undefined → $0)
+### Task 1 — Root cause
+- `v_tenant_monthly_usage.api_calls_quota_monthly = NULL` for new tenants
+- `int(NULL)` raises `TypeError` at admin.py:375 → 500
 
-### Vercel auto-deploy
-- main → Production (Deploy Hook set in CI)
-- develop → Preview
+### Task 2 — API fix (admin.py)
+- COALESCE(api_calls_quota_monthly, 0) in usage query
+- Removed `created_at` from brand_rules SELECT (only `updated_at` needed)
+- Added 7 new brand identity columns to SELECT with COALESCE guards
+- Fixed `last_updated` to never crash on None
+- Added `_parse_jsonb()` helper for JSONB-as-string defence
 
-### AA-1/2/3/4 — Linear onboarding issues: closed
-### AA-54 — Cancelled (wrong diagnosis)
+### Task 3 — Migration 018 + Brand seeding
+- `api/migrations/018_brand_identity_columns.sql` created
+- Applied to dev DB: 8 new columns added to `shared.tenant_brand_rules`
+- Default rows inserted for 3 tenants (wildkind-travel already had one)
+- Full brand identity seeded for all 4 tenants
 
-## Next priorities
-1. AA-13: API Gateway REST + per-tenant rate limiting + Terraform (due 31/5)
-2. Phase 3 Report DOCX for Ms. Thu (overdue)
-3. Bug 3: quality_score=0.00 all rewrites — CloudWatch investigate (ECS must be running first)
-4. AA-28: Full column export — Backlog (done for both Admin + Tenant)
-5. AA-36: No char limits on rewrite fields — Backlog
+### Task 4 — CatalogTab UI overflow fix
+- Right-side editorial panel: `display:flex, flexDirection:column, maxHeight:calc(100vh-120px)`
+- Header: `flexShrink:0`
+- Content area: `flex:1, overflowY:auto, minHeight:0`
+- SEO Health and Actions no longer cut off
 
-## Schema notes (carried forward)
-- tenants PK = tenant_id (NOT id)
-- v_tenant_monthly_usage: billing_month, api_calls_used, quota_calls_pct
-- tenant_tour_versions.published_tour_id → published_tours.id
-- forbidden_words: asyncpg returns JSONB as string → always json.loads()
-- pool rewrites do NOT create pipeline_runs rows
-- acp_runs table: shared.acp_runs (migration 009)
+### Task 5 — End-to-end verified
+All 4 new tenants return HTTP 200:
+- atlas-hearth: brand_type="Luxury cultural travel brand" ✅
+- terra-family-expeditions: brand_type="Premium family adventure travel brand" ✅
+- trail-pulse: brand_type="Young active adventure travel brand" ✅
+- wildkind-travel: brand_type="Responsible nature and conservation travel brand" ✅
+
+## DB State After Session
+- `shared.tenant_brand_rules` new columns: brand_type, core_idea, customer_segment,
+  customer_mindset, voice_examples, source_docx_s3_key, rewrite_language, target_markets
+- All 4 new tenants seeded with full brand identity
+
+## Next Session
+1. AA-11: Phase 3 Report DOCX → Ms. Thu (Claude Chat, no AWS needed)
+2. Regenerate aa_internal API key: POST /admin/tenants/{id}/rotate-key
+3. Disable WAF after verifying API GW rate limiting stable
+4. Phase 5 planning: Webhook notifications, B2B self-signup
+5. Consider: add quota row to membership_plans for new tenants (so quota % shows correctly)
+
+## Start Next Session
+```
+aws rds start-db-instance --db-instance-identifier aa-cis-dev-db --profile pqnghiep-admin --region us-west-1
+aws ecs update-service --cluster aa-cis-dev-cluster --service aa-cis-dev-api --desired-count 1 --profile pqnghiep-admin --region us-west-1
+```
