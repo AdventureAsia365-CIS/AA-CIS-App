@@ -13,7 +13,7 @@ BEGIN;
 
 CREATE TABLE IF NOT EXISTS shared.tenant_brand_rule_versions (
     version_id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id           VARCHAR(50) NOT NULL REFERENCES shared.tenant_brand_rules(tenant_id),
+    tenant_id           UUID        NOT NULL REFERENCES shared.tenants(tenant_id),
     snapshot            JSONB       NOT NULL,
     source_docx_s3_key  TEXT,
     source_type         TEXT        NOT NULL CHECK (source_type IN ('manual', 'docx_parse')),
