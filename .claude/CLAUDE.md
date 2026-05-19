@@ -1,11 +1,11 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 14/05/2026 | ECS api:137 | CI #218
+# Updated: 20/05/2026 | ECS api:141 | CI #224
 
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway owq9as3wjl)
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel)
-- ECS task def: api:138 | CI #220 green | Deploy Dev #132
-- AWS: STOPPED (ECS 0/0, RDS stopping)
+- ECS task def: api:141 | CI #224 green | Deploy Dev #135
+- AWS: STOPPED (ECS 0/0, RDS stopped)
 - API Gateway: owq9as3wjl | Lambda Authorizer: aa-cis-dev-authorizer
 - DB: PostgreSQL 15, aa_cis_dev, secret: aa-cis/dev/rds (plain DSN)
 - Tours: 7 in catalog (WanderLux dev session, 15 published Sri Lanka) | 5 tenants | avg quality 9.9
@@ -86,34 +86,43 @@ S3 Bronze upload → Ingestion Lambda → shared.pipeline_runs (status=ingesting
 pytest tests/ -v
 104 integration tests + 23 E2E Playwright tests baseline
 
-## ACTIVE WORK — 19/05/2026
-Session 12 COMPLETE. AA-85 COMPLETE.
-Last commit: 2b9ea74
+## MIGRATIONS APPLIED (dev DB)
+- 018: brand_identity_columns (tenant_brand_rules extensions)
+- 019: tenant_brand_rule_versions table (acp_silver_s2 prep)
+- 024: raw_tours review_status/reviewed_by/reviewed_at/review_notes + index
+- 027: acp_silver_s2.competitor_inputs table + index
 
-### ✅ Done Session 12 (AA-85)
-- Root cause: int(None) crash when v_tenant_monthly_usage has no quota row
-- Fix: COALESCE guards on usage query + voice_examples JSONB parse fix
-- Migration 018: 8 new brand identity columns on tenant_brand_rules
-- Seeded full brand identity for 4 new tenants (atlas-hearth, terra-family-expeditions, trail-pulse, wildkind-travel)
-- CatalogTab UI overflow: flex column layout so SEO Health/Actions scroll properly
+## ROUTERS REGISTERED (main.py)
+- v1_tours, v1_exports, v1_pipeline, v1_acp, v1_competitors, v1_s0, admin
 
-### 🔴 Next Session Priority
-1. AA-11: Phase 3 Report DOCX → Ms. Thu (Claude Chat, no AWS needed)
-2. Regenerate aa_internal API key: POST /admin/tenants/{id}/rotate-key
-3. Disable WAF after verifying API GW rate limiting stable
-4. Phase 5 planning: Webhook notifications, B2B self-signup
-5. Add quota rows to membership_plans for 4 new tenants (quota% shows 0% currently)
+## ACTIVE WORK — 20/05/2026
+Session 18 COMPLETE. AA-86, AA-88, AA-44 COMPLETE.
+Last commits: 5ee8688 (AA-86), 9863b36 (AA-88), 2e4ce29 (AA-44)
+
+### ✅ Done Session 18
+- AA-87: brand_system_prompt → LLMRequest.system_prompt wired (was already flowing); added prompt_len logging, is_branded flag, og_tags={"unbranded":true} in generated_content. Commit bd68d74.
+- AA-82: migration 019 tenant_brand_rule_versions table (FK → shared.tenants). Commit 24ee254.
+- AA-86: validate_node refactor — _FAILURE_MAP 13 codes, 4 sub-scores (brand/seo/structure/quality), failure_codes JSONB populated, validator_fn_version='v2'. Commit 5ee8688.
+- AA-88: migration 027 acp_silver_s2.competitor_inputs + v1_competitors.py (4 endpoints, max-10/country, ownership check) + AA-ACP-App portal competitors page. Commit 9863b36.
+- AA-44: migration 024 raw_tours review_status + v1_s0.py (GET/PATCH/approve/reject, field_coverage_pct) + AA-ACP-App /workspace/s0/review page (inline edit, bulk approve/reject, coverage badge). Commit 2e4ce29.
+
+### 🔴 Next Session Priority (P0)
+1. AA-90: S1 Configured Rewrite Engine — migrations 025/026 + tour_content_versions table + S1 Trigger UI
+   - ADR-016 accepted: S0/S1 separation + tour content versioning (published_tours → VIEW)
+2. AA-11: Phase 3 Report DOCX → Ms. Thu (Claude Chat, no AWS needed)
+3. Add quota rows to membership_plans for 4 new tenants (quota% shows 0% currently)
 
 ### ⚠️ Open Issues
 - AA-36: No char limits on rewrite fields — Backlog
 - api_task_def_arn hardcoded :21 in main.tf — AA-CIS-Infra (AA-22 tech debt)
 - New tenant quota_pct always 0% (no membership_plans row) — cosmetic only
+- reviewed_by always NULL in S0 review — no user identity in JWT yet
 
-## Session 12 Close — 19/05/2026
-- ECS desired=0, RDS stopping
-- Task def: api:138 | CI #220 | Deploy #132 | Commits: d09a786, 2b9ea74
-- 4 new tenant brand identities seeded + detail panel fixed
-- CatalogTab scroll layout fixed
+## Session 18 Close — 20/05/2026
+- ECS desired=0, RDS stopped
+- Task def: api:141 | CI #224 | Deploy #135
+- Commits: bd68d74, 24ee254, 5ee8688, 9863b36, 2e4ce29 (AA-CIS-App develop)
+- AA-ACP-App commits: 912ee85 (competitors page), 7d56cbc (S0 review page)
 
 
 ## Implementation Notes Pattern
