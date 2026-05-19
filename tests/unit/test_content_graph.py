@@ -1,22 +1,30 @@
 import pytest
 import json
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, call
 from services.content_generation.graph import (
-    validate_node, should_retry, increment_retry, ContentState
+    generate_node, validate_node, should_retry, increment_retry, ContentState
 )
+from shared.llm_client.models import LLMResponse
 
 def make_state(**kwargs) -> ContentState:
     base = {
-        "tour":          {"name": "Halong Bay", "country": "Vietnam"},
-        "seo":           {},
-        "few_shots":     [],
-        "generated":     {},
-        "quality_score": 0.0,
-        "retry_count":   0,
-        "feedback":      "",
-        "error":         "",
-        "cost_usd":      0.0,
-        "model_used":    "",
+        "tour":                  {"name": "Halong Bay", "country": "Vietnam"},
+        "seo":                   {},
+        "few_shots":             [],
+        "generated":             {},
+        "quality_score":         0.0,
+        "retry_count":           0,
+        "feedback":              "",
+        "error":                 "",
+        "cost_usd":              0.0,
+        "model_used":            "",
+        "brand_system_prompt":   "",
+        "brand_style_guide":     "",
+        "brand_forbidden_words": [],
+        "rewrite_language":      "en-US",
+        "model_tier":            "haiku",
+        "is_tenant_rewrite":     False,
+        "is_branded":            True,
     }
     base.update(kwargs)
     return base
@@ -110,3 +118,70 @@ def test_increment_retry_twice():
     state = make_state(retry_count=1)
     result = increment_retry(state)
     assert result["retry_count"] == 2
+
+
+# --- generate_node brand injection tests ---
+
+_FAKE_LLM_OUTPUT = json.dumps({
+    "name": "Halong Bay",
+    "subtitle": "A private cruise",
+    "summary": "Three nights on Halong Bay.",
+    "highlights": ["Kayaking", "Cave tour", "Sunrise"],
+    "itineraries": "Day 1: board.",
+    "seo_title": "Halong Bay Cruise",
+    "seo_meta": "Private cruise through Halong Bay karst islands.",
+    "seo_keywords_used": [],
+})
+
+
+def _fake_response() -> LLMResponse:
+    return LLMResponse(
+        content=_FAKE_LLM_OUTPUT,
+        model_used="us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        provider="bedrock",
+        input_tokens=100,
+        output_tokens=50,
+        cost_usd=0.0002,
+    )
+
+
+def test_generate_node_injects_brand_system_prompt():
+    """brand_system_prompt from state must appear in LLMRequest.system_prompt sent to LLM."""
+    brand_text = "You are writing for Atlas & Hearth, a luxury cultural travel brand."
+    state = make_state(brand_system_prompt=brand_text)
+
+    captured: list = []
+
+    async def fake_generate(req):
+        captured.append(req)
+        return _fake_response()
+
+    with patch("services.content_generation.graph.LLMClient") as MockClient:
+        instance = MockClient.return_value
+        instance.generate.side_effect = fake_generate
+
+        result = generate_node(state)
+
+    assert captured, "LLMClient.generate was never called"
+    req = captured[0]
+    assert brand_text in req.system_prompt, (
+        f"brand_system_prompt not found in LLMRequest.system_prompt:\n{req.system_prompt[:300]}"
+    )
+    assert result.get("is_branded") is True
+    assert result.get("generated") != {}
+
+
+def test_generate_node_unbranded_flag_when_no_brand():
+    """is_branded=False when brand_system_prompt is empty."""
+    state = make_state(brand_system_prompt="")
+
+    async def fake_generate(req):
+        return _fake_response()
+
+    with patch("services.content_generation.graph.LLMClient") as MockClient:
+        instance = MockClient.return_value
+        instance.generate.side_effect = fake_generate
+
+        result = generate_node(state)
+
+    assert result.get("is_branded") is False

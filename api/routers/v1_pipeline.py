@@ -93,6 +93,7 @@ async def _rewrite_tour(
             "cost_usd": result.get("cost_usd", 0.0),
             "retry_count": result.get("retry_count", 0),
             "error": result.get("error", ""),
+            "is_branded": result.get("is_branded", True),
             "status": "success" if result.get("generated") else "failed",
         }
 
@@ -306,13 +307,15 @@ async def run_tour(req: TourRunRequest):
             import json as _json
             generated = result["generated"]
             status = "approved" if result.get("quality_score", 0.0) >= 7.0 else "pending"
+            is_branded = result.get("is_branded", True)
+            og_tags_val = _json.dumps({} if is_branded else {"unbranded": True})
             version_id = await conn.fetchval("""
                 INSERT INTO silver_aa_internal.generated_content (
                     tour_id, tenant_id, version_num,
                     aa_name, aa_subtitle, aa_summary,
                     aa_description, aa_highlights, aa_itineraries,
                     seo_title, seo_meta, seo_keywords_used,
-                    model_editorial, status
+                    model_editorial, status, og_tags
                 ) VALUES (
                     $1::uuid, $2::uuid,
                     COALESCE((SELECT MAX(version_num) + 1
@@ -321,7 +324,7 @@ async def run_tour(req: TourRunRequest):
                     $3, $4, $5,
                     $6, $7::jsonb, $8,
                     $9, $10, $11::jsonb,
-                    $12, $13::content_status_enum
+                    $12, $13::content_status_enum, $14::jsonb
                 ) RETURNING id
             """,
                 req.tour_id,
@@ -337,6 +340,7 @@ async def run_tour(req: TourRunRequest):
                 _json.dumps(generated.get("seo_keywords_used", [])),
                 result.get("model_used", ""),
                 status,
+                og_tags_val,
             )
 
         # Write quality score to quality_scores table

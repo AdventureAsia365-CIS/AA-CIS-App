@@ -29,6 +29,7 @@ class ContentState(TypedDict):
     rewrite_language:       str
     model_tier:             str
     is_tenant_rewrite:      bool
+    is_branded:             bool
 
 def generate_node(state: ContentState) -> ContentState:
     """Node 1: Generate content via LLMClient."""
@@ -63,6 +64,13 @@ def generate_node(state: ContentState) -> ContentState:
     if style_guide:
         prompt += f"\n\nSTYLE GUIDE FOR THIS CLIENT:\n{style_guide}"
 
+    is_branded = bool(brand_sp)
+    prompt_len = len(system)
+    logger.info("llm_prompt_built", prompt_len=prompt_len, is_branded=is_branded,
+                retry=state.get("retry_count", 0))
+    if not is_branded:
+        logger.warning("unbranded_generation", tour_name=state.get("tour", {}).get("name", ""))
+
     request = LLMRequest(
         system_prompt=system,
         user_prompt=prompt,
@@ -86,14 +94,15 @@ def generate_node(state: ContentState) -> ContentState:
             "generated":  generated,
             "cost_usd":   state.get("cost_usd", 0) + resp.cost_usd,
             "model_used": resp.model_used,
+            "is_branded": is_branded,
             "error":      "",
         }
     except json.JSONDecodeError as e:
         logger.warning("json_parse_failed", error=str(e))
-        return {**state, "generated": {}, "error": f"JSON parse error: {e}"}
+        return {**state, "generated": {}, "is_branded": is_branded, "error": f"JSON parse error: {e}"}
     except Exception as e:
         logger.error("generation_failed", error=str(e))
-        return {**state, "generated": {}, "error": str(e)}
+        return {**state, "generated": {}, "is_branded": is_branded, "error": str(e)}
 
 def validate_node(state: ContentState) -> ContentState:
     """Node 2: Quality check — score 0-10."""
