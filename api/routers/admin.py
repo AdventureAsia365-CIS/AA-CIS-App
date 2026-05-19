@@ -303,9 +303,13 @@ async def get_tenant_details(
         """, tenant_id)
 
         # v_tenant_monthly_usage has one row per tenant per billing_month;
-        # ORDER BY DESC so we always get the current/most-recent month
+        # ORDER BY DESC so we always get the current/most-recent month.
+        # COALESCE guards: new tenants have no quota row, producing NULLs.
         usage = await conn.fetchrow("""
-            SELECT api_calls_used, quota_calls_pct, api_calls_quota_monthly
+            SELECT
+                COALESCE(api_calls_used, 0)            AS api_calls_used,
+                COALESCE(quota_calls_pct, 0)           AS quota_calls_pct,
+                COALESCE(api_calls_quota_monthly, 0)   AS api_calls_quota_monthly
             FROM shared.v_tenant_monthly_usage WHERE tenant_id = $1
             ORDER BY billing_month DESC LIMIT 1
         """, tenant_id)
@@ -352,8 +356,15 @@ async def get_tenant_details(
         """, tenant_id)
 
         brand_rows = await conn.fetch("""
-            SELECT system_prompt, style_guide, forbidden_words,
-                   version, updated_at, created_at
+            SELECT
+                system_prompt, style_guide, forbidden_words, version, updated_at,
+                COALESCE(brand_type, '')         AS brand_type,
+                COALESCE(core_idea, '')          AS core_idea,
+                COALESCE(customer_segment, '')   AS customer_segment,
+                COALESCE(customer_mindset, '')   AS customer_mindset,
+                COALESCE(voice_examples, '{}'::jsonb) AS voice_examples,
+                COALESCE(rewrite_language, 'en') AS rewrite_language,
+                COALESCE(target_markets, ARRAY[]::text[]) AS target_markets
             FROM shared.tenant_brand_rules
             WHERE tenant_id = $1
             ORDER BY version DESC
@@ -363,6 +374,10 @@ async def get_tenant_details(
     api_calls     = int(usage["api_calls_used"])            if usage else 0
     quota_total   = int(usage["api_calls_quota_monthly"])   if usage else 0
     quota_pct     = float(usage["quota_calls_pct"])         if usage else 0.0
+
+    last_updated: str | None = None
+    if brand and brand["updated_at"]:
+        last_updated = brand["updated_at"].isoformat()
 
     return {
         "summary": {
@@ -406,11 +421,18 @@ async def get_tenant_details(
             "rate_limit_per_min": tenant["rate_limit_rpm"],
         },
         "brand_rules": {
-            "system_prompt":   brand["system_prompt"]               if brand else None,
-            "style_guide":     brand["style_guide"]                 if brand else None,
-            "forbidden_words": _parse_fw(brand["forbidden_words"]) if brand else [],
-            "version_count":   len(brand_rows),
-            "last_updated":    (brand["updated_at"] or brand["created_at"]).isoformat() if brand else None,
+            "system_prompt":    brand["system_prompt"]               if brand else None,
+            "style_guide":      brand["style_guide"]                 if brand else None,
+            "forbidden_words":  _parse_fw(brand["forbidden_words"]) if brand else [],
+            "version_count":    len(brand_rows),
+            "last_updated":     last_updated,
+            "brand_type":       brand["brand_type"]       if brand else "",
+            "core_idea":        brand["core_idea"]        if brand else "",
+            "customer_segment": brand["customer_segment"] if brand else "",
+            "customer_mindset": brand["customer_mindset"] if brand else "",
+            "voice_examples":   dict(brand["voice_examples"]) if brand and brand["voice_examples"] else {},
+            "rewrite_language": brand["rewrite_language"] if brand else "en",
+            "target_markets":   list(brand["target_markets"]) if brand else [],
         },
     }
 
