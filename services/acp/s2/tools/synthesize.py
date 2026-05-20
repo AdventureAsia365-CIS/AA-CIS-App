@@ -1,7 +1,9 @@
 """
 Synthesis node. Always runs last.
-Calls Bedrock claude-sonnet-4-5 to build a visibility_report JSONB.
-Writes report to acp_silver_s2.visibility_reports.
+Calls Bedrock claude-sonnet-4-5 to build visibility analysis.
+Writes to acp_silver_s2.visibility_reports using the actual table schema:
+  keyword_gaps, competitor_data, google_trends, reddit_insights, gsc_data,
+  top_opportunities, confidence_score (new), primary_keywords (new), fetched_at (new).
 Updates acp_shared.acp_runs status to 'completed'.
 """
 import json
@@ -45,7 +47,7 @@ def make_synthesize_node(pool, s3_client):
             "Respond with only valid JSON. No markdown, no explanation."
         )
 
-        visibility_report = {}
+        llm_output = {}
         confidence_score = 0.0
         try:
             response = _bedrock.invoke_model(
@@ -57,42 +59,56 @@ def make_synthesize_node(pool, s3_client):
                 }),
             )
             raw = json.loads(response["body"].read())
-            visibility_report = json.loads(raw["content"][0]["text"])
-            confidence_score = float(visibility_report.get("confidence_score", 70.0))
+            llm_output = json.loads(raw["content"][0]["text"])
+            confidence_score = float(llm_output.get("confidence_score", 70.0))
         except Exception as exc:
             logger.error("synthesize_bedrock_error", run_id=run_id, error=str(exc))
-            visibility_report = {"error": str(exc), "summary": "Synthesis failed — Bedrock error"}
+            llm_output = {
+                "top_opportunities": [],
+                "content_gaps": [],
+                "summary": f"Synthesis failed: {exc}",
+            }
+
+        # Map LLM output + state S3 keys to actual visibility_reports column names
+        top_opportunities = llm_output.get("top_opportunities") or []
+        keyword_gaps = llm_output.get("content_gaps") or []
+        # Use top 3 opportunities as primary keywords
+        primary_keywords = top_opportunities[:3]
 
         async with pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO acp_silver_s2.visibility_reports
-                    (run_id, tenant_id, country, visibility_report, confidence_score,
-                     keyword_count, existing_content_risk,
-                     keywords_s3_key, competitors_s3_key, trends_s3_key,
-                     reddit_s3_key, gsc_s3_key, fetched_at)
-                VALUES ($1::uuid, $2::uuid, $3, $4::jsonb, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
-                ON CONFLICT (run_id) DO UPDATE
-                    SET visibility_report     = EXCLUDED.visibility_report,
-                        confidence_score      = EXCLUDED.confidence_score,
-                        keyword_count         = EXCLUDED.keyword_count,
-                        existing_content_risk = EXCLUDED.existing_content_risk,
-                        fetched_at            = NOW()
-            """,
+                    (run_id, tenant_id, country,
+                     keyword_gaps, top_opportunities, competitor_data,
+                     google_trends, reddit_insights, gsc_data,
+                     confidence_score, primary_keywords, fetched_at)
+                VALUES
+                    ($1::uuid, $2::uuid, $3,
+                     $4::jsonb, $5::jsonb, $6,
+                     $7, $8, $9,
+                     $10, $11::jsonb, NOW())
+                """,
                 run_id, tenant_id, country,
-                json.dumps(visibility_report), confidence_score, kw_count, existing_risk,
-                state.get("keywords_s3_key"),
+                json.dumps(keyword_gaps),
+                json.dumps(top_opportunities),
                 state.get("competitors_s3_key"),
                 state.get("trends_s3_key"),
                 state.get("reddit_s3_key"),
                 state.get("gsc_s3_key"),
+                confidence_score,
+                json.dumps(primary_keywords),
             )
 
         async with pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 UPDATE acp_shared.acp_runs
                 SET status = 'completed', completed_at = NOW()
                 WHERE run_id = $1::uuid
-            """, run_id)
+                """,
+                run_id,
+            )
 
         completed_tools.append("synthesize")
         logger.info("synthesize_complete", run_id=run_id, confidence_score=confidence_score)

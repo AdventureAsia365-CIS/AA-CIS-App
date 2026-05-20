@@ -89,7 +89,10 @@ async def run_s2(
             status_code=429,
             detail={
                 "error_code": ACPErrorCode.CONCURRENCY_LIMIT,
-                "message": f"Tenant '{tenant_id}' already has {_MAX_CONCURRENT} active runs. Retry after current run completes.",
+                "message": (
+                    f"Tenant '{tenant_id}' already has {_MAX_CONCURRENT} active runs. "
+                    "Retry after current run completes."
+                ),
                 "retry_after": 300,
             },
         )
@@ -236,27 +239,37 @@ async def get_s2_report(
     pool = request.app.state.pool
 
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            SELECT run_id, tenant_id, country, visibility_report,
-                   confidence_score, keyword_count, existing_content_risk, fetched_at
+        row = await conn.fetchrow(
+            """
+            SELECT run_id, tenant_id, country,
+                   keyword_gaps, top_opportunities, competitor_data,
+                   google_trends, reddit_insights, gsc_data,
+                   confidence_score, primary_keywords, fetched_at
             FROM acp_silver_s2.visibility_reports
             WHERE run_id = $1::uuid
-        """, run_id)
+            """,
+            run_id,
+        )
 
     if not row:
         raise HTTPException(status_code=404, detail=f"Report for run {run_id} not found")
 
-    report = row["visibility_report"]
-    if isinstance(report, str):
-        report = json.loads(report)
+    def _jsonb(val):
+        if val is None:
+            return None
+        return val if isinstance(val, (list, dict)) else json.loads(val)
 
     return {
-        "run_id":                str(row["run_id"]),
-        "tenant_id":             str(row["tenant_id"]),
-        "country":               row["country"],
-        "visibility_report":     report,
-        "confidence_score":      float(row["confidence_score"]) if row["confidence_score"] is not None else None,
-        "keyword_count":         row["keyword_count"],
-        "existing_content_risk": row["existing_content_risk"],
-        "fetched_at":            row["fetched_at"].isoformat() if row["fetched_at"] else None,
+        "run_id":            str(row["run_id"]),
+        "tenant_id":         str(row["tenant_id"]),
+        "country":           row["country"],
+        "top_opportunities": _jsonb(row["top_opportunities"]),
+        "keyword_gaps":      _jsonb(row["keyword_gaps"]),
+        "primary_keywords":  _jsonb(row["primary_keywords"]),
+        "competitor_data":   row["competitor_data"],
+        "google_trends":     row["google_trends"],
+        "reddit_insights":   row["reddit_insights"],
+        "gsc_data":          row["gsc_data"],
+        "confidence_score":  float(row["confidence_score"]) if row["confidence_score"] is not None else None,
+        "fetched_at":        row["fetched_at"].isoformat() if row["fetched_at"] else None,
     }

@@ -38,7 +38,9 @@ async def lifespan(app: FastAPI):
     app.state.pool = pool
 
     # Build and register S2 graph (async — awaits checkpointer.setup())
-    import boto3, json as _json
+    import boto3
+    import json as _json
+
     def _get_api_keys():
         try:
             client = boto3.client("secretsmanager", region_name=os.environ.get("AWS_REGION", "us-west-1"))

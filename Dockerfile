@@ -2,13 +2,14 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install system deps including C++ compiler for chroma-hnswlib
+# Install system deps including C++ compiler for chroma-hnswlib and git for pip VCS deps
 RUN apt-get update && apt-get install -y \
     curl \
     gcc \
     g++ \
     cmake \
     build-essential \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python deps
