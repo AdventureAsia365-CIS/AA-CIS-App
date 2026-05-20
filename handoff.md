@@ -1,41 +1,22 @@
-# CIS Session 11 Handoff — 14/05/2026
+# AA-CIS-App Handoff — Session 22 (21/05/2026)
 
-## Status: Phase 4 COMPLETE ✅
+## State
+- Branch: develop | Commit: ae2ba56
+- ECS: api:151 | CI #241 ✅ | Deploy Dev #147 ✅
+- AWS: STOPPED (ECS desired=0, RDS stopped)
 
-## AWS State
-- ECS aa-cis-dev-api: desired=0, running=0 (STOPPED)
-- RDS aa-cis-dev-db: stopping → will be stopped
-- API Gateway: owq9as3wjl (ALWAYS ON — no cost when idle)
-- Lambda Authorizer: aa-cis-dev-authorizer (ALWAYS ON — no cost when idle)
+## What was built (AA-45)
+- services/acp_s3/: Lambda handler — skeleton-then-expand (Sonnet), ads (Haiku), 5 validators, 3-tier lessons
+- api/routers/v1_s3.py: POST /v1/s3/run, GET /v1/s3/runs/{id}, POST /v1/hitl/gate2/{id}/approve|reject
+- migrations/versions/031_acp_silver_s3_v2.sql: ads_plan + acp_run_context + acp_lessons_agency/shared + ALTER content_calendars
 
-## Last Deploy
-- ECS task def: api:137
-- CI #218 ✅ | Deploy Dev #130 ✅
-- Vercel Production: 4iiN9RaQ2 (commit 85ed50d)
+## Pending (Session 23 must do FIRST)
+1. Apply migration 031 via S3-mediated ECS exec (RDS must be running)
+2. Deploy Lambda aa-cis-dev-acp-s3-campaign-planner via AA-CIS-Infra Terraform
+3. AA-89: B2B self-approval — migration 021
 
-## Completed This Session
-- AA-57: Tenant detail bugs (quality_score, pipeline→activity tab, aa_internal tours)
-- AA-23: Remove Langfuse (~$8/mo saved)
-- AA-22: SF fallback router (threshold=15) + HITL IAM fix
-- AA-13: API Gateway REST + Lambda Authorizer + 4 usage plans + custom domain
-- AA-60: Dashboard all-tenant metrics + all X-API-Key routing fixes
-
-## API Gateway Routing (IMPORTANT)
-All server-side Next.js routes calling /v1/* MUST either:
-  a) Use /api/tenant/ proxy (handles X-API-Key automatically)
-  b) Add header: X-API-Key: INTERNAL_API_KEY
-
-Public routes (no auth): /health, /auth/*, /docs, /openapi.json
-Admin routes (JWT only): /admin/*
-Content routes (JWT only): /content/*
-B2B routes (X-API-Key required): /v1/*
-
-## Next Session
-1. AA-11: Phase 3 Report DOCX → Ms. Thu (Claude Chat, no AWS needed)
-2. Regenerate aa_internal API key: POST /admin/tenants/{id}/rotate-key
-3. Disable WAF after verifying API GW rate limiting stable
-4. Consider Phase 5: Webhook notifications, B2B self-signup
-
-## Start Next Session
-aws rds start-db-instance --db-instance-identifier aa-cis-dev-db --profile pqnghiep-admin --region us-west-1
-aws ecs update-service --cluster aa-cis-dev-cluster --service aa-cis-dev-api --desired-count 1 --profile pqnghiep-admin --region us-west-1
+## Known deviations (accepted)
+- InvocationType=Event for S3 Lambda (not RequestResponse) — correct for 15-min Lambda
+- acp_shared.tenants FK dropped in migration 031 — table does not exist in DB
+- social_plan table NOT in S3 — moved to AA-80 (M4)
+- GET /v1/s3/runs/{id} returns full expanded_markdown + campaigns (UI requires it)

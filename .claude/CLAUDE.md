@@ -1,11 +1,11 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 14/05/2026 | ECS api:137 | CI #218
+# Updated: 21/05/2026 | ECS api:151 | CI #241
 
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway owq9as3wjl)
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel)
-- ECS task def: api:138 | CI #220 green | Deploy Dev #132
-- AWS: STOPPED (ECS 0/0, RDS stopping)
+- ECS task def: api:151 | CI #241 green | Deploy Dev #147
+- AWS: STOPPED (ECS desired=0, RDS stopped)
 - API Gateway: owq9as3wjl | Lambda Authorizer: aa-cis-dev-authorizer
 - DB: PostgreSQL 15, aa_cis_dev, secret: aa-cis/dev/rds (plain DSN)
 - Tours: 7 in catalog (WanderLux dev session, 15 published Sri Lanka) | 5 tenants | avg quality 9.9
@@ -86,34 +86,34 @@ S3 Bronze upload → Ingestion Lambda → shared.pipeline_runs (status=ingesting
 pytest tests/ -v
 104 integration tests + 23 E2E Playwright tests baseline
 
-## ACTIVE WORK — 19/05/2026
-Session 12 COMPLETE. AA-85 COMPLETE.
-Last commit: 2b9ea74
+## ACTIVE WORK — 21/05/2026
+Session 22 COMPLETE. AA-45 COMPLETE.
+Last commit: ae2ba56 (AA-CIS-App) | 2a37231 (AA-ACP-App)
 
-### ✅ Done Session 12 (AA-85)
-- Root cause: int(None) crash when v_tenant_monthly_usage has no quota row
-- Fix: COALESCE guards on usage query + voice_examples JSONB parse fix
-- Migration 018: 8 new brand identity columns on tenant_brand_rules
-- Seeded full brand identity for 4 new tenants (atlas-hearth, terra-family-expeditions, trail-pulse, wildkind-travel)
-- CatalogTab UI overflow: flex column layout so SEO Health/Actions scroll properly
+### ✅ Done Session 22 (AA-45 — S3 Campaign Planner)
+- services/acp_s3/: Lambda handler — skeleton-then-expand (Sonnet), ads (Haiku), 5 validators, 3-tier lessons
+- api/routers/v1_s3.py: POST /v1/s3/run, GET /v1/s3/runs/{id}, POST /v1/hitl/gate2/{id}/approve|reject
+- migrations/versions/031_acp_silver_s3_v2.sql: ads_plan + acp_run_context + acp_lessons_agency/shared + ALTER content_calendars
+- Gate 2 HITL: audit_log mandatory, NEVER auto-approve, notes required on reject, double-submit 409 guard
+- Portal page AA-ACP-App: src/app/(admin)/workspace/s3/review/page.tsx — calendar + ads accordion + funnel bar + approve/reject modals
+- CI #241 ✅ | Deploy Dev #147 ✅
 
-### 🔴 Next Session Priority
-1. AA-11: Phase 3 Report DOCX → Ms. Thu (Claude Chat, no AWS needed)
-2. Regenerate aa_internal API key: POST /admin/tenants/{id}/rotate-key
-3. Disable WAF after verifying API GW rate limiting stable
-4. Phase 5 planning: Webhook notifications, B2B self-signup
-5. Add quota rows to membership_plans for 4 new tenants (quota% shows 0% currently)
+### 🔴 Next Session Priority (Session 23)
+1. Apply migration 031 via S3-mediated ECS exec (RDS must be running FIRST)
+2. Deploy Lambda aa-cis-dev-acp-s3-campaign-planner via AA-CIS-Infra Terraform
+3. AA-89: B2B self-approval — migration 021
 
 ### ⚠️ Open Issues
+- Migration 031 NOT yet applied to live DB — apply when RDS started next session
+- Lambda aa-cis-dev-acp-s3-campaign-planner NOT yet deployed to AWS (Infra work pending)
 - AA-36: No char limits on rewrite fields — Backlog
 - api_task_def_arn hardcoded :21 in main.tf — AA-CIS-Infra (AA-22 tech debt)
 - New tenant quota_pct always 0% (no membership_plans row) — cosmetic only
 
-## Session 12 Close — 19/05/2026
-- ECS desired=0, RDS stopping
-- Task def: api:138 | CI #220 | Deploy #132 | Commits: d09a786, 2b9ea74
-- 4 new tenant brand identities seeded + detail panel fixed
-- CatalogTab scroll layout fixed
+## Session 22 Close — 21/05/2026
+- ECS desired=0, RDS stopped
+- Task def: api:151 | CI #241 | Last deploy #147
+- Commits: ae2ba56 (AA-CIS-App AA-45), 2a37231 (AA-ACP-App portal)
 
 
 ## Implementation Notes Pattern
