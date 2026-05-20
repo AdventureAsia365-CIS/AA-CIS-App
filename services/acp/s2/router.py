@@ -9,6 +9,8 @@ Routes (all under prefix /acp/s2):
 
 Concurrency: max 2 concurrent runs per tenant via acpcore semaphore.
 Pre-check is synchronous (TOCTOU-safe for scaffold); background task holds the slot.
+
+Graph lifecycle: compiled graph is stored on app.state.s2_graph by the lifespan handler.
 """
 import asyncio
 import json
@@ -27,18 +29,12 @@ from acpcore.errors import ACPErrorCode
 logger = structlog.get_logger()
 router = APIRouter(tags=["S2 Research"])
 
-_s2_graph = None
 
-
-def init_s2_graph(graph) -> None:
-    global _s2_graph
-    _s2_graph = graph
-
-
-def _get_s2_graph():
-    if _s2_graph is None:
+def _get_s2_graph(request: Request):
+    graph = getattr(request.app.state, "s2_graph", None)
+    if graph is None:
         raise HTTPException(status_code=503, detail="S2 graph not initialized")
-    return _s2_graph
+    return graph
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -125,7 +121,7 @@ async def run_s2(
             ON CONFLICT (key) DO NOTHING
         """, idem_key, run_id)
 
-    graph = _get_s2_graph()
+    graph = _get_s2_graph(request)
     initial_state = {
         "run_id": run_id,
         "country": body.country,
@@ -206,13 +202,13 @@ async def resume_s2(
     tenant_id = str(tenant.get("sub", ""))
 
     async with pool.acquire() as conn:
-        updated = await conn.execute("""
+        await conn.execute("""
             UPDATE acp_shared.acp_hitl_requests
             SET status = 'approved', resolved_at = NOW()
             WHERE run_id = $1::uuid AND status = 'pending'
         """, run_id)
 
-    graph = _get_s2_graph()
+    graph = _get_s2_graph(request)
     config = {"configurable": {"thread_id": run_id}}
     sem = _get_semaphore(tenant_id)
 

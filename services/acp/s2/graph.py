@@ -1,15 +1,12 @@
 """
 S2 LangGraph research agent graph.
 
-build_s2_graph(pool, s3_client, api_keys) → CompiledStateGraph
+build_s2_graph(pool, s3_client, api_keys) → StateGraph (uncompiled)
+get_compiled_s2_graph(pool, s3_client, api_keys, database_url) → compiled graph
 
-Linear flow: dataforseo → apify → google_trends → reddit → gsc → expand_scope → synthesize
-Conditional logic is handled inside each node (no-op if condition not met).
-
-Checkpointing: uses AsyncPostgresSaver if langgraph-checkpoint-postgres is installed;
-falls back to MemorySaver (loses state across pod restarts — not for production).
+Separated so the checkpointer (AsyncPostgresSaver) can be awaited at startup
+without mixing sync construction with async setup.
 """
-import os
 import structlog
 from langgraph.graph import StateGraph, START, END
 
@@ -27,7 +24,10 @@ from services.acp.s2.tools import (
 logger = structlog.get_logger()
 
 
-def build_s2_graph(pool, s3_client, api_keys: dict):
+def build_s2_graph(pool, s3_client, api_keys: dict) -> StateGraph:
+    """Build the S2 state graph with nodes wired to runtime dependencies.
+    Returns an uncompiled StateGraph — caller must compile with a checkpointer.
+    """
     builder = StateGraph(S2AgentState)
 
     builder.add_node("dataforseo",    make_dataforseo_node(pool, s3_client, api_keys))
@@ -47,17 +47,19 @@ def build_s2_graph(pool, s3_client, api_keys: dict):
     builder.add_edge("expand_scope",  "synthesize")
     builder.add_edge("synthesize",    END)
 
-    checkpointer = _make_checkpointer()
+    return builder
+
+
+async def get_compiled_s2_graph(pool, s3_client, api_keys: dict, database_url: str):
+    """Build and compile the S2 graph with an AsyncPostgresSaver checkpointer.
+    Calls checkpointer.setup() to create checkpoint tables in acp_shared schema.
+    Must be awaited inside an async lifespan context.
+    """
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+    checkpointer = AsyncPostgresSaver.from_conn_string(database_url)
+    await checkpointer.setup()
+    logger.info("s2_graph_postgres_checkpointer_ready")
+
+    builder = build_s2_graph(pool, s3_client, api_keys)
     return builder.compile(checkpointer=checkpointer)
-
-
-def _make_checkpointer():
-    try:
-        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-        db_url = os.environ["DATABASE_URL"]
-        logger.info("s2_graph_using_postgres_checkpointer")
-        return AsyncPostgresSaver.from_conn_string(db_url, schema_name="acp_shared")
-    except (ImportError, KeyError, Exception) as exc:
-        from langgraph.checkpoint.memory import MemorySaver
-        logger.warning("s2_graph_using_memory_checkpointer", reason=str(exc))
-        return MemorySaver()

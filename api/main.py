@@ -21,7 +21,7 @@ from api.routers.v1_s0 import router as v1_s0_router
 from api.routers.v1_s1 import router as v1_s1_router
 from api.routers.admin import router as admin_router
 from api.middleware.rate_limit import rate_limit_middleware
-from services.acp.s2.router import router as v1_s2_router, init_s2_graph
+from services.acp.s2.router import router as v1_s2_router
 pool: asyncpg.Pool = None
 
 @asynccontextmanager
@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
     )
     app.state.pool = pool
 
-    # Build and register S2 graph
+    # Build and register S2 graph (async — awaits checkpointer.setup())
     import boto3, json as _json
     def _get_api_keys():
         try:
@@ -47,10 +47,11 @@ async def lifespan(app: FastAPI):
         except Exception:
             return {}
 
-    from services.acp.s2.graph import build_s2_graph
+    from services.acp.s2.graph import get_compiled_s2_graph
     s3 = boto3.client("s3", region_name=os.environ.get("AWS_REGION", "us-west-1"))
-    s2_graph = build_s2_graph(pool, s3, _get_api_keys())
-    init_s2_graph(s2_graph)
+    app.state.s2_graph = await get_compiled_s2_graph(
+        pool, s3, _get_api_keys(), os.environ["DATABASE_URL"]
+    )
 
     yield
     await pool.close()

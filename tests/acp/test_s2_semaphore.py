@@ -60,14 +60,14 @@ async def test_semaphore_allows_two_concurrent():
 
     mock_graph = AsyncMock()
     mock_graph.ainvoke = AsyncMock(return_value={})
+    request.app.state.s2_graph = mock_graph
 
-    with patch("services.acp.s2.router._s2_graph", mock_graph):
-        with patch("asyncio.create_task"):
-            result = await run_s2(
-                body=RunS2Request(country="Thailand"),
-                request=request,
-                tenant=TENANT,
-            )
+    with patch("asyncio.create_task"):
+        result = await run_s2(
+            body=RunS2Request(country="Thailand"),
+            request=request,
+            tenant=TENANT,
+        )
     assert result["status"] == "running"
 
 

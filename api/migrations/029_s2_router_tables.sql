@@ -1,9 +1,11 @@
 -- =============================================================================
--- Migration 028: S2 visibility_reports + idempotency_keys
+-- Migration 029: S2 visibility_reports + idempotency_keys
 -- Project: AA-CIS (Adventure Asia Content Intelligence System)
 -- Date: 20/05/2026
 -- Ticket: AA-43 — S2 LangGraph Research Agent
 -- =============================================================================
+-- Numbered 029 because 028 (idempotency_keys) was applied via ECS exec before
+-- this file was created. IF NOT EXISTS guards make this safe to re-run.
 -- acp_silver_s2.visibility_reports: one row per S2 run, stores visibility
 --   report JSONB + S3 pointers for each data source. TTL guarded via fetched_at.
 -- acp_shared.idempotency_keys: dedup table keyed on tenant_id:country.

@@ -97,14 +97,14 @@ async def test_idempotency_first_call_creates_run():
 
     mock_graph = AsyncMock()
     mock_graph.ainvoke = AsyncMock(return_value={})
+    request.app.state.s2_graph = mock_graph
 
-    with patch("services.acp.s2.router._s2_graph", mock_graph):
-        with patch("asyncio.create_task"):
-            result = await run_s2(
-                body=RunS2Request(country="Thailand", idempotency_key=IDEM_KEY),
-                request=request,
-                tenant=TENANT,
-            )
+    with patch("asyncio.create_task"):
+        result = await run_s2(
+            body=RunS2Request(country="Thailand", idempotency_key=IDEM_KEY),
+            request=request,
+            tenant=TENANT,
+        )
 
     assert result["status"] == "running"
     assert result["run_id"] == new_run_id
@@ -143,14 +143,14 @@ async def test_idempotency_default_key_is_tenant_country():
 
     mock_graph = AsyncMock()
     mock_graph.ainvoke = AsyncMock(return_value={})
+    request.app.state.s2_graph = mock_graph
 
-    with patch("services.acp.s2.router._s2_graph", mock_graph):
-        with patch("asyncio.create_task"):
-            result = await run_s2(
-                body=RunS2Request(country="Vietnam"),
-                request=request,
-                tenant=TENANT,
-            )
+    with patch("asyncio.create_task"):
+        result = await run_s2(
+            body=RunS2Request(country="Vietnam"),
+            request=request,
+            tenant=TENANT,
+        )
 
     assert result["status"] == "running"
 
