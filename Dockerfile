@@ -1,19 +1,28 @@
+# syntax=docker/dockerfile:1
 FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install system deps including C++ compiler for chroma-hnswlib
+# Install system deps including C++ compiler for chroma-hnswlib and git for pip VCS deps
 RUN apt-get update && apt-get install -y \
     curl \
     gcc \
     g++ \
     cmake \
     build-essential \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python deps
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements-acpcore.txt ./
+RUN --mount=type=secret,id=acpcore_token,required=true \
+    GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0="url.https://x-access-token:$(cat /run/secrets/acpcore_token)@github.com/.insteadOf" \
+    GIT_CONFIG_VALUE_0="https://github.com/" \
+    pip install --no-cache-dir -r requirements.txt && \
+    GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0="url.https://x-access-token:$(cat /run/secrets/acpcore_token)@github.com/.insteadOf" \
+    GIT_CONFIG_VALUE_0="https://github.com/" \
+    pip install --no-cache-dir --no-deps -r requirements-acpcore.txt
 
 # Copy source
 COPY api/ ./api/

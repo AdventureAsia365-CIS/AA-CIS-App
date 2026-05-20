@@ -5,13 +5,13 @@ import asyncpg
 import redis.asyncio as aioredis
 import os
 import uuid
+import structlog
 
 from shared.repository.raw_tour_repository import RawTourRepository
 from api.routers.auth import (
     _hash_api_key, _create_jwt, verify_jwt,
     TenantLoginRequest, TenantLoginResponse,
 )
-
 from api.routers.v1_tours import router as v1_tours_router
 from api.routers.v1_exports import router as v1_exports_router
 from api.routers.v1_pipeline import router as v1_pipeline_router
@@ -21,6 +21,9 @@ from api.routers.v1_s0 import router as v1_s0_router
 from api.routers.v1_s1 import router as v1_s1_router
 from api.routers.admin import router as admin_router
 from api.middleware.rate_limit import rate_limit_middleware
+from services.acp.s2.router import router as v1_s2_router
+
+logger = structlog.get_logger()
 pool: asyncpg.Pool = None
 
 @asynccontextmanager
@@ -35,6 +38,29 @@ async def lifespan(app: FastAPI):
         os.environ["DATABASE_URL"], min_size=2, max_size=10,
     )
     app.state.pool = pool
+
+    # Build and register S2 graph (async — awaits checkpointer.setup())
+    import boto3
+    import json as _json
+
+    def _get_api_keys():
+        try:
+            client = boto3.client("secretsmanager", region_name=os.environ.get("AWS_REGION", "us-west-1"))
+            secret = client.get_secret_value(SecretId="aa-cis/dev/api-keys")
+            return _json.loads(secret["SecretString"])
+        except Exception:
+            return {}
+
+    from services.acp.s2.graph import get_compiled_s2_graph
+    s3 = boto3.client("s3", region_name=os.environ.get("AWS_REGION", "us-west-1"))
+    try:
+        app.state.s2_graph = await get_compiled_s2_graph(
+            pool, s3, _get_api_keys(), os.environ["DATABASE_URL"]
+        )
+    except Exception as e:
+        logger.warning("s2_graph_init_failed", error=str(e))
+        app.state.s2_graph = None
+
     yield
     await pool.close()
     await redis.aclose()
@@ -66,6 +92,7 @@ app.include_router(v1_acp_router)
 app.include_router(v1_competitors_router)
 app.include_router(v1_s0_router)
 app.include_router(v1_s1_router, prefix="/acp/s1")
+app.include_router(v1_s2_router, prefix="/acp/s2")
 app.include_router(admin_router)
 
 app.middleware("http")(rate_limit_middleware)
