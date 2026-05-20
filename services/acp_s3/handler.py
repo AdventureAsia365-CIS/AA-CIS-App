@@ -230,7 +230,8 @@ def handler(event, context):
         )
 
         # ── Step 7: Lesson update ─────────────────────────────────────────────
-        skeleton_summary = f"{skeleton.document_title} — {len(skeleton.weeks)} weeks, {sum(len(w.posts) for w in skeleton.weeks)} posts"
+        n_posts = sum(len(w.posts) for w in skeleton.weeks)
+        skeleton_summary = f"{skeleton.document_title} — {len(skeleton.weeks)} weeks, {n_posts} posts"
         lesson_output, in7, out7 = _lessons.lesson_update_call(
             run_id, tenant_id, country, lesson_summary, skeleton_summary
         )

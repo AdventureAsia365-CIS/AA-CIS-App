@@ -1,6 +1,3 @@
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
 import json
 from unittest.mock import MagicMock, patch
 
@@ -11,8 +8,10 @@ from models import AdGroup, AdsOutput, Campaign, CompactPacket
 def _make_packet():
     return CompactPacket(
         top_keywords=[
-            {"keyword": "vietnam adventure tours", "vol": 1000, "competition": "medium", "cpc": 2.5, "intent": "commercial"},
-            {"keyword": "vietnam trekking packages", "vol": 800, "competition": "low", "cpc": 1.8, "intent": "informational"},
+            {"keyword": "vietnam adventure tours", "vol": 1000,
+             "competition": "medium", "cpc": 2.5, "intent": "commercial"},
+            {"keyword": "vietnam trekking packages", "vol": 800,
+             "competition": "low", "cpc": 1.8, "intent": "informational"},
         ],
         funnel_mix={"tofu": 20, "mofu": 60, "bofu": 20},
         cadence_weeks=12,
