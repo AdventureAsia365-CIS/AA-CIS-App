@@ -5,6 +5,9 @@ import asyncpg
 import redis.asyncio as aioredis
 import os
 import uuid
+import structlog
+
+logger = structlog.get_logger()
 
 from shared.repository.raw_tour_repository import RawTourRepository
 from api.routers.auth import (
@@ -51,9 +54,13 @@ async def lifespan(app: FastAPI):
 
     from services.acp.s2.graph import get_compiled_s2_graph
     s3 = boto3.client("s3", region_name=os.environ.get("AWS_REGION", "us-west-1"))
-    app.state.s2_graph = await get_compiled_s2_graph(
-        pool, s3, _get_api_keys(), os.environ["DATABASE_URL"]
-    )
+    try:
+        app.state.s2_graph = await get_compiled_s2_graph(
+            pool, s3, _get_api_keys(), os.environ["DATABASE_URL"]
+        )
+    except Exception as e:
+        logger.warning("s2_graph_init_failed", error=str(e))
+        app.state.s2_graph = None
 
     yield
     await pool.close()

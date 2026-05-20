@@ -44,7 +44,7 @@ jobs:
           FULL_IMAGE=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
           LATEST=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
           docker build \
-            --build-arg ACPCORE_TOKEN=${{ secrets.ACPCORE_READ_TOKEN }} \
+            --secret id=acpcore_token,env=ACPCORE_READ_TOKEN \
             -t $FULL_IMAGE -t $LATEST .
           docker push $FULL_IMAGE
           docker push $LATEST
