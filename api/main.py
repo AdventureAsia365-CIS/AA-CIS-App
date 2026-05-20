@@ -21,6 +21,7 @@ from api.routers.v1_s0 import router as v1_s0_router
 from api.routers.v1_s1 import router as v1_s1_router
 from api.routers.admin import router as admin_router
 from api.middleware.rate_limit import rate_limit_middleware
+from services.acp.s2.router import router as v1_s2_router, init_s2_graph
 pool: asyncpg.Pool = None
 
 @asynccontextmanager
@@ -35,6 +36,22 @@ async def lifespan(app: FastAPI):
         os.environ["DATABASE_URL"], min_size=2, max_size=10,
     )
     app.state.pool = pool
+
+    # Build and register S2 graph
+    import boto3, json as _json
+    def _get_api_keys():
+        try:
+            client = boto3.client("secretsmanager", region_name=os.environ.get("AWS_REGION", "us-west-1"))
+            secret = client.get_secret_value(SecretId="aa-cis/dev/api-keys")
+            return _json.loads(secret["SecretString"])
+        except Exception:
+            return {}
+
+    from services.acp.s2.graph import build_s2_graph
+    s3 = boto3.client("s3", region_name=os.environ.get("AWS_REGION", "us-west-1"))
+    s2_graph = build_s2_graph(pool, s3, _get_api_keys())
+    init_s2_graph(s2_graph)
+
     yield
     await pool.close()
     await redis.aclose()
@@ -66,6 +83,7 @@ app.include_router(v1_acp_router)
 app.include_router(v1_competitors_router)
 app.include_router(v1_s0_router)
 app.include_router(v1_s1_router, prefix="/acp/s1")
+app.include_router(v1_s2_router, prefix="/acp/s2")
 app.include_router(admin_router)
 
 app.middleware("http")(rate_limit_middleware)
