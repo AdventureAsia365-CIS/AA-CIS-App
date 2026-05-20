@@ -1,4 +1,4 @@
-from .models import BrandRulesRow, ParsedBrief
+from models import BrandRulesRow, ParsedBrief
 from datetime import datetime, timezone
 
 

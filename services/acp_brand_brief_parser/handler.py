@@ -2,9 +2,9 @@ import traceback
 
 import boto3
 
-from .builder import build_rules_row
-from .db import upsert_brand_rules
-from .parser import parse_docx
+from builder import build_rules_row
+from db import upsert_brand_rules
+from parser import parse_docx
 
 
 def handler(event, context):

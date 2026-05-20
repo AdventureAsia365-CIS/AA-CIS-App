@@ -3,7 +3,7 @@ from pathlib import Path
 
 from docx import Document
 
-from .models import ParsedBrief, VoiceExamples
+from models import ParsedBrief, VoiceExamples
 
 _SECTION_PREFIXES = (
     "brand type:",
