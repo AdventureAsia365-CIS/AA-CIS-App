@@ -38,13 +38,13 @@ jobs:
       - name: Build, tag, push image
         id: build
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACPCORE_READ_TOKEN: ${{ secrets.ACPCORE_READ_TOKEN }}
         run: |
           IMAGE_TAG=dev-${{ github.sha }}
           FULL_IMAGE=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
           LATEST=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
           docker build \
-            --secret id=github_token,env=GITHUB_TOKEN \
+            --build-arg ACPCORE_TOKEN=${{ secrets.ACPCORE_READ_TOKEN }} \
             -t $FULL_IMAGE -t $LATEST .
           docker push $FULL_IMAGE
           docker push $LATEST

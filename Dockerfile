@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.4
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -13,13 +12,13 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python deps — github_token secret used to authenticate private acpcore repo
-COPY requirements.txt .
-RUN --mount=type=secret,id=github_token \
+COPY requirements.txt requirements-acpcore.txt ./
+ARG ACPCORE_TOKEN
+RUN pip install --no-cache-dir -r requirements.txt && \
     GIT_CONFIG_COUNT=1 \
-    GIT_CONFIG_KEY_0="url.https://x-access-token:$(cat /run/secrets/github_token)@github.com/.insteadOf" \
+    GIT_CONFIG_KEY_0="url.https://x-access-token:${ACPCORE_TOKEN}@github.com/.insteadOf" \
     GIT_CONFIG_VALUE_0="https://github.com/" \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir --no-deps -r requirements-acpcore.txt
 
 # Copy source
 COPY api/ ./api/

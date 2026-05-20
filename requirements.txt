@@ -41,4 +41,3 @@ sqlalchemy>=2.0.29
 PyJWT>=2.8.0
 redis[asyncio]>=5.0.0
 python-multipart>=0.0.9
-acpcore @ git+https://github.com/AdventureAsia365-CIS/AA-ACP-Core.git@v0.4.0
