@@ -33,9 +33,9 @@ logger = structlog.get_logger()
 router = APIRouter(tags=["S1 Rewrite"])
 
 _TERMINAL_STATUSES = {"published", "failed", "rejected"}
-_SSE_POLL_INTERVAL = 2      # seconds between DB polls
-_SSE_HEARTBEAT_S   = 15     # seconds between SSE heartbeat comments
-_SSE_TIMEOUT_S     = 1800   # 30 minutes max stream duration
+_SSE_POLL_INTERVAL = 2    # seconds between DB polls
+_SSE_HEARTBEAT_S = 15     # seconds between SSE heartbeat comments
+_SSE_TIMEOUT_S = 1800     # 30 minutes max stream duration
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -97,8 +97,8 @@ def _row_to_tour(r) -> dict:
 async def list_approved_tours(
     request:          Request,
     tenant=Depends(_get_tenant),
-    country:          Optional[str]  = None,
-    supplier:         Optional[str]  = None,
+    country: Optional[str] = None,
+    supplier: Optional[str] = None,
     upload_date_from: Optional[date] = None,
     upload_date_to:   Optional[date] = None,
 ):
@@ -111,19 +111,23 @@ async def list_approved_tours(
 
     if country:
         conditions.append(f"LOWER(country) = LOWER(${idx})")
-        params.append(country); idx += 1
+        params.append(country)
+        idx += 1
 
     if supplier:
         conditions.append(f"LOWER(provider) LIKE LOWER(${idx})")
-        params.append(f"%{supplier}%"); idx += 1
+        params.append(f"%{supplier}%")
+        idx += 1
 
     if upload_date_from:
         conditions.append(f"ingest_at >= ${idx}")
-        params.append(upload_date_from); idx += 1
+        params.append(upload_date_from)
+        idx += 1
 
     if upload_date_to:
         conditions.append(f"ingest_at < ${idx} + INTERVAL '1 day'")
-        params.append(upload_date_to); idx += 1
+        params.append(upload_date_to)
+        idx += 1
 
     where = " AND ".join(conditions)
 
@@ -174,12 +178,13 @@ async def create_run(
             )
 
         # Create acp_runs row
-        run_row = await conn.fetchrow("""
+        run_row = await conn.fetchrow(
+            """
             INSERT INTO acp_shared.acp_runs
                 (tenant_id, country, status, tour_count, run_config)
             VALUES ($1, $2, 'running', $3, $4)
             RETURNING run_id
-        """,
+            """,
             str(tenant.get("sub", "")),
             run_config_dict.get("language", ""),
             len(validated_ids),
@@ -270,7 +275,8 @@ async def list_runs(
         "data": [
             {
                 "run_id":     str(r["run_id"]),
-                "run_config": r["run_config"] if isinstance(r["run_config"], dict) else json.loads(r["run_config"] or "{}"),
+                "run_config": (r["run_config"] if isinstance(r["run_config"], dict)
+                               else json.loads(r["run_config"] or "{}")),
                 "status":     r["status"],
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
                 "total_tours":  r["tour_count"],
@@ -333,7 +339,7 @@ async def _sse_generator(pool, run_id: str):
 
         all_terminal = all(r["status"] in _TERMINAL_STATUSES for r in rows)
         if all_terminal:
-            done   = sum(1 for r in rows if r["status"] == "published")
+            done = sum(1 for r in rows if r["status"] == "published")
             failed = sum(1 for r in rows if r["status"] == "failed")
             summary = {
                 "event":   "complete",
@@ -413,7 +419,8 @@ async def list_tour_versions(
             {
                 "id":            str(r["id"]),
                 "acp_run_id":    str(r["acp_run_id"]),
-                "run_config":    r["run_config"] if isinstance(r["run_config"], dict) else json.loads(r["run_config"] or "{}"),
+                "run_config":    (r["run_config"] if isinstance(r["run_config"], dict)
+                                  else json.loads(r["run_config"] or "{}")),
                 "content":       r["content"] if isinstance(r["content"], dict) else json.loads(r["content"] or "{}"),
                 "quality_score": float(r["quality_score"]) if r["quality_score"] is not None else None,
                 "status":        r["status"],
