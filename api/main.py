@@ -19,6 +19,7 @@ from api.routers.v1_acp import router as v1_acp_router
 from api.routers.v1_competitors import router as v1_competitors_router
 from api.routers.v1_s0 import router as v1_s0_router
 from api.routers.v1_s1 import router as v1_s1_router
+from api.routers.v1_s3 import router as v1_s3_router
 from api.routers.admin import router as admin_router
 from api.middleware.rate_limit import rate_limit_middleware
 from services.acp.s2.router import router as v1_s2_router
@@ -93,6 +94,7 @@ app.include_router(v1_competitors_router)
 app.include_router(v1_s0_router)
 app.include_router(v1_s1_router, prefix="/acp/s1")
 app.include_router(v1_s2_router, prefix="/acp/s2")
+app.include_router(v1_s3_router)
 app.include_router(admin_router)
 
 app.middleware("http")(rate_limit_middleware)
