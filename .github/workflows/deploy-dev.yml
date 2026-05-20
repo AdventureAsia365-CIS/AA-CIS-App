@@ -37,11 +37,15 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
       - name: Build, tag, push image
         id: build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           IMAGE_TAG=dev-${{ github.sha }}
           FULL_IMAGE=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
           LATEST=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
-          docker build -t $FULL_IMAGE -t $LATEST .
+          docker build \
+            --secret id=github_token,env=GITHUB_TOKEN \
+            -t $FULL_IMAGE -t $LATEST .
           docker push $FULL_IMAGE
           docker push $LATEST
           echo "image=$LATEST" >> $GITHUB_OUTPUT
