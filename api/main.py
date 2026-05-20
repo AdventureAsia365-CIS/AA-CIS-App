@@ -7,14 +7,11 @@ import os
 import uuid
 import structlog
 
-logger = structlog.get_logger()
-
 from shared.repository.raw_tour_repository import RawTourRepository
 from api.routers.auth import (
     _hash_api_key, _create_jwt, verify_jwt,
     TenantLoginRequest, TenantLoginResponse,
 )
-
 from api.routers.v1_tours import router as v1_tours_router
 from api.routers.v1_exports import router as v1_exports_router
 from api.routers.v1_pipeline import router as v1_pipeline_router
@@ -25,6 +22,8 @@ from api.routers.v1_s1 import router as v1_s1_router
 from api.routers.admin import router as admin_router
 from api.middleware.rate_limit import rate_limit_middleware
 from services.acp.s2.router import router as v1_s2_router
+
+logger = structlog.get_logger()
 pool: asyncpg.Pool = None
 
 @asynccontextmanager

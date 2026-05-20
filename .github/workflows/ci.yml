@@ -156,8 +156,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build Docker image
+        env:
+          ACPCORE_READ_TOKEN: ${{ secrets.ACPCORE_READ_TOKEN }}
         run: |
           docker build \
+            --secret id=acpcore_token,env=ACPCORE_READ_TOKEN \
             --tag aa-cis-api:ci-${{ github.sha }} \
             --file Dockerfile \
             .
