@@ -79,3 +79,22 @@ echo ""
 echo "✅ Done:"
 ls -lh "$DIST_DIR/"
 package_lambda "content_generation" "content" langchain langchain-core langgraph anthropic
+
+# AA-78: brand_brief_parser — flat layout (absolute imports, no services/ nesting)
+package_brand_brief_parser() {
+  local ZIP_PATH="$DIST_DIR/brand_brief_parser.zip"
+  local TMP_DIR="$BUILD_DIR/brand_brief_parser"
+  rm -rf "$TMP_DIR" && mkdir -p "$TMP_DIR"
+  echo "🔨 Packaging brand_brief_parser → brand_brief_parser.zip"
+  "$VENV_PIP" install --quiet --target "$TMP_DIR" --ignore-installed --no-compile \
+    "python-docx==1.1.2" "psycopg2-binary==2.9.9" "pydantic==2.7.1" "boto3" || true
+  cp "$APP_DIR/services/acp_brand_brief_parser"/*.py "$TMP_DIR/"
+  find "$TMP_DIR" -name "*.dist-info" -type d -exec rm -rf {} + 2>/dev/null || true
+  find "$TMP_DIR" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+  pushd "$TMP_DIR" > /dev/null
+  zip -r -q "$ZIP_PATH" .
+  popd > /dev/null
+  rm -rf "$TMP_DIR"
+  echo "   ✅ brand_brief_parser.zip ($(du -sh "$ZIP_PATH" | cut -f1))"
+}
+package_brand_brief_parser
