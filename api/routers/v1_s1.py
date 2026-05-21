@@ -488,7 +488,9 @@ async def compare_tour_versions(
             "status":        row["status"],
             "is_active":     row["is_active"],
             "failure_codes": list(row["failure_codes"]) if row["failure_codes"] else [],
-            "preview_text":  (content if isinstance(content, dict) else json.loads(content or "{}")).get("aa_summary", "")[:300],
+            "preview_text":  (
+                content if isinstance(content, dict) else json.loads(content or "{}")
+            ).get("aa_summary", "")[:300],
             "created_at":    row["created_at"].isoformat() if row["created_at"] else None,
         }
 

@@ -39,7 +39,8 @@ AA_MATCHING_RULES = _load_prompt("aa_matching_rules.md")
 BLOG_BRIEF_RULES = _load_prompt("blog_brief_rules.md")
 SOCIAL_CONTENT_RULES = _load_prompt("social_content_rules.md")
 
-_SYSTEM_PROMPT = f"""You are an expert travel content strategist for Adventure Asia — a premium curated soft-adventure brand.
+_SYSTEM_PROMPT = f"""You are an expert travel content strategist for Adventure Asia \
+— a premium curated soft-adventure brand.
 
 {TOUR_VISIBILITY_RULES}
 

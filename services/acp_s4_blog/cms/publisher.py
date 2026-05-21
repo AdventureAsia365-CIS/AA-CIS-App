@@ -36,7 +36,8 @@ async def publish_draft_to_cms(pool, queue_id: str, draft_id: str,
 
         try:
             draft = await conn.fetchrow(
-                "SELECT title, content_md, slug, seo_title, seo_meta FROM acp_silver_s4.blog_drafts WHERE draft_id=$1::uuid",
+                "SELECT title, content_md, slug, seo_title, seo_meta"
+                " FROM acp_silver_s4.blog_drafts WHERE draft_id=$1::uuid",
                 draft_id,
             )
             if not draft:
@@ -60,11 +61,14 @@ async def publish_draft_to_cms(pool, queue_id: str, draft_id: str,
             result = await adapter.create_post(content)
 
             await conn.execute(
-                "UPDATE acp_shared.acp_cms_publish_queue SET status='published', wp_post_id=$2, wp_post_url=$3 WHERE queue_id=$1",
+                "UPDATE acp_shared.acp_cms_publish_queue"
+                " SET status='published', wp_post_id=$2, wp_post_url=$3 WHERE queue_id=$1",
                 queue_id, result.post_id, result.post_url,
             )
             await conn.execute(
-                "UPDATE acp_silver_s4.blog_drafts SET cms_publish_status='published', cms_post_id=$2, published_at=NOW() WHERE draft_id=$1::uuid",
+                "UPDATE acp_silver_s4.blog_drafts"
+                " SET cms_publish_status='published', cms_post_id=$2, published_at=NOW()"
+                " WHERE draft_id=$1::uuid",
                 draft_id, str(result.post_id),
             )
             logger.info("cms_publish_ok draft=%s wp_post=%s", draft_id, result.post_id)
@@ -72,7 +76,8 @@ async def publish_draft_to_cms(pool, queue_id: str, draft_id: str,
 
         except Exception as exc:
             await conn.execute(
-                "UPDATE acp_shared.acp_cms_publish_queue SET status='failed', retries=retries+1, last_error=$2 WHERE queue_id=$1",
+                "UPDATE acp_shared.acp_cms_publish_queue"
+                " SET status='failed', retries=retries+1, last_error=$2 WHERE queue_id=$1",
                 queue_id, str(exc)[:500],
             )
             await conn.execute(

@@ -482,7 +482,7 @@ async def save_node(state: S4BlogState) -> S4BlogState:
             section_text=f"{state.get('title','')} {state.get('primary_keyword','')}",
         )
         if links:
-            link_lines = "\n".join(f"- [{l['aa_name']}](/tours/{l['slug']})" for l in links[:3])
+            link_lines = "\n".join(f"- [{lnk['aa_name']}](/tours/{lnk['slug']})" for lnk in links[:3])
             content_md = content_md + f"\n\n**Explore Related Adventures:**\n{link_lines}"
             logger.info("s4_internal_links_added count=%d", len(links))
         elif not links:
