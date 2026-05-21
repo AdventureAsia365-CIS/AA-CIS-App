@@ -1,12 +1,13 @@
 """
-AA-49 H-2 — S4 Blog Draft Generation with post-processor + evaluator integration.
+AA-49 H-2 + AA-80 — S4 Blog Draft Generation.
 
 Flow:
   1. LLM generates blog draft (content_md, seo_title, seo_meta)
   2. apply_output_rules() — deterministic brand/quality rules (ECS, hits DB)
-  3. acp-s4-evaluate Lambda — isolated quality scoring (Bedrock only, no DB)
-  4. Gate: evaluator_score >= 7.5 required
-  5. Save to acp_silver_s4.blog_drafts with all harness columns
+  3. ValidatorAgent — 30+ structural/content checks + compiled db_rules (AA-80)
+  4. acp-s4-evaluate Lambda — isolated quality scoring (Bedrock only, no DB)
+  5. Gate: evaluator_score >= 7.5 required
+  6. Save to acp_silver_s4.blog_drafts with all harness columns
 """
 import json
 import boto3
@@ -14,6 +15,7 @@ import asyncpg
 import structlog
 
 from api.services.acp_post_processor import apply_output_rules, OutputRuleViolation
+from services.acp_s4_blog.validator import ValidatorAgent
 
 logger = structlog.get_logger()
 
@@ -63,7 +65,41 @@ async def generate_blog_draft(
     review_flags = output.get("review_flags", [])
     rules_applied = output.get("rules_applied", [])
 
-    # STEP 2 — Call acp-s4-evaluate Lambda (text-only — isolation enforced)
+    # STEP 2 — ValidatorAgent: 30+ structural/content checks + compiled db_rules (AA-80)
+    db_rules_rows = await db.fetch(
+        "SELECT rule_id::text, rule_type, pattern, action_value "
+        "FROM acp_shared.acp_output_rules WHERE is_active = TRUE AND stage IS NULL"
+    )
+    db_rules = [dict(r) for r in db_rules_rows]
+
+    validator = ValidatorAgent(db_rules=db_rules)
+    val_result = await validator.validate(
+        blog=output,
+        brief={
+            "primary_keyword": output.get("primary_keyword"),
+            "outline": output.get("outline"),
+            "destination": output.get("destination"),
+        },
+    )
+
+    logger.info("s4_validation_done",
+                passed=val_result.overall_passed,
+                score=val_result.overall_score,
+                failing=len(val_result.failing_sections))
+
+    if not val_result.overall_passed:
+        return {
+            "status": "validation_failed",
+            "validation_score": val_result.overall_score,
+            "failing_checks": [c.check_name for c in val_result.checks if not c.passed],
+            "repair_targets": val_result.repair_targets,
+        }
+
+    # Merge validator review_flags into output review_flags
+    val_flags = [{"check": c.check_name, "issues": c.issues} for c in val_result.checks if not c.passed]
+    review_flags = review_flags + val_flags
+
+    # STEP 3 — Call acp-s4-evaluate Lambda (text-only — isolation enforced)
     content_text = output.get("content_md", "") or output.get("content", "")
     try:
         eval_response = _lambda_client.invoke(
