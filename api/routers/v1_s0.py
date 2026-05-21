@@ -128,6 +128,7 @@ async def list_review(
 
     where = " AND ".join(conditions) if conditions else "TRUE"
 
+    tenant_id = tenant.get("sub", "")
     async with pool.acquire() as conn:
         rows = await conn.fetch(f"""
             SELECT tour_id, src_name, country, provider,
@@ -139,6 +140,13 @@ async def list_review(
             ORDER BY created_at DESC
             LIMIT 500
         """, *params)
+
+        # Brand brief reuse: include last uploaded key so frontend can auto-fill (M1)
+        tenant_row = await conn.fetchrow(
+            "SELECT last_brand_brief_s3_key FROM shared.tenants WHERE tenant_id=$1::uuid",
+            tenant_id,
+        )
+        last_brief_key = tenant_row["last_brand_brief_s3_key"] if tenant_row else None
 
     return {
         "data": [
@@ -155,6 +163,10 @@ async def list_review(
             for r in rows
         ],
         "total": len(rows),
+        "brand_brief": {
+            "last_s3_key":           last_brief_key,
+            "has_previous_brief":    last_brief_key is not None,
+        },
     }
 
 
