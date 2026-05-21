@@ -23,6 +23,8 @@ from langgraph.graph import StateGraph, END
 
 from api.services.acp_post_processor import apply_output_rules, OutputRuleViolation
 from services.acp_s4_blog.validator import ValidatorAgent
+from services.acp_s4.embeddings import check_blog_dedup, find_internal_links, store_blog_embedding
+from services.acp_s4.image_sourcer import source_featured_image
 
 logger = structlog.get_logger()
 
@@ -67,6 +69,13 @@ class S4BlogState(TypedDict):
     outline: list
     target_keywords: list
     title: str
+    # Factual grounding (G1)
+    tour_facts: dict
+    tour_facts_block: str
+    # Image sourcing (G5)
+    featured_image_url: Optional[str]
+    image_credit: Optional[str]
+    image_source: Optional[str]
     # Draft output
     content_md: str
     seo_title: str
@@ -97,25 +106,121 @@ class S4BlogState(TypedDict):
     db_rules: list
 
 
+# ── Tour facts helpers ────────────────────────────────────────────────────────
+
+async def _fetch_tour_facts(db_conn, tenant_id: str, keywords: list[str]) -> dict:
+    """
+    Fetch factual grounding from gold_aa_internal.published_tours.
+    Matches on aa_name/aa_description for any keyword. Limit 3 by quality_score.
+    PRD v1.0 §4 S4: all specific facts must come from tour_facts only.
+    """
+    if not keywords:
+        return {}
+    ilike_conditions = " OR ".join(
+        f"(aa_name ILIKE ${i} OR aa_description ILIKE ${i})"
+        for i in range(3, 3 + len(keywords))
+    )
+    params = [tenant_id] + [f"%{kw}%" for kw in keywords[:5]]
+    try:
+        rows = await db_conn.fetch(
+            f"""
+            SELECT tour_id::text, aa_name, aa_summary, aa_description,
+                   aa_highlights::text AS highlights_json, aa_itineraries
+            FROM gold_aa_internal.published_tours
+            WHERE tenant_id = $1::uuid
+              AND ({ilike_conditions})
+            ORDER BY quality_score DESC NULLS LAST
+            LIMIT 3
+            """,
+            *params,
+        )
+        return {
+            row["tour_id"]: {
+                "aa_name":        row["aa_name"] or "",
+                "aa_summary":     row["aa_summary"] or "",
+                "aa_description": row["aa_description"] or "",
+                "aa_highlights":  row["highlights_json"] or "[]",
+                "aa_itineraries": row["aa_itineraries"] or "",
+            }
+            for row in rows
+        }
+    except Exception as exc:
+        logger.warning("tour_facts_fetch_failed (non-fatal): %s", exc)
+        return {}
+
+
+def _build_tour_facts_block(tour_facts: dict) -> str:
+    if not tour_facts:
+        return ""
+    lines = [
+        "## FACTUAL GROUNDING — use ONLY these verified facts. Never invent specifics.\n",
+    ]
+    for facts in tour_facts.values():
+        lines.append(f"### {facts['aa_name']}")
+        if facts["aa_summary"]:
+            lines.append(f"Summary: {facts['aa_summary'][:300]}")
+        if facts["aa_itineraries"]:
+            lines.append(f"Itinerary: {facts['aa_itineraries'][:500]}")
+        if facts["aa_highlights"] and facts["aa_highlights"] != "[]":
+            lines.append(f"Highlights: {facts['aa_highlights'][:300]}")
+        lines.append("")
+    lines.append(
+        "RULE: All durations, routes, activities, and itinerary details MUST come "
+        "from the data above. Do not invent specific facts.\n"
+    )
+    return "\n".join(lines)
+
+
 # ── Node 1: brief_node ────────────────────────────────────────────────────────
 
 async def brief_node(state: S4BlogState) -> S4BlogState:
-    """Validate and enrich brief — content_calendars not yet in DB, use inline data."""
+    """Validate brief, fetch tour facts (G1), dedup check (G3)."""
     if not state.get("primary_keyword") or not state.get("title"):
         return {**state, "status": "error", "error": "primary_keyword and title are required"}
-    logger.info("s4_brief_ready", keyword=state["primary_keyword"], title=state["title"])
-    return {**state, "status": "drafting"}
+
+    db = state.get("db")
+    tenant_id = state["tenant_id"]
+
+    # G1: Fetch tour facts for factual grounding
+    keywords = [state["primary_keyword"]] + (state.get("target_keywords") or [])[:3]
+    tour_facts = await _fetch_tour_facts(db, tenant_id, keywords) if db else {}
+    tour_facts_block = _build_tour_facts_block(tour_facts)
+    if tour_facts:
+        logger.info("s4_tour_facts_loaded count=%d", len(tour_facts))
+
+    # G3: Dedup check — skip if similar blog already exists
+    if db:
+        dup_id = await check_blog_dedup(db, tenant_id, state["title"], state["primary_keyword"])
+        if dup_id:
+            logger.info("s4_dedup_skip existing_draft=%s", dup_id)
+            return {**state, "status": "done", "draft_id": dup_id,
+                    "error": f"duplicate_detected:{dup_id}",
+                    "tour_facts": tour_facts, "tour_facts_block": tour_facts_block,
+                    "featured_image_url": None, "image_credit": None, "image_source": "none"}
+
+    logger.info("s4_brief_ready keyword=%s title=%s tour_facts=%d",
+                state["primary_keyword"], state["title"], len(tour_facts))
+    return {
+        **state,
+        "status": "drafting",
+        "tour_facts": tour_facts,
+        "tour_facts_block": tour_facts_block,
+        "featured_image_url": None,
+        "image_credit": None,
+        "image_source": "none",
+    }
 
 
 # ── Node 2: draft_node ────────────────────────────────────────────────────────
 
 async def draft_node(state: S4BlogState) -> S4BlogState:
-    """Generate blog draft via Bedrock Sonnet."""
+    """Generate blog draft via Bedrock Sonnet with factual grounding (G1)."""
     outline_text = "\n".join(f"- {p}" for p in (state.get("outline") or []))
     kw_text = ", ".join(state.get("target_keywords") or [])
     feedback = state.get("rewrite_feedback", "")
+    tour_facts_block = state.get("tour_facts_block", "")
 
-    user_prompt = f"""Write a travel blog post with these specifications:
+    user_prompt = f"""{tour_facts_block}Write a travel blog post with these specifications:
 
 Title: {state['title']}
 Primary keyword: {state['primary_keyword']}
@@ -344,15 +449,44 @@ async def seo_node(state: S4BlogState) -> S4BlogState:
 # ── Node 7: save_node ─────────────────────────────────────────────────────────
 
 async def save_node(state: S4BlogState) -> S4BlogState:
-    """INSERT into acp_silver_s4.blog_drafts."""
+    """INSERT into acp_silver_s4.blog_drafts. Includes image sourcing + embedding store."""
     db = state.get("db")
     if db is None:
         return {**state, "status": "error", "error": "No DB connection for save_node"}
 
+    # G6: 2-step Gate 3 — use pending_trang (not 'pending')
     validation_passed = state.get("validation_passed")
-    hitl_status = "pending" if validation_passed else "flagged_human"
+    hitl_status = "pending_trang" if validation_passed else "flagged_human"
     if state.get("status") == "blocked":
         hitl_status = "flagged_human"
+
+    # G5: Source featured image (async HTTP, non-fatal)
+    img_url = state.get("featured_image_url")
+    img_credit = state.get("image_credit")
+    img_source = state.get("image_source", "none")
+    if img_source == "none":
+        try:
+            img_url, img_credit, img_source = await source_featured_image(
+                country=_extract_destination(state.get("primary_keyword", "")),
+                primary_keyword=state.get("primary_keyword", ""),
+            )
+        except Exception as exc:
+            logger.warning("image_source_failed (non-fatal): %s", exc)
+            img_url, img_credit, img_source = None, None, "none"
+
+    # G3: Internal links — append semantic link block to content
+    content_md = state.get("content_md", "")
+    if db:
+        links = await find_internal_links(
+            db, state["tenant_id"],
+            section_text=f"{state.get('title','')} {state.get('primary_keyword','')}",
+        )
+        if links:
+            link_lines = "\n".join(f"- [{l['aa_name']}](/tours/{l['slug']})" for l in links[:3])
+            content_md = content_md + f"\n\n**Explore Related Adventures:**\n{link_lines}"
+            logger.info("s4_internal_links_added count=%d", len(links))
+        elif not links:
+            logger.warning("s4_no_internal_links keyword=%s", state.get("primary_keyword"))
 
     try:
         row = await db.fetchrow(
@@ -361,20 +495,22 @@ async def save_node(state: S4BlogState) -> S4BlogState:
                 word_count, seo_title, seo_meta, target_keywords, status,
                 evaluator_score, evaluator_input_hash, review_flags, rules_applied,
                 validation_passed, validation_score, failing_checks, repair_targets,
-                seo_score, seo_issues, hitl_gate3_status, rewrite_count, pipeline_version)
+                seo_score, seo_issues, hitl_gate3_status, rewrite_count, pipeline_version,
+                featured_image_url, image_credit, image_source)
              VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6,
                      $7, $8, $9, $10::jsonb, 'draft',
                      $11, $12, $13::jsonb, $14::jsonb,
                      $15, $16, $17::jsonb, $18::jsonb,
-                     $19, $20::jsonb, $21, $22, 'v1')
+                     $19, $20::jsonb, $21, $22, 'v2',
+                     $23, $24, $25)
              RETURNING draft_id::text""",
             state["run_id"],
             state["tenant_id"],
             state.get("calendar_item_id") or str(uuid.uuid4()),
             state.get("title", ""),
             state.get("slug", ""),
-            state.get("content_md", ""),
-            len(state.get("content_md", "").split()),
+            content_md,
+            len(content_md.split()),
             state.get("seo_title", ""),
             state.get("seo_meta", ""),
             json.dumps(state.get("target_keywords") or []),
@@ -390,12 +526,23 @@ async def save_node(state: S4BlogState) -> S4BlogState:
             json.dumps(state.get("seo_issues") or []),
             hitl_status,
             state.get("rewrite_count", 0),
+            img_url,
+            img_credit,
+            img_source,
         )
         draft_id = row["draft_id"]
-        logger.info("s4_draft_saved", draft_id=draft_id, hitl_status=hitl_status)
-        return {**state, "draft_id": draft_id, "status": "done"}
+        logger.info("s4_draft_saved draft_id=%s hitl_status=%s image_source=%s",
+                    draft_id, hitl_status, img_source)
+
+        # G3: Store content embedding for future dedup (non-fatal)
+        await store_blog_embedding(db, draft_id, state.get("title", ""),
+                                   state.get("primary_keyword", ""))
+
+        return {**state, "draft_id": draft_id, "status": "done",
+                "content_md": content_md, "featured_image_url": img_url,
+                "image_credit": img_credit, "image_source": img_source}
     except Exception as e:
-        logger.error("s4_save_failed", error=str(e))
+        logger.error("s4_save_failed error=%s", str(e))
         return {**state, "status": "error", "error": f"Save failed: {e}"}
 
 
