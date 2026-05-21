@@ -17,7 +17,7 @@ class OutputRuleViolation(Exception):
     def __init__(self, rule_id: str, rule_type: str, message: str):
         self.rule_id = rule_id
         self.rule_type = rule_type
-        super().__init__(message)
+        super().__init__(message, rule_id, rule_type)
 
 
 async def apply_output_rules(

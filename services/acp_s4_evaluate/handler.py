@@ -26,7 +26,9 @@ Dimensions:
 - completeness: all sections present, logical conclusion
 
 Output schema (JSON only):
-{"evaluator_score": <avg float 1-10>, "dimension_scores": {"readability": x, "factual_trust": x, "engagement": x, "keyword_naturalness": x, "completeness": x}, "issues": ["<string>", ...]}"""
+{"evaluator_score": <avg float 1-10>, "dimension_scores": {"readability": x,
+"factual_trust": x, "engagement": x, "keyword_naturalness": x, "completeness": x},
+"issues": ["<string>", ...]}"""
 
 
 def lambda_handler(event, context):
@@ -61,7 +63,8 @@ def lambda_handler(event, context):
         result = json.loads(content_text)
         required = {"evaluator_score", "dimension_scores", "issues"}
         if not required.issubset(result.keys()):
-            return {"statusCode": 500, "body": json.dumps({"error": f"LLM response missing fields: {list(required - result.keys())}"})}
+            missing = list(required - result.keys())
+            return {"statusCode": 500, "body": json.dumps({"error": f"LLM response missing fields: {missing}"})}
         result["evaluator_input_hash"] = evaluator_input_hash
         return {"statusCode": 200, "body": json.dumps(result)}
 
