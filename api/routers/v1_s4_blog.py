@@ -74,8 +74,9 @@ class RunRequest(BaseModel):
 
 
 class HitlRequest(BaseModel):
-    status: str
+    status: str           # "approved" | "rejected"
     reviewer_id: str
+    reviewer_role: str = "trang"  # "trang" | "ms_thu"
     notes: Optional[str] = None
 
 
@@ -267,10 +268,21 @@ async def hitl_decision(
 ):
     if body.status not in ("approved", "rejected"):
         raise HTTPException(status_code=422, detail="status must be 'approved' or 'rejected'")
+    if body.reviewer_role not in ("trang", "ms_thu"):
+        raise HTTPException(status_code=422, detail="reviewer_role must be 'trang' or 'ms_thu'")
     try:
         UUID(draft_id)
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid draft_id UUID")
+
+    # Map reviewer_role + decision → Gate 3 status
+    _status_map = {
+        ("trang",  "approved"): "trang_approved",
+        ("trang",  "rejected"): "trang_rejected",
+        ("ms_thu", "approved"): "msthy_approved",
+        ("ms_thu", "rejected"): "msthy_rejected",
+    }
+    new_hitl_status = _status_map[(body.reviewer_role, body.status)]
 
     pool = _get_pool(request)
     async with pool.acquire() as conn:
@@ -280,7 +292,7 @@ async def hitl_decision(
             "WHERE draft_id=$3::uuid "
             "RETURNING draft_id::text, run_id::text, tenant_id, "
             "hitl_gate3_status, hitl_reviewer_id, hitl_decided_at",
-            body.status, body.reviewer_id, draft_id,
+            new_hitl_status, body.reviewer_id, draft_id,
         )
         if not row:
             raise HTTPException(status_code=404, detail="Draft not found")
@@ -302,7 +314,7 @@ async def hitl_decision(
             json.dumps({"notes": body.notes, "reviewer_id": body.reviewer_id}),
         )
 
-        if body.status == "approved":
+        if new_hitl_status == "msthy_approved":
             queue_id = str(uuid4())
             cms_secret_key = f"acp/cms/{tenant_id}"
             await conn.execute(
