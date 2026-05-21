@@ -26,6 +26,7 @@ audit_log schema (migration 030):
   details       JSONB        — {"actor_type": "hitl_reviewer", "notes": "..."}
   Note: spec uses actor_type as a column but migration 030 uses actor + details JSONB.
 """
+import asyncio
 import json
 import os
 from typing import Optional
@@ -38,6 +39,7 @@ from fastapi.security import HTTPBearer as _HTTPBearer, HTTPAuthorizationCredent
 from pydantic import BaseModel, field_validator
 
 from api.routers.auth import verify_jwt as _verify_jwt
+from services.acp_shared import h3_rule_extractor as _h3
 
 logger = structlog.get_logger()
 router = APIRouter(tags=["S3 Campaign Planner"])
@@ -380,6 +382,17 @@ async def hitl_gate2_reject(
                     "hitl_id": str(hitl_row["hitl_id"]),
                 }),
             )
+
+    # H-3: extract rule from rejection note (fire-and-forget, does not block response)
+    asyncio.create_task(
+        _h3.extract_and_save_rule(
+            pool=pool,
+            hitl_id=str(hitl_row["hitl_id"]),
+            run_id=run_id,
+            gate_number=2,
+            reviewer_notes=body.notes,
+        )
+    )
 
     logger.info("s3_gate2_rejected", run_id=run_id, actor=actor, notes_len=len(body.notes))
     return {"run_id": run_id, "status": "rejected", "notes": body.notes}

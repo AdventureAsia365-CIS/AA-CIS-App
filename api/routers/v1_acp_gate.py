@@ -18,6 +18,7 @@ Gate rules (NON-NEGOTIABLE):
   - actor_type='tenant_admin' written as typed column on audit_log (per PRD v1.2)
   - Double-submit guard: 409 if hitl_request already resolved
 """
+import asyncio
 import json
 import os
 from typing import Optional
@@ -29,6 +30,7 @@ from fastapi.security import HTTPBearer as _HTTPBearer, HTTPAuthorizationCredent
 from pydantic import BaseModel, field_validator
 
 from api.routers.auth import verify_jwt as _verify_jwt
+from services.acp_shared import h3_rule_extractor as _h3
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/v1/acp/gate", tags=["acp-gate"])
@@ -281,6 +283,17 @@ async def gate_reject(
                     "notes": body.notes,
                 }),
             )
+
+    # H-3: extract rule from rejection note (fire-and-forget, does not block response)
+    asyncio.create_task(
+        _h3.extract_and_save_rule(
+            pool=pool,
+            hitl_id=str(hitl_row["hitl_id"]),
+            run_id=run_id,
+            gate_number=stage_int,
+            reviewer_notes=body.notes,
+        )
+    )
 
     logger.info("gate_rejected", run_id=run_id, stage=stage, actor=actor, notes_len=len(body.notes))
     return {"run_id": run_id, "stage": stage, "status": "rejected", "notes": body.notes}
