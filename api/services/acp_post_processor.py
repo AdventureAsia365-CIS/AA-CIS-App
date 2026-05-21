@@ -8,6 +8,7 @@ DB schema (actual): acp_shared.acp_output_rules
   rule_id, tenant_id, stage, rule_type, pattern, action_value,
   error_message, source_type, source_hitl_id, run_count, is_active
 """
+import re
 import asyncpg
 from typing import Optional
 
@@ -73,7 +74,6 @@ async def apply_output_rules(
             raise OutputRuleViolation(rule_id, rule_type, error_msg)
 
         elif rule_type == "replace":
-            import re
             replacement = action_value
             content = re.sub(re.escape(pattern), replacement, content, flags=re.IGNORECASE)
             if "content_md" in output:
@@ -95,10 +95,9 @@ async def apply_output_rules(
         elif rule_type == "truncate":
             try:
                 max_len = int(action_value)
-                if "seo_title" in output and len(output.get("seo_title", "")) > max_len:
-                    output["seo_title"] = output["seo_title"][:max_len]
-                if "seo_meta" in output and len(output.get("seo_meta", "")) > max_len:
-                    output["seo_meta"] = output["seo_meta"][:max_len]
+                target_field = pattern  # pattern = "seo_title" or "seo_meta"
+                if target_field in output and len(output.get(target_field, "")) > max_len:
+                    output[target_field] = output[target_field][:max_len]
             except (ValueError, TypeError):
                 pass
 

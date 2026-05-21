@@ -59,6 +59,9 @@ def lambda_handler(event, context):
             content_text = content_text.strip()
 
         result = json.loads(content_text)
+        required = {"evaluator_score", "dimension_scores", "issues"}
+        if not required.issubset(result.keys()):
+            return {"statusCode": 500, "body": json.dumps({"error": f"LLM response missing fields: {list(required - result.keys())}"})}
         result["evaluator_input_hash"] = evaluator_input_hash
         return {"statusCode": 200, "body": json.dumps(result)}
 

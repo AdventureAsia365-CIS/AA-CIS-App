@@ -20,9 +20,10 @@ logger = structlog.get_logger()
 EVALUATOR_FUNCTION_NAME = "aa-cis-dev-acp-s4-evaluate"
 EVALUATOR_SCORE_THRESHOLD = 7.5
 
+_lambda_client = boto3.client("lambda", region_name="us-west-1")
+
 
 async def generate_blog_draft(
-    draft_input: dict,
     tenant_id: str,
     run_id: str,
     calendar_item_id: str,
@@ -33,7 +34,6 @@ async def generate_blog_draft(
     Apply H-2 post-processor + H-1 evaluator after LLM blog draft generation.
 
     Args:
-        draft_input: raw LLM output {content_md, seo_title, seo_meta, title, slug, ...}
         tenant_id:   UUID string
         run_id:      UUID string
         calendar_item_id: UUID string
@@ -65,9 +65,8 @@ async def generate_blog_draft(
 
     # STEP 2 — Call acp-s4-evaluate Lambda (text-only — isolation enforced)
     content_text = output.get("content_md", "") or output.get("content", "")
-    lambda_client = boto3.client("lambda", region_name="us-west-1")
     try:
-        eval_response = lambda_client.invoke(
+        eval_response = _lambda_client.invoke(
             FunctionName=EVALUATOR_FUNCTION_NAME,
             InvocationType="RequestResponse",
             Payload=json.dumps({"text": content_text}),  # ONLY content, no brand/outline

@@ -58,10 +58,10 @@ class PatchRuleRequest(BaseModel):
 
 @router.get("")
 async def list_rules(
+    request: Request,
     stage: Optional[str] = Query(None, description="Filter by stage (e.g. S4, S3)"),
     tenant_id: Optional[str] = Query(None, description="Filter by tenant UUID"),
     _auth=Depends(_get_admin),
-    request: Request = None,
 ):
     pool = _get_pool(request)
     async with pool.acquire() as conn:
@@ -107,9 +107,9 @@ async def list_rules(
 @router.patch("/{rule_id}")
 async def toggle_rule(
     rule_id: str,
+    request: Request,
     body: PatchRuleRequest,
     _auth=Depends(_get_admin),
-    request: Request = None,
 ):
     try:
         UUID(rule_id)
