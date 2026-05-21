@@ -22,6 +22,7 @@ from fastapi.security import HTTPBearer as _HTTPBearer, HTTPAuthorizationCredent
 from pydantic import BaseModel
 
 from api.routers.auth import verify_jwt as _verify_jwt
+from services.acp_s4_blog.cms.publisher import publish_draft_to_cms as _cms_publish
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/v1/acp/s4/blog", tags=["S4 Blog Engine"])
@@ -277,10 +278,46 @@ async def hitl_decision(
             "UPDATE acp_silver_s4.blog_drafts "
             "SET hitl_gate3_status=$1, hitl_reviewer_id=$2, hitl_decided_at=NOW() "
             "WHERE draft_id=$3::uuid "
-            "RETURNING draft_id::text, hitl_gate3_status, hitl_reviewer_id, hitl_decided_at",
+            "RETURNING draft_id::text, run_id::text, tenant_id, "
+            "hitl_gate3_status, hitl_reviewer_id, hitl_decided_at",
             body.status, body.reviewer_id, draft_id,
         )
-    if not row:
-        raise HTTPException(status_code=404, detail="Draft not found")
+        if not row:
+            raise HTTPException(status_code=404, detail="Draft not found")
+
+        run_id = str(row["run_id"])
+        tenant_id = str(row["tenant_id"])
+
+        # Audit log — mandatory on every decision
+        await conn.execute(
+            """
+            INSERT INTO acp_shared.audit_log
+                (tenant_id, actor, action, resource_type, resource_id, details)
+            VALUES ($1, $2, $3, 'blog_draft', $4, $5::jsonb)
+            """,
+            tenant_id,
+            body.reviewer_id,
+            f"hitl.gate3.{body.status}",
+            draft_id,
+            json.dumps({"notes": body.notes, "reviewer_id": body.reviewer_id}),
+        )
+
+        if body.status == "approved":
+            queue_id = str(uuid4())
+            cms_secret_key = f"acp/cms/{tenant_id}"
+            await conn.execute(
+                """
+                INSERT INTO acp_shared.acp_cms_publish_queue
+                    (queue_id, run_id, tenant_id, draft_id, cms_secret_key, status)
+                VALUES ($1, $2::uuid, $3, $4::uuid, $5, 'pending')
+                """,
+                queue_id, run_id, tenant_id, draft_id, cms_secret_key,
+            )
+            await conn.execute(
+                "UPDATE acp_silver_s4.blog_drafts SET cms_publish_status='enqueued' WHERE draft_id=$1::uuid",
+                draft_id,
+            )
+            asyncio.create_task(_cms_publish(pool, queue_id, draft_id, tenant_id, cms_secret_key))
+
     logger.info("s4_hitl_decision", draft_id=draft_id, status=body.status, reviewer=body.reviewer_id)
     return _row_to_dict(row)

@@ -7,6 +7,7 @@ Routes:
   POST /v1/acp/s4/social/write    → guided step 2: brief + angle → write → save
   GET  /v1/acp/s4/social/{id}     → fetch social_content row
 """
+import json
 import os
 from typing import Optional
 from uuid import UUID
@@ -237,4 +238,62 @@ async def get_social(
         )
     if not row:
         raise HTTPException(status_code=404, detail="Social content not found")
+    return _row_to_dict(row)
+
+
+# ── PATCH /{social_id}/hitl — Gate 3-social approve/reject ───────────────────
+
+class SocialHitlRequest(BaseModel):
+    status: str
+    reviewer_id: str
+    notes: Optional[str] = None
+
+
+@router.patch("/{social_id}/hitl")
+async def gate3_social_decision(
+    social_id: str,
+    body: SocialHitlRequest,
+    request: Request,
+    _auth=Depends(_get_admin),
+):
+    """Gate 3-social: approve or reject per-tour social content."""
+    if body.status not in ("approved", "rejected"):
+        raise HTTPException(status_code=422, detail="status must be 'approved' or 'rejected'")
+    try:
+        UUID(social_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid social_id UUID")
+
+    pool = _get_pool(request)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE acp_silver_s4.social_content
+            SET hitl_gate_3_social_status = $1,
+                hitl_reviewer_id          = $2,
+                hitl_decided_at           = NOW()
+            WHERE social_id = $3::uuid
+            RETURNING social_id::text, tenant_id, run_id::text,
+                      hitl_gate_3_social_status, hitl_reviewer_id, hitl_decided_at
+            """,
+            body.status, body.reviewer_id, social_id,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Social content not found")
+
+        await conn.execute(
+            """
+            INSERT INTO acp_shared.audit_log
+                (tenant_id, actor, action, resource_type, resource_id, details)
+            VALUES ($1, $2, $3, 'social_content', $4, $5::jsonb)
+            """,
+            str(row["tenant_id"]),
+            body.reviewer_id,
+            f"hitl.gate3_social.{body.status}",
+            social_id,
+            json.dumps({"notes": body.notes, "reviewer_id": body.reviewer_id}),
+        )
+
+    logger.info("gate3_social_decision social_id=%s status=%s reviewer=%s",
+                social_id, body.status, body.reviewer_id)
     return _row_to_dict(row)
