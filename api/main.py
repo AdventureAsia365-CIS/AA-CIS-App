@@ -24,6 +24,7 @@ from api.routers.v1_acp_gate import router as v1_acp_gate_router
 from api.routers.v1_rules import router as v1_rules_router
 from api.routers.v1_social import router as v1_social_router
 from api.routers.v1_s4_blog import router as v1_s4_blog_router
+from api.routers.v1_s4_social import router as v1_s4_social_router
 from api.routers.admin import router as admin_router
 from api.middleware.rate_limit import rate_limit_middleware
 from services.acp.s2.router import router as v1_s2_router
@@ -103,6 +104,7 @@ app.include_router(v1_acp_gate_router)
 app.include_router(v1_rules_router)
 app.include_router(v1_social_router)
 app.include_router(v1_s4_blog_router)
+app.include_router(v1_s4_social_router)
 app.include_router(admin_router)
 
 app.middleware("http")(rate_limit_middleware)
