@@ -98,3 +98,19 @@ package_brand_brief_parser() {
   echo "   ✅ brand_brief_parser.zip ($(du -sh "$ZIP_PATH" | cut -f1))"
 }
 package_brand_brief_parser
+
+# AA-49 H-1: acp-s4-evaluate — flat layout, stdlib + boto3 only (boto3 in Lambda runtime)
+package_acp_s4_evaluate() {
+  local ZIP_PATH="$DIST_DIR/acp-s4-evaluate.zip"
+  local TMP_DIR="$BUILD_DIR/acp-s4-evaluate"
+  rm -rf "$TMP_DIR" && mkdir -p "$TMP_DIR"
+  echo "🔨 Packaging acp_s4_evaluate → acp-s4-evaluate.zip"
+  cp "$APP_DIR/services/acp_s4_evaluate/handler.py" "$TMP_DIR/"
+  find "$TMP_DIR" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+  pushd "$TMP_DIR" > /dev/null
+  zip -r -q "$ZIP_PATH" .
+  popd > /dev/null
+  rm -rf "$TMP_DIR"
+  echo "   ✅ acp-s4-evaluate.zip ($(du -sh "$ZIP_PATH" | cut -f1))"
+}
+package_acp_s4_evaluate

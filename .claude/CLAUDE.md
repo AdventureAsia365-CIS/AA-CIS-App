@@ -5,7 +5,8 @@
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway owq9as3wjl)
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel)
 - ECS task def: api:151 | CI #241 green | Deploy Dev #147
-- AWS: STOPPED (ECS desired=0, RDS stopped)
+- AWS: STOPPED (stop ECS + RDS after session 23)
+- Lambda aa-cis-dev-acp-s4-evaluate: DEPLOYED ✅ (AA-49 H-1)
 - API Gateway: owq9as3wjl | Lambda Authorizer: aa-cis-dev-authorizer
 - DB: PostgreSQL 15, aa_cis_dev, secret: aa-cis/dev/rds (plain DSN)
 - Tours: 7 in catalog (WanderLux dev session, 15 published Sri Lanka) | 5 tenants | avg quality 9.9
@@ -98,22 +99,36 @@ Last commit: ae2ba56 (AA-CIS-App) | 2a37231 (AA-ACP-App)
 - Portal page AA-ACP-App: src/app/(admin)/workspace/s3/review/page.tsx — calendar + ads accordion + funnel bar + approve/reject modals
 - CI #241 ✅ | Deploy Dev #147 ✅
 
-### 🔴 Next Session Priority (Session 23)
-1. Apply migration 031 via S3-mediated ECS exec (RDS must be running FIRST)
-2. Deploy Lambda aa-cis-dev-acp-s3-campaign-planner via AA-CIS-Infra Terraform
-3. AA-89: B2B self-approval — migration 021
+### ✅ Done Session 23 (AA-49 — Harness H-1 + H-2)
+- services/acp_s4_evaluate/handler.py: isolated evaluator Lambda (SHA256 hash, Bedrock Haiku)
+- api/services/acp_post_processor.py: deterministic output rules post-processor (7 tests pass)
+- services/acp_s4/generate.py: S4 blog draft generation stub with H-1/H-2 integration
+- api/routers/v1_rules.py: GET /v1/rules + PATCH /v1/rules/{rule_id}
+- api/migrations/032_harness_columns.sql: idempotent (columns already in live DB)
+- AA-ACP-App: rules dashboard page with stage filter + toggle
+- Lambda aa-cis-dev-acp-s4-evaluate DEPLOYED ✅ | IAM Bedrock policy ✅
+- Branches pushed: feature/aa-49-harness-h1-h2 (App + ACP-App) | develop (Infra)
+
+### 🔴 Next Session Priority (Session 24)
+1. Merge feature/aa-49-harness-h1-h2 → develop (AA-CIS-App + AA-ACP-App)
+2. Push CI → deploy new /v1/rules route to ECS
+3. Apply migration 031 via S3-mediated ECS exec (STILL PENDING from S22)
+4. Deploy Lambda aa-cis-dev-acp-s3-campaign-planner (STILL PENDING from S22)
+5. AA-90 (S1 trigger page), AA-43 (S2 LangGraph)
 
 ### ⚠️ Open Issues
-- Migration 031 NOT yet applied to live DB — apply when RDS started next session
-- Lambda aa-cis-dev-acp-s3-campaign-planner NOT yet deployed to AWS (Infra work pending)
+- Migration 031 NOT yet applied to live DB
+- Lambda aa-cis-dev-acp-s3-campaign-planner NOT yet deployed
+- AA-49 branches NOT yet merged to develop (pending verify)
+- acp_output_rules schema uses rule_type/pattern (NOT rule_code/condition_field as task spec assumed)
 - AA-36: No char limits on rewrite fields — Backlog
 - api_task_def_arn hardcoded :21 in main.tf — AA-CIS-Infra (AA-22 tech debt)
-- New tenant quota_pct always 0% (no membership_plans row) — cosmetic only
 
-## Session 22 Close — 21/05/2026
-- ECS desired=0, RDS stopped
+## Session 23 Close — 21/05/2026
+- ECS still RUNNING (stop after review!)
+- Lambda acp-s4-evaluate: ACTIVE | Terraform applied
 - Task def: api:151 | CI #241 | Last deploy #147
-- Commits: ae2ba56 (AA-CIS-App AA-45), 2a37231 (AA-ACP-App portal)
+- Commits: 4dd923b (AA-CIS-App AA-49), ee491de (AA-ACP-App rules), ab81ad0 (Infra Lambda)
 
 
 ## Implementation Notes Pattern
