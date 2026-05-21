@@ -15,7 +15,7 @@ Auth:
 Gate rules (NON-NEGOTIABLE):
   - NEVER auto-approve: endpoint only reached by explicit human action in portal
   - audit_log mandatory on every approve or reject — no exceptions
-  - actor_type='tenant_admin' recorded in details JSONB
+  - actor_type='tenant_admin' written as typed column on audit_log (per PRD v1.2)
   - Double-submit guard: 409 if hitl_request already resolved
 """
 import json
@@ -175,15 +175,15 @@ async def gate_approve(
             await conn.execute(
                 """
                 INSERT INTO acp_shared.audit_log
-                    (tenant_id, actor, action, resource_type, resource_id, details)
-                VALUES ($1, $2, $3, 'acp_hitl_request', $4, $5::jsonb)
+                    (tenant_id, actor, action, resource_type, resource_id, actor_type, details)
+                VALUES ($1, $2, $3, 'acp_hitl_request', $4,
+                        'tenant_admin'::acp_shared.audit_actor_type, $5::jsonb)
                 """,
                 run_tenant,
                 actor,
                 f"hitl.gate{stage_int}.approve",
                 run_id,
                 json.dumps({
-                    "actor_type": "tenant_admin",
                     "stage": stage,
                     "hitl_id": str(hitl_row["hitl_id"]),
                     "notes": body.notes.strip(),
@@ -267,15 +267,15 @@ async def gate_reject(
             await conn.execute(
                 """
                 INSERT INTO acp_shared.audit_log
-                    (tenant_id, actor, action, resource_type, resource_id, details)
-                VALUES ($1, $2, $3, 'acp_hitl_request', $4, $5::jsonb)
+                    (tenant_id, actor, action, resource_type, resource_id, actor_type, details)
+                VALUES ($1, $2, $3, 'acp_hitl_request', $4,
+                        'tenant_admin'::acp_shared.audit_actor_type, $5::jsonb)
                 """,
                 run_tenant,
                 actor,
                 f"hitl.gate{stage_int}.reject",
                 run_id,
                 json.dumps({
-                    "actor_type": "tenant_admin",
                     "stage": stage,
                     "hitl_id": str(hitl_row["hitl_id"]),
                     "notes": body.notes,

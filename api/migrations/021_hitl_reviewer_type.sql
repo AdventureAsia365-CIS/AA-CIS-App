@@ -31,3 +31,11 @@ END $$;
 -- Idempotent value additions (safe to re-run)
 ALTER TYPE acp_shared.audit_actor_type ADD VALUE IF NOT EXISTS 'tenant_admin';
 ALTER TYPE acp_shared.audit_actor_type ADD VALUE IF NOT EXISTS 'tenant_reviewer';
+
+-- Add typed actor_type column to audit_log (per PRD v1.2)
+-- ALTER TABLE can run independently — no transaction constraint here.
+ALTER TABLE acp_shared.audit_log
+  ADD COLUMN IF NOT EXISTS actor_type acp_shared.audit_actor_type;
+
+CREATE INDEX IF NOT EXISTS idx_audit_log_actor_type
+  ON acp_shared.audit_log(actor_type);
