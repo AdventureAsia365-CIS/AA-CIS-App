@@ -29,6 +29,58 @@ from acpcore.errors import ACPErrorCode
 logger = structlog.get_logger()
 router = APIRouter(tags=["S2 Research"])
 
+GATE1_AUTO_APPROVE_THRESHOLD = 0.85  # PRD v1.3 §2.2: aa_internal + confidence >= 0.85
+
+
+async def _handle_gate1(pool, run_id: str, tenant_id: str) -> dict:
+    """
+    Gate 1 post-S2: auto-approve for aa_internal if confidence >= 0.85.
+    B2B tenants always get a pending HITL request (self-approve via portal).
+    PRD v1.3 §2.2.
+    """
+    async with pool.acquire() as conn:
+        ctx = await conn.fetchrow(
+            "SELECT s2_confidence_score FROM acp_shared.acp_run_context WHERE run_id = $1::uuid",
+            run_id,
+        )
+
+    confidence = float(ctx["s2_confidence_score"] or 0) if ctx else 0.0
+    is_aa_internal = (tenant_id == "00000000-0000-0000-0000-000000000001")
+    auto_approved = is_aa_internal and confidence >= GATE1_AUTO_APPROVE_THRESHOLD
+    status = "approved" if auto_approved else "pending"
+    reviewer_type = "aa_internal" if is_aa_internal else "tenant_admin"
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO acp_shared.acp_hitl_requests
+                (run_id, stage, gate_type, payload, status,
+                 auto_approved, confidence_score, reviewer_type)
+            VALUES ($1::uuid, 2, 'gate1', $2::jsonb, $3, $4, $5, $6)
+            ON CONFLICT DO NOTHING
+            """,
+            run_id,
+            json.dumps({"confidence": confidence, "threshold": GATE1_AUTO_APPROVE_THRESHOLD}),
+            status, auto_approved, confidence, reviewer_type,
+        )
+        await conn.execute(
+            """
+            INSERT INTO acp_shared.audit_log
+                (tenant_id, actor, actor_type, action, resource_type, resource_id, details)
+            VALUES ($1, 'system', 'system', 'hitl.gate1', 'acp_run', $2,
+                    $3::jsonb)
+            """,
+            tenant_id, run_id,
+            json.dumps({"auto_approved": auto_approved, "confidence": confidence,
+                        "threshold": GATE1_AUTO_APPROVE_THRESHOLD}),
+        )
+
+    logger.info("gate1_evaluated", run_id=run_id, auto_approved=auto_approved,
+                confidence=confidence, tenant_id=tenant_id)
+    return {"auto_approved": auto_approved, "confidence_score": confidence,
+            "threshold": GATE1_AUTO_APPROVE_THRESHOLD,
+            "next": "trigger_s3" if auto_approved else "await_manual_approval"}
+
 
 def _get_s2_graph(request: Request):
     graph = getattr(request.app.state, "s2_graph", None)
@@ -148,6 +200,7 @@ async def run_s2(
         async with sem:
             try:
                 await graph.ainvoke(initial_state, config=config)
+                await _handle_gate1(pool, run_id, tenant_id)
             except Exception as exc:
                 logger.error("s2_graph_error", run_id=run_id, error=str(exc))
                 async with pool.acquire() as conn:

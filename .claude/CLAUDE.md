@@ -1,11 +1,12 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 20/05/2026 | ECS api:141 | CI #224
+# Updated: 21/05/2026 | ECS api:151 | CI #241
 
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway owq9as3wjl)
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel)
-- ECS task def: api:141 | CI #224 green | Deploy Dev #135
-- AWS: STOPPED (ECS 0/0, RDS stopped)
+- ECS task def: api:151 | CI #241 green | Deploy Dev #147
+- AWS: STOPPED (stop ECS + RDS after session 23)
+- Lambda aa-cis-dev-acp-s4-evaluate: DEPLOYED ✅ (AA-49 H-1)
 - API Gateway: owq9as3wjl | Lambda Authorizer: aa-cis-dev-authorizer
 - DB: PostgreSQL 15, aa_cis_dev, secret: aa-cis/dev/rds (plain DSN)
 - Tours: 7 in catalog (WanderLux dev session, 15 published Sri Lanka) | 5 tenants | avg quality 9.9
@@ -86,43 +87,48 @@ S3 Bronze upload → Ingestion Lambda → shared.pipeline_runs (status=ingesting
 pytest tests/ -v
 104 integration tests + 23 E2E Playwright tests baseline
 
-## MIGRATIONS APPLIED (dev DB)
-- 018: brand_identity_columns (tenant_brand_rules extensions)
-- 019: tenant_brand_rule_versions table (acp_silver_s2 prep)
-- 024: raw_tours review_status/reviewed_by/reviewed_at/review_notes + index
-- 027: acp_silver_s2.competitor_inputs table + index
+## ACTIVE WORK — 21/05/2026
+Session 22 COMPLETE. AA-45 COMPLETE.
+Last commit: ae2ba56 (AA-CIS-App) | 2a37231 (AA-ACP-App)
 
-## ROUTERS REGISTERED (main.py)
-- v1_tours, v1_exports, v1_pipeline, v1_acp, v1_competitors, v1_s0, admin
+### ✅ Done Session 22 (AA-45 — S3 Campaign Planner)
+- services/acp_s3/: Lambda handler — skeleton-then-expand (Sonnet), ads (Haiku), 5 validators, 3-tier lessons
+- api/routers/v1_s3.py: POST /v1/s3/run, GET /v1/s3/runs/{id}, POST /v1/hitl/gate2/{id}/approve|reject
+- migrations/versions/031_acp_silver_s3_v2.sql: ads_plan + acp_run_context + acp_lessons_agency/shared + ALTER content_calendars
+- Gate 2 HITL: audit_log mandatory, NEVER auto-approve, notes required on reject, double-submit 409 guard
+- Portal page AA-ACP-App: src/app/(admin)/workspace/s3/review/page.tsx — calendar + ads accordion + funnel bar + approve/reject modals
+- CI #241 ✅ | Deploy Dev #147 ✅
 
-## ACTIVE WORK — 20/05/2026
-Session 18 COMPLETE. AA-86, AA-88, AA-44 COMPLETE.
-Last commits: 5ee8688 (AA-86), 9863b36 (AA-88), 2e4ce29 (AA-44)
+### ✅ Done Session 23 (AA-49 — Harness H-1 + H-2)
+- services/acp_s4_evaluate/handler.py: isolated evaluator Lambda (SHA256 hash, Bedrock Haiku)
+- api/services/acp_post_processor.py: deterministic output rules post-processor (7 tests pass)
+- services/acp_s4/generate.py: S4 blog draft generation stub with H-1/H-2 integration
+- api/routers/v1_rules.py: GET /v1/rules + PATCH /v1/rules/{rule_id}
+- api/migrations/032_harness_columns.sql: idempotent (columns already in live DB)
+- AA-ACP-App: rules dashboard page with stage filter + toggle
+- Lambda aa-cis-dev-acp-s4-evaluate DEPLOYED ✅ | IAM Bedrock policy ✅
+- Branches pushed: feature/aa-49-harness-h1-h2 (App + ACP-App) | develop (Infra)
 
-### ✅ Done Session 18
-- AA-87: brand_system_prompt → LLMRequest.system_prompt wired (was already flowing); added prompt_len logging, is_branded flag, og_tags={"unbranded":true} in generated_content. Commit bd68d74.
-- AA-82: migration 019 tenant_brand_rule_versions table (FK → shared.tenants). Commit 24ee254.
-- AA-86: validate_node refactor — _FAILURE_MAP 13 codes, 4 sub-scores (brand/seo/structure/quality), failure_codes JSONB populated, validator_fn_version='v2'. Commit 5ee8688.
-- AA-88: migration 027 acp_silver_s2.competitor_inputs + v1_competitors.py (4 endpoints, max-10/country, ownership check) + AA-ACP-App portal competitors page. Commit 9863b36.
-- AA-44: migration 024 raw_tours review_status + v1_s0.py (GET/PATCH/approve/reject, field_coverage_pct) + AA-ACP-App /workspace/s0/review page (inline edit, bulk approve/reject, coverage badge). Commit 2e4ce29.
-
-### 🔴 Next Session Priority (P0)
-1. AA-90: S1 Configured Rewrite Engine — migrations 025/026 + tour_content_versions table + S1 Trigger UI
-   - ADR-016 accepted: S0/S1 separation + tour content versioning (published_tours → VIEW)
-2. AA-11: Phase 3 Report DOCX → Ms. Thu (Claude Chat, no AWS needed)
-3. Add quota rows to membership_plans for 4 new tenants (quota% shows 0% currently)
+### 🔴 Next Session Priority (Session 24)
+1. Merge feature/aa-49-harness-h1-h2 → develop (AA-CIS-App + AA-ACP-App)
+2. Push CI → deploy new /v1/rules route to ECS
+3. Apply migration 031 via S3-mediated ECS exec (STILL PENDING from S22)
+4. Deploy Lambda aa-cis-dev-acp-s3-campaign-planner (STILL PENDING from S22)
+5. AA-90 (S1 trigger page), AA-43 (S2 LangGraph)
 
 ### ⚠️ Open Issues
+- Migration 031 NOT yet applied to live DB
+- Lambda aa-cis-dev-acp-s3-campaign-planner NOT yet deployed
+- AA-49 branches NOT yet merged to develop (pending verify)
+- acp_output_rules schema uses rule_type/pattern (NOT rule_code/condition_field as task spec assumed)
 - AA-36: No char limits on rewrite fields — Backlog
 - api_task_def_arn hardcoded :21 in main.tf — AA-CIS-Infra (AA-22 tech debt)
-- New tenant quota_pct always 0% (no membership_plans row) — cosmetic only
-- reviewed_by always NULL in S0 review — no user identity in JWT yet
 
-## Session 18 Close — 20/05/2026
-- ECS desired=0, RDS stopped
-- Task def: api:141 | CI #224 | Deploy #135
-- Commits: bd68d74, 24ee254, 5ee8688, 9863b36, 2e4ce29 (AA-CIS-App develop)
-- AA-ACP-App commits: 912ee85 (competitors page), 7d56cbc (S0 review page)
+## Session 23 Close — 21/05/2026
+- ECS still RUNNING (stop after review!)
+- Lambda acp-s4-evaluate: ACTIVE | Terraform applied
+- Task def: api:151 | CI #241 | Last deploy #147
+- Commits: 4dd923b (AA-CIS-App AA-49), ee491de (AA-ACP-App rules), ab81ad0 (Infra Lambda)
 
 
 ## Implementation Notes Pattern

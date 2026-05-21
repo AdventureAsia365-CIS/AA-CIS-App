@@ -1,14 +1,19 @@
 """
 Synthesis node. Always runs last.
 Calls Bedrock claude-sonnet-4-5 to build visibility analysis.
-Writes to acp_silver_s2.visibility_reports using the actual table schema:
-  keyword_gaps, competitor_data, google_trends, reddit_insights, gsc_data,
-  top_opportunities, confidence_score (new), primary_keywords (new), fetched_at (new).
-Updates acp_shared.acp_runs status to 'completed'.
+
+Writes:
+  1. acp_silver_s2.visibility_reports — full research output
+  2. acp_shared.acp_run_context       — s2_keyword_research, s2_visibility_report,
+                                        s2_keyword_clusters, s2_confidence_score
+  3. acp_shared.acp_runs              — status = 'completed'
+
+System prompt built from Ms. Thư's stage-2 prompt files in ../prompts/.
 """
 import json
 import os
 import structlog
+from pathlib import Path
 
 import boto3
 
@@ -16,6 +21,38 @@ logger = structlog.get_logger()
 
 _MODEL_ID = "us.anthropic.claude-sonnet-4-5"
 _AWS_REGION = os.environ.get("AWS_REGION", "us-west-1")
+_PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
+
+
+def _load_prompt(filename: str) -> str:
+    path = _PROMPTS_DIR / filename
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    logger.warning("prompt_file_missing", path=str(path))
+    return ""
+
+
+# Loaded once at module import — ECS cold-start only
+TOUR_VISIBILITY_RULES = _load_prompt("tour_visibility_rules.md")
+MARKET_PREFERENCE_RULES = _load_prompt("market_preference_rules.md")
+AA_MATCHING_RULES = _load_prompt("aa_matching_rules.md")
+BLOG_BRIEF_RULES = _load_prompt("blog_brief_rules.md")
+SOCIAL_CONTENT_RULES = _load_prompt("social_content_rules.md")
+
+_SYSTEM_PROMPT = f"""You are an expert travel content strategist for Adventure Asia \
+— a premium curated soft-adventure brand.
+
+{TOUR_VISIBILITY_RULES}
+
+When generating blog briefs and content ideas, apply:
+{BLOG_BRIEF_RULES}
+
+When matching opportunities to AA tours, apply:
+{AA_MATCHING_RULES}
+
+For any social content ideas, apply:
+{SOCIAL_CONTENT_RULES}
+"""
 
 
 def make_synthesize_node(pool, s3_client):
@@ -30,8 +67,8 @@ def make_synthesize_node(pool, s3_client):
         existing_risk = state.get("existing_content_risk", False)
         completed_tools = list(state.get("completed_tools", []))
 
-        prompt = (
-            f"You are a travel content strategist. Analyze SEO visibility data for '{country}' tours.\n\n"
+        user_prompt = (
+            f"Analyze SEO visibility data for '{country}' tours.\n\n"
             f"Research summary:\n"
             f"- Keywords analyzed: {kw_count}\n"
             f"- Informational intent: {intent_pct:.1f}%\n"
@@ -43,6 +80,9 @@ def make_synthesize_node(pool, s3_client):
             "  content_gaps: array of 2-3 identified content gap strings\n"
             "  recommended_actions: array of 3 next-step action strings\n"
             "  risk_flags: array of risk strings (empty array if none)\n"
+            "  keyword_clusters: array of objects {cluster_name, keywords[], intent}\n"
+            "  market_preference: object {dominant_duration, dominant_style, price_band}\n"
+            "  aa_tour_matches: array of objects {keyword, tour_suggestion, match_reason}\n"
             "  confidence_score: float 0-100\n\n"
             "Respond with only valid JSON. No markdown, no explanation."
         )
@@ -55,7 +95,8 @@ def make_synthesize_node(pool, s3_client):
                 body=json.dumps({
                     "anthropic_version": "bedrock-2023-05-31",
                     "max_tokens": 4096,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "system": _SYSTEM_PROMPT,
+                    "messages": [{"role": "user", "content": user_prompt}],
                 }),
             )
             raw = json.loads(response["body"].read())
@@ -67,14 +108,19 @@ def make_synthesize_node(pool, s3_client):
                 "top_opportunities": [],
                 "content_gaps": [],
                 "summary": f"Synthesis failed: {exc}",
+                "keyword_clusters": [],
+                "market_preference": {},
+                "aa_tour_matches": [],
             }
 
-        # Map LLM output + state S3 keys to actual visibility_reports column names
         top_opportunities = llm_output.get("top_opportunities") or []
         keyword_gaps = llm_output.get("content_gaps") or []
-        # Use top 3 opportunities as primary keywords
+        keyword_clusters = llm_output.get("keyword_clusters") or []
+        market_preference = llm_output.get("market_preference") or {}
+        aa_tour_matches = llm_output.get("aa_tour_matches") or []
         primary_keywords = top_opportunities[:3]
 
+        # 1. Write to visibility_reports
         async with pool.acquire() as conn:
             await conn.execute(
                 """
@@ -100,6 +146,42 @@ def make_synthesize_node(pool, s3_client):
                 json.dumps(primary_keywords),
             )
 
+        # 2. Write S2 outputs to acp_run_context (upsert — S1 may not have run)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO acp_shared.acp_run_context
+                    (run_id, tenant_id,
+                     s2_keyword_research, s2_visibility_report,
+                     s2_keyword_clusters, s2_market_preference, s2_aa_tour_matches,
+                     s2_confidence_score, updated_at)
+                VALUES
+                    ($1::uuid, $2,
+                     $3::jsonb, $4::jsonb,
+                     $5::jsonb, $6::jsonb, $7::jsonb,
+                     $8, NOW())
+                ON CONFLICT (run_id) DO UPDATE SET
+                    s2_keyword_research  = EXCLUDED.s2_keyword_research,
+                    s2_visibility_report = EXCLUDED.s2_visibility_report,
+                    s2_keyword_clusters  = EXCLUDED.s2_keyword_clusters,
+                    s2_market_preference = EXCLUDED.s2_market_preference,
+                    s2_aa_tour_matches   = EXCLUDED.s2_aa_tour_matches,
+                    s2_confidence_score  = EXCLUDED.s2_confidence_score,
+                    updated_at           = NOW()
+                """,
+                run_id, tenant_id,
+                json.dumps({"top_opportunities": top_opportunities, "content_gaps": keyword_gaps,
+                            "recommended_actions": llm_output.get("recommended_actions", [])}),
+                json.dumps({"summary": llm_output.get("summary", ""),
+                            "risk_flags": llm_output.get("risk_flags", []),
+                            "primary_keywords": primary_keywords}),
+                json.dumps(keyword_clusters),
+                json.dumps(market_preference),
+                json.dumps(aa_tour_matches),
+                round(confidence_score / 100.0, 4),  # normalize 0-100 → 0.0-1.0
+            )
+
+        # 3. Update acp_runs status
         async with pool.acquire() as conn:
             await conn.execute(
                 """

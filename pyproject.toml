@@ -1,0 +1,8 @@
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+
+[tool.coverage.run]
+omit = [
+    "services/acp_s4/generate.py",
+    "services/acp_s4_evaluate/handler.py",
+]

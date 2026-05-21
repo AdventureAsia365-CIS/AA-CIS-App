@@ -128,7 +128,7 @@ jobs:
       - name: Package and deploy Lambdas
         run: |
           bash scripts/package_lambdas.sh
-          for fn in ingestion seo validation export content; do
+          for fn in ingestion seo validation export content brand-brief-parser acp-s4-evaluate; do
             ZIP="dist/lambdas/${fn}.zip"
             if [ -f "$ZIP" ]; then
               echo "Deploying $fn..."

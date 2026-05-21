@@ -435,6 +435,94 @@ async def list_tour_versions(
     }
 
 
+# ── GET /tours/{raw_tour_id}/versions/compare ─────────────────────────────────
+
+@router.get("/tours/{raw_tour_id}/versions/compare")
+async def compare_tour_versions(
+    raw_tour_id: str,
+    v1:          str,
+    v2:          str,
+    request:     Request,
+    tenant=Depends(_get_tenant),
+):
+    """
+    Compare 2 tour_content_versions for the same raw_tour.
+    GET /v1/tours/{raw_tour_id}/versions/compare?v1={version_id}&v2={version_id}
+    PRD v1.2 AA-63.
+    """
+    _safe_uuid(raw_tour_id, "raw_tour_id")
+    _safe_uuid(v1, "v1")
+    _safe_uuid(v2, "v2")
+    if v1 == v2:
+        raise HTTPException(status_code=422, detail="v1 and v2 must be different version IDs")
+
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id::text, acp_run_id::text, run_config, content,
+                   quality_score, status, is_active, failure_codes,
+                   created_at, updated_at
+            FROM silver_aa_internal.tour_content_versions
+            WHERE raw_tour_id = $1::uuid
+              AND id = ANY($2::uuid[])
+            """,
+            raw_tour_id, [v1, v2],
+        )
+
+    if len(rows) < 2:
+        missing = ({v1, v2} - {r["id"] for r in rows})
+        raise HTTPException(
+            status_code=404,
+            detail=f"Version(s) not found for this tour: {missing}",
+        )
+
+    def _ser(row) -> dict:
+        rc = row["run_config"]
+        content = row["content"]
+        return {
+            "version_id":    row["id"],
+            "acp_run_id":    row["acp_run_id"],
+            "run_config":    (rc if isinstance(rc, dict) else json.loads(rc or "{}")),
+            "quality_score": float(row["quality_score"]) if row["quality_score"] is not None else None,
+            "status":        row["status"],
+            "is_active":     row["is_active"],
+            "failure_codes": list(row["failure_codes"]) if row["failure_codes"] else [],
+            "preview_text":  (
+                content if isinstance(content, dict) else json.loads(content or "{}")
+            ).get("aa_summary", "")[:300],
+            "created_at":    row["created_at"].isoformat() if row["created_at"] else None,
+        }
+
+    v_map = {r["id"]: _ser(r) for r in rows}
+    s1, s2 = v_map[v1], v_map[v2]
+
+    score_delta = None
+    if s1["quality_score"] is not None and s2["quality_score"] is not None:
+        score_delta = round(s2["quality_score"] - s1["quality_score"], 2)
+
+    fc1 = set(s1["failure_codes"])
+    fc2 = set(s2["failure_codes"])
+    model1 = s1["run_config"].get("model_id") or s1["run_config"].get("model")
+    model2 = s2["run_config"].get("model_id") or s2["run_config"].get("model")
+
+    return {
+        "raw_tour_id": raw_tour_id,
+        "v1": s1,
+        "v2": s2,
+        "diff": {
+            "score_delta":              score_delta,
+            "failure_codes_only_in_v1": sorted(fc1 - fc2),
+            "failure_codes_only_in_v2": sorted(fc2 - fc1),
+            "failure_codes_fixed":      sorted(fc1 - fc2),
+            "failure_codes_new":        sorted(fc2 - fc1),
+            "model_changed":            model1 != model2 if model1 and model2 else None,
+            "model_v1":                 model1,
+            "model_v2":                 model2,
+        },
+    }
+
+
 # ── PATCH /versions/{version_id}/activate ────────────────────────────────────
 
 @router.patch("/versions/{version_id}/activate")

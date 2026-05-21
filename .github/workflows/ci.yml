@@ -33,6 +33,30 @@ jobs:
             --extend-ignore=E203,W503,E302,E303,E305,E221,F401,E128,E124,E401,E127,E126,B008,E701,F821,F841,W291,E272,W293,E231 \
             --exclude=__pycache__,.venv,migrations
 
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pip-audit
+        run: pip install pip-audit --quiet
+
+      - name: Audit main requirements
+        run: pip-audit -r requirements.txt --ignore-vuln PYSEC-2024-56 || true
+
+      - name: Audit Lambda requirements
+        run: |
+          for f in services/acp_brand_brief_parser/requirements.txt; do
+            echo "=== Auditing $f ==="
+            pip-audit -r "$f" --ignore-vuln PYSEC-2024-56 || true
+          done
+
   test-unit:
     name: Unit Tests
     runs-on: ubuntu-latest

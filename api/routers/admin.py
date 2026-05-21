@@ -1,11 +1,15 @@
 # api/routers/admin.py
 # P2-S5 — Multi-tenant onboarding + billing metrics
 import hashlib
+import io
+import json
 import os
 import secrets
+from datetime import datetime, timezone
 from uuid import UUID
 from typing import Optional
-from fastapi import APIRouter, Header, HTTPException, Request
+import boto3
+from fastapi import APIRouter, File, Header, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -72,18 +76,43 @@ async def create_tenant(
 
     pool = request.app.state.pool
     async with pool.acquire() as conn:
-        # Check slug unique
         existing = await conn.fetchval(
             "SELECT tenant_id FROM shared.tenants WHERE slug = $1", body.slug
         )
         if existing:
             raise HTTPException(status_code=409, detail=f"Slug '{body.slug}' already exists")
 
-        tenant_id = await conn.fetchval("""
-            INSERT INTO shared.tenants (name, slug, plan_tier, api_key_hash, rate_limit_rpm, is_active)
-            VALUES ($1, $2, $3::plan_tier_enum, $4, $5, true)
-            RETURNING tenant_id
-        """, body.name, body.slug, body.plan_tier, key_hash, rpm)
+        async with conn.transaction():
+            tenant_id = await conn.fetchval("""
+                INSERT INTO shared.tenants (name, slug, plan_tier, api_key_hash, rate_limit_rpm, is_active)
+                VALUES ($1, $2, $3::plan_tier_enum, $4, $5, true)
+                RETURNING tenant_id
+            """, body.name, body.slug, body.plan_tier, key_hash, rpm)
+
+            # Quota ledger — default limits per plan
+            plan_limits = PLAN_LIMITS.get(body.plan_tier, PLAN_LIMITS["starter"])
+            await conn.execute("""
+                INSERT INTO acp_shared.acp_quota_ledger
+                    (tenant_id, s2_runs_limit, s3_runs_limit, s4_blogs_limit)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (tenant_id) DO NOTHING
+            """, tenant_id, 10, 10, 50)
+
+            # Empty brand rules row — populated later via brand-brief upload
+            await conn.execute("""
+                INSERT INTO shared.tenant_brand_rules (tenant_id)
+                VALUES ($1)
+                ON CONFLICT (tenant_id, is_active) DO NOTHING
+            """, tenant_id)
+
+            # Onboarding audit trail
+            await conn.execute("""
+                INSERT INTO acp_shared.audit_log
+                    (tenant_id, actor, action, resource_type, resource_id, details)
+                VALUES ($1, 'admin_api', 'agency.onboard', 'tenant', $2, $3::jsonb)
+            """, str(tenant_id), str(tenant_id), json.dumps({
+                "name": body.name, "plan_tier": body.plan_tier,
+            }))
 
     return CreateTenantResponse(
         tenant_id=str(tenant_id),
@@ -530,3 +559,141 @@ async def generate_api_key(
         api_key=plaintext,
         message="Store this key securely — it will not be shown again.",
     )
+
+
+# ── POST /admin/tenants/{id}/brand-brief ─────────────────────────────────────
+
+_BRAND_BRIEF_BUCKET = "acp-bronze-867490540162"
+_BRAND_BRIEF_LAMBDA = "acp-brand-brief-parser"
+_MAX_DOCX_BYTES = 5 * 1024 * 1024  # 5 MB
+
+
+@router.post("/tenants/{tenant_id}/brand-brief", summary="Upload and parse brand brief DOCX")
+async def upload_brand_brief(
+    tenant_id: str,
+    request: Request,
+    file: UploadFile = File(...),
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+
+    content_type = file.content_type or ""
+    if "officedocument.wordprocessingml" not in content_type and not file.filename.endswith(".docx"):
+        raise HTTPException(status_code=400, detail="File must be a .docx document")
+
+    data = await file.read()
+    if len(data) > _MAX_DOCX_BYTES:
+        raise HTTPException(status_code=400, detail="File exceeds 5 MB limit")
+
+    iso_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+    s3_key = f"brand-briefs/{tenant_id}/{iso_ts}.docx"
+
+    s3 = boto3.client("s3", region_name="us-west-1")
+    try:
+        s3.upload_fileobj(io.BytesIO(data), _BRAND_BRIEF_BUCKET, s3_key)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"S3 upload failed: {e}")
+
+    lam = boto3.client("lambda", region_name="us-west-1")
+    payload = json.dumps({
+        "tenant_id": tenant_id,
+        "s3_bucket": _BRAND_BRIEF_BUCKET,
+        "s3_key": s3_key,
+    }).encode()
+    try:
+        resp = lam.invoke(
+            FunctionName=_BRAND_BRIEF_LAMBDA,
+            InvocationType="RequestResponse",
+            Payload=payload,
+        )
+        result = json.loads(resp["Payload"].read())
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Lambda invoke failed: {e}")
+
+    if result.get("status") == "error":
+        raise HTTPException(status_code=422, detail=result.get("warnings", ["Unknown parse error"]))
+
+    # Persist S3 key for brand brief reuse on next S0 run (M1)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE shared.tenants SET last_brand_brief_s3_key=$2, updated_at=NOW() WHERE tenant_id=$1::uuid",
+            tenant_id, s3_key,
+        )
+
+    return {**result, "brand_brief_s3_key": s3_key}
+
+
+# ── POST /admin/tenants/{id}/offboard — GDPR offboard ────────────────────────
+
+class OffboardRequest(BaseModel):
+    reason: str
+
+
+@router.post("/tenants/{tenant_id}/offboard", summary="GDPR offboarding — cancel tenant + revoke key")
+async def offboard_tenant(
+    tenant_id: str,
+    body: OffboardRequest,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    """
+    GDPR offboarding: cancel tenant, revoke API key, log for data deletion.
+    S3 data deletion must be run manually (Lambda or CLI) after 14 days.
+    PRD v1.0 §3.2.
+    """
+    verify_admin_secret(x_admin_secret)
+    if not body.reason.strip():
+        raise HTTPException(status_code=400, detail="reason is required for GDPR audit trail")
+
+    try:
+        UUID(tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid tenant_id UUID")
+
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        tenant = await conn.fetchrow(
+            "SELECT tenant_id, name, cancelled_at FROM shared.tenants WHERE tenant_id=$1::uuid",
+            tenant_id,
+        )
+        if not tenant:
+            raise HTTPException(status_code=404, detail=f"Tenant {tenant_id} not found")
+        if tenant["cancelled_at"]:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Tenant already offboarded at {tenant['cancelled_at'].isoformat()}",
+            )
+
+        async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE shared.tenants
+                SET cancelled_at        = NOW(),
+                    cancellation_reason = $2,
+                    is_active           = FALSE,
+                    api_key_hash        = 'REVOKED_' || tenant_id::text,
+                    updated_at          = NOW()
+                WHERE tenant_id = $1::uuid
+                """,
+                tenant_id, body.reason,
+            )
+            await conn.execute(
+                """
+                INSERT INTO acp_shared.audit_log
+                    (tenant_id, actor, action, resource_type, resource_id, details)
+                VALUES ($1, 'admin_api', 'agency.offboard', 'tenant', $1, $2::jsonb)
+                """,
+                tenant_id, json.dumps({
+                    "reason": body.reason,
+                    "name": tenant["name"],
+                    "note": "S3 data deletion: acp-cis-*/{tenant_id}/ — schedule Lambda after 14d",
+                }),
+            )
+
+    return {
+        "tenant_id": tenant_id,
+        "status": "offboarded",
+        "api_key": "REVOKED",
+        "note": f"S3 prefix acp-cis-bronze-867490540162/{tenant_id}/ must be deleted after 14 days.",
+    }
