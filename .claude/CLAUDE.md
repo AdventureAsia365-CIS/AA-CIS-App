@@ -1,11 +1,11 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 21/05/2026 | ECS api:151 | CI #241
+# Updated: 21/05/2026 | ECS api:161 | CI #252
 
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway owq9as3wjl)
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel)
-- ECS task def: api:151 | CI #241 green | Deploy Dev #147
-- AWS: STOPPED (stop ECS + RDS after session 23)
+- ECS task def: api:161 | CI #252 green | Deploy Dev #157
+- AWS: STOPPED (stop ECS + RDS after session 25)
 - Lambda aa-cis-dev-acp-s4-evaluate: DEPLOYED ✅ (AA-49 H-1)
 - API Gateway: owq9as3wjl | Lambda Authorizer: aa-cis-dev-authorizer
 - DB: PostgreSQL 15, aa_cis_dev, secret: aa-cis/dev/rds (plain DSN)
@@ -109,26 +109,25 @@ Last commit: ae2ba56 (AA-CIS-App) | 2a37231 (AA-ACP-App)
 - Lambda aa-cis-dev-acp-s4-evaluate DEPLOYED ✅ | IAM Bedrock policy ✅
 - Branches pushed: feature/aa-49-harness-h1-h2 (App + ACP-App) | develop (Infra)
 
-### 🔴 Next Session Priority (Session 24)
-1. Merge feature/aa-49-harness-h1-h2 → develop (AA-CIS-App + AA-ACP-App)
-2. Push CI → deploy new /v1/rules route to ECS
-3. Apply migration 031 via S3-mediated ECS exec (STILL PENDING from S22)
-4. Deploy Lambda aa-cis-dev-acp-s3-campaign-planner (STILL PENDING from S22)
-5. AA-90 (S1 trigger page), AA-43 (S2 LangGraph)
+### 🔴 Next Session Priority (Session 26)
+1. AA-47 — Full E2E UAT (see handoff.md §7 for checklist)
+2. Fix Lambda s4-trigger ALB_INTERNAL_URL (placeholder, P0)
+3. Setup WordPress Docker for UAT (docker/wordpress-uat)
+4. Verify aa_internal tenant UUID in DB (Gate 1 hardcodes this)
 
 ### ⚠️ Open Issues
-- Migration 031 NOT yet applied to live DB
-- Lambda aa-cis-dev-acp-s3-campaign-planner NOT yet deployed
-- AA-49 branches NOT yet merged to develop (pending verify)
-- acp_output_rules schema uses rule_type/pattern (NOT rule_code/condition_field as task spec assumed)
-- AA-36: No char limits on rewrite fields — Backlog
+- Lambda s4-trigger ALB_INTERNAL_URL is placeholder — must fix before AA-47 UAT
+- WordPress UAT setup not done (Docker + ngrok + Secrets Manager)
 - api_task_def_arn hardcoded :21 in main.tf — AA-CIS-Infra (AA-22 tech debt)
+- AA-36: No char limits on rewrite fields — Backlog
 
-## Session 23 Close — 21/05/2026
-- ECS still RUNNING (stop after review!)
-- Lambda acp-s4-evaluate: ACTIVE | Terraform applied
-- Task def: api:151 | CI #241 | Last deploy #147
-- Commits: 4dd923b (AA-CIS-App AA-49), ee491de (AA-ACP-App rules), ab81ad0 (Infra Lambda)
+## Session 25 Close — 21/05/2026
+- ECS: api:161 RUNNING (⚠️ stop after reading this!)
+- All M5 Phase A+B tickets merged to main ✅
+- schema_versions gap fixed (025→042 continuous) ✅
+- handoff.md updated ✅
+- Task def: api:161 | CI #252 | Last deploy #157
+- Commits: 4d587d8 (lint fix), e4fd002 (handoff) on AA-CIS-App develop
 
 
 ## Implementation Notes Pattern
