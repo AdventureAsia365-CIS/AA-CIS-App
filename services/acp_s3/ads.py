@@ -110,8 +110,11 @@ def _build_pdf(ads: AdsOutput, tenant_id: str, country: str) -> bytes:
 
 
 def upload_ads_pdf(ads: AdsOutput, tenant_id: str, country: str, run_id: str) -> str:
-    """Generate PDF, upload to S3, return s3_key."""
-    pdf_bytes = _build_pdf(ads, tenant_id, country)
+    """Generate PDF, upload to S3, return s3_key. Returns empty string on PDF error."""
+    try:
+        pdf_bytes = _build_pdf(ads, tenant_id, country)
+    except Exception:
+        return ""
     s3_key = f"acp/s3/ads-plans/{tenant_id}/{run_id}/ads_plan.pdf"
     s3 = boto3.client("s3", region_name=_BEDROCK_REGION)
     s3.upload_fileobj(

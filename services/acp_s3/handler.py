@@ -162,10 +162,11 @@ def _create_hitl_gate2(conn, run_id: str) -> None:
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO acp_shared.acp_hitl_requests
-                (run_id, stage, gate_type, reviewer_id, status, expires_at, created_at)
-            VALUES (%s, 2, 'content_calendar', 'ms.thu@adventure-asia.com',
-                    'pending', NOW() + INTERVAL '24 hours', NOW())
-        """, (run_id,))
+                (run_id, stage, gate_type, reviewer_id, status,
+                 auto_approved, confidence_score, reviewer_type, payload)
+            VALUES (%s, 3, 'content_calendar', 'ms.thu',
+                    'pending', false, NULL, 'tenant_admin', %s::jsonb)
+        """, (run_id, json.dumps({"gate": 2, "reviewer": "ms.thu"})))
 
 
 def _emit_eventbridge(run_id: str, tenant_id: str) -> None:
