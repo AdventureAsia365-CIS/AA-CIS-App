@@ -227,7 +227,7 @@ async def get_s2_status(
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            SELECT run_id, status, country, created_at, completed_at
+            SELECT run_id, status, country, started_at, completed_at
             FROM acp_shared.acp_runs
             WHERE run_id = $1::uuid
         """, run_id)
@@ -239,7 +239,7 @@ async def get_s2_status(
         "run_id":       str(row["run_id"]),
         "status":       row["status"],
         "country":      row["country"],
-        "created_at":   row["created_at"].isoformat() if row["created_at"] else None,
+        "started_at":   row["started_at"].isoformat() if row["started_at"] else None,
         "completed_at": row["completed_at"].isoformat() if row["completed_at"] else None,
     }
 
