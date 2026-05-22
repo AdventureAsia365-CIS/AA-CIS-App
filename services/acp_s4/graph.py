@@ -31,7 +31,7 @@ logger = structlog.get_logger()
 _BEDROCK = boto3.client("bedrock-runtime", region_name="us-west-1")
 _LAMBDA = boto3.client("lambda", region_name="us-west-1")
 
-DRAFT_MODEL = "us.anthropic.claude-sonnet-4-5-20251001-v1:0"
+DRAFT_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 EVAL_FUNCTION = "aa-cis-dev-acp-s4-evaluate"
 EVAL_THRESHOLD = 7.5
 MAX_REWRITE = 2

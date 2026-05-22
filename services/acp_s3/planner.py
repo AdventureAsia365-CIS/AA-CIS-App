@@ -9,7 +9,7 @@ import boto3
 
 from models import CalendarSkeleton, CompactPacket
 
-_SONNET = "us.anthropic.claude-sonnet-4-5-20251001-v1:0"
+_SONNET = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 _BEDROCK_REGION = "us-west-1"
 
 _PROMPT_DIR = os.path.join(os.path.dirname(__file__), "prompts")
