@@ -9,6 +9,7 @@ NOTE: /runs/{run_id}/context MUST be declared before /runs/{run_id} — FastAPI 
 import json as _json
 import os
 import structlog
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.security import HTTPBearer as _HTTPBearer, HTTPAuthorizationCredentials as _Creds
@@ -92,6 +93,13 @@ async def get_s1_keywords(
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+
+def _validate_uuid(value: str, field: str = "run_id") -> str:
+    try:
+        return str(UUID(value))
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=422, detail=f"Invalid UUID for {field}: {value!r}")
+
 
 def _dec(v):
     """Convert Decimal/None to float/None for JSON."""
@@ -225,6 +233,7 @@ async def get_run_context(
     CIS tours for S1 panel queried by run country from silver/gold_aa_internal.
     Returns null for any stage not yet reached.
     """
+    run_id = _validate_uuid(run_id)
     pool = request.app.state.pool
 
     async with pool.acquire() as conn:
@@ -355,6 +364,7 @@ async def get_acp_run(
     tenant=Depends(_get_tenant),
 ):
     """Full run detail with all gate decisions."""
+    run_id = _validate_uuid(run_id)
     pool = request.app.state.pool
 
     async with pool.acquire() as conn:
