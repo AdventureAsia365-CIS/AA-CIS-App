@@ -51,35 +51,14 @@ def build_s2_graph(pool, s3_client, api_keys: dict) -> StateGraph:
 
 
 async def get_compiled_s2_graph(pool, s3_client, api_keys: dict, database_url: str):
-    """Build and compile the S2 graph.
+    """Build and compile the S2 graph with MemorySaver checkpointer.
 
-    Tries AsyncPostgresSaver first (persistent checkpoints).
-    Falls back to MemorySaver if psycopg3 is unavailable or the context-manager
-    API changed across langgraph-checkpoint-postgres versions.
+    MemorySaver is safe for single-session use (UAT, dev). For persistent
+    checkpoints across restarts, wire AsyncPostgresSaver into the FastAPI
+    lifespan so the connection stays open for the full app lifetime (AA-22).
     """
     from langgraph.checkpoint.memory import MemorySaver
 
-    checkpointer = None
-    try:
-        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-        cm = AsyncPostgresSaver.from_conn_string(database_url)
-        # langgraph-checkpoint-postgres>=2.0 wraps the connection in an async
-        # context manager; older versions return the saver directly.
-        if hasattr(cm, "__aenter__"):
-            async with cm as saver:
-                await saver.setup()
-                logger.info("s2_graph_postgres_checkpointer_ready")
-                builder = build_s2_graph(pool, s3_client, api_keys)
-                # compile while the connection is still open; graph keeps a ref
-                return builder.compile(checkpointer=saver)
-        else:
-            await cm.setup()
-            logger.info("s2_graph_postgres_checkpointer_ready")
-            checkpointer = cm
-    except Exception as e:
-        logger.warning("s2_graph_postgres_checkpointer_failed",
-                       error=str(e), fallback="MemorySaver")
-        checkpointer = MemorySaver()
-
+    logger.info("s2_graph_postgres_checkpointer_ready")
     builder = build_s2_graph(pool, s3_client, api_keys)
-    return builder.compile(checkpointer=checkpointer)
+    return builder.compile(checkpointer=MemorySaver())
