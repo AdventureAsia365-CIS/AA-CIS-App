@@ -140,6 +140,7 @@ _COUNTRY_KEYWORDS = {
     "thailand": "Thailand", "thai": "Thailand",
     "indonesia": "Indonesia", "bali": "Indonesia",
     "japan": "Japan",
+    "korea": "South Korea", "south_korea": "South Korea",
     "nepal": "Nepal",
     "india": "India",
     "cambodia": "Cambodia",

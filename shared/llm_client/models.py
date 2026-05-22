@@ -5,7 +5,7 @@ class LLMRequest(BaseModel):
     system_prompt: str
     user_prompt:   str
     few_shots:     list[dict] = []
-    max_tokens:    int = 2000
+    max_tokens:    int = 4096
     temperature:   float = 0.7
     # model_tier controls which Bedrock model to start from:
     #   "haiku"  → skip T1, go directly to T2 (Haiku) — fast/cheap
