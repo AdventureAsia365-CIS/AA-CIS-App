@@ -45,6 +45,7 @@ async def _rewrite_tour(
     seo: dict = None,
     model_tier: str = "haiku",
     is_tenant_rewrite: bool = False,
+    subtitle_focus: str = "standard",
 ) -> dict:
     """Rewrite single tour using LangGraph."""
     logger.info("rewriting_tour", idx=idx, total=total, name=tour.get("name", ""))
@@ -70,6 +71,7 @@ async def _rewrite_tour(
             "brand_style_guide":    _br.get("style_guide", ""),
             "brand_forbidden_words": _br.get("forbidden_words", []),
             "rewrite_language":     _br.get("rewrite_language", "en-US"),
+            "subtitle_focus":       subtitle_focus,
         }
 
         def run_graph():
@@ -197,6 +199,7 @@ class TourRunRequest(BaseModel):
     seo_mode: str = "dataforseo"  # "dataforseo" | "custom_keywords" | "disabled"
     rewrite_language: str = "en-US"  # en-US | en-GB
     model_tier: str = "haiku"        # "haiku" | "sonnet"
+    subtitle_focus: str = "standard" # "standard" | "seo" | "concise"
 
 
 @router.post("/run-tour")
@@ -279,6 +282,7 @@ async def run_tour(req: TourRunRequest):
             brand_rules=brand_rules,
             seo=seo_data,
             model_tier=req.model_tier,
+            subtitle_focus=req.subtitle_focus,
         )
 
         # Auto-upgrade: Haiku score below threshold → retry with Sonnet
@@ -297,6 +301,7 @@ async def run_tour(req: TourRunRequest):
                 brand_rules=brand_rules,
                 seo=seo_data,
                 model_tier="sonnet",
+                subtitle_focus=req.subtitle_focus,
             )
             _new_score = _upgraded.get("quality_score", 0.0)
             logger.info("auto_upgrade_result", tour_id=req.tour_id,
@@ -502,6 +507,7 @@ class IngestS3Request(_BaseModel):
     bucket: str
     seo_mode: str = "dataforseo"  # dataforseo | custom_keywords | disabled
     model_tier: str = "haiku"
+    subtitle_focus: str = "standard"
 
 
 # Limit concurrent LLM runs to avoid DB pool exhaustion and Bedrock throttling
@@ -610,6 +616,7 @@ async def ingest_s3(
             tenant_id="00000000-0000-0000-0000-000000000001",
             seo_mode=req.seo_mode,
             model_tier=req.model_tier,
+            subtitle_focus=req.subtitle_focus,
         )
         background_tasks.add_task(_run_tour_safe, tour_req)
 

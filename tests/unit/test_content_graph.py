@@ -23,6 +23,7 @@ def make_state(**kwargs) -> ContentState:
         "brand_forbidden_words": [],
         "rewrite_language":      "en-US",
         "model_tier":            "haiku",
+        "subtitle_focus":        "standard",
         "is_tenant_rewrite":     False,
         "is_branded":            True,
         "failure_codes":         [],
@@ -92,6 +93,46 @@ def test_validate_seo_title_too_long():
     )
     result = validate_node(state)
     assert "seo_title" in result["feedback"]
+
+def _good_generated(**overrides):
+    base = {
+        "name": "South Korea: Temple, Trail & Peninsula — 12 Days",
+        "subtitle": "Seoul to Jeju via Seoraksan, 12 days, DMZ and temple stay",
+        "summary": "Twelve days from Seoul to Jeju covering the DMZ, Seoraksan, Gyeongju, and the volcanic coast.",
+        "highlights": ["Visit the 3rd Tunnel at the DMZ", "Hike Seoraksan to Ulsanbawi Rock", "Temple stay at Golgulsa"],
+        "itineraries": "Day 1: Arrive Seoul, welcome dinner. Day 2: Gyeongbokgung Palace, afternoon free. Day 3: DMZ and 3rd Tunnel, K-pop class. Day 4: Seoraksan National Park.",
+        "seo_title": "South Korea Tours: Seoul to Jeju | Adventure Asia",
+        "seo_meta": "Twelve days from Seoul to Jeju via Seoraksan trails, Gyeongju cycling, and the Jeju Olle Trail.",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_validate_brand_seo_meta_violation_hostel():
+    state = make_state(generated=_good_generated(
+        seo_meta="Twelve days including hostels and public transport across South Korea."
+    ))
+    result = validate_node(state)
+    assert "BRAND_SEO_META_VIOLATION" in result["failure_codes"]
+    assert result["quality_score"] < 10.0
+
+
+def test_validate_brand_seo_meta_clean():
+    state = make_state(generated=_good_generated())
+    result = validate_node(state)
+    assert "BRAND_SEO_META_VIOLATION" not in result["failure_codes"]
+    assert result["quality_score"] == 10.0
+
+
+def test_validate_name_rewrite_no_longer_penalised():
+    state = make_state(
+        tour={"name": "Exploring South Korea", "country": "South Korea"},
+        generated=_good_generated(name="South Korea: Temple, Trail & Peninsula — 12 Days"),
+    )
+    result = validate_node(state)
+    assert "NAME_MODIFIED" not in result["failure_codes"]
+    assert result["quality_score"] == 10.0
+
 
 # --- should_retry tests ---
 
