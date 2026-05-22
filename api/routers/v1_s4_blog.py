@@ -320,8 +320,10 @@ async def hitl_decision(
             await conn.execute(
                 """
                 INSERT INTO acp_shared.acp_cms_publish_queue
-                    (queue_id, run_id, tenant_id, draft_id, cms_secret_key, status)
-                VALUES ($1, $2::uuid, $3, $4::uuid, $5, 'pending')
+                    (queue_id, run_id, tenant_id, draft_id,
+                     cms_type, cms_secret_key, status, retries)
+                VALUES ($1, $2::uuid, $3, $4::uuid,
+                        'wordpress', $5, 'pending', 0)
                 """,
                 queue_id, run_id, tenant_id, draft_id, cms_secret_key,
             )
