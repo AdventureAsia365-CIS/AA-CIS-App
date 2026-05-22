@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 logger = structlog.get_logger()
 
-_S3_BUCKET = os.environ.get("ACP_BRONZE_BUCKET", "acp-cis-bronze-867490540162")
+_S3_BUCKET = os.environ.get("ACP_BRONZE_BUCKET", "aa-cis-bronze-867490540162")
 
 
 def make_google_trends_node(pool, s3_client):

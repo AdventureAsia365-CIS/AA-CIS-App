@@ -14,7 +14,7 @@ import httpx
 
 logger = structlog.get_logger()
 
-_S3_BUCKET = os.environ.get("ACP_BRONZE_BUCKET", "acp-cis-bronze-867490540162")
+_S3_BUCKET = os.environ.get("ACP_BRONZE_BUCKET", "aa-cis-bronze-867490540162")
 _APIFY_RUN_URL = "https://api.apify.com/v2/acts/apify~website-content-crawler/runs"
 
 

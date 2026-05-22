@@ -13,7 +13,7 @@ import httpx
 
 logger = structlog.get_logger()
 
-_S3_BUCKET = os.environ.get("ACP_BRONZE_BUCKET", "acp-cis-bronze-867490540162")
+_S3_BUCKET = os.environ.get("ACP_BRONZE_BUCKET", "aa-cis-bronze-867490540162")
 _REDDIT_SEARCH_URL = "https://www.reddit.com/search.json"
 _INFORMATIONAL_THRESHOLD = 30.0
 

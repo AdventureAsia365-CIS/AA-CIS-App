@@ -16,7 +16,7 @@ import httpx
 logger = structlog.get_logger()
 
 _MAX_KEYWORDS = int(os.environ.get("ACP_MAX_KEYWORDS_PER_RUN", "200"))
-_S3_BUCKET = os.environ.get("ACP_BRONZE_BUCKET", "acp-cis-bronze-867490540162")
+_S3_BUCKET = os.environ.get("ACP_BRONZE_BUCKET", "aa-cis-bronze-867490540162")
 _DATAFORSEO_URL = "https://api.dataforseo.com/v3/keywords_data/google_ads/search_volume/live"
 _INFORMATIONAL_WORDS = frozenset({"how", "what", "guide", "tips", "best", "top", "vs", "why", "when"})
 
