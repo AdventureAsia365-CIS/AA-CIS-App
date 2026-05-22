@@ -237,7 +237,7 @@ Return ONLY the JSON object — no preamble, no explanation."""
             modelId=DRAFT_MODEL,
             body=json.dumps({
                 "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 4096,
+                "max_tokens": 8192,
                 "system": BLOG_SYSTEM_PROMPT,
                 "messages": [{"role": "user", "content": user_prompt}],
             }),
