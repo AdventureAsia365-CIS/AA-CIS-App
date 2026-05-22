@@ -100,7 +100,7 @@ def generate_node(state: ContentState) -> ContentState:
     )
 
     try:
-        resp = asyncio.get_event_loop().run_until_complete(client.generate(request))
+        resp = asyncio.new_event_loop().run_until_complete(client.generate(request))
         # Strip markdown fences nếu LLM wrap JSON trong ```json ... ```
         raw = resp.content.strip()
         if raw.startswith("```"):
