@@ -51,15 +51,35 @@ def build_s2_graph(pool, s3_client, api_keys: dict) -> StateGraph:
 
 
 async def get_compiled_s2_graph(pool, s3_client, api_keys: dict, database_url: str):
-    """Build and compile the S2 graph with an AsyncPostgresSaver checkpointer.
-    Calls checkpointer.setup() to create checkpoint tables in acp_shared schema.
-    Must be awaited inside an async lifespan context.
-    """
-    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    """Build and compile the S2 graph.
 
-    checkpointer = AsyncPostgresSaver.from_conn_string(database_url)
-    await checkpointer.setup()
-    logger.info("s2_graph_postgres_checkpointer_ready")
+    Tries AsyncPostgresSaver first (persistent checkpoints).
+    Falls back to MemorySaver if psycopg3 is unavailable or the context-manager
+    API changed across langgraph-checkpoint-postgres versions.
+    """
+    from langgraph.checkpoint.memory import MemorySaver
+
+    checkpointer = None
+    try:
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+        cm = AsyncPostgresSaver.from_conn_string(database_url)
+        # langgraph-checkpoint-postgres>=2.0 wraps the connection in an async
+        # context manager; older versions return the saver directly.
+        if hasattr(cm, "__aenter__"):
+            async with cm as saver:
+                await saver.setup()
+                logger.info("s2_graph_postgres_checkpointer_ready")
+                builder = build_s2_graph(pool, s3_client, api_keys)
+                # compile while the connection is still open; graph keeps a ref
+                return builder.compile(checkpointer=saver)
+        else:
+            await cm.setup()
+            logger.info("s2_graph_postgres_checkpointer_ready")
+            checkpointer = cm
+    except Exception as e:
+        logger.warning("s2_graph_postgres_checkpointer_failed",
+                       error=str(e), fallback="MemorySaver")
+        checkpointer = MemorySaver()
 
     builder = build_s2_graph(pool, s3_client, api_keys)
     return builder.compile(checkpointer=checkpointer)
