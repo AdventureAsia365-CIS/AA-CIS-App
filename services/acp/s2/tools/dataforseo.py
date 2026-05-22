@@ -35,7 +35,7 @@ def make_dataforseo_node(pool, s3_client, api_keys: dict):
             cached = await conn.fetchrow("""
                 SELECT keywords_s3_key, keyword_count
                 FROM acp_silver_s2.visibility_reports
-                WHERE tenant_id = $1::uuid AND country = $2
+                WHERE tenant_id = $1 AND country = $2
                   AND keywords_s3_key IS NOT NULL
                   AND fetched_at > NOW() - INTERVAL '7 days'
                 ORDER BY fetched_at DESC
@@ -93,7 +93,7 @@ def make_dataforseo_node(pool, s3_client, api_keys: dict):
                 pub_rows = await conn.fetch("""
                     SELECT primary_keyword
                     FROM acp_gold_output.published_content
-                    WHERE tenant_id = $1::uuid
+                    WHERE tenant_id = $1
                       AND published_at > NOW() - INTERVAL '6 months'
                       AND quality_score >= 7.0
                 """, tenant_id)

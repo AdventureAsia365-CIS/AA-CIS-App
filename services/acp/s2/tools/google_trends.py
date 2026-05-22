@@ -26,7 +26,7 @@ def make_google_trends_node(pool, s3_client):
             cached = await conn.fetchrow("""
                 SELECT trends_s3_key
                 FROM acp_silver_s2.visibility_reports
-                WHERE tenant_id = $1::uuid AND country = $2
+                WHERE tenant_id = $1 AND country = $2
                   AND trends_s3_key IS NOT NULL
                   AND fetched_at > NOW() - INTERVAL '14 days'
                 ORDER BY fetched_at DESC

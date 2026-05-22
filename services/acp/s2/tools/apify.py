@@ -31,7 +31,7 @@ def make_apify_node(pool, s3_client, api_keys: dict):
             cached = await conn.fetchrow("""
                 SELECT competitors_s3_key
                 FROM acp_silver_s2.visibility_reports
-                WHERE tenant_id = $1::uuid AND country = $2
+                WHERE tenant_id = $1 AND country = $2
                   AND competitors_s3_key IS NOT NULL
                   AND fetched_at > NOW() - INTERVAL '3 days'
                 ORDER BY fetched_at DESC
@@ -47,7 +47,7 @@ def make_apify_node(pool, s3_client, api_keys: dict):
             urls = await conn.fetch("""
                 SELECT url, label
                 FROM acp_silver_s2.competitor_inputs
-                WHERE tenant_id = $1::uuid AND country = $2 AND is_active = TRUE
+                WHERE tenant_id = $1 AND country = $2 AND is_active = TRUE
             """, tenant_id, country)
 
         if not urls:

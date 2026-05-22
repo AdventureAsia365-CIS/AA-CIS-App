@@ -37,7 +37,7 @@ def make_reddit_node(pool, s3_client):
             cached = await conn.fetchrow("""
                 SELECT reddit_s3_key
                 FROM acp_silver_s2.visibility_reports
-                WHERE tenant_id = $1::uuid AND country = $2
+                WHERE tenant_id = $1 AND country = $2
                   AND reddit_s3_key IS NOT NULL
                   AND fetched_at > NOW() - INTERVAL '7 days'
                 ORDER BY fetched_at DESC
