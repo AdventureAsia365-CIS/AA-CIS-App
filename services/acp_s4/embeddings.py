@@ -97,7 +97,7 @@ async def find_internal_links(
                    LOWER(REPLACE(COALESCE(aa_name, ''), ' ', '-')) AS slug,
                    1 - (content_embedding <=> $1::vector) AS similarity
             FROM gold_aa_internal.published_tours
-            WHERE tenant_id = $2::uuid
+            WHERE tenant_id = $2
               AND content_embedding IS NOT NULL
               AND 1 - (content_embedding <=> $1::vector) > $3
             ORDER BY similarity DESC

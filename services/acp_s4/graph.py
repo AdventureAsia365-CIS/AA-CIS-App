@@ -127,7 +127,7 @@ async def _fetch_tour_facts(db_conn, tenant_id: str, keywords: list[str]) -> dic
             SELECT tour_id::text, aa_name, aa_summary, aa_description,
                    aa_highlights::text AS highlights_json, aa_itineraries
             FROM gold_aa_internal.published_tours
-            WHERE tenant_id = $1::uuid
+            WHERE tenant_id = $1
               AND ({ilike_conditions})
             ORDER BY quality_score DESC NULLS LAST
             LIMIT 3
