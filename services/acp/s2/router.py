@@ -67,7 +67,7 @@ async def _handle_gate1(pool, run_id: str, tenant_id: str) -> dict:
             """
             INSERT INTO acp_shared.audit_log
                 (tenant_id, actor, actor_type, action, resource_type, resource_id, details)
-            VALUES ($1, 'system', 'system', 'hitl.gate1', 'acp_run', $2,
+            VALUES ($1, 'system', 'tenant_admin', 'hitl.gate1', 'acp_run', $2,
                     $3::jsonb)
             """,
             tenant_id, run_id,

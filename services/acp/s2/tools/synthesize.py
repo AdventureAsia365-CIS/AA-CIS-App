@@ -19,7 +19,7 @@ import boto3
 
 logger = structlog.get_logger()
 
-_MODEL_ID = "us.anthropic.claude-sonnet-4-5-20251001-v1:0"
+_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 _AWS_REGION = os.environ.get("AWS_REGION", "us-west-1")
 _PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
 
