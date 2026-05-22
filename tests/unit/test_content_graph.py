@@ -156,7 +156,7 @@ def test_generate_node_injects_brand_system_prompt():
 
     captured: list = []
 
-    async def fake_generate(req):
+    def fake_generate(req):
         captured.append(req)
         return _fake_response()
 
@@ -179,7 +179,7 @@ def test_generate_node_unbranded_flag_when_no_brand():
     """is_branded=False when brand_system_prompt is empty."""
     state = make_state(brand_system_prompt="")
 
-    async def fake_generate(req):
+    def fake_generate(req):
         return _fake_response()
 
     with patch("services.content_generation.graph.LLMClient") as MockClient:

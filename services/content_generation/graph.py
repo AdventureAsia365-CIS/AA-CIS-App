@@ -55,8 +55,6 @@ _FAILURE_MAP: dict[str, tuple[str, float]] = {
 
 def generate_node(state: ContentState) -> ContentState:
     """Node 1: Generate content via LLMClient."""
-    import asyncio
-
     client = LLMClient()
     prompt = build_rewrite_prompt(
         state["tour"],
@@ -100,7 +98,7 @@ def generate_node(state: ContentState) -> ContentState:
     )
 
     try:
-        resp = asyncio.new_event_loop().run_until_complete(client.generate(request))
+        resp = client.generate(request)
         # Strip markdown fences nếu LLM wrap JSON trong ```json ... ```
         raw = resp.content.strip()
         if raw.startswith("```"):
