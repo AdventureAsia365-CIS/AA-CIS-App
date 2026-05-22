@@ -1,11 +1,11 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 21/05/2026 | ECS api:161 | CI #252
+# Updated: 22/05/2026 | ECS api:162 | CI #254
 
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway owq9as3wjl)
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel)
-- ECS task def: api:161 | CI #252 green | Deploy Dev #157
-- AWS: STOPPED (stop ECS + RDS after session 25)
+- ECS task def: api:162 | CI #254 green | Deploy Dev #159
+- AWS: RUNNING (started for AA-47 session 26)
 - Lambda aa-cis-dev-acp-s4-evaluate: DEPLOYED ✅ (AA-49 H-1)
 - API Gateway: owq9as3wjl | Lambda Authorizer: aa-cis-dev-authorizer
 - DB: PostgreSQL 15, aa_cis_dev, secret: aa-cis/dev/rds (plain DSN)
@@ -109,25 +109,33 @@ Last commit: ae2ba56 (AA-CIS-App) | 2a37231 (AA-ACP-App)
 - Lambda aa-cis-dev-acp-s4-evaluate DEPLOYED ✅ | IAM Bedrock policy ✅
 - Branches pushed: feature/aa-49-harness-h1-h2 (App + ACP-App) | develop (Infra)
 
-### 🔴 Next Session Priority (Session 26)
-1. AA-47 — Full E2E UAT (see handoff.md §7 for checklist)
+### ✅ Done Session 26 (AA-47 — Pipeline Stage Inspector)
+- api/routers/v1_acp.py: GET /v1/acp/runs, /runs/{id}/context, /runs/{id}
+  + UUID validation 422 fix. Gate summary (gate1=stage2, gate2=stage3, gate3=stage4).
+- AA-ACP-App: workspace/pipeline/page.tsx (run list, stage dots, 10s poll)
+- AA-ACP-App: workspace/pipeline/[run_id]/page.tsx (E2E inspector)
+  S0 brand brief, S1 CIS tours table, Gate 1/2/3 inline approve/reject (SLATimer),
+  S2 tabbed, S3 tabbed (calendar/ads/funnel), S4 blog drafts, CMS panel
+- layout.tsx: "Pipeline" added as first nav item
+- CI #254 ✅ | Deploy Dev #159 ✅ | Last commit: 60c35f3
+
+### 🔴 Next Session Priority (Session 27)
+1. AA-47 — Run actual E2E UAT against pipeline (need WordPress setup first)
 2. Fix Lambda s4-trigger ALB_INTERNAL_URL (placeholder, P0)
 3. Setup WordPress Docker for UAT (docker/wordpress-uat)
 4. Verify aa_internal tenant UUID in DB (Gate 1 hardcodes this)
 
 ### ⚠️ Open Issues
-- Lambda s4-trigger ALB_INTERNAL_URL is placeholder — must fix before AA-47 UAT
+- Lambda s4-trigger ALB_INTERNAL_URL is placeholder — must fix before UAT
 - WordPress UAT setup not done (Docker + ngrok + Secrets Manager)
 - api_task_def_arn hardcoded :21 in main.tf — AA-CIS-Infra (AA-22 tech debt)
 - AA-36: No char limits on rewrite fields — Backlog
 
-## Session 25 Close — 21/05/2026
-- ECS: api:161 RUNNING (⚠️ stop after reading this!)
-- All M5 Phase A+B tickets merged to main ✅
-- schema_versions gap fixed (025→042 continuous) ✅
-- handoff.md updated ✅
-- Task def: api:161 | CI #252 | Last deploy #157
-- Commits: 4d587d8 (lint fix), e4fd002 (handoff) on AA-CIS-App develop
+## Session 26 Close — 22/05/2026
+- ECS: api:162 RUNNING (⚠️ stop after reading this!)
+- Pipeline inspector built and deployed ✅
+- Task def: api:162 | CI #254 | Last deploy #159
+- Commits: 60c35f3 (uuid fix), 53cb216 (backend endpoints) on AA-CIS-App develop
 
 
 ## Implementation Notes Pattern
