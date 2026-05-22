@@ -171,10 +171,10 @@ async def run_s2(
         run_id = str(run_row["run_id"])
 
         await conn.execute("""
-            INSERT INTO acp_shared.idempotency_keys (key, run_id)
-            VALUES ($1, $2::uuid)
+            INSERT INTO acp_shared.idempotency_keys (key, run_id, tenant_id)
+            VALUES ($1, $2::uuid, $3::uuid)
             ON CONFLICT (key) DO NOTHING
-        """, idem_key, run_id)
+        """, idem_key, run_id, tenant_id)
 
     graph = _get_s2_graph(request)
     initial_state = {
