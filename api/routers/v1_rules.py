@@ -82,7 +82,7 @@ async def list_rules(
             except ValueError:
                 raise HTTPException(status_code=422, detail="Invalid tenant_id UUID")
             params.append(tenant_id)
-            query += f" AND (tenant_id = ${len(params)}::uuid OR tenant_id IS NULL)"
+            query += f" AND (tenant_id = ${len(params)} OR tenant_id IS NULL)"
         query += " ORDER BY source_type ASC, created_at ASC"
         rows = await conn.fetch(query, *params)
 

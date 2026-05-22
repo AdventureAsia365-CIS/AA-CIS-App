@@ -40,7 +40,7 @@ async def apply_output_rules(
            FROM acp_shared.acp_output_rules
            WHERE is_active = TRUE
              AND (stage = $1 OR stage IS NULL)
-             AND (tenant_id = $2::uuid OR tenant_id IS NULL)
+             AND (tenant_id = $2 OR tenant_id IS NULL)
            ORDER BY source_type ASC, created_at ASC""",
         stage,
         tenant_id,
