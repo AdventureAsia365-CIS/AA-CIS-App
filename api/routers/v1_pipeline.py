@@ -199,7 +199,7 @@ class TourRunRequest(BaseModel):
     seo_mode: str = "dataforseo"  # "dataforseo" | "custom_keywords" | "disabled"
     rewrite_language: str = "en-US"  # en-US | en-GB
     model_tier: str = "haiku"        # "haiku" | "sonnet"
-    subtitle_focus: str = "standard" # "standard" | "seo" | "concise"
+    subtitle_focus: str = "standard"  # "standard" | "seo" | "concise"
 
 
 @router.post("/run-tour")

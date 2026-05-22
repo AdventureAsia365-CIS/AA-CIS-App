@@ -29,7 +29,10 @@ Output ONLY valid JSON. No preamble, no markdown, no explanation.
 
 _SUBTITLE_INSTRUCTIONS = {
     "standard": "concrete subtitle: route, duration, and 1-2 key landmarks or experiences",
-    "seo":      "SEO-optimised: lead with primary keyword (country + activity type), include duration — e.g. 'South Korea Cycling Tour: 9 Days, Seoul to East Sea'",
+    "seo":      (
+        "SEO-optimised: lead with primary keyword (country + activity type),"
+        " include duration — e.g. 'South Korea Cycling Tour: 9 Days, Seoul to East Sea'"
+    ),
     "concise":  "concise value proposition — max 12 words, lead with country and defining activity",
 }
 
