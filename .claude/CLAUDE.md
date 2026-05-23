@@ -1,15 +1,16 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 22/05/2026 | ECS api:162 | CI #254
+# Updated: 23/05/2026 | ECS api:185 | CI #280
 
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway owq9as3wjl)
-- Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel)
-- ECS task def: api:162 | CI #254 green | Deploy Dev #159
-- AWS: RUNNING (started for AA-47 session 26)
+- Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel — AA-103 production)
+- ECS task def: api:185 | CI #280 green | Deploy Dev #181 ✅
+- AWS: STOPPED (stop ECS/RDS after each session — see cost checklist)
 - Lambda aa-cis-dev-acp-s4-evaluate: DEPLOYED ✅ (AA-49 H-1)
+- Lambda aa-cis-dev-acp-s4-trigger: DEPLOYED ✅ | ALB_INTERNAL_URL: FIXED ✅
+- Lambda aa-cis-dev-acp-s3-campaign-planner: DEPLOYED ✅ (AA-45)
 - API Gateway: owq9as3wjl | Lambda Authorizer: aa-cis-dev-authorizer
 - DB: PostgreSQL 15, aa_cis_dev, secret: aa-cis/dev/rds (plain DSN)
-- Tours: 7 in catalog (WanderLux dev session, 15 published Sri Lanka) | 5 tenants | avg quality 9.9
 - Models: Bedrock Haiku 4.5 (primary) → Sonnet 4.5 (quality fallback)
 
 ## STACK
@@ -39,6 +40,24 @@ seo_context:        tour_id, keyword_search, top_keywords(jsonb), keyword_ideas(
                     provider(enum), fetched_at
 pipeline_runs:      id, tenant_id, batch_id, status, cost_usd, llm_model,
                     tours_total, tours_passed, started_at, completed_at
+
+## CRITICAL RULES
+- raw_tours PK = tour_id (NOT id)
+- published_tours has NO country column → always JOIN raw_tours ON tour_id
+- seo_context has NO country column → JOIN raw_tours
+- All UUIDs: default=str in json.dumps()
+- Schema-qualify all queries: silver_aa_internal.raw_tours (not just raw_tours)
+- max_tokens = 4096 (NOT 2000 — JSON truncation bug fixed)
+- generate() is SYNCHRONOUS (asyncio deadlock fix, Python 3.12)
+- Log group: /ecs/aa-cis-dev (CORRECT) | /ecs/aa-cis-dev-api (WRONG — always empty)
+
+## CONTENT QUALITY RULES (aa_internal tenant)
+- aa_name MUST be rewritten (not src_name passthrough)
+- seo_meta forbidden: hostel, budget, public transport, cheap, backpacker, dorm
+- Subtitle must differ clearly between V1/V2/V3 configs
+- Brand: "Discreet Executive Adventure" | Target: 40-60 senior professional $250k+
+- Forbidden words: deals, cheap, book now, instant booking, epic
+- CTA: "Design This Journey"
 
 ## FASTAPI ROUTE ORDER — CRITICAL
 /{id}/full MUST come BEFORE /{id} — FastAPI greedy matching.
@@ -72,94 +91,64 @@ S3 Bronze upload → Ingestion Lambda → shared.pipeline_runs (status=ingesting
 → LangGraph: validate → generate → evaluate → seo_context
 → Export: gold layer write + pipeline_runs status=completed
 
+## AWS PATTERNS (WSL2)
+- Single-line commands only (multi-line backslash hangs in WSL2)
+- ECS has no AWS CLI → use boto3 for S3 upload from container
+- S3-mediated ECS exec: write script → upload S3 → presign → ECS execute-command
+- DBeaver tunnel: cis-tunnel alias → localhost:15432
+- SSM only, no SSH port 22
+
 ## KNOWN TECH DEBT — DO NOT BREAK
-- api_task_def_arn hardcoded :21 in main.tf (AA-CIS-Infra) — do not change
-- Step Functions deployed but bypassed — direct API flow only (AA-22)
+- api_task_def_arn hardcoded :21 in main.tf (AA-CIS-Infra) — do not change (AA-22)
+- Step Functions deployed but bypassed — direct API flow only
 - webhook_deliveries = 0 — deferred P2
 - content_exports table does not exist in shared schema
+- Lambda DATABASE_URL plaintext → Secrets Manager (P4-S6)
+- mobile_card_text no prompt → always NULL
+- AA-36: No char limits on rewrite fields — Backlog
 
 ## CI/CD
 - Push to develop → GitHub Actions ci.yml → build → deploy-dev.yml → ECR push → ECS deploy
+- Push to main → Deploy Prod CI auto-triggers
 - Image tag: always :latest (never commit hash)
-- Vercel: manual deploy via `vercel --prod` for frontend (Hobby plan)
+- Lint: flake8 (120 char limit, 2 spaces before inline comment)
+- No static AWS keys — GitHub Actions OIDC only
+- Vercel: auto-deploys on main push (CIS Admin)
 
 ## TESTING
 pytest tests/ -v
 104 integration tests + 23 E2E Playwright tests baseline
 
-## ACTIVE WORK — 21/05/2026
-Session 22 COMPLETE. AA-45 COMPLETE.
-Last commit: ae2ba56 (AA-CIS-App) | 2a37231 (AA-ACP-App)
+## ACTIVE WORK — 23/05/2026
+### AA-103 COMPLETE ✅ (Session 31)
+All CIS admin pages merged to main, Vercel production deployed.
 
-### ✅ Done Session 22 (AA-45 — S3 Campaign Planner)
-- services/acp_s3/: Lambda handler — skeleton-then-expand (Sonnet), ads (Haiku), 5 validators, 3-tier lessons
-- api/routers/v1_s3.py: POST /v1/s3/run, GET /v1/s3/runs/{id}, POST /v1/hitl/gate2/{id}/approve|reject
-- migrations/versions/031_acp_silver_s3_v2.sql: ads_plan + acp_run_context + acp_lessons_agency/shared + ALTER content_calendars
-- Gate 2 HITL: audit_log mandatory, NEVER auto-approve, notes required on reject, double-submit 409 guard
-- Portal page AA-ACP-App: src/app/(admin)/workspace/s3/review/page.tsx — calendar + ads accordion + funnel bar + approve/reject modals
-- CI #241 ✅ | Deploy Dev #147 ✅
+| Page | URL | Status |
+|------|-----|--------|
+| Upload (S0) | /admin/upload | ✅ Live |
+| S1 Rewrite | /admin/pipeline/s1 | ✅ Live |
+| Master Content | /admin/master-content | ✅ Live |
+| Dashboard | /admin/dashboard | ✅ Live |
+| Tenants | /admin/tenants | ✅ Live |
 
-### ✅ Done Session 23 (AA-49 — Harness H-1 + H-2)
-- services/acp_s4_evaluate/handler.py: isolated evaluator Lambda (SHA256 hash, Bedrock Haiku)
-- api/services/acp_post_processor.py: deterministic output rules post-processor (7 tests pass)
-- services/acp_s4/generate.py: S4 blog draft generation stub with H-1/H-2 integration
-- api/routers/v1_rules.py: GET /v1/rules + PATCH /v1/rules/{rule_id}
-- api/migrations/032_harness_columns.sql: idempotent (columns already in live DB)
-- AA-ACP-App: rules dashboard page with stage filter + toggle
-- Lambda aa-cis-dev-acp-s4-evaluate DEPLOYED ✅ | IAM Bedrock policy ✅
-- Branches pushed: feature/aa-49-harness-h1-h2 (App + ACP-App) | develop (Infra)
+Route conflict fix: (admin) route group → admin/ real directory (Session 31 commit 5b6face)
 
-### ✅ Done Session 26 (AA-47 — Pipeline Stage Inspector)
-- api/routers/v1_acp.py: GET /v1/acp/runs, /runs/{id}/context, /runs/{id}
-  + UUID validation 422 fix. Gate summary (gate1=stage2, gate2=stage3, gate3=stage4).
-- AA-ACP-App: workspace/pipeline/page.tsx (run list, stage dots, 10s poll)
-- AA-ACP-App: workspace/pipeline/[run_id]/page.tsx (E2E inspector)
-  S0 brand brief, S1 CIS tours table, Gate 1/2/3 inline approve/reject (SLATimer),
-  S2 tabbed, S3 tabbed (calendar/ads/funnel), S4 blog drafts, CMS panel
-- layout.tsx: "Pipeline" added as first nav item
-- CI #254 ✅ | Deploy Dev #159 ✅ | Last commit: 60c35f3
-
-### 🔴 Next Session Priority (Session 27)
-1. AA-47 — Run actual E2E UAT against pipeline (need WordPress setup first)
-2. Fix Lambda s4-trigger ALB_INTERNAL_URL (placeholder, P0)
-3. Setup WordPress Docker for UAT (docker/wordpress-uat)
-4. Verify aa_internal tenant UUID in DB (Gate 1 hardcodes this)
-
-### ⚠️ Open Issues
-- Lambda s4-trigger ALB_INTERNAL_URL is placeholder — must fix before UAT
-- WordPress UAT setup not done (Docker + ngrok + Secrets Manager)
-- api_task_def_arn hardcoded :21 in main.tf — AA-CIS-Infra (AA-22 tech debt)
-- AA-36: No char limits on rewrite fields — Backlog
-
-## Session 26 Close — 22/05/2026
-- ECS: api:162 RUNNING (⚠️ stop after reading this!)
-- Pipeline inspector built and deployed ✅
-- Task def: api:162 | CI #254 | Last deploy #159
-- Commits: 60c35f3 (uuid fix), 53cb216 (backend endpoints) on AA-CIS-App develop
-
+### Next Priority
+1. Manual UAT all pages on production (ECS + RDS must be running)
+2. WordPress Docker UAT setup (docker/wordpress-uat + ngrok + Secrets Manager)
+3. Verify aa_internal tenant UUID in DB (Gate 1 hardcodes this)
 
 ## Implementation Notes Pattern
-
 For every Linear issue involving code changes, maintain a parallel notes file
-**while implementing** (not after).
+while implementing (not after).
 
-**Path:** `docs/implementation-notes/<ISSUE-ID>.md`
+Path: docs/implementation-notes/<ISSUE-ID>.md
 
-### Required sections
-- **Decisions** — choices made that were not specified in the Linear issue
-- **Changed** — what was modified vs. the original requirement
-- **Tradeoffs** — what was weighed and why
-- **Should know** — anything the reviewer needs before reading the diff
+Required sections:
+- Decisions — choices made not specified in Linear issue
+- Changed — what was modified vs. original requirement
+- Tradeoffs — what was weighed and why
+- Should know — anything reviewer needs before reading the diff
 
-### Example
-```md
-## AA-87: S1 Brand Injection Fix
-- Decision: inject system_prompt at invoke_model(), not LangGraph node (node cached)
-- Changed: _call_llm() signature 2→3 args (added brand_context)
-- Tradeoff: prompt_len logging adds ~$0.02/mo CloudWatch cost — accepted
-- Should know: empty system_prompt → flag "unbranded", do not raise exception
-```
-
-### Trigger
-Create the file when starting any task: "implement AA-XX", "fix AA-XX", "build AA-XX"
+Trigger: create when starting any task — "implement AA-XX", "fix AA-XX", "build AA-XX"
 Update incrementally as decisions are made — not in one batch at the end.
