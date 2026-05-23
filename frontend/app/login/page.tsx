@@ -34,7 +34,7 @@ export default function LoginPage() {
       document.cookie = `cis_role=${data.role}; path=/; max-age=86400`;
       document.cookie = `cis_user=${encodeURIComponent(data.name)}; path=/; max-age=86400`;
 
-      router.push(data.role === "admin" ? "/dashboard" : "/upload");
+      router.push(data.role === "admin" ? "/admin/dashboard" : "/upload");
     } catch {
       setError("Network error — check connection");
       setLoading(false);

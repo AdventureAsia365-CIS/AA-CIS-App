@@ -1,19 +1,21 @@
 "use client";
-// app/(admin)/_components/AdminSidebar.tsx
+// app/admin/_components/AdminSidebar.tsx
 
 import { useRouter, usePathname } from "next/navigation";
-import { LayoutDashboard, Users, Upload, ClipboardList, BookOpen, LogOut } from "lucide-react";
+import { LayoutDashboard, Users, Upload, ClipboardList, BookOpen, LogOut, Wand2, Library } from "lucide-react";
 import { A, serif, sans } from "./adminUi";
 
 const ADMIN_NAV = [
-  { href: "/dashboard", icon: <LayoutDashboard size={15} />, label: "Dashboard" },
-  { href: "/tenants",   icon: <Users size={15} />,           label: "Tenants" },
+  { href: "/admin/dashboard", icon: <LayoutDashboard size={15} />, label: "Dashboard" },
+  { href: "/admin/tenants",   icon: <Users size={15} />,           label: "Tenants" },
 ];
 
 const CONTENT_NAV = [
-  { href: "/upload",  icon: <Upload size={15} />,       label: "Upload" },
-  { href: "/review",  icon: <ClipboardList size={15} />, label: "Review Queue" },
-  { href: "/catalog", icon: <BookOpen size={15} />,     label: "Catalog" },
+  { href: "/admin/upload",          icon: <Upload size={15} />,       label: "Upload (S0)" },
+  { href: "/admin/pipeline/s1",     icon: <Wand2 size={15} />,        label: "S1 Rewrite" },
+  { href: "/admin/master-content",  icon: <Library size={15} />,      label: "Master Content" },
+  { href: "/review",                icon: <ClipboardList size={15} />, label: "Review Queue" },
+  { href: "/catalog",               icon: <BookOpen size={15} />,     label: "Catalog" },
 ];
 
 export default function AdminSidebar({ userName = "Admin" }: { userName?: string }) {
@@ -60,7 +62,7 @@ export default function AdminSidebar({ userName = "Admin" }: { userName?: string
         </NavGroup>
         <NavGroup label="Content Team">
           {CONTENT_NAV.map(n => (
-            <NavItem key={n.href} active={pathname === n.href}
+            <NavItem key={n.href} active={pathname === n.href || pathname.startsWith(n.href + "/")}
               icon={n.icon} label={n.label} accent={A.gold}
               onClick={() => router.push(n.href)} />
           ))}
