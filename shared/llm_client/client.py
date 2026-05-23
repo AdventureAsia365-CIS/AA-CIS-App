@@ -39,7 +39,7 @@ class LLMClient:
             api_key=os.environ.get("OPENAI_API_KEY")
         )
 
-    async def generate(self, request: LLMRequest) -> LLMResponse:
+    def generate(self, request: LLMRequest) -> LLMResponse:
         tier = request.model_tier  # "haiku" | "sonnet"
 
         if tier == "sonnet":

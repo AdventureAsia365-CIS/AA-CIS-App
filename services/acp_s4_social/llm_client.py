@@ -9,7 +9,7 @@ import json
 import os
 from typing import Callable
 
-SOCIAL_MODEL_BEDROCK = "us.anthropic.claude-sonnet-4-5-20251001-v1:0"
+SOCIAL_MODEL_BEDROCK = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 SOCIAL_MODEL_ANTHROPIC = "claude-sonnet-4-5-20251001"
 SOCIAL_MODEL_OPENAI = "gpt-4o"
 

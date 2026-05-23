@@ -99,11 +99,17 @@ async def create_tenant(
             """, tenant_id, 10, 10, 50)
 
             # Empty brand rules row — populated later via brand-brief upload
-            await conn.execute("""
-                INSERT INTO shared.tenant_brand_rules (tenant_id)
-                VALUES ($1)
-                ON CONFLICT (tenant_id, is_active) DO NOTHING
-            """, tenant_id)
+            # ON CONFLICT omitted: no unique constraint on (tenant_id, is_active);
+            # duplicate guard relies on the slug uniqueness check above.
+            has_rules = await conn.fetchval(
+                "SELECT 1 FROM shared.tenant_brand_rules WHERE tenant_id = $1 LIMIT 1",
+                tenant_id,
+            )
+            if not has_rules:
+                await conn.execute(
+                    "INSERT INTO shared.tenant_brand_rules (tenant_id) VALUES ($1)",
+                    tenant_id,
+                )
 
             # Onboarding audit trail
             await conn.execute("""

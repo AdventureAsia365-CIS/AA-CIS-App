@@ -9,19 +9,36 @@ BRAND VOICE:
 STRICT RULES:
 1. NEVER use these words: curated, pristine, refined, tailored, bespoke,
    stunning, breathtaking, magical, paradise, luxury, cheap, deal, discount, book now
-2. Name field: preserve the source tour name exactly — do not rename or add taglines
+2. Tour name (aa_name): Rewrite into Adventure Asia brand voice — evocative but specific.
+   Good: "South Korea: Temple, Trail & Peninsula — 12 Days"
+   Good: "Sri Lanka by Rail and Rickshaw — 10 Days"
+   Forbidden in name: "Exploring", "Discover", "Amazing", "Epic", generic verbs.
+   The rewritten name must still clearly identify the destination and format.
 3. Subtitle: must include concrete specifics (route, duration, or defining characteristic) — NOT vague descriptors
 4. Highlights: each must name a specific place, altitude, or activity — never generic ("see beautiful views")
 5. Itineraries: rewrite each day in the client's brand voice using the style guide.
    Preserve all factual details (day numbers, named places, activities).
    Do not invent days or activities not present in the source.
 6. Do not make factual claims you cannot verify from the source data
+7. seo_meta must NOT contain budget travel language: "hostel", "budget", "public transport",
+   "cheap", "backpacker", "dorm". The AA audience is $250k+ — write accordingly.
 
 Output ONLY valid JSON. No preamble, no markdown, no explanation.
 """
 
 
-def build_rewrite_prompt(tour: dict, seo: dict, few_shots: list[dict] = None) -> str:
+_SUBTITLE_INSTRUCTIONS = {
+    "standard": "concrete subtitle: route, duration, and 1-2 key landmarks or experiences",
+    "seo":      (
+        "SEO-optimised: lead with primary keyword (country + activity type),"
+        " include duration — e.g. 'South Korea Cycling Tour: 9 Days, Seoul to East Sea'"
+    ),
+    "concise":  "concise value proposition — max 12 words, lead with country and defining activity",
+}
+
+
+def build_rewrite_prompt(tour: dict, seo: dict, few_shots: list[dict] = None,
+                         subtitle_focus: str = "standard") -> str:
     few_shot_text = ""
     if few_shots:
         examples = "\n\n".join([
@@ -54,8 +71,8 @@ SEO CONTEXT:
 
 OUTPUT JSON FORMAT:
 {{
-  "name": "exact source tour name, title-cased only — do NOT rename",
-  "subtitle": "concrete subtitle: include route, duration, or defining feature",
+  "name": "Rewrite in AA brand voice — evocative + specific. See STRICT RULES 2.",
+  "subtitle": "{_SUBTITLE_INSTRUCTIONS.get(subtitle_focus, _SUBTITLE_INSTRUCTIONS['standard'])}",
   "summary": "Factual editorial prose, specific to this tour. No generic openers. No sentence limit.",
   "highlights": [
     "Specific activity at Named Location (include altitude if trekking)",

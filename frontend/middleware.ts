@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
-const ADMIN_PATHS    = ["/dashboard"];
-const INTERNAL_PATHS = ["/upload", "/review", "/catalog"];
+const ADMIN_PATHS    = ["/admin/dashboard", "/admin/tenants"];
+const INTERNAL_PATHS = ["/admin/upload", "/admin/pipeline", "/admin/master-content", "/upload", "/review", "/catalog"];
 const TENANT_PATHS   = ["/portal"];
 const PUBLIC_PATHS   = ["/login", "/tenant-login"];
 
@@ -82,6 +82,7 @@ export async function middleware(request: NextRequest) {
 
 export const config = {
   matcher: [
+    "/admin/:path*",
     "/dashboard/:path*",
     "/upload/:path*",
     "/review/:path*",

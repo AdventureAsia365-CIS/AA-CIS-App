@@ -12,7 +12,7 @@ import httpx
 
 logger = structlog.get_logger()
 
-_S3_BUCKET = os.environ.get("ACP_BRONZE_BUCKET", "acp-cis-bronze-867490540162")
+_S3_BUCKET = os.environ.get("ACP_BRONZE_BUCKET", "aa-cis-bronze-867490540162")
 _DATAFORSEO_URL = "https://api.dataforseo.com/v3/keywords_data/google_ads/search_volume/live"
 _EXPAND_THRESHOLD = 20
 

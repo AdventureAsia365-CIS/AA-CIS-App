@@ -1,11 +1,11 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 21/05/2026 | ECS api:151 | CI #241
+# Updated: 22/05/2026 | ECS api:162 | CI #254
 
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway owq9as3wjl)
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel)
-- ECS task def: api:151 | CI #241 green | Deploy Dev #147
-- AWS: STOPPED (stop ECS + RDS after session 23)
+- ECS task def: api:162 | CI #254 green | Deploy Dev #159
+- AWS: RUNNING (started for AA-47 session 26)
 - Lambda aa-cis-dev-acp-s4-evaluate: DEPLOYED ✅ (AA-49 H-1)
 - API Gateway: owq9as3wjl | Lambda Authorizer: aa-cis-dev-authorizer
 - DB: PostgreSQL 15, aa_cis_dev, secret: aa-cis/dev/rds (plain DSN)
@@ -109,26 +109,33 @@ Last commit: ae2ba56 (AA-CIS-App) | 2a37231 (AA-ACP-App)
 - Lambda aa-cis-dev-acp-s4-evaluate DEPLOYED ✅ | IAM Bedrock policy ✅
 - Branches pushed: feature/aa-49-harness-h1-h2 (App + ACP-App) | develop (Infra)
 
-### 🔴 Next Session Priority (Session 24)
-1. Merge feature/aa-49-harness-h1-h2 → develop (AA-CIS-App + AA-ACP-App)
-2. Push CI → deploy new /v1/rules route to ECS
-3. Apply migration 031 via S3-mediated ECS exec (STILL PENDING from S22)
-4. Deploy Lambda aa-cis-dev-acp-s3-campaign-planner (STILL PENDING from S22)
-5. AA-90 (S1 trigger page), AA-43 (S2 LangGraph)
+### ✅ Done Session 26 (AA-47 — Pipeline Stage Inspector)
+- api/routers/v1_acp.py: GET /v1/acp/runs, /runs/{id}/context, /runs/{id}
+  + UUID validation 422 fix. Gate summary (gate1=stage2, gate2=stage3, gate3=stage4).
+- AA-ACP-App: workspace/pipeline/page.tsx (run list, stage dots, 10s poll)
+- AA-ACP-App: workspace/pipeline/[run_id]/page.tsx (E2E inspector)
+  S0 brand brief, S1 CIS tours table, Gate 1/2/3 inline approve/reject (SLATimer),
+  S2 tabbed, S3 tabbed (calendar/ads/funnel), S4 blog drafts, CMS panel
+- layout.tsx: "Pipeline" added as first nav item
+- CI #254 ✅ | Deploy Dev #159 ✅ | Last commit: 60c35f3
+
+### 🔴 Next Session Priority (Session 27)
+1. AA-47 — Run actual E2E UAT against pipeline (need WordPress setup first)
+2. Fix Lambda s4-trigger ALB_INTERNAL_URL (placeholder, P0)
+3. Setup WordPress Docker for UAT (docker/wordpress-uat)
+4. Verify aa_internal tenant UUID in DB (Gate 1 hardcodes this)
 
 ### ⚠️ Open Issues
-- Migration 031 NOT yet applied to live DB
-- Lambda aa-cis-dev-acp-s3-campaign-planner NOT yet deployed
-- AA-49 branches NOT yet merged to develop (pending verify)
-- acp_output_rules schema uses rule_type/pattern (NOT rule_code/condition_field as task spec assumed)
-- AA-36: No char limits on rewrite fields — Backlog
+- Lambda s4-trigger ALB_INTERNAL_URL is placeholder — must fix before UAT
+- WordPress UAT setup not done (Docker + ngrok + Secrets Manager)
 - api_task_def_arn hardcoded :21 in main.tf — AA-CIS-Infra (AA-22 tech debt)
+- AA-36: No char limits on rewrite fields — Backlog
 
-## Session 23 Close — 21/05/2026
-- ECS still RUNNING (stop after review!)
-- Lambda acp-s4-evaluate: ACTIVE | Terraform applied
-- Task def: api:151 | CI #241 | Last deploy #147
-- Commits: 4dd923b (AA-CIS-App AA-49), ee491de (AA-ACP-App rules), ab81ad0 (Infra Lambda)
+## Session 26 Close — 22/05/2026
+- ECS: api:162 RUNNING (⚠️ stop after reading this!)
+- Pipeline inspector built and deployed ✅
+- Task def: api:162 | CI #254 | Last deploy #159
+- Commits: 60c35f3 (uuid fix), 53cb216 (backend endpoints) on AA-CIS-App develop
 
 
 ## Implementation Notes Pattern

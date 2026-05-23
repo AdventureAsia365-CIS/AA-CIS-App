@@ -31,7 +31,7 @@ logger = structlog.get_logger()
 _BEDROCK = boto3.client("bedrock-runtime", region_name="us-west-1")
 _LAMBDA = boto3.client("lambda", region_name="us-west-1")
 
-DRAFT_MODEL = "us.anthropic.claude-sonnet-4-5-20251001-v1:0"
+DRAFT_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 EVAL_FUNCTION = "aa-cis-dev-acp-s4-evaluate"
 EVAL_THRESHOLD = 7.5
 MAX_REWRITE = 2
@@ -127,7 +127,7 @@ async def _fetch_tour_facts(db_conn, tenant_id: str, keywords: list[str]) -> dic
             SELECT tour_id::text, aa_name, aa_summary, aa_description,
                    aa_highlights::text AS highlights_json, aa_itineraries
             FROM gold_aa_internal.published_tours
-            WHERE tenant_id = $1::uuid
+            WHERE tenant_id = $1
               AND ({ilike_conditions})
             ORDER BY quality_score DESC NULLS LAST
             LIMIT 3
@@ -237,7 +237,7 @@ Return ONLY the JSON object — no preamble, no explanation."""
             modelId=DRAFT_MODEL,
             body=json.dumps({
                 "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 4096,
+                "max_tokens": 8192,
                 "system": BLOG_SYSTEM_PROMPT,
                 "messages": [{"role": "user", "content": user_prompt}],
             }),

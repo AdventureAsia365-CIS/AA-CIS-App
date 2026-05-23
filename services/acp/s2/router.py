@@ -67,7 +67,7 @@ async def _handle_gate1(pool, run_id: str, tenant_id: str) -> dict:
             """
             INSERT INTO acp_shared.audit_log
                 (tenant_id, actor, actor_type, action, resource_type, resource_id, details)
-            VALUES ($1, 'system', 'system', 'hitl.gate1', 'acp_run', $2,
+            VALUES ($1, 'system', 'tenant_admin', 'hitl.gate1', 'acp_run', $2,
                     $3::jsonb)
             """,
             tenant_id, run_id,
@@ -171,10 +171,10 @@ async def run_s2(
         run_id = str(run_row["run_id"])
 
         await conn.execute("""
-            INSERT INTO acp_shared.idempotency_keys (key, run_id)
-            VALUES ($1, $2::uuid)
+            INSERT INTO acp_shared.idempotency_keys (key, run_id, tenant_id)
+            VALUES ($1, $2::uuid, $3::uuid)
             ON CONFLICT (key) DO NOTHING
-        """, idem_key, run_id)
+        """, idem_key, run_id, tenant_id)
 
     graph = _get_s2_graph(request)
     initial_state = {
@@ -227,7 +227,7 @@ async def get_s2_status(
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            SELECT run_id, status, country, created_at, completed_at
+            SELECT run_id, status, country, started_at, completed_at
             FROM acp_shared.acp_runs
             WHERE run_id = $1::uuid
         """, run_id)
@@ -239,7 +239,7 @@ async def get_s2_status(
         "run_id":       str(row["run_id"]),
         "status":       row["status"],
         "country":      row["country"],
-        "created_at":   row["created_at"].isoformat() if row["created_at"] else None,
+        "started_at":   row["started_at"].isoformat() if row["started_at"] else None,
         "completed_at": row["completed_at"].isoformat() if row["completed_at"] else None,
     }
 

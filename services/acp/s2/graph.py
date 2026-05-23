@@ -51,15 +51,14 @@ def build_s2_graph(pool, s3_client, api_keys: dict) -> StateGraph:
 
 
 async def get_compiled_s2_graph(pool, s3_client, api_keys: dict, database_url: str):
-    """Build and compile the S2 graph with an AsyncPostgresSaver checkpointer.
-    Calls checkpointer.setup() to create checkpoint tables in acp_shared schema.
-    Must be awaited inside an async lifespan context.
+    """Build and compile the S2 graph with MemorySaver checkpointer.
+
+    MemorySaver is safe for single-session use (UAT, dev). For persistent
+    checkpoints across restarts, wire AsyncPostgresSaver into the FastAPI
+    lifespan so the connection stays open for the full app lifetime (AA-22).
     """
-    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    from langgraph.checkpoint.memory import MemorySaver
 
-    checkpointer = AsyncPostgresSaver.from_conn_string(database_url)
-    await checkpointer.setup()
     logger.info("s2_graph_postgres_checkpointer_ready")
-
     builder = build_s2_graph(pool, s3_client, api_keys)
-    return builder.compile(checkpointer=checkpointer)
+    return builder.compile(checkpointer=MemorySaver())

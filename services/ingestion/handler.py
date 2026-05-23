@@ -7,6 +7,7 @@ import tempfile
 import uuid
 import hashlib
 import structlog
+from urllib.parse import unquote_plus
 
 from .excel_parser import ExcelParser
 from shared.repository.raw_tour_repository import RawTourRepository
@@ -217,7 +218,7 @@ def lambda_handler(event: dict, context) -> dict:
 
     for record in records:
         s3_bucket = record["s3"]["bucket"]["name"]
-        s3_key    = record["s3"]["object"]["key"]
+        s3_key    = unquote_plus(record["s3"]["object"]["key"])
 
         if not s3_key.startswith("raw-inbox/"):
             logger.info("skipped_non_inbox", s3_key=s3_key)

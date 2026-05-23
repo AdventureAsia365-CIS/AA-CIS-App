@@ -29,6 +29,7 @@ class ContentState(TypedDict):
     brand_forbidden_words:  list
     rewrite_language:       str
     model_tier:             str
+    subtitle_focus:         str
     is_tenant_rewrite:      bool
     is_branded:             bool
     failure_codes:          list
@@ -38,30 +39,29 @@ class ContentState(TypedDict):
 
 # code → (dimension, deduction)
 _FAILURE_MAP: dict[str, tuple[str, float]] = {
-    "MISSING_FIELD":            ("structure", 1.5),
-    "HIGHLIGHTS_NOT_LIST":      ("structure", 1.0),
-    "HIGHLIGHTS_TOO_FEW":       ("structure", 0.5),
-    "NAME_MODIFIED":            ("structure", 2.0),
-    "SUBTITLE_GENERIC":         ("brand",     1.0),
-    "SUMMARY_OFF_BRAND":        ("brand",     1.0),
-    "FORBIDDEN_WORD":           ("quality",   0.5),
-    "HIGHLIGHTS_TOO_GENERIC":   ("quality",   0.5),
-    "SEO_TITLE_TOO_LONG":       ("seo",       0.5),
-    "SEO_META_TOO_LONG":        ("seo",       0.5),
-    "META_INCOMPLETE_SENTENCE": ("seo",       1.0),
-    "ITINERARY_STRUCTURE_WEAK": ("structure", 1.0),
-    "DFS_INTENT_UNDERUSED":     ("seo",       1.0),
+    "MISSING_FIELD":             ("structure", 1.5),
+    "HIGHLIGHTS_NOT_LIST":       ("structure", 1.0),
+    "HIGHLIGHTS_TOO_FEW":        ("structure", 0.5),
+    "SUBTITLE_GENERIC":          ("brand",     1.0),
+    "SUMMARY_OFF_BRAND":         ("brand",     1.0),
+    "BRAND_SEO_META_VIOLATION":  ("brand",     1.5),
+    "FORBIDDEN_WORD":            ("quality",   0.5),
+    "HIGHLIGHTS_TOO_GENERIC":    ("quality",   0.5),
+    "SEO_TITLE_TOO_LONG":        ("seo",       0.5),
+    "SEO_META_TOO_LONG":         ("seo",       0.5),
+    "META_INCOMPLETE_SENTENCE":  ("seo",       1.0),
+    "ITINERARY_STRUCTURE_WEAK":  ("structure", 1.0),
+    "DFS_INTENT_UNDERUSED":      ("seo",       1.0),
 }
 
 def generate_node(state: ContentState) -> ContentState:
     """Node 1: Generate content via LLMClient."""
-    import asyncio
-
     client = LLMClient()
     prompt = build_rewrite_prompt(
         state["tour"],
         state["seo"],
         state.get("few_shots", []),
+        subtitle_focus=state.get("subtitle_focus", "standard"),
     )
 
     # Inject feedback nếu đang retry
@@ -100,7 +100,7 @@ def generate_node(state: ContentState) -> ContentState:
     )
 
     try:
-        resp = asyncio.get_event_loop().run_until_complete(client.generate(request))
+        resp = client.generate(request)
         # Strip markdown fences nếu LLM wrap JSON trong ```json ... ```
         raw = resp.content.strip()
         if raw.startswith("```"):
@@ -153,16 +153,6 @@ def validate_node(state: ContentState) -> ContentState:
         fired.append("HIGHLIGHTS_TOO_FEW")
         score -= 0.5
 
-    # Name must not be modified — skip for tenant rewrites (AA name is the source,
-    # minor normalisation differences are acceptable and should not tank the score)
-    if not state.get("is_tenant_rewrite"):
-        src_name = (tour.get("name") or "").strip().lower()
-        ai_name  = (generated.get("name") or "").strip().lower()
-        if src_name and ai_name and src_name != ai_name:
-            issues.append(f"Name modified: '{tour.get('name')}' → '{generated.get('name')}'")
-            fired.append("NAME_MODIFIED")
-            score -= 2.0
-
     # Subtitle must not be generic
     subtitle = generated.get("subtitle", "").lower()
     generic_subtitle_flags = [
@@ -203,6 +193,18 @@ def validate_node(state: ContentState) -> ContentState:
             issues.append(f"Generic highlight phrase: '{pattern}'")
             fired.append("HIGHLIGHTS_TOO_GENERIC")
             score -= 0.5
+
+    # seo_meta must not contain budget/accommodation language (AA audience = $250k+)
+    _seo_meta_forbidden = [
+        "hostel", "budget", "public transport", "cheap", "backpacker", "dorm",
+    ]
+    seo_meta_lower = (generated.get("seo_meta") or "").lower()
+    for term in _seo_meta_forbidden:
+        if term in seo_meta_lower:
+            issues.append(f"Budget language in seo_meta: '{term}'")
+            fired.append("BRAND_SEO_META_VIOLATION")
+            score -= 1.5
+            break  # one violation is enough
 
     # SEO field lengths
     if len(generated.get("seo_title", "")) > 70:
