@@ -52,7 +52,7 @@ export default function InternalSidebar({ isAdmin = false, userName = "Content" 
         {isAdmin && (
           <div>
             <div style={{ fontSize: 9.5, textTransform: "uppercase", letterSpacing: "0.16em", color: "#6E7681", padding: "0 10px 8px", fontWeight: 600 }}>Admin</div>
-            <NavItem active={false} icon={<LayoutDashboard size={15} />} label="Dashboard" onClick={() => router.push("/dashboard")} />
+            <NavItem active={false} icon={<LayoutDashboard size={15} />} label="Dashboard" onClick={() => router.push("/admin/dashboard")} />
           </div>
         )}
         <div>
