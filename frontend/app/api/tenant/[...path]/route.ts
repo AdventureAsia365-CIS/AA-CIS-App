@@ -8,11 +8,10 @@ async function handler(
   { params }: { params: Promise<{ path: string[] }> }
 ) {
   const cookieStore = await cookies();
-  const token = cookieStore.get("cis_tenant_token")?.value
-    ?? cookieStore.get("cis_api_token")?.value
-    ?? "";
+  const tenantToken = cookieStore.get("cis_tenant_token")?.value ?? "";
+  const adminSecret = cookieStore.get("cis_api_token")?.value ?? "";
 
-  if (!token) {
+  if (!tenantToken && !adminSecret) {
     return NextResponse.json({ detail: "Unauthorized" }, { status: 401 });
   }
 
@@ -21,12 +20,12 @@ async function handler(
   const search = req.nextUrl.search;
   const url = `${API_URL}/${pathStr}${search}`;
 
-  const internalApiKey = process.env.INTERNAL_API_KEY ?? "";
-  const headers: Record<string, string> = {
-    "Authorization": `Bearer ${token}`,
-    "Content-Type": "application/json",
-    ...(internalApiKey ? { "X-API-Key": internalApiKey } : {}),
-  };
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (adminSecret) {
+    headers["x-admin-secret"] = adminSecret;
+  } else {
+    headers["Authorization"] = `Bearer ${tenantToken}`;
+  }
 
   let body: string | undefined;
   if (req.method !== "GET" && req.method !== "HEAD") {
