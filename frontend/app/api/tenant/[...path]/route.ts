@@ -8,9 +8,11 @@ async function handler(
   { params }: { params: Promise<{ path: string[] }> }
 ) {
   const cookieStore = await cookies();
-  const token = cookieStore.get("cis_tenant_token")?.value
-    ?? cookieStore.get("cis_api_token")?.value
-    ?? "";
+  const role        = cookieStore.get("cis_role")?.value ?? "";
+  const isStaff     = role === "admin" || role === "content";
+  const token       = isStaff
+    ? (cookieStore.get("cis_api_token")?.value ?? "")
+    : (cookieStore.get("cis_tenant_token")?.value ?? "");
 
   if (!token) {
     return NextResponse.json({ detail: "Unauthorized" }, { status: 401 });
@@ -21,10 +23,10 @@ async function handler(
   const search = req.nextUrl.search;
   const url = `${API_URL}/${pathStr}${search}`;
 
-  const isAdmin = pathStr.startsWith("admin/") || pathStr === "admin";
+  // Staff (admin/content) always use x-admin-secret; tenant users use Bearer JWT
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    ...(isAdmin
+    ...(isStaff
       ? { "x-admin-secret": token }
       : { "Authorization": `Bearer ${token}` }),
   };
