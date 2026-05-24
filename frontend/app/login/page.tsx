@@ -2,7 +2,6 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { User, Lock } from "lucide-react";
-import { setAdminSecret } from "@/lib/admin-auth";
 
 export default function LoginPage() {
   const [username, setUsername] = useState("");
@@ -31,7 +30,6 @@ export default function LoginPage() {
         return;
       }
 
-      setAdminSecret(data.token);
       document.cookie = `cis_api_token=${encodeURIComponent(data.token)}; path=/; max-age=86400`;
       document.cookie = `cis_role=${data.role}; path=/; max-age=86400`;
       document.cookie = `cis_user=${encodeURIComponent(data.name)}; path=/; max-age=86400`;

@@ -8,9 +8,14 @@ import * as XLSX from "xlsx";
 import { Search, X, ChevronDown, ChevronUp, Edit2, Check, RotateCcw } from "lucide-react";
 import InternalSidebar from "../_components/InternalSidebar";
 import { A, serif, mono, sans, Card, SLabel, Btn, LoadingScreen, TopBar, TH, TD } from "../_components/internalUi";
-import { adminHeaders } from "@/lib/admin-auth";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
+
+function getToken() {
+  if (typeof document === "undefined") return null;
+  const m = document.cookie.match(/cis_api_token=([^;]+)/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
 
 interface Tour {
   id: string; tour_id: string; aa_name: string; aa_subtitle: string;
@@ -249,7 +254,14 @@ function ReviewPanel({ tour, onClose }: { tour: Tour; onClose: () => void }) {
   const [published, setPublished] = useState<any>(null);
 
   useEffect(() => {
-    fetch(`/api/tour-full/${tour.id}`, { headers: adminHeaders() })
+    const token = getToken();
+    const adminSecret = process.env.NEXT_PUBLIC_ADMIN_SECRET || "";
+    fetch(`/api/tour-full/${tour.id}`, {
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(adminSecret ? { "X-Admin-Secret": adminSecret } : {}),
+      },
+    })
       .then(r => r.ok ? r.json() : null)
       .then(d => { setData(d); setPublished(d?.published); setLoading(false); })
       .catch(() => setLoading(false));
@@ -508,10 +520,17 @@ export default function CatalogPage() {
     if (selectedTours.length === 0) return;
     setIsExporting(true);
     try {
+      const token = getToken();
+      const adminSecret = process.env.NEXT_PUBLIC_ADMIN_SECRET || "";
       const fullData = await Promise.all(
         selectedTours.map(async t => {
           try {
-            const r = await fetch(`/api/tour-full/${t.id}`, { headers: adminHeaders() });
+            const r = await fetch(`/api/tour-full/${t.id}`, {
+              headers: {
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                ...(adminSecret ? { "X-Admin-Secret": adminSecret } : {}),
+              },
+            });
             return r.ok ? await r.json() : null;
           } catch { return null; }
         })
