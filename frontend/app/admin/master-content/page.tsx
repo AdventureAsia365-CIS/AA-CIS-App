@@ -24,7 +24,7 @@ function getToken(): string | null {
 
 function authHeaders(): Record<string, string> {
   const t = getToken();
-  return t ? { Authorization: `Bearer ${t}` } : {};
+  return t ? { "x-admin-secret": t } : {};
 }
 
 function apiGet(path: string) {
