@@ -1,523 +1,453 @@
 "use client";
-// app/(admin)/dashboard/page.tsx
-// Design: Fraunces serif + IBM Plex Sans, light theme, red accent
-// API: same as before — /v1/pipeline/metrics, /v1/tours, /v1/pipeline/review-queue
 
 import React, { useState, useEffect } from "react";
-import {
-  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
-  LineChart, Line, CartesianGrid,
-} from "recharts";
-import {
-  FileText, CheckCircle, Clock, DollarSign,
-} from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
 import {
   A, serif, mono, sans,
-  Card, SLabel, StatCard, TabBar, ChartCard, Badge,
-  LoadingScreen, Btn, TH, TD, CHART_TOOLTIP,
+  Card, SLabel, TabBar, LoadingScreen, TH, TD,
 } from "../_components/adminUi";
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
-
-function getToken(): string | null {
-  if (typeof document === "undefined") return null;
-  const m = document.cookie.match(/cis_api_token=([^;]+)/);
-  return m ? decodeURIComponent(m[1]) : null;
-}
 
 const STATUS_COLOR: Record<string, string> = {
   healthy: "#22C55E", degraded: "#F59E0B", down: "#EF4444",
   running: "#22C55E", interrupted: "#EF4444", idle: "#9099A6",
 };
 
-const PIPELINE_HEALTH_DEFAULT = [
-  { name: "Ingestion Lambda",   status: "idle", latency: "—", errors: 0 },
-  { name: "SEO Intelligence",   status: "idle", latency: "—", errors: 0 },
-  { name: "Content Generation", status: "idle", latency: "—", errors: 0 },
-  { name: "Validation Lambda",  status: "idle", latency: "—", errors: 0 },
-  { name: "Export Lambda",      status: "idle", latency: "—", errors: 0 },
-];
-
-const SPOT_WORKERS = [
-  { id: "spot-1a", status: "idle", tours: 0, progress: 0, instance: "c5.xlarge" },
-  { id: "spot-1b", status: "idle", tours: 0, progress: 0, instance: "c5.xlarge" },
-  { id: "spot-2a", status: "idle", tours: 0, progress: 0, instance: "c5.2xlarge" },
-  { id: "spot-2b", status: "idle", tours: 0, progress: 0, instance: "c5.xlarge" },
-];
-
-// ─── Sub-tab components (logic unchanged, design updated) ─────────────────────
-
-function Src({ children }: { children: React.ReactNode }) {
+function MetricCard({ label, value, sub, color = A.ink }: {
+  label: string; value: string | number; sub?: string; color?: string;
+}) {
   return (
-    <div style={{ fontSize: 10, color: A.muted2, marginTop: 4, letterSpacing: "0.02em" }}>
-      {children}
-    </div>
-  );
-}
-
-function VolumeTab({ data }: { data: any }) {
-  const daily         = data?.daily_runs ?? [];
-  const totalTours    = data?.published_count ?? 0;
-  const totalRewrites = data?.tenant_rewrite_count ?? 0;
-  const totalFailed   = daily.reduce((s: number, d: any) => s + (d.failed ?? 0), 0);
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
-        {[
-          { label: "Tours in Pool",    value: totalTours,    color: A.gold,    src: "gold_aa_internal.published_tours" },
-          { label: "Tenant Rewrites",  value: totalRewrites, color: "#7C3AED", src: "gold_aa_internal.tenant_tour_versions" },
-          { label: "Failed (7d)",      value: totalFailed,   color: A.red,     src: "pipeline_runs · 7d window" },
-          { label: "Pass Rate",        value: totalTours > 0 ? `${(((totalTours - totalFailed) / totalTours) * 100).toFixed(0)}%` : "—", color: "#22C55E", src: "published ÷ total" },
-        ].map(c => (
-          <Card key={c.label}>
-            <SLabel>{c.label}</SLabel>
-            <div style={{ fontFamily: serif, fontSize: 28, fontWeight: 500, color: c.color, letterSpacing: "-0.02em" }}>
-              {c.value}
-            </div>
-            <Src>↳ {c.src}</Src>
-          </Card>
-        ))}
+    <Card>
+      <SLabel>{label}</SLabel>
+      <div style={{ fontFamily: serif, fontSize: 28, fontWeight: 500, color, letterSpacing: "-0.02em" }}>
+        {value}
       </div>
-      <ChartCard title="Daily Volume — Pipeline + Tenant Rewrites">
-        <ResponsiveContainer width="100%" height={240}>
-          <BarChart data={daily} margin={{ top: 4, right: 4, left: -20, bottom: 0 }}>
-            <XAxis dataKey="date" tick={{ fontSize: 11, fill: A.muted }} tickFormatter={(v: string) => v?.slice(5) ?? v} />
-            <YAxis tick={{ fontSize: 11, fill: A.muted }} />
-            <Tooltip {...CHART_TOOLTIP} />
-            <Bar dataKey="passed"  name="Passed"  fill="#22C55E" radius={[3,3,0,0]} />
-            <Bar dataKey="rewrites" name="Rewrites" fill="#7C3AED" radius={[3,3,0,0]} />
-            <Bar dataKey="hitl"    name="HITL"    fill={A.gold}  radius={[3,3,0,0]} />
-            <Bar dataKey="failed"  name="Failed"  fill={A.red}   radius={[3,3,0,0]} />
-          </BarChart>
-        </ResponsiveContainer>
-      </ChartCard>
-    </div>
+      {sub && <div style={{ fontSize: 11, color: A.muted2, marginTop: 4 }}>{sub}</div>}
+    </Card>
   );
 }
 
-function QualityTab() {
-  const [data, setData]     = useState<any>(null);
-  const [loading, setLoading] = useState(true);
+// ─── Tab 1: Overview ──────────────────────────────────────────────────────────
+function OverviewTab({ data }: { data: any }) {
+  if (!data) return (
+    <div style={{ padding: 40, textAlign: "center", color: A.red }}>Failed to load metrics</div>
+  );
 
-  useEffect(() => {
-    fetch("/api/tenant/v1/pipeline/metrics?days=30")
-      .then(r => r.ok ? r.json() : null).then(setData).finally(() => setLoading(false));
-  }, []);
-
-  if (loading) return <LoadingScreen msg="Loading quality data…" />;
-  const models = data?.model_usage ?? [];
+  const cs        = data.content_summary ?? {};
+  const total     = cs.total_content_all_tenants ?? 0;
+  const published = data.published_count ?? 0;
+  const rewrites  = data.tenant_rewrite_count ?? 0;
+  const breakdown = (cs.tenant_breakdown ?? []).filter((r: any) => r.rewrite_count > 0);
+  const daily     = (data.daily_runs ?? []).filter((r: any) => r.runs > 0);
+  const models    = data.model_usage ?? [];
+  const health    = data.pipeline_health ?? [];
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <Card>
-        <SLabel>Model Quality Scores (30d)</SLabel>
-        {models.length === 0 ? (
-          <div style={{ color: A.muted, fontSize: 13 }}>No model data yet</div>
-        ) : (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      {/* Row 1 — 4 metric cards */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
+        <MetricCard
+          label="Total Content"
+          value={total}
+          sub={`${published} master + ${rewrites} tenant rewrites`}
+          color={A.ink}
+        />
+        <MetricCard
+          label="Master Tours"
+          value={published}
+          sub="aa_internal published"
+          color={A.gold}
+        />
+        <MetricCard
+          label="Tenant Rewrites"
+          value={rewrites}
+          sub={`${breakdown.length} active tenants`}
+          color="#7C3AED"
+        />
+        <MetricCard
+          label="LLM Calls"
+          value={data.llm_calls ?? 0}
+          sub={`avg $${Number(data.avg_cost_per_run ?? 0).toFixed(4)}/run`}
+          color="#22C55E"
+        />
+      </div>
+
+      {/* Row 2 — Tenant Breakdown */}
+      {breakdown.length > 0 && (
+        <Card>
+          <SLabel>Tenant Breakdown</SLabel>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
-              <tr>{["Model","Calls","Avg Score","Cost/Call"].map(h => <th key={h} style={TH}>{h}</th>)}</tr>
+              <tr>
+                {["Tenant Slug", "Plan Tier", "Rewrites"].map((h, i) => (
+                  <th key={h} style={{ ...TH, textAlign: i > 0 ? "right" : "left" }}>{h}</th>
+                ))}
+              </tr>
             </thead>
             <tbody>
-              {models.map((m: any) => {
-                const score     = m.avg_score != null ? parseFloat(m.avg_score) : null;
-                const scoreLabel = score != null ? score.toFixed(1) : "—";
-                const sc = score == null ? A.muted2 : score >= 9 ? "#22C55E" : score >= 7 ? A.gold : A.red;
-                return (
-                  <tr key={m.model}>
-                    <td style={TD}><code style={{ fontSize: 12, color: A.gold, fontFamily: mono }}>{m.model}</code></td>
-                    <td style={TD}>{m.calls}</td>
-                    <td style={TD}><span style={{ color: sc, fontWeight: 700 }}>{scoreLabel}</span></td>
-                    <td style={TD}>{m.calls > 0 && m.total_cost ? `$${(m.total_cost / m.calls).toFixed(4)}` : "—"}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
-      </Card>
-      <ChartCard title="Quality Score Trend (7d)">
-        <ResponsiveContainer width="100%" height={200}>
-          <LineChart data={data?.daily_runs ?? []} margin={{ top: 4, right: 4, left: -20, bottom: 0 }}>
-            <XAxis dataKey="date" tick={{ fontSize: 11, fill: A.muted }} tickFormatter={(v: string) => v?.slice(5) ?? v} />
-            <YAxis domain={[0, 10]} tick={{ fontSize: 11, fill: A.muted }} />
-            <CartesianGrid strokeDasharray="3 3" stroke={A.line} />
-            <Tooltip {...CHART_TOOLTIP} />
-            <Line type="monotone" dataKey="passed" name="Passed Tours" stroke="#22C55E" strokeWidth={2} dot={false} />
-          </LineChart>
-        </ResponsiveContainer>
-      </ChartCard>
-    </div>
-  );
-}
-
-function CostTab() {
-  const [data, setData]     = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    fetch("/api/tenant/v1/pipeline/metrics?days=30")
-      .then(r => r.ok ? r.json() : null).then(setData).finally(() => setLoading(false));
-  }, []);
-
-  if (loading) return <LoadingScreen msg="Loading cost data…" />;
-
-  const daily         = data?.daily_runs ?? [];
-  const models        = data?.model_usage ?? [];
-  const totalCost     = daily.reduce((s: number, d: any) => s + parseFloat(d.cost ?? 0), 0);
-  const totalTours    = data?.published_count ?? 0;
-  const avgCostPerRun = data?.avg_cost_per_run ?? 0;
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
-        {[
-          { label: "Total LLM Cost (30d)", value: `$${totalCost.toFixed(4)}`,      color: A.gold,    src: "pipeline_runs · 30d window" },
-          { label: "Tours Processed",      value: String(totalTours),              color: "#7C3AED", src: "published_tours · all time" },
-          { label: "Avg Cost / Run",       value: `$${avgCostPerRun.toFixed(4)}`,  color: "#22C55E", src: "pipeline_runs · SUM/COUNT" },
-        ].map(c => (
-          <Card key={c.label}>
-            <SLabel>{c.label}</SLabel>
-            <div style={{ fontFamily: serif, fontSize: 26, fontWeight: 500, color: c.color, letterSpacing: "-0.02em" }}>{c.value}</div>
-            <Src>↳ {c.src}</Src>
-          </Card>
-        ))}
-      </div>
-      <ChartCard title="Daily LLM Cost (30d)">
-        <ResponsiveContainer width="100%" height={220}>
-          <LineChart data={daily} margin={{ top: 4, right: 4, left: -10, bottom: 0 }}>
-            <XAxis dataKey="date" tick={{ fontSize: 11, fill: A.muted }} tickFormatter={(v: string) => v?.slice(5) ?? v} />
-            <YAxis tick={{ fontSize: 11, fill: A.muted }} tickFormatter={(v: number) => `$${v}`} />
-            <CartesianGrid strokeDasharray="3 3" stroke={A.line} />
-            <Tooltip {...CHART_TOOLTIP} formatter={(v: unknown) => [`$${Number(v).toFixed(4)}`, "Cost"]} />
-            <Line type="monotone" dataKey="cost" stroke={A.gold} strokeWidth={2} dot={{ fill: A.gold, r: 3 }} />
-          </LineChart>
-        </ResponsiveContainer>
-      </ChartCard>
-      <Card>
-        <SLabel>Cost by Model</SLabel>
-        {models.map((m: any) => (
-          <div key={m.model} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 0", borderBottom: `1px solid ${A.line2}` }}>
-            <code style={{ color: A.gold, fontSize: 12, fontFamily: mono }}>{m.model}</code>
-            <div style={{ display: "flex", gap: 24 }}>
-              <span style={{ color: A.muted, fontSize: 12 }}>{m.calls} calls</span>
-              <span style={{ color: A.ink, fontWeight: 600, fontSize: 13 }}>${m.total_cost ? Number(m.total_cost).toFixed(4) : "0.0000"}</span>
-            </div>
-          </div>
-        ))}
-      </Card>
-    </div>
-  );
-}
-
-function SeoTab() {
-  const [data, setData]     = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    fetch("/api/tenant/v1/pipeline/metrics/seo")
-      .then(r => r.ok ? r.json() : null).then(setData).finally(() => setLoading(false));
-  }, []);
-  if (loading) return <LoadingScreen msg="Loading SEO data…" />;
-  if (!data) return <div style={{ padding: 40, textAlign: "center", color: A.red }}>Failed to load SEO data</div>;
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
-        {[
-          { label: "Tours in Pool",  value: data.total_tours ?? 0 },
-          { label: "SEO Covered",    value: data.seo_covered ?? 0 },
-          { label: "Coverage",       value: `${data.coverage_pct ?? 0}%` },
-        ].map(c => (
-          <Card key={c.label}>
-            <SLabel>{c.label}</SLabel>
-            <div style={{ fontFamily: serif, fontSize: 26, fontWeight: 500, color: A.ink, letterSpacing: "-0.02em" }}>{c.value}</div>
-          </Card>
-        ))}
-      </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-        <Card>
-          <SLabel>Top Keywords</SLabel>
-          {(data.top_keywords || []).slice(0, 10).map((k: any) => (
-            <div key={k.keyword} style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, fontSize: 13 }}>
-              <span style={{ color: A.ink }}>{k.keyword}</span>
-              <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 20, background: A.goldTint, color: A.gold, fontWeight: 600 }}>{k.count}</span>
-            </div>
-          ))}
-          {(!data.top_keywords || data.top_keywords.length === 0) && (
-            <div style={{ color: A.muted, fontSize: 13 }}>No keyword data yet</div>
-          )}
-        </Card>
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <Card>
-            <SLabel>Redis Cache</SLabel>
-            {[["Hit Rate", data.cache?.hit_rate ?? "N/A"], ["Cached Keys", data.cache?.keys ?? 0], ["Hits", data.cache?.hits ?? 0], ["Misses", data.cache?.misses ?? 0]].map(([l, v]) => (
-              <div key={l as string} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
-                <span style={{ color: A.muted }}>{l}</span>
-                <span style={{ color: A.ink, fontWeight: 600 }}>{v as string}</span>
-              </div>
-            ))}
-          </Card>
-          <Card>
-            <SLabel>Countries Covered</SLabel>
-            {(data.countries || []).slice(0, 8).map((c: any) => (
-              <div key={c.country} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
-                <span style={{ color: A.ink }}>{c.country || "Unknown"}</span>
-                <span style={{ color: A.muted }}>{c.count} tours</span>
-              </div>
-            ))}
-          </Card>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function LibraryTab() {
-  const [data, setData]     = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    fetch("/api/tenant/v1/pipeline/metrics/library")
-      .then(r => r.ok ? r.json() : null).then(setData).finally(() => setLoading(false));
-  }, []);
-  if (loading) return <LoadingScreen msg="Loading library data…" />;
-  if (!data) return <div style={{ padding: 40, textAlign: "center", color: A.red }}>Failed to load</div>;
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
-        {[
-          { label: "Total Tours",   value: data.total ?? 0,              color: A.gold },
-          { label: "Avg Quality",   value: data.avg_score ?? 0,          color: "#22C55E" },
-          { label: "Added (30d)",   value: data.published_last_30d ?? 0, color: "#7C3AED" },
-          { label: "Stale (>180d)", value: data.stale_count ?? 0,        color: A.amber },
-        ].map(c => (
-          <Card key={c.label}>
-            <SLabel>{c.label}</SLabel>
-            <div style={{ fontFamily: serif, fontSize: 26, fontWeight: 500, color: c.color, letterSpacing: "-0.02em" }}>{c.value}</div>
-          </Card>
-        ))}
-      </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-        <Card>
-          <SLabel>Coverage by Country</SLabel>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-            <thead><tr>{["Country","Tours","Avg Score"].map(h => <th key={h} style={TH}>{h}</th>)}</tr></thead>
-            <tbody>
-              {(data.by_country || []).slice(0, 12).map((r: any) => (
-                <tr key={r.country}>
-                  <td style={TD}>{r.country || "Unknown"}</td>
-                  <td style={TD}>{r.total}</td>
-                  <td style={TD}>
-                    <span style={{ color: r.avg_score >= 9 ? "#22C55E" : r.avg_score >= 7 ? A.gold : A.red, fontWeight: 600 }}>{r.avg_score}</span>
-                  </td>
+              {breakdown.map((r: any, idx: number) => (
+                <tr key={r.slug} style={{ background: idx % 2 === 1 ? A.bg : "transparent" }}>
+                  <td style={TD}><code style={{ fontFamily: mono, fontSize: 12, color: A.gold }}>{r.slug}</code></td>
+                  <td style={{ ...TD, textAlign: "right" }}>{r.plan_tier ?? "—"}</td>
+                  <td style={{ ...TD, textAlign: "right", fontWeight: 600 }}>{r.rewrite_count}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </Card>
+      )}
+
+      {/* Row 3 — Pipeline Activity */}
+      <Card>
+        <SLabel>Pipeline Activity (7d)</SLabel>
+        {daily.length === 0 ? (
+          <div style={{ color: A.muted, fontSize: 13 }}>No pipeline activity in the last 7 days</div>
+        ) : (
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                {["Date", "Runs", "Tours", "Passed", "Failed", "Cost ($)"].map((h, i) => (
+                  <th key={h} style={{ ...TH, textAlign: i > 0 ? "right" : "left" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {daily.map((r: any, idx: number) => (
+                <tr key={r.date} style={{ background: idx % 2 === 1 ? A.bg : "transparent" }}>
+                  <td style={TD}>{r.date}</td>
+                  <td style={{ ...TD, textAlign: "right" }}>{r.runs}</td>
+                  <td style={{ ...TD, textAlign: "right" }}>{r.tours}</td>
+                  <td style={{ ...TD, textAlign: "right", color: "#22C55E", fontWeight: 600 }}>{r.passed}</td>
+                  <td style={{ ...TD, textAlign: "right", color: r.failed > 0 ? A.red : A.muted }}>{r.failed}</td>
+                  <td style={{ ...TD, textAlign: "right", fontFamily: mono, fontSize: 12 }}>
+                    ${Number(r.cost ?? 0).toFixed(4)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      {/* Row 4 — Model Usage */}
+      {models.length > 0 && (
         <Card>
-          <SLabel>Score Distribution</SLabel>
-          {(data.score_distribution || []).map((r: any) => {
-            const pct   = Math.round((r.count / (data.total || 1)) * 100);
-            const color = r.range === "9-10" ? "#22C55E" : r.range === "8-9" ? "#7C3AED" : r.range === "7-8" ? A.gold : A.red;
-            return (
-              <div key={r.range} style={{ marginBottom: 12 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
-                  <span style={{ color: A.ink, fontWeight: 600 }}>{r.range}</span>
-                  <span style={{ color: A.muted }}>{r.count} tours ({pct}%)</span>
-                </div>
-                <div style={{ height: 7, background: A.line2, borderRadius: 4, overflow: "hidden" }}>
-                  <div style={{ height: "100%", width: `${pct}%`, background: color, borderRadius: 4, transition: "width 0.4s" }} />
-                </div>
-              </div>
-            );
-          })}
+          <SLabel>Model Usage</SLabel>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                {["Model", "Calls", "Avg Score", "Total Cost", "Cost/Call"].map((h, i) => (
+                  <th key={h} style={{ ...TH, textAlign: i > 0 ? "right" : "left" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {models.map((m: any, idx: number) => {
+                const score = m.avg_score != null ? parseFloat(m.avg_score) : null;
+                const sc    = score == null ? A.muted2 : score >= 9 ? "#22C55E" : score >= 7 ? A.gold : A.red;
+                return (
+                  <tr key={m.model} style={{ background: idx % 2 === 1 ? A.bg : "transparent" }}>
+                    <td style={TD}><code style={{ fontFamily: mono, fontSize: 12, color: A.gold }}>{m.model}</code></td>
+                    <td style={{ ...TD, textAlign: "right" }}>{m.calls}</td>
+                    <td style={{ ...TD, textAlign: "right" }}>
+                      <span style={{ color: sc, fontWeight: 700 }}>{score != null ? score.toFixed(1) : "—"}</span>
+                    </td>
+                    <td style={{ ...TD, textAlign: "right" }}>${Number(m.total_cost ?? 0).toFixed(4)}</td>
+                    <td style={{ ...TD, textAlign: "right", color: A.muted }}>${Number(m.cost_per_call ?? 0).toFixed(4)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </Card>
+      )}
+
+      {/* Row 5 — Pipeline Health */}
+      {health.length > 0 && (
+        <Card>
+          <SLabel>Pipeline Health</SLabel>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+            {health.map((s: any) => (
+              <div key={s.name} style={{
+                display: "flex", alignItems: "center", gap: 8,
+                padding: "8px 14px", borderRadius: 8,
+                background: A.bg, border: `1px solid ${A.line}`,
+              }}>
+                <div style={{
+                  width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
+                  background: STATUS_COLOR[s.status] || A.muted2,
+                  boxShadow: `0 0 5px ${STATUS_COLOR[s.status] || A.muted2}`,
+                }} />
+                <span style={{ fontSize: 12, fontWeight: 500, color: A.ink }}>{s.name}</span>
+                <span style={{
+                  fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 999,
+                  background: `${STATUS_COLOR[s.status] || A.muted2}18`,
+                  color: STATUS_COLOR[s.status] || A.muted2,
+                  textTransform: "capitalize",
+                }}>{s.status}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+// ─── Tab 2: SEO Intelligence ──────────────────────────────────────────────────
+function SeoTab() {
+  const [data, setData]       = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError]     = useState(false);
+
+  useEffect(() => {
+    fetch("/api/admin/metrics/seo")
+      .then(r => { if (!r.ok) throw new Error(); return r.json(); })
+      .then(setData)
+      .catch(() => setError(true))
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) return <LoadingScreen msg="Loading SEO data…" />;
+  if (error || !data) return (
+    <div style={{ padding: 40, textAlign: "center", color: A.red }}>Failed to load SEO data</div>
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      {/* Row 1 — 3 metric cards */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
+        <MetricCard
+          label="SEO Coverage"
+          value={`${data.coverage_pct ?? 0}%`}
+          sub={`${data.seo_covered ?? 0}/${data.total_tours ?? 0} tours`}
+          color={A.gold}
+        />
+        <MetricCard
+          label="Cache Hit Rate"
+          value={data.cache?.hit_rate ?? "N/A"}
+          sub={`${data.cache?.hits ?? 0} hits / ${data.cache?.misses ?? 0} misses`}
+          color="#22C55E"
+        />
+        <MetricCard
+          label="Countries"
+          value={(data.countries ?? []).length}
+          sub="with SEO data"
+          color="#7C3AED"
+        />
       </div>
+
+      {/* Row 2 — Countries table */}
+      <Card>
+        <SLabel>Countries</SLabel>
+        {(data.countries ?? []).length === 0 ? (
+          <div style={{ color: A.muted, fontSize: 13 }}>No country data yet</div>
+        ) : (
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                {["Country", "Tours with SEO"].map((h, i) => (
+                  <th key={h} style={{ ...TH, textAlign: i > 0 ? "right" : "left" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {(data.countries ?? []).map((c: any, idx: number) => (
+                <tr key={c.country} style={{ background: idx % 2 === 1 ? A.bg : "transparent" }}>
+                  <td style={TD}>{c.country || "Unknown"}</td>
+                  <td style={{ ...TD, textAlign: "right" }}>{c.count}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      {/* Row 3 — Top Keywords */}
+      <Card>
+        <SLabel>Top Keywords</SLabel>
+        {(data.top_keywords ?? []).length === 0 ? (
+          <div style={{ color: A.muted, fontSize: 13 }}>No keyword data yet</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            {(data.top_keywords ?? []).map((k: any, idx: number) => (
+              <div key={k.keyword} style={{
+                display: "flex", justifyContent: "space-between", alignItems: "center",
+                fontSize: 13, padding: "8px 0",
+                borderBottom: idx < (data.top_keywords ?? []).length - 1 ? `1px solid ${A.line2}` : "none",
+              }}>
+                <span style={{ color: A.ink }}>{k.keyword}</span>
+                <span style={{
+                  fontSize: 11, padding: "2px 8px", borderRadius: 20,
+                  background: A.goldTint, color: A.gold, fontWeight: 600,
+                }}>{k.count}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+// ─── Tab 3: Content Library ───────────────────────────────────────────────────
+function LibraryTab() {
+  const [data, setData]       = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError]     = useState(false);
+
+  useEffect(() => {
+    fetch("/api/admin/metrics/library")
+      .then(r => { if (!r.ok) throw new Error(); return r.json(); })
+      .then(setData)
+      .catch(() => setError(true))
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) return <LoadingScreen msg="Loading library data…" />;
+  if (error || !data) return (
+    <div style={{ padding: 40, textAlign: "center", color: A.red }}>Failed to load library data</div>
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      {/* Row 1 — 3 metric cards */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
+        <MetricCard
+          label="Total Published"
+          value={data.total ?? 0}
+          color={A.gold}
+        />
+        <MetricCard
+          label="Avg Quality Score"
+          value={data.avg_score != null ? Number(data.avg_score).toFixed(1) : "—"}
+          color="#22C55E"
+        />
+        <MetricCard
+          label="Published (30d)"
+          value={data.published_last_30d ?? 0}
+          color="#7C3AED"
+        />
+      </div>
+
+      {/* Row 2 — By Country table */}
+      <Card>
+        <SLabel>By Country</SLabel>
+        {(data.by_country ?? []).length === 0 ? (
+          <div style={{ color: A.muted, fontSize: 13 }}>No country data yet</div>
+        ) : (
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                {["Country", "Tours", "Avg Score", "Last Published"].map((h, i) => (
+                  <th key={h} style={{ ...TH, textAlign: i > 0 ? "right" : "left" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {(data.by_country ?? []).map((r: any, idx: number) => (
+                <tr key={r.country ?? "unknown"} style={{ background: idx % 2 === 1 ? A.bg : "transparent" }}>
+                  <td style={TD}>{r.country || "Unknown"}</td>
+                  <td style={{ ...TD, textAlign: "right" }}>{r.total}</td>
+                  <td style={{ ...TD, textAlign: "right" }}>
+                    <span style={{
+                      fontWeight: 700,
+                      color: Number(r.avg_score) >= 9 ? "#22C55E" : Number(r.avg_score) >= 7 ? A.gold : A.red,
+                    }}>{Number(r.avg_score).toFixed(1)}</span>
+                  </td>
+                  <td style={{ ...TD, textAlign: "right", color: A.muted, fontSize: 12 }}>
+                    {r.last_published ? String(r.last_published).slice(0, 10) : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
+
+      {/* Row 3 — Score Distribution */}
+      <Card>
+        <SLabel>Score Distribution</SLabel>
+        {(data.score_distribution ?? []).length === 0 ? (
+          <div style={{ color: A.muted, fontSize: 13 }}>No distribution data yet</div>
+        ) : (
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                {["Range", "Count"].map((h, i) => (
+                  <th key={h} style={{ ...TH, textAlign: i > 0 ? "right" : "left" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {(data.score_distribution ?? []).map((r: any, idx: number) => (
+                <tr key={r.range} style={{ background: idx % 2 === 1 ? A.bg : "transparent" }}>
+                  <td style={TD}>{r.range}</td>
+                  <td style={{ ...TD, textAlign: "right", fontWeight: 600 }}>{r.count}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Card>
     </div>
   );
 }
 
 // ─── Main page ────────────────────────────────────────────────────────────────
-
 const TABS = [
-  { key: "metrics",  label: "📊 Metrics" },
-  { key: "volume",   label: "📈 Volume" },
-  { key: "quality",  label: "🎯 Quality" },
-  { key: "billing",  label: "💰 Cost" },
-  { key: "seo",      label: "🔎 SEO" },
-  { key: "library",  label: "📚 Library" },
-  { key: "health",   label: "🏥 Health" },
-  { key: "spot",     label: "⚡ Spot Workers" },
+  { key: "overview", label: "Overview" },
+  { key: "seo",      label: "SEO Intelligence" },
+  { key: "library",  label: "Content Library" },
 ];
 
 export default function DashboardPage() {
-  const [activeTab, setActiveTab] = useState("metrics");
-  const [totalTours,  setTotalTours]  = useState(0);
-  const [totalHITL,   setTotalHITL]   = useState(0);
-  const [totalPassed, setTotalPassed] = useState(0);
-  const [metrics, setMetrics]         = useState<any>(null);
-  const [loading, setLoading]         = useState(true);
+  const [activeTab, setActiveTab] = useState("overview");
+  const [metrics, setMetrics]     = useState<any>(null);
+  const [loading, setLoading]     = useState(true);
 
   useEffect(() => {
-    fetch("/api/tenant/v1/tours?page=1&page_size=1")
-      .then(r => r.json()).then(d => { const t = d.pagination?.total || 0; setTotalTours(t); setTotalPassed(t); }).catch(() => {});
-    fetch("/api/tenant/v1/pipeline/review-queue?page_size=1")
-      .then(r => r.json()).then(d => setTotalHITL(d.pagination?.total || 0)).catch(() => {});
-    fetch("/api/tenant/v1/pipeline/metrics?days=7")
-      .then(r => r.ok ? r.json() : null).then(d => { if (d) setMetrics(d); }).catch(() => {}).finally(() => setLoading(false));
+    fetch("/api/admin/metrics?days=7")
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d) setMetrics(d); })
+      .catch(() => {})
+      .finally(() => setLoading(false));
   }, []);
-
-  const totalCost = metrics?.model_usage
-    ? metrics.model_usage.reduce((s: number, m: any) => s + (Number(m.total_cost) || 0), 0).toFixed(4)
-    : metrics?.daily_runs
-      ? metrics.daily_runs.reduce((s: number, d: any) => s + (Number(d.cost) || 0), 0).toFixed(4)
-      : "0.0000";
-  const passRate = totalTours > 0 ? ((totalPassed / totalTours) * 100).toFixed(1) : "0.0";
 
   return (
     <div style={{ display: "flex", minHeight: "100vh", fontFamily: sans, background: A.bg }}>
       <AdminSidebar />
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
-        {/* Topbar */}
-        <header style={{ height: 56, background: "#fff", borderBottom: `1px solid ${A.line}`, display: "flex", alignItems: "center", padding: "0 32px", gap: 8, position: "sticky", top: 0, zIndex: 10 }}>
+        <header style={{
+          height: 56, background: "#fff", borderBottom: `1px solid ${A.line}`,
+          display: "flex", alignItems: "center", padding: "0 32px", gap: 8,
+          position: "sticky", top: 0, zIndex: 10,
+        }}>
           <span style={{ fontSize: 12, color: A.muted2 }}>Admin /</span>
           <span style={{ fontSize: 12, fontWeight: 500, color: A.body }}>Dashboard</span>
         </header>
 
         <main style={{ flex: 1, overflowY: "auto", padding: "28px 36px 56px" }}>
-          {/* Page header */}
-          <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 24 }}>
-            <div>
-              <h1 style={{ fontFamily: serif, fontSize: 24, fontWeight: 500, color: A.ink, margin: "0 0 6px", letterSpacing: "-0.01em" }}>
-                Dev Dashboard
-              </h1>
-              <p style={{ fontSize: 13, color: A.muted, margin: 0 }}>Pipeline metrics · API v0.3.0</p>
-            </div>
+          <div style={{ marginBottom: 24 }}>
+            <h1 style={{
+              fontFamily: serif, fontSize: 24, fontWeight: 500,
+              color: A.ink, margin: "0 0 6px", letterSpacing: "-0.01em",
+            }}>Dashboard</h1>
+            <p style={{ fontSize: 13, color: A.muted, margin: 0 }}>
+              All-tenant metrics · API v0.3.0
+            </p>
           </div>
 
-          {/* Stat cards */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 16, marginBottom: 24 }}>
-            <StatCard icon={<FileText size={16} />}    label="Tours Processed" value={String(totalTours)}  sub="↳ published_tours · all time" />
-            <StatCard icon={<CheckCircle size={16} />} label="Auto-Approved"   value={`${passRate}%`}      sub={`${totalPassed} tours · pipeline_runs (7d)`} accent="#22C55E" />
-            <StatCard icon={<Clock size={16} />}       label="HITL Queue"      value={String(totalHITL)}   sub="↳ review_queue · pending"     accent={A.amber} />
-            <StatCard icon={<DollarSign size={16} />}  label="Total LLM Cost"  value={`$${totalCost}`}     sub="↳ pipeline_runs · accumulated" />
-          </div>
-
-          {/* Tab bar */}
-          <div style={{ marginBottom: 20, overflowX: "auto" }}>
+          <div style={{ marginBottom: 24 }}>
             <TabBar tabs={TABS} active={activeTab} onChange={setActiveTab} />
           </div>
 
-          {/* Tab content */}
-          {activeTab === "metrics" && (
-            loading ? <LoadingScreen msg="Loading metrics…" /> : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-                  <ChartCard title="Daily Pipeline Volume">
-                    <ResponsiveContainer width="100%" height={220}>
-                      <BarChart data={metrics?.daily_runs ?? []}>
-                        <XAxis dataKey="date" tick={{ fill: A.muted, fontSize: 11 }} axisLine={false} tickLine={false} />
-                        <YAxis tick={{ fill: A.muted, fontSize: 11 }} axisLine={false} tickLine={false} />
-                        <Tooltip {...CHART_TOOLTIP} />
-                        <Bar dataKey="tours"  name="Tours"  fill="#22C55E" radius={[4,4,0,0]} />
-                        <Bar dataKey="hitl"   name="HITL"   fill={A.gold}  radius={[4,4,0,0]} />
-                        <Bar dataKey="failed" name="Failed" fill={A.red}   radius={[4,4,0,0]} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </ChartCard>
-                  <ChartCard title="Daily LLM Cost (USD)">
-                    <ResponsiveContainer width="100%" height={220}>
-                      <LineChart data={metrics?.daily_runs ?? []}>
-                        <CartesianGrid strokeDasharray="3 3" stroke={A.line} />
-                        <XAxis dataKey="date" tick={{ fill: A.muted, fontSize: 11 }} axisLine={false} tickLine={false} />
-                        <YAxis tick={{ fill: A.muted, fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={v => `$${v}`} />
-                        <Tooltip {...CHART_TOOLTIP} formatter={(v: any) => [`$${v}`, "Cost"]} />
-                        <Line type="monotone" dataKey="cost" stroke={A.gold} strokeWidth={2.5} dot={{ fill: A.gold, r: 4 }} activeDot={{ r: 6 }} />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </ChartCard>
-                </div>
-                <ChartCard title="LLM Model Usage">
-                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                    <thead>
-                      <tr>{["Model","Calls","Total Cost","Avg Score","Cost/Call"].map((h,i) => (
-                        <th key={h} style={{ ...TH, textAlign: i === 0 ? "left" : "right" }}>{h}</th>
-                      ))}</tr>
-                    </thead>
-                    <tbody>
-                      {(metrics?.model_usage ?? []).map((m: any) => (
-                        <tr key={m.model}>
-                          <td style={TD}><code style={{ fontFamily: mono, fontSize: 12, color: A.gold }}>{m.model}</code></td>
-                          <td style={{ ...TD, textAlign: "right" }}>{m.calls}</td>
-                          <td style={{ ...TD, textAlign: "right" }}>${Number(m.total_cost ?? 0).toFixed(4)}</td>
-                          <td style={{ ...TD, textAlign: "right" }}>
-                            <span style={{ fontWeight: 700, color: m.avg_score >= 8.5 ? "#22C55E" : m.avg_score >= 7.5 ? A.gold : A.amber }}>{m.avg_score ?? "—"}</span>
-                          </td>
-                          <td style={{ ...TD, textAlign: "right", color: A.muted }}>${Number(m.cost_per_call ?? 0).toFixed(4)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </ChartCard>
-              </div>
-            )
+          {activeTab === "overview" && (
+            loading
+              ? <LoadingScreen msg="Loading metrics…" />
+              : <OverviewTab data={metrics} />
           )}
-
-          {activeTab === "volume"  && <VolumeTab data={metrics} />}
-          {activeTab === "quality" && <QualityTab />}
-          {activeTab === "billing" && <CostTab />}
           {activeTab === "seo"     && <SeoTab />}
           {activeTab === "library" && <LibraryTab />}
-
-          {activeTab === "health" && (
-            <ChartCard title="Pipeline Service Health">
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {((metrics?.pipeline_health as any[]) ?? PIPELINE_HEALTH_DEFAULT).map((s: any) => (
-                  <div key={s.name} style={{
-                    display: "flex", alignItems: "center", gap: 16,
-                    padding: "12px 16px", borderRadius: 10, background: A.bg, border: `1px solid ${A.line}`,
-                  }}>
-                    <div style={{ width: 10, height: 10, borderRadius: "50%", flexShrink: 0, background: STATUS_COLOR[s.status] || A.muted2, boxShadow: `0 0 6px ${STATUS_COLOR[s.status] || A.muted2}` }} />
-                    <div style={{ flex: 1, fontWeight: 500, fontSize: 13, color: A.ink }}>{s.name}</div>
-                    <div style={{ fontSize: 12, color: A.muted, width: 80, textAlign: "right", fontFamily: mono }}>{s.latency}</div>
-                    <div style={{ width: 80, textAlign: "right" }}>
-                      {s.errors > 0
-                        ? <span style={{ fontSize: 12, color: A.red }}>⚠ {s.errors} err</span>
-                        : <span style={{ fontSize: 12, color: "#22C55E" }}>✓ Clean</span>}
-                    </div>
-                    <span style={{ fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 999, background: `${STATUS_COLOR[s.status]}18`, color: STATUS_COLOR[s.status], textTransform: "capitalize" }}>{s.status}</span>
-                  </div>
-                ))}
-              </div>
-            </ChartCard>
-          )}
-
-          {activeTab === "spot" && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-              <ChartCard title="Batch Rewrite Spot Workers">
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                  {SPOT_WORKERS.map(w => (
-                    <div key={w.id} style={{ padding: 16, borderRadius: 10, background: A.bg, border: `1px solid ${STATUS_COLOR[w.status]}33` }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
-                        <div>
-                          <div style={{ fontFamily: mono, fontSize: 13, color: A.ink, fontWeight: 600 }}>{w.id}</div>
-                          <div style={{ fontSize: 11, color: A.muted, marginTop: 2 }}>{w.instance}</div>
-                        </div>
-                        <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 999, background: `${STATUS_COLOR[w.status]}18`, color: STATUS_COLOR[w.status], textTransform: "capitalize" }}>{w.status}</span>
-                      </div>
-                      <div style={{ fontSize: 12, color: A.muted }}>Waiting for batch job</div>
-                    </div>
-                  ))}
-                </div>
-                <div style={{ marginTop: 14, padding: 12, background: A.goldTint, borderRadius: 8, border: `1px solid ${A.gold}33`, fontSize: 12, color: A.muted }}>
-                  💡 Spot Workers run ECS Fargate Spot for cost-efficient batch rewriting. On interruption, checkpoint is saved and work resumes.
-                </div>
-              </ChartCard>
-            </div>
-          )}
-
         </main>
       </div>
     </div>

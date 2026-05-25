@@ -13,7 +13,7 @@ function apiHeaders(extra: Record<string, string> = {}): Record<string, string> 
 }
 
 export async function GET(_req: NextRequest) {
-  const res = await fetch(`${API_URL}/v1/pipeline/brand-identity`, {
+  const res = await fetch(`${API_URL}/admin/brand-identity`, {
     headers: apiHeaders(),
     cache: "no-store",
   });
@@ -23,7 +23,7 @@ export async function GET(_req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const res = await fetch(`${API_URL}/v1/pipeline/brand-identity`, {
+  const res = await fetch(`${API_URL}/admin/brand-identity`, {
     method: "POST",
     headers: apiHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
