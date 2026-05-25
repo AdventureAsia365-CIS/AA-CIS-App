@@ -333,52 +333,44 @@ async def ingest_s3(
     from services.ingestion.handler import process_file
 
     _bucket = req.bucket or os.environ.get("BRONZE_BUCKET", "aa-cis-bronze-867490540162")
-    result = await process_file(_bucket, req.s3_key, seo_mode=req.seo_mode)
-    if result.get("status") == "skipped_duplicate":
-        return {"status": "duplicate", "batch_id": None, "tour_count": 0}
 
-    batch_id = result.get("source_id")
-    pool = request.app.state.pool
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT tour_id FROM silver_aa_internal.raw_tours WHERE batch_id = $1::uuid",
-            batch_id,
-        )
-        if req.dry_run:
+    # dry_run: parse file into DB but do NOT trigger pipeline
+    if req.dry_run:
+        pool = request.app.state.pool
+        async with pool.acquire() as conn:
+            source = await conn.fetchrow("""
+                SELECT source_id FROM silver_aa_internal.raw_sources
+                WHERE s3_path = $1
+                ORDER BY parsed_at DESC LIMIT 1
+            """, req.s3_key)
+
+            if not source:
+                result = await process_file(_bucket, req.s3_key, seo_mode=req.seo_mode)
+                if result.get("status") == "skipped_duplicate":
+                    return {"status": "duplicate", "dry_run": True,
+                            "batch_id": None, "tour_count": 0}
+                batch_id = result.get("source_id")
+            else:
+                batch_id = source["source_id"]
+
             tour_details = await conn.fetch("""
-                SELECT
-                    tour_id,
-                    src_name,
-                    country,
-                    duration,
-                    price_raw,
-                    group_size,
-                    period,
-                    pipeline_status,
-                    ingest_at,
-                    src_subtitle,
-                    src_summary,
-                    src_highlights,
-                    src_itineraries,
-                    provider,
-                    activities,
-                    inclusions,
-                    exclusions,
-                    sku,
-                    src_description,
-                    links,
-                    feature,
-                    best_time_to_go
+                SELECT tour_id, src_name, country, duration, price_raw,
+                       group_size, period, pipeline_status, ingest_at,
+                       src_subtitle, src_summary, src_highlights, src_itineraries,
+                       provider, activities, inclusions, exclusions, sku,
+                       src_description, links, feature, best_time_to_go
                 FROM silver_aa_internal.raw_tours
                 WHERE batch_id = $1::uuid
                 ORDER BY ingest_at
             """, batch_id)
+
             existing = await conn.fetch("""
                 SELECT src_name FROM silver_aa_internal.raw_tours
                 WHERE batch_id != $1::uuid
                 AND src_name = ANY($2::text[])
             """, batch_id, [r["src_name"] for r in tour_details])
             existing_names = {r["src_name"] for r in existing}
+
             tours_out = []
             for t in tour_details:
                 missing = [f for f in ["src_name", "country", "duration", "price_raw"]
@@ -409,13 +401,14 @@ async def ingest_s3(
                     "missing_fields":  missing,
                     "is_duplicate":    t["src_name"] in existing_names,
                 })
+
             sources = await conn.fetch("""
                 SELECT filename, s3_path, row_count, parsed_at, parse_errors, file_hash
                 FROM silver_aa_internal.raw_sources
                 WHERE tenant_id = $1::uuid
-                ORDER BY parsed_at DESC
-                LIMIT 20
+                ORDER BY parsed_at DESC LIMIT 20
             """, UUID("00000000-0000-0000-0000-000000000001"))
+
             return {
                 "status":          "parsed",
                 "dry_run":         True,
@@ -426,6 +419,19 @@ async def ingest_s3(
                 "tours":           tours_out,
                 "upload_history":  [dict(s) for s in sources],
             }
+
+    # Non-dry_run: parse + trigger pipeline
+    result = await process_file(_bucket, req.s3_key, seo_mode=req.seo_mode)
+    if result.get("status") == "skipped_duplicate":
+        return {"status": "duplicate", "batch_id": None, "tour_count": 0}
+
+    batch_id = result.get("source_id")
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT tour_id FROM silver_aa_internal.raw_tours WHERE batch_id = $1::uuid",
+            batch_id,
+        )
 
     sf_threshold = int(os.environ.get("SF_BATCH_THRESHOLD", "15"))
     tour_ids = [str(r["tour_id"]) for r in rows]
