@@ -10,7 +10,7 @@ from uuid import UUID
 import asyncpg
 import boto3 as _boto3
 import structlog
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional, List
 
@@ -325,125 +325,95 @@ async def get_upload_url(body: UploadUrlRequest, x_admin_secret: str = Header(No
 @router.post("/ingest-s3")
 async def ingest_s3(
     req: IngestS3Request,
-    background_tasks: BackgroundTasks,
     request: Request,
     x_admin_secret: str = Header(None),
 ):
     verify_admin_secret(x_admin_secret)
-    from services.ingestion.handler import process_file
 
     _bucket = req.bucket or os.environ.get("BRONZE_BUCKET", "aa-cis-bronze-867490540162")
 
-    # dry_run: parse file into DB but do NOT trigger pipeline
+    # ── dry_run=True: parse-only preview, no DB write ─────────────────────────
     if req.dry_run:
+        import tempfile as _tempfile
+        import hashlib as _hashlib
+        from services.ingestion.excel_parser import ExcelParser as _ExcelParser
+        import uuid as _uuid
+
+        s3_client = _boto3.client("s3", region_name=os.environ.get("AWS_REGION", "us-west-1"))
+        with _tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
+            s3_client.download_fileobj(_bucket, req.s3_key, tmp)
+            tmp_path = tmp.name
+
+        with open(tmp_path, "rb") as fh:
+            file_bytes = fh.read()
+        file_hash = _hashlib.sha256(file_bytes).hexdigest()
+
         pool = request.app.state.pool
         async with pool.acquire() as conn:
-
-            # CHECK 1: File duplicate (same s3_key already in raw_sources)
-            existing_source = await conn.fetchrow("""
-                SELECT id, filename, parsed_at
-                FROM silver_aa_internal.raw_sources
-                WHERE s3_path = $1
-                ORDER BY parsed_at DESC LIMIT 1
-            """, req.s3_key)
-
-            if existing_source:
-                return {
-                    "status":      "blocked",
-                    "reason":      "duplicate_file",
-                    "dry_run":     True,
-                    "filename":    existing_source["filename"],
-                    "uploaded_at": str(existing_source["parsed_at"]),
-                    "message":     (
-                        f"File này đã được upload lúc "
-                        f"{existing_source['parsed_at'].strftime('%Y-%m-%d %H:%M')}. "
-                        f"Vui lòng chọn file khác."
-                    ),
-                }
-
-            # PARSE: File not yet in raw_sources → call process_file
-            result = await process_file(_bucket, req.s3_key, seo_mode=req.seo_mode)
-
-            if result.get("status") == "skipped_duplicate":
+            existing_hash = await conn.fetchrow(
+                "SELECT id, filename FROM silver_aa_internal.raw_sources WHERE file_hash = $1",
+                file_hash,
+            )
+            if existing_hash:
                 return {
                     "status":  "blocked",
                     "reason":  "duplicate_file_hash",
                     "dry_run": True,
-                    "message": (
-                        "Nội dung file này đã tồn tại trong hệ thống (file hash trùng). "
-                        "Vui lòng chọn file khác."
-                    ),
+                    "message": "File hash trùng — nội dung này đã tồn tại trong hệ thống. Vui lòng chọn file khác.",
                 }
 
-            batch_id = result.get("source_id")
+            parser = _ExcelParser(tmp_path, source_file=req.s3_key)
+            records = parser.parse()
 
-            # CHECK 2: Tour duplicate per src_name
-            parsed_tours = await conn.fetch("""
-                SELECT tour_id, src_name, country, duration, price_raw,
-                       group_size, period, pipeline_status, ingest_at,
-                       src_subtitle, src_summary, src_highlights, src_itineraries,
-                       provider, activities, inclusions, exclusions, sku,
-                       src_description, links, feature, best_time_to_go
-                FROM silver_aa_internal.raw_tours
-                WHERE batch_id = $1::uuid
-                ORDER BY ingest_at
-            """, batch_id)
-
-            all_names = [r["src_name"] for r in parsed_tours if r["src_name"]]
+            all_names = [r["src_name"] for r in records if r.get("src_name")]
             duplicate_names: set = set()
             if all_names:
-                dup_rows = await conn.fetch("""
-                    SELECT DISTINCT src_name
-                    FROM silver_aa_internal.raw_tours
-                    WHERE batch_id != $1::uuid
-                    AND src_name = ANY($2::text[])
-                """, batch_id, all_names)
+                dup_rows = await conn.fetch(
+                    "SELECT DISTINCT src_name FROM silver_aa_internal.raw_tours WHERE src_name = ANY($1::text[])",
+                    all_names,
+                )
                 duplicate_names = {r["src_name"] for r in dup_rows}
 
             ready_tours = []
             blocked_tours = []
-            for t in parsed_tours:
-                missing = [f for f in ["src_name", "country", "duration", "price_raw"]
-                           if not t[f]]
-                if t["src_name"] in duplicate_names:
+            for r in records[:req.max_tours]:
+                src_name = r.get("src_name") or "(no name)"
+                missing = [f for f in ["src_name", "country", "duration", "price_raw"] if not r.get(f)]
+                if src_name in duplicate_names:
                     blocked_tours.append({
-                        "src_name": t["src_name"],
-                        "country":  t["country"],
-                        "reason":   "duplicate_tour",
-                        "message":  "Tour này đã tồn tại trong hệ thống.",
+                        "src_name": src_name, "country": r.get("country"),
+                        "reason": "duplicate_tour", "message": "Tour này đã tồn tại trong hệ thống.",
                     })
                 elif missing:
                     blocked_tours.append({
-                        "src_name":      t["src_name"] or "(no name)",
-                        "country":       t["country"],
-                        "reason":        "missing_fields",
-                        "missing_fields": missing,
-                        "message":       f"Thiếu fields: {', '.join(missing)}",
+                        "src_name": src_name, "country": r.get("country"),
+                        "reason": "missing_fields", "missing_fields": missing,
+                        "message": f"Thiếu fields: {', '.join(missing)}",
                     })
                 else:
                     ready_tours.append({
-                        "tour_id":         str(t["tour_id"]),
-                        "src_name":        t["src_name"],
-                        "country":         t["country"],
-                        "duration":        t["duration"],
-                        "price_raw":       t["price_raw"],
-                        "group_size":      t["group_size"],
-                        "period":          t["period"],
-                        "pipeline_status": t["pipeline_status"],
-                        "ingest_at":       str(t["ingest_at"]),
-                        "src_subtitle":    t["src_subtitle"],
-                        "src_summary":     t["src_summary"],
-                        "src_highlights":  t["src_highlights"],
-                        "src_itineraries": t["src_itineraries"],
-                        "provider":        t["provider"],
-                        "activities":      t["activities"],
-                        "inclusions":      t["inclusions"],
-                        "exclusions":      t["exclusions"],
-                        "sku":             t["sku"],
-                        "src_description": t["src_description"],
-                        "links":           t["links"],
-                        "feature":         t["feature"],
-                        "best_time_to_go": t["best_time_to_go"],
+                        "tour_id":         str(_uuid.uuid4()),
+                        "src_name":        src_name,
+                        "country":         r.get("country"),
+                        "duration":        r.get("duration"),
+                        "price_raw":       r.get("price_raw"),
+                        "group_size":      r.get("group_size"),
+                        "period":          r.get("period"),
+                        "pipeline_status": "preview",
+                        "ingest_at":       "",
+                        "src_subtitle":    r.get("src_subtitle"),
+                        "src_summary":     r.get("src_summary"),
+                        "src_highlights":  r.get("src_highlights"),
+                        "src_itineraries": r.get("src_itineraries"),
+                        "provider":        r.get("provider"),
+                        "activities":      r.get("activities"),
+                        "inclusions":      r.get("inclusions"),
+                        "exclusions":      r.get("exclusions"),
+                        "sku":             r.get("sku"),
+                        "src_description": r.get("src_description"),
+                        "links":           r.get("links"),
+                        "feature":         r.get("feature"),
+                        "best_time_to_go": r.get("best_time_to_go"),
                     })
 
             sources = await conn.fetch("""
@@ -454,17 +424,18 @@ async def ingest_s3(
             """, UUID("00000000-0000-0000-0000-000000000001"))
 
             return {
-                "status":        "parsed",
-                "dry_run":       True,
-                "batch_id":      str(batch_id),
-                "ready_count":   len(ready_tours),
-                "blocked_count": len(blocked_tours),
-                "tours":         ready_tours,
-                "blocked_tours": blocked_tours,
+                "status":         "parsed",
+                "dry_run":        True,
+                "batch_id":       None,
+                "ready_count":    len(ready_tours),
+                "blocked_count":  len(blocked_tours),
+                "tours":          ready_tours,
+                "blocked_tours":  blocked_tours,
                 "upload_history": [dict(s) for s in sources],
             }
 
-    # Non-dry_run: parse + trigger pipeline
+    # ── dry_run=False: insert raw_sources + raw_tours, no pipeline trigger ────
+    from services.ingestion.handler import process_file
     result = await process_file(_bucket, req.s3_key, seo_mode=req.seo_mode)
     if result.get("status") == "skipped_duplicate":
         return {"status": "duplicate", "batch_id": None, "tour_count": 0}
@@ -477,41 +448,84 @@ async def ingest_s3(
             batch_id,
         )
 
-    sf_threshold = int(os.environ.get("SF_BATCH_THRESHOLD", "15"))
-    tour_ids = [str(r["tour_id"]) for r in rows]
+    return {"status": "done", "batch_id": str(batch_id), "tour_count": len(rows)}
 
-    if len(tour_ids) > sf_threshold:
-        sf_arn = os.environ.get("STEP_FUNCTIONS_ARN", "")
-        if sf_arn:
-            sfn = _boto3.client("stepfunctions", region_name=os.environ.get("AWS_REGION", "us-west-1"))
-            try:
-                sfn.start_execution(
-                    stateMachineArn=sf_arn,
-                    name=f"pipeline-{batch_id}",
-                    input=json.dumps({
-                        "tour_ids": tour_ids,
-                        "tenant_id": "00000000-0000-0000-0000-000000000001",
-                        "batch_id": str(batch_id),
-                        "seo_mode": req.seo_mode,
-                        "model_tier": req.model_tier,
-                    }),
-                )
-                return {"status": "sf_triggered", "batch_id": batch_id, "tour_count": len(rows)}
-            except Exception as sf_err:
-                logger.error("sf_start_execution_failed", error=str(sf_err), batch_id=batch_id)
 
-    for row in rows:
-        tour_req = TourRunRequest(
-            tour_id=str(row["tour_id"]),
-            batch_id=batch_id,
-            tenant_id="00000000-0000-0000-0000-000000000001",
-            seo_mode=req.seo_mode,
-            model_tier=req.model_tier,
-            subtitle_focus=req.subtitle_focus,
-        )
-        background_tasks.add_task(_run_tour_safe, tour_req)
+# ── GET /admin/upload-history ─────────────────────────────────────────────────
 
-    return {"status": "triggered", "batch_id": batch_id, "tour_count": len(rows)}
+def _count_parse_errors(parse_errors) -> int:
+    if not parse_errors:
+        return 0
+    if isinstance(parse_errors, list):
+        return len(parse_errors)
+    if isinstance(parse_errors, dict):
+        return sum(len(v) if isinstance(v, list) else 1 for v in parse_errors.values())
+    try:
+        import json as _j
+        parsed = _j.loads(parse_errors)
+        return len(parsed) if isinstance(parsed, list) else 0
+    except Exception:
+        return 0
+
+
+@router.get("/upload-history")
+async def get_upload_history(request: Request, x_admin_secret: str = Header(None)):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        sources = await conn.fetch("""
+            SELECT id::text, filename, file_size_kb, row_count, parsed_at,
+                   parse_errors, batch_id::text
+            FROM silver_aa_internal.raw_sources
+            WHERE tenant_id = '00000000-0000-0000-0000-000000000001'::uuid
+            ORDER BY parsed_at DESC LIMIT 20
+        """)
+    return {
+        "sources": [
+            {
+                "id":                s["id"],
+                "filename":          s["filename"],
+                "file_size_kb":      float(s["file_size_kb"]) if s["file_size_kb"] else None,
+                "row_count":         s["row_count"],
+                "parsed_at":         str(s["parsed_at"]) if s["parsed_at"] else None,
+                "parse_error_count": _count_parse_errors(s["parse_errors"]),
+                "batch_id":          s["batch_id"],
+            }
+            for s in sources
+        ],
+    }
+
+
+# ── GET /admin/tours-ready ────────────────────────────────────────────────────
+
+@router.get("/tours-ready")
+async def get_tours_ready(request: Request, x_admin_secret: str = Header(None)):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        tours = await conn.fetch("""
+            SELECT t.tour_id::text, t.src_name, t.country, t.ingest_at,
+                   t.source_id::text, t.batch_id::text, rs.filename
+            FROM silver_aa_internal.raw_tours t
+            LEFT JOIN silver_aa_internal.raw_sources rs ON rs.id = t.source_id
+            WHERE t.pipeline_status = 'ingested'
+            ORDER BY t.ingest_at DESC
+        """)
+    return {
+        "tours": [
+            {
+                "tour_id":   t["tour_id"],
+                "src_name":  t["src_name"],
+                "country":   t["country"],
+                "ingest_at": str(t["ingest_at"]) if t["ingest_at"] else None,
+                "source_id": t["source_id"],
+                "batch_id":  t["batch_id"],
+                "filename":  t["filename"],
+            }
+            for t in tours
+        ],
+        "total": len(tours),
+    }
 
 
 # ── GET /admin/metrics ────────────────────────────────────────────────────────
