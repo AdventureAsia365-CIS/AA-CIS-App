@@ -777,7 +777,8 @@ async def update_raw_tour_fields(
     pool = request.app.state.pool
     async with pool.acquire() as conn:
         updated = await conn.fetchval(
-            f"UPDATE silver_aa_internal.raw_tours SET {set_clause} WHERE tour_id = ${len(fields)+1}::uuid RETURNING tour_id",
+            f"UPDATE silver_aa_internal.raw_tours SET {set_clause}"
+            f" WHERE tour_id = ${len(fields)+1}::uuid RETURNING tour_id",
             *values, tour_id,
         )
     if not updated:
