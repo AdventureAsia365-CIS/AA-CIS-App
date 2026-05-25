@@ -5,6 +5,7 @@
 import asyncio
 import json
 import os
+from uuid import UUID
 
 import asyncpg
 import boto3 as _boto3
@@ -49,10 +50,13 @@ class UploadUrlResponse(BaseModel):
 
 class IngestS3Request(BaseModel):
     s3_key: str
-    bucket: str
+    bucket: str = ""
     seo_mode: str = "dataforseo"
     model_tier: str = "haiku"
     subtitle_focus: str = "standard"
+    dry_run: bool = False
+    tenant_id: str = "00000000-0000-0000-0000-000000000001"
+    max_tours: int = 500
 
 
 class BrandIdentityUpdate(BaseModel):
@@ -328,7 +332,8 @@ async def ingest_s3(
     verify_admin_secret(x_admin_secret)
     from services.ingestion.handler import process_file
 
-    result = await process_file(req.bucket, req.s3_key, seo_mode=req.seo_mode)
+    _bucket = req.bucket or os.environ.get("BRONZE_BUCKET", "aa-cis-bronze-867490540162")
+    result = await process_file(_bucket, req.s3_key, seo_mode=req.seo_mode)
     if result.get("status") == "skipped_duplicate":
         return {"status": "duplicate", "batch_id": None, "tour_count": 0}
 
@@ -339,6 +344,56 @@ async def ingest_s3(
             "SELECT tour_id FROM silver_aa_internal.raw_tours WHERE batch_id = $1::uuid",
             batch_id,
         )
+        if req.dry_run:
+            tour_details = await conn.fetch("""
+                SELECT tour_id, src_name, country, duration, price_raw,
+                       group_size, period, pipeline_status, ingest_at,
+                       src_highlights, src_summary
+                FROM silver_aa_internal.raw_tours
+                WHERE batch_id = $1::uuid
+                ORDER BY ingest_at
+            """, batch_id)
+            existing = await conn.fetch("""
+                SELECT src_name FROM silver_aa_internal.raw_tours
+                WHERE batch_id != $1::uuid
+                AND src_name = ANY($2::text[])
+            """, batch_id, [r["src_name"] for r in tour_details])
+            existing_names = {r["src_name"] for r in existing}
+            tours_out = []
+            for t in tour_details:
+                missing = [f for f in ["src_name", "country", "duration", "price_raw"]
+                           if not t[f]]
+                tours_out.append({
+                    "tour_id":         str(t["tour_id"]),
+                    "src_name":        t["src_name"],
+                    "country":         t["country"],
+                    "duration":        t["duration"],
+                    "price_raw":       t["price_raw"],
+                    "group_size":      t["group_size"],
+                    "period":          t["period"],
+                    "pipeline_status": t["pipeline_status"],
+                    "ingest_at":       str(t["ingest_at"]),
+                    "src_summary":     t["src_summary"],
+                    "missing_fields":  missing,
+                    "is_duplicate":    t["src_name"] in existing_names,
+                })
+            sources = await conn.fetch("""
+                SELECT filename, s3_path, row_count, parsed_at, parse_errors, file_hash
+                FROM silver_aa_internal.raw_sources
+                WHERE tenant_id = $1::uuid
+                ORDER BY parsed_at DESC
+                LIMIT 20
+            """, UUID("00000000-0000-0000-0000-000000000001"))
+            return {
+                "status":          "parsed",
+                "dry_run":         True,
+                "batch_id":        str(batch_id),
+                "tour_count":      len(tours_out),
+                "duplicate_count": sum(1 for t in tours_out if t["is_duplicate"]),
+                "error_count":     sum(1 for t in tours_out if t["missing_fields"]),
+                "tours":           tours_out,
+                "upload_history":  [dict(s) for s in sources],
+            }
 
     sf_threshold = int(os.environ.get("SF_BATCH_THRESHOLD", "15"))
     tour_ids = [str(r["tour_id"]) for r in rows]
