@@ -352,8 +352,10 @@ async def get_tenant_details(
         if is_internal:
             # Show published_tours for the internal catalog
             tours = await conn.fetch("""
-                SELECT pt.id, pt.aa_name, rt.country,
-                       pt.quality_score, NULL::int AS version_number,
+                SELECT pt.id, pt.tour_id, pt.aa_name, rt.country,
+                       pt.quality_score,
+                       (SELECT gc.version_num FROM silver_aa_internal.generated_content gc
+                        WHERE gc.tour_id = pt.tour_id ORDER BY gc.created_at DESC LIMIT 1) AS version_number,
                        'published'::text AS status, pt.published_at AS created_at
                 FROM gold_aa_internal.published_tours pt
                 LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
@@ -443,6 +445,7 @@ async def get_tenant_details(
         "rewritten_tours": [
             {
                 "version_id":     str(r["id"]),
+                "tour_id":        str(r["tour_id"]) if r.get("tour_id") else None,
                 "tour_name":      r["aa_name"] or "—",
                 "country":        r["country"],
                 "quality_score":  float(r["quality_score"]) if r["quality_score"] is not None else None,

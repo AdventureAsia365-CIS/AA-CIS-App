@@ -30,10 +30,11 @@ class TourRunRequest(BaseModel):
     tenant_id: str
     retry_count: int = 0
     validation_feedback: list = []
-    seo_mode: str = "dataforseo"
+    seo_mode: str = "standard"
     rewrite_language: str = "en-US"
     model_tier: str = "haiku"
     subtitle_focus: str = "standard"
+    brand_rules_version: Optional[int] = None
 
 
 class UploadUrlRequest(BaseModel):
@@ -122,12 +123,14 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
         seo_data: dict = {}
         try:
             from services.seo_intelligence.handler import process_seo
+            _SEO_MODE_MAP = {"standard": "dataforseo", "aggressive": "dataforseo", "minimal": "disabled"}
+            effective_seo_mode = _SEO_MODE_MAP.get(req.seo_mode, req.seo_mode)
             destination = (
                 f"{row['country']} tours" if row.get("country") else row.get("src_name", "")
             )
             if destination:
                 seo_result = await process_seo(
-                    tour_id=req.tour_id, destination=destination, seo_mode=req.seo_mode,
+                    tour_id=req.tour_id, destination=destination, seo_mode=effective_seo_mode,
                 )
                 seo_data = seo_result.get("data", {})
         except Exception as _seo_err:
@@ -529,6 +532,184 @@ async def get_tours_ready(request: Request, x_admin_secret: str = Header(None)):
             for t in tours
         ],
         "total": len(tours),
+    }
+
+
+# ── GET /admin/tours — all raw_tours with rewrite_count ──────────────────────
+
+@router.get("/tours")
+async def get_all_tours(request: Request, x_admin_secret: str = Header(None)):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        tours = await conn.fetch("""
+            SELECT
+                rt.tour_id::text, rt.src_name, rt.country,
+                rt.pipeline_status::text, rt.ingest_at,
+                rt.batch_id::text, rt.source_id::text,
+                rs.filename,
+                COUNT(gc.id)         AS rewrite_count,
+                MAX(gc.created_at)   AS last_rewritten_at
+            FROM silver_aa_internal.raw_tours rt
+            LEFT JOIN silver_aa_internal.raw_sources rs ON rs.id = rt.source_id
+            LEFT JOIN silver_aa_internal.generated_content gc ON gc.tour_id = rt.tour_id
+            GROUP BY rt.tour_id, rt.src_name, rt.country, rt.pipeline_status,
+                     rt.ingest_at, rt.batch_id, rt.source_id, rs.filename
+            ORDER BY rt.ingest_at DESC
+        """)
+    return {
+        "tours": [
+            {
+                "tour_id":           t["tour_id"],
+                "src_name":          t["src_name"],
+                "country":           t["country"],
+                "pipeline_status":   t["pipeline_status"],
+                "ingest_at":         str(t["ingest_at"]) if t["ingest_at"] else None,
+                "source_id":         t["source_id"],
+                "batch_id":          t["batch_id"],
+                "filename":          t["filename"],
+                "rewrite_count":     int(t["rewrite_count"]),
+                "last_rewritten_at": str(t["last_rewritten_at"]) if t["last_rewritten_at"] else None,
+            }
+            for t in tours
+        ],
+        "total": len(tours),
+    }
+
+
+# ── GET /admin/tours/{tour_id}/history ───────────────────────────────────────
+
+@router.get("/tours/{tour_id}/history")
+async def get_tour_history(tour_id: str, request: Request, x_admin_secret: str = Header(None)):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT
+                gc.id::text, gc.version_num, gc.created_at, gc.status::text,
+                gc.model_editorial,
+                qs.score_overall, qs.score_brand, qs.score_seo, qs.score_structure,
+                pr.llm_model, pr.cost_usd, pr.started_at
+            FROM silver_aa_internal.generated_content gc
+            LEFT JOIN silver_aa_internal.quality_scores qs
+                ON qs.generated_content_id = gc.id
+            LEFT JOIN shared.pipeline_runs pr
+                ON pr.batch_id = gc.tour_id
+            WHERE gc.tour_id = $1::uuid
+            ORDER BY gc.created_at DESC
+        """, tour_id)
+    return {
+        "history": [
+            {
+                "id":              r["id"],
+                "version_num":     r["version_num"],
+                "created_at":      str(r["created_at"]) if r["created_at"] else None,
+                "status":          r["status"],
+                "model_editorial": r["model_editorial"],
+                "score_overall":   float(r["score_overall"]) if r["score_overall"] is not None else None,
+                "score_brand":     float(r["score_brand"])   if r["score_brand"] is not None else None,
+                "score_seo":       float(r["score_seo"])     if r["score_seo"] is not None else None,
+                "score_structure": float(r["score_structure"]) if r["score_structure"] is not None else None,
+                "llm_model":       r["llm_model"],
+                "cost_usd":        float(r["cost_usd"]) if r["cost_usd"] is not None else None,
+                "started_at":      str(r["started_at"]) if r["started_at"] else None,
+            }
+            for r in rows
+        ]
+    }
+
+
+# ── GET /admin/tours/{tour_id}/detail ────────────────────────────────────────
+
+@router.get("/tours/{tour_id}/detail")
+async def get_tour_detail(tour_id: str, request: Request, x_admin_secret: str = Header(None)):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        raw = await conn.fetchrow("""
+            SELECT tour_id::text, src_name, src_subtitle, src_summary, src_description,
+                   src_highlights, src_itineraries, country, duration, price_raw,
+                   group_size, pipeline_status::text, ingest_at
+            FROM silver_aa_internal.raw_tours
+            WHERE tour_id = $1::uuid
+        """, tour_id)
+        if not raw:
+            raise HTTPException(status_code=404, detail=f"Tour {tour_id} not found")
+
+        gen = await conn.fetchrow("""
+            SELECT gc.id::text, gc.version_num, gc.created_at, gc.status::text,
+                   gc.aa_name, gc.aa_subtitle, gc.aa_summary, gc.aa_description,
+                   gc.aa_highlights, gc.aa_itineraries, gc.seo_title, gc.seo_meta,
+                   gc.seo_keywords_used, gc.model_editorial,
+                   qs.score_overall, qs.score_brand, qs.score_seo,
+                   qs.score_structure, qs.score_quality
+            FROM silver_aa_internal.generated_content gc
+            LEFT JOIN silver_aa_internal.quality_scores qs
+                ON qs.generated_content_id = gc.id
+            WHERE gc.tour_id = $1::uuid
+            ORDER BY gc.version_num DESC LIMIT 1
+        """, tour_id)
+
+        pub = await conn.fetchrow("""
+            SELECT id::text, aa_name, aa_subtitle, quality_score, published_at
+            FROM gold_aa_internal.published_tours
+            WHERE tour_id = $1::uuid
+            ORDER BY published_at DESC LIMIT 1
+        """, tour_id)
+
+    def _parse_jsonb(v):
+        if v is None:
+            return []
+        if isinstance(v, (list, dict)):
+            return v
+        try:
+            return __import__("json").loads(v)
+        except Exception:
+            return []
+
+    return {
+        "raw": {
+            "tour_id":         raw["tour_id"],
+            "src_name":        raw["src_name"],
+            "src_subtitle":    raw["src_subtitle"],
+            "src_summary":     raw["src_summary"],
+            "src_description": raw["src_description"],
+            "src_highlights":  _parse_jsonb(raw["src_highlights"]),
+            "src_itineraries": raw["src_itineraries"],
+            "country":         raw["country"],
+            "duration":        raw["duration"],
+            "price_raw":       raw["price_raw"],
+            "group_size":      raw["group_size"],
+            "pipeline_status": raw["pipeline_status"],
+            "ingest_at":       str(raw["ingest_at"]) if raw["ingest_at"] else None,
+        },
+        "generated": {
+            "id":               gen["id"],
+            "version_num":      gen["version_num"],
+            "created_at":       str(gen["created_at"]) if gen["created_at"] else None,
+            "status":           gen["status"],
+            "aa_name":          gen["aa_name"],
+            "aa_subtitle":      gen["aa_subtitle"],
+            "aa_summary":       gen["aa_summary"],
+            "aa_description":   gen["aa_description"],
+            "aa_highlights":    _parse_jsonb(gen["aa_highlights"]),
+            "aa_itineraries":   gen["aa_itineraries"],
+            "seo_title":        gen["seo_title"],
+            "seo_meta":         gen["seo_meta"],
+            "seo_keywords_used": _parse_jsonb(gen["seo_keywords_used"]),
+            "model_editorial":  gen["model_editorial"],
+            "score_overall":    float(gen["score_overall"]) if gen["score_overall"] is not None else None,
+            "score_brand":      float(gen["score_brand"])   if gen["score_brand"] is not None else None,
+            "score_seo":        float(gen["score_seo"])     if gen["score_seo"] is not None else None,
+            "score_structure":  float(gen["score_structure"]) if gen["score_structure"] is not None else None,
+        } if gen else None,
+        "published": {
+            "id":            pub["id"],
+            "aa_name":       pub["aa_name"],
+            "aa_subtitle":   pub["aa_subtitle"],
+            "quality_score": float(pub["quality_score"]) if pub["quality_score"] is not None else None,
+            "published_at":  str(pub["published_at"]) if pub["published_at"] else None,
+        } if pub else None,
     }
 
 
