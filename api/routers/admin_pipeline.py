@@ -647,7 +647,10 @@ async def get_seo_metrics(request: Request, x_admin_secret: str = Header(None)):
             kw_data = row["top_keywords"]
             if isinstance(kw_data, str):
                 kw_data = _j.loads(kw_data)
-            items = kw_data if isinstance(kw_data, list) else (kw_data.get("top_keywords") or [] if isinstance(kw_data, dict) else [])
+            items = (
+                kw_data if isinstance(kw_data, list)
+                else (kw_data.get("top_keywords") or [] if isinstance(kw_data, dict) else [])
+            )
             for item in items[:5]:
                 kw = item.get("keyword") if isinstance(item, dict) else str(item)
                 if kw:

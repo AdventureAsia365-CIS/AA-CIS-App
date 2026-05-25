@@ -448,4 +448,3 @@ async def get_sources(
         ],
         "total": len(rows),
     }
-
