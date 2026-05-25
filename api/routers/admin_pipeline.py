@@ -65,6 +65,10 @@ class BrandIdentityUpdate(BaseModel):
     forbidden_words: Optional[List[str]] = None
 
 
+class CountryUpdateRequest(BaseModel):
+    country: str
+
+
 # ── POST /admin/run-tour ──────────────────────────────────────────────────────
 
 async def _execute_run_tour(req: TourRunRequest) -> dict:
@@ -526,6 +530,27 @@ async def get_tours_ready(request: Request, x_admin_secret: str = Header(None)):
         ],
         "total": len(tours),
     }
+
+
+# ── PATCH /admin/tours/{tour_id}/country ─────────────────────────────────────
+
+@router.patch("/tours/{tour_id}/country")
+async def update_tour_country(
+    tour_id: str,
+    body: CountryUpdateRequest,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        updated = await conn.fetchval(
+            "UPDATE silver_aa_internal.raw_tours SET country = $1 WHERE tour_id = $2::uuid RETURNING tour_id",
+            body.country.strip(), tour_id,
+        )
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Tour {tour_id} not found")
+    return {"tour_id": tour_id, "country": body.country.strip()}
 
 
 # ── GET /admin/metrics ────────────────────────────────────────────────────────

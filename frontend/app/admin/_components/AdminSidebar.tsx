@@ -8,7 +8,7 @@ import { A, serif, sans } from "./adminUi";
 
 const CONTENT_NAV = [
   { href: "/admin/upload",         icon: <Upload size={15} />,        label: "Upload (S0)" },
-  { href: "/admin/pipeline/s1",    icon: <Wand2 size={15} />,         label: "S1 Rewrite" },
+  { href: "/admin/s1-rewrite",      icon: <Wand2 size={15} />,         label: "S1 Rewrite" },
   { href: "/admin/review",         icon: <ClipboardList size={15} />, label: "Review Queue" },
   { href: "/admin/brand",          icon: <Palette size={15} />,       label: "Brand Identity" },
   { href: "/admin/master-content", icon: <Library size={15} />,       label: "Master Content" },

@@ -4,6 +4,7 @@ import math
 import structlog
 from typing import Any
 from shared.llm_client.column_mapper import build_dynamic_column_map
+from shared.country_resolver import resolve_country
 
 logger = structlog.get_logger()
 
@@ -105,8 +106,7 @@ class ExcelParser:
                 for excel_col, db_field in col_lookup.items():
                     current[db_field] = self._clean(row.get(excel_col))
                 current["source_file"] = self.source_file
-                if not current.get("country"):
-                    current["country"] = detect_country_from_filename(self.source_file)
+                current["country"] = resolve_country(current.get("country"), self.source_file)
                 current["raw_data"] = json.dumps(row.to_dict(), default=str)
             else:
                 # Continuation row — concat itineraries only
