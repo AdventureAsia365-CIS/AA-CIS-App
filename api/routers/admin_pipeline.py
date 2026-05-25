@@ -338,22 +338,47 @@ async def ingest_s3(
     if req.dry_run:
         pool = request.app.state.pool
         async with pool.acquire() as conn:
-            source = await conn.fetchrow("""
-                SELECT source_id FROM silver_aa_internal.raw_sources
+
+            # CHECK 1: File duplicate (same s3_key already in raw_sources)
+            existing_source = await conn.fetchrow("""
+                SELECT source_id, filename, parsed_at
+                FROM silver_aa_internal.raw_sources
                 WHERE s3_path = $1
                 ORDER BY parsed_at DESC LIMIT 1
             """, req.s3_key)
 
-            if not source:
-                result = await process_file(_bucket, req.s3_key, seo_mode=req.seo_mode)
-                if result.get("status") == "skipped_duplicate":
-                    return {"status": "duplicate", "dry_run": True,
-                            "batch_id": None, "tour_count": 0}
-                batch_id = result.get("source_id")
-            else:
-                batch_id = source["source_id"]
+            if existing_source:
+                return {
+                    "status":      "blocked",
+                    "reason":      "duplicate_file",
+                    "dry_run":     True,
+                    "filename":    existing_source["filename"],
+                    "uploaded_at": str(existing_source["parsed_at"]),
+                    "message":     (
+                        f"File này đã được upload lúc "
+                        f"{existing_source['parsed_at'].strftime('%Y-%m-%d %H:%M')}. "
+                        f"Vui lòng chọn file khác."
+                    ),
+                }
 
-            tour_details = await conn.fetch("""
+            # PARSE: File not yet in raw_sources → call process_file
+            result = await process_file(_bucket, req.s3_key, seo_mode=req.seo_mode)
+
+            if result.get("status") == "skipped_duplicate":
+                return {
+                    "status":  "blocked",
+                    "reason":  "duplicate_file_hash",
+                    "dry_run": True,
+                    "message": (
+                        "Nội dung file này đã tồn tại trong hệ thống (file hash trùng). "
+                        "Vui lòng chọn file khác."
+                    ),
+                }
+
+            batch_id = result.get("source_id")
+
+            # CHECK 2: Tour duplicate per src_name
+            parsed_tours = await conn.fetch("""
                 SELECT tour_id, src_name, country, duration, price_raw,
                        group_size, period, pipeline_status, ingest_at,
                        src_subtitle, src_summary, src_highlights, src_itineraries,
@@ -364,43 +389,62 @@ async def ingest_s3(
                 ORDER BY ingest_at
             """, batch_id)
 
-            existing = await conn.fetch("""
-                SELECT src_name FROM silver_aa_internal.raw_tours
-                WHERE batch_id != $1::uuid
-                AND src_name = ANY($2::text[])
-            """, batch_id, [r["src_name"] for r in tour_details])
-            existing_names = {r["src_name"] for r in existing}
+            all_names = [r["src_name"] for r in parsed_tours if r["src_name"]]
+            duplicate_names: set = set()
+            if all_names:
+                dup_rows = await conn.fetch("""
+                    SELECT DISTINCT src_name
+                    FROM silver_aa_internal.raw_tours
+                    WHERE batch_id != $1::uuid
+                    AND src_name = ANY($2::text[])
+                """, batch_id, all_names)
+                duplicate_names = {r["src_name"] for r in dup_rows}
 
-            tours_out = []
-            for t in tour_details:
+            ready_tours = []
+            blocked_tours = []
+            for t in parsed_tours:
                 missing = [f for f in ["src_name", "country", "duration", "price_raw"]
                            if not t[f]]
-                tours_out.append({
-                    "tour_id":         str(t["tour_id"]),
-                    "src_name":        t["src_name"],
-                    "country":         t["country"],
-                    "duration":        t["duration"],
-                    "price_raw":       t["price_raw"],
-                    "group_size":      t["group_size"],
-                    "period":          t["period"],
-                    "pipeline_status": t["pipeline_status"],
-                    "ingest_at":       str(t["ingest_at"]),
-                    "src_subtitle":    t["src_subtitle"],
-                    "src_summary":     t["src_summary"],
-                    "src_highlights":  t["src_highlights"],
-                    "src_itineraries": t["src_itineraries"],
-                    "provider":        t["provider"],
-                    "activities":      t["activities"],
-                    "inclusions":      t["inclusions"],
-                    "exclusions":      t["exclusions"],
-                    "sku":             t["sku"],
-                    "src_description": t["src_description"],
-                    "links":           t["links"],
-                    "feature":         t["feature"],
-                    "best_time_to_go": t["best_time_to_go"],
-                    "missing_fields":  missing,
-                    "is_duplicate":    t["src_name"] in existing_names,
-                })
+                if t["src_name"] in duplicate_names:
+                    blocked_tours.append({
+                        "src_name": t["src_name"],
+                        "country":  t["country"],
+                        "reason":   "duplicate_tour",
+                        "message":  "Tour này đã tồn tại trong hệ thống.",
+                    })
+                elif missing:
+                    blocked_tours.append({
+                        "src_name":      t["src_name"] or "(no name)",
+                        "country":       t["country"],
+                        "reason":        "missing_fields",
+                        "missing_fields": missing,
+                        "message":       f"Thiếu fields: {', '.join(missing)}",
+                    })
+                else:
+                    ready_tours.append({
+                        "tour_id":         str(t["tour_id"]),
+                        "src_name":        t["src_name"],
+                        "country":         t["country"],
+                        "duration":        t["duration"],
+                        "price_raw":       t["price_raw"],
+                        "group_size":      t["group_size"],
+                        "period":          t["period"],
+                        "pipeline_status": t["pipeline_status"],
+                        "ingest_at":       str(t["ingest_at"]),
+                        "src_subtitle":    t["src_subtitle"],
+                        "src_summary":     t["src_summary"],
+                        "src_highlights":  t["src_highlights"],
+                        "src_itineraries": t["src_itineraries"],
+                        "provider":        t["provider"],
+                        "activities":      t["activities"],
+                        "inclusions":      t["inclusions"],
+                        "exclusions":      t["exclusions"],
+                        "sku":             t["sku"],
+                        "src_description": t["src_description"],
+                        "links":           t["links"],
+                        "feature":         t["feature"],
+                        "best_time_to_go": t["best_time_to_go"],
+                    })
 
             sources = await conn.fetch("""
                 SELECT filename, s3_path, row_count, parsed_at, parse_errors, file_hash
@@ -410,14 +454,14 @@ async def ingest_s3(
             """, UUID("00000000-0000-0000-0000-000000000001"))
 
             return {
-                "status":          "parsed",
-                "dry_run":         True,
-                "batch_id":        str(batch_id),
-                "tour_count":      len(tours_out),
-                "duplicate_count": sum(1 for t in tours_out if t["is_duplicate"]),
-                "error_count":     sum(1 for t in tours_out if t["missing_fields"]),
-                "tours":           tours_out,
-                "upload_history":  [dict(s) for s in sources],
+                "status":        "parsed",
+                "dry_run":       True,
+                "batch_id":      str(batch_id),
+                "ready_count":   len(ready_tours),
+                "blocked_count": len(blocked_tours),
+                "tours":         ready_tours,
+                "blocked_tours": blocked_tours,
+                "upload_history": [dict(s) for s in sources],
             }
 
     # Non-dry_run: parse + trigger pipeline

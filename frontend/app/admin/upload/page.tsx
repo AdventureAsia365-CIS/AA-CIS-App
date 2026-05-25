@@ -16,7 +16,7 @@ const TENANT_ID = "00000000-0000-0000-0000-000000000001";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-interface DryRunTour {
+interface TourPreview {
   tour_id: string;
   src_name: string;
   country: string;
@@ -39,8 +39,14 @@ interface DryRunTour {
   links: string | null;
   feature: string | null;
   best_time_to_go: string | null;
-  missing_fields: string[];
-  is_duplicate: boolean;
+}
+
+interface BlockedTour {
+  src_name: string;
+  country: string | null;
+  reason: "duplicate_tour" | "missing_fields";
+  missing_fields?: string[];
+  message: string;
 }
 
 interface UploadHistoryRow {
@@ -52,14 +58,19 @@ interface UploadHistoryRow {
   file_hash: string | null;
 }
 
-interface DryRunResult {
-  status: string;
-  batch_id: string;
-  tour_count: number;
-  duplicate_count: number;
-  error_count: number;
-  tours: DryRunTour[];
-  upload_history: UploadHistoryRow[];
+interface DryRunResponse {
+  status: "parsed" | "blocked";
+  reason?: "duplicate_file" | "duplicate_file_hash";
+  dry_run: boolean;
+  batch_id?: string;
+  ready_count?: number;
+  blocked_count?: number;
+  tours?: TourPreview[];
+  blocked_tours?: BlockedTour[];
+  upload_history?: UploadHistoryRow[];
+  message?: string;
+  filename?: string;
+  uploaded_at?: string;
 }
 
 interface BrandRules {
@@ -135,17 +146,8 @@ function DetailField({ label, value }: { label: string; value: string | null | u
 }
 
 function TourRow({ tour, idx, isExpanded, onToggle }: {
-  tour: DryRunTour; idx: number; isExpanded: boolean; onToggle: () => void;
+  tour: TourPreview; idx: number; isExpanded: boolean; onToggle: () => void;
 }) {
-  const hasMissing  = tour.missing_fields.length > 0;
-  const isDuplicate = tour.is_duplicate;
-
-  let badgeColor: "green" | "amber" | "blue" | "red" = "green";
-  let badgeLabel = "Ready";
-  if (hasMissing && isDuplicate) { badgeColor = "red";   badgeLabel = "Skip"; }
-  else if (hasMissing)           { badgeColor = "amber"; badgeLabel = "Incomplete"; }
-  else if (isDuplicate)          { badgeColor = "blue";  badgeLabel = "Duplicate"; }
-
   const itinPreview = tour.src_itineraries
     ? (tour.src_itineraries.length > 200
         ? tour.src_itineraries.slice(0, 200) + "..."
@@ -159,7 +161,7 @@ function TourRow({ tour, idx, isExpanded, onToggle }: {
         onClick={onToggle}
       >
         <td style={{ ...TD, textAlign: "center" as const, color: A.muted2 }}>{idx}</td>
-        <td style={{ ...TD, fontWeight: 600, color: hasMissing ? A.red : A.ink }}>{tour.src_name || "—"}</td>
+        <td style={{ ...TD, fontWeight: 600, color: A.ink }}>{tour.src_name || "—"}</td>
         <td style={TD}>{tour.country || "—"}</td>
         <td style={TD}>{tour.duration || "—"}</td>
         <td style={TD}>{tour.price_raw || "—"}</td>
@@ -169,7 +171,7 @@ function TourRow({ tour, idx, isExpanded, onToggle }: {
         <td style={TD}>{tour.sku || "—"}</td>
         <td style={TD}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <Badge color={badgeColor}>{badgeLabel}</Badge>
+            <Badge color="green">Ready</Badge>
             {isExpanded
               ? <ChevronUp size={13} style={{ color: A.muted2 }} />
               : <ChevronDown size={13} style={{ color: A.muted2 }} />}
@@ -200,21 +202,6 @@ function TourRow({ tour, idx, isExpanded, onToggle }: {
                   <DetailField label="Links"       value={tour.links} />
                 </div>
               </div>
-              {/* Full-width alerts */}
-              {hasMissing && (
-                <div style={{ marginTop: 10, fontSize: 12, color: "#92400E",
-                  background: "#FFFBEB", border: "1px solid #FDE68A",
-                  borderRadius: 6, padding: "6px 12px" }}>
-                  <strong>Missing fields:</strong> {tour.missing_fields.join(", ")}
-                </div>
-              )}
-              {isDuplicate && (
-                <div style={{ marginTop: 6, fontSize: 12, color: "#9A3412",
-                  background: "#FFF7ED", border: "1px solid #FDBA74",
-                  borderRadius: 6, padding: "6px 12px" }}>
-                  <strong>Duplicate:</strong> Yes — tour name already exists in catalog
-                </div>
-              )}
             </div>
           </td>
         </tr>
@@ -295,7 +282,7 @@ function TourContentTab() {
   const [s2Error, setS2Error]   = useState("");
   const [urlResult, setUrlResult] = useState<UploadUrlResult | null>(null);
 
-  const [dryRunResult, setDryRunResult]   = useState<DryRunResult | null>(null);
+  const [dryRunResult, setDryRunResult]   = useState<DryRunResponse | null>(null);
   const [dryRunError, setDryRunError]     = useState("");
   const [dryRunLoading, setDryRunLoading] = useState(false);
   const [expandedRow, setExpandedRow]     = useState<string | null>(null);
@@ -497,100 +484,171 @@ function TourContentTab() {
             </Card>
           ) : dryRunResult ? (
             <>
-              {/* 4 summary cards */}
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
-                {[
-                  { label: "Tours Parsed",    value: dryRunResult.tour_count,      color: A.gold },
-                  { label: "Errors",           value: dryRunResult.error_count,     color: dryRunResult.error_count > 0 ? A.red : A.muted2 },
-                  { label: "Duplicates",       value: dryRunResult.duplicate_count, color: dryRunResult.duplicate_count > 0 ? "#F59E0B" : A.muted2 },
-                  { label: "Ready to Process", value: Math.max(0, dryRunResult.tour_count - dryRunResult.error_count - dryRunResult.duplicate_count), color: "#22C55E" },
-                ].map(c => (
-                  <Card key={c.label}>
-                    <SLabel>{c.label}</SLabel>
-                    <div style={{ fontFamily: serif, fontSize: 28, fontWeight: 500,
-                      color: c.color, letterSpacing: "-0.02em" }}>{c.value}</div>
-                  </Card>
-                ))}
-              </div>
-
-              {/* Tours table */}
-              <Card style={{ padding: 0 }}>
-                <div style={{ padding: "16px 20px 12px", borderBottom: `1px solid ${A.line}` }}>
-                  <SLabel>Parsed Tours — {file?.name}</SLabel>
-                </div>
-                <div style={{ overflowX: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                    <thead>
-                      <tr>
-                        {["#", "Tour Name", "Country", "Duration", "Price", "Group Size", "Period", "Provider", "SKU", "Status"].map((h, i) => (
-                          <th key={h} style={{ ...TH, textAlign: i === 0 ? "center" : "left" }}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {dryRunResult.tours.map((tour, i) => (
-                        <TourRow
-                          key={tour.tour_id}
-                          tour={tour}
-                          idx={i + 1}
-                          isExpanded={expandedRow === tour.tour_id}
-                          onToggle={() => toggleRow(tour.tour_id)}
-                        />
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </Card>
-
-              {/* Upload History */}
-              {dryRunResult.upload_history.length > 0 && (
-                <Card style={{ padding: 0 }}>
-                  <div style={{ padding: "16px 20px 12px", borderBottom: `1px solid ${A.line}` }}>
-                    <SLabel>Upload History</SLabel>
+              {/* File blocked */}
+              {dryRunResult.status === "blocked" && (
+                <Card style={{ border: `1px solid ${A.red}`, background: "#FFF5F5" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10,
+                    color: A.red, fontSize: 15, fontWeight: 600, marginBottom: 12 }}>
+                    <XCircle size={18} /> File bị từ chối
                   </div>
-                  <div style={{ overflowX: "auto" }}>
-                    <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                      <thead>
-                        <tr>
-                          {["Filename", "Rows", "Parsed At", "Errors", "Hash"].map((h, i) => (
-                            <th key={h} style={{ ...TH, textAlign: i > 0 ? "right" : "left" }}>{h}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {dryRunResult.upload_history.map((r, i) => (
-                          <tr key={i} style={{ background: i % 2 === 1 ? A.bg : "transparent" }}>
-                            <td style={{ ...TD, maxWidth: 260, overflow: "hidden",
-                              textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.filename}</td>
-                            <td style={{ ...TD, textAlign: "right" }}>{r.row_count ?? "—"}</td>
-                            <td style={{ ...TD, textAlign: "right", color: A.muted }}>
-                              {r.parsed_at ? String(r.parsed_at).slice(0, 16).replace("T", " ") : "—"}
-                            </td>
-                            <td style={{ ...TD, textAlign: "right", color: A.muted2 }}>
-                              {r.parse_errors || "—"}
-                            </td>
-                            <td style={{ ...TD, textAlign: "right" }}>
-                              <code style={{ fontFamily: mono, fontSize: 11, color: A.muted2 }}>
-                                {r.file_hash ? r.file_hash.slice(0, 8) : "—"}
-                              </code>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                  <p style={{ fontSize: 13, color: "#7F1D1D", margin: "0 0 16px", lineHeight: 1.6 }}>
+                    {dryRunResult.message}
+                  </p>
+                  <Btn variant="secondary" onClick={reset}>← Upload Another</Btn>
                 </Card>
               )}
 
-              {/* Action buttons */}
-              <div style={{ display: "flex", gap: 12 }}>
-                <Btn variant="secondary" onClick={reset}>← Upload Another</Btn>
-                <Btn variant="primary" onClick={() => router.push("/admin/pipeline/s1")}
-                  style={{ background: A.gold, border: `1px solid ${A.gold}`,
-                    display: "flex", alignItems: "center", gap: 8 }}>
-                  Proceed to S1 Rewrite <ArrowRight size={14} />
-                </Btn>
-              </div>
+              {/* Parsed result */}
+              {dryRunResult.status === "parsed" && (
+                <>
+                  {/* 3 summary cards */}
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14 }}>
+                    {[
+                      { label: "Tours Ready",   value: dryRunResult.ready_count ?? 0,   color: "#22C55E" },
+                      { label: "Tours Blocked", value: dryRunResult.blocked_count ?? 0,  color: (dryRunResult.blocked_count ?? 0) > 0 ? A.red : A.muted2 },
+                      { label: "Total Parsed",  value: (dryRunResult.ready_count ?? 0) + (dryRunResult.blocked_count ?? 0), color: A.gold },
+                    ].map(c => (
+                      <Card key={c.label}>
+                        <SLabel>{c.label}</SLabel>
+                        <div style={{ fontFamily: serif, fontSize: 28, fontWeight: 500,
+                          color: c.color, letterSpacing: "-0.02em" }}>{c.value}</div>
+                      </Card>
+                    ))}
+                  </div>
+
+                  {/* Section 1 — Ready Tours */}
+                  {(dryRunResult.ready_count ?? 0) > 0 && (
+                    <Card style={{ padding: 0 }}>
+                      <div style={{ padding: "16px 20px 12px", borderBottom: `1px solid ${A.line}`,
+                        display: "flex", alignItems: "center", gap: 8 }}>
+                        <CheckCircle size={14} style={{ color: "#22C55E" }} />
+                        <SLabel style={{ margin: 0 }}>Ready Tours — {file?.name}</SLabel>
+                      </div>
+                      <div style={{ overflowX: "auto" }}>
+                        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                          <thead>
+                            <tr>
+                              {["#", "Tour Name", "Country", "Duration", "Price", "Group Size", "Period", "Provider", "SKU", "Status"].map((h, i) => (
+                                <th key={h} style={{ ...TH, textAlign: i === 0 ? "center" : "left" }}>{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(dryRunResult.tours ?? []).map((tour, i) => (
+                              <TourRow
+                                key={tour.tour_id}
+                                tour={tour}
+                                idx={i + 1}
+                                isExpanded={expandedRow === tour.tour_id}
+                                onToggle={() => toggleRow(tour.tour_id)}
+                              />
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </Card>
+                  )}
+
+                  {/* Section 2 — Blocked Tours */}
+                  {(dryRunResult.blocked_count ?? 0) > 0 && (
+                    <Card style={{ padding: 0 }}>
+                      <div style={{ padding: "16px 20px 12px", borderBottom: `1px solid ${A.line}`,
+                        display: "flex", alignItems: "center", gap: 8 }}>
+                        <XCircle size={14} style={{ color: A.red }} />
+                        <SLabel style={{ margin: 0 }}>Blocked Tours</SLabel>
+                      </div>
+                      <div style={{ overflowX: "auto" }}>
+                        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                          <thead>
+                            <tr>
+                              {["Tour Name", "Country", "Reason", "Details"].map((h, i) => (
+                                <th key={h} style={{ ...TH, textAlign: "left" }}>{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(dryRunResult.blocked_tours ?? []).map((t, i) => (
+                              <tr key={i} style={{ background: i % 2 === 1 ? A.bg : "transparent" }}>
+                                <td style={{ ...TD, fontWeight: 600 }}>{t.src_name}</td>
+                                <td style={TD}>{t.country || "—"}</td>
+                                <td style={TD}>
+                                  <Badge color={t.reason === "duplicate_tour" ? "blue" : "amber"}>
+                                    {t.reason === "duplicate_tour" ? "Duplicate" : "Missing Fields"}
+                                  </Badge>
+                                </td>
+                                <td style={{ ...TD, fontSize: 12, color: A.muted }}>
+                                  {t.reason === "missing_fields"
+                                    ? (t.missing_fields ?? []).join(", ")
+                                    : "Already in catalog"}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </Card>
+                  )}
+
+                  {/* Section 3 — Upload History */}
+                  {(dryRunResult.upload_history ?? []).length > 0 && (
+                    <Card style={{ padding: 0 }}>
+                      <div style={{ padding: "16px 20px 12px", borderBottom: `1px solid ${A.line}` }}>
+                        <SLabel>Upload History</SLabel>
+                      </div>
+                      <div style={{ overflowX: "auto" }}>
+                        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                          <thead>
+                            <tr>
+                              {["Filename", "Rows", "Parsed At", "Errors", "Hash"].map((h, i) => (
+                                <th key={h} style={{ ...TH, textAlign: i > 0 ? "right" : "left" }}>{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(dryRunResult.upload_history ?? []).map((r, i) => (
+                              <tr key={i} style={{ background: i % 2 === 1 ? A.bg : "transparent" }}>
+                                <td style={{ ...TD, maxWidth: 260, overflow: "hidden",
+                                  textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.filename}</td>
+                                <td style={{ ...TD, textAlign: "right" }}>{r.row_count ?? "—"}</td>
+                                <td style={{ ...TD, textAlign: "right", color: A.muted }}>
+                                  {r.parsed_at ? String(r.parsed_at).slice(0, 16).replace("T", " ") : "—"}
+                                </td>
+                                <td style={{ ...TD, textAlign: "right", color: A.muted2 }}>
+                                  {r.parse_errors || "—"}
+                                </td>
+                                <td style={{ ...TD, textAlign: "right" }}>
+                                  <code style={{ fontFamily: mono, fontSize: 11, color: A.muted2 }}>
+                                    {r.file_hash ? r.file_hash.slice(0, 8) : "—"}
+                                  </code>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </Card>
+                  )}
+
+                  {/* Action buttons */}
+                  <div style={{ display: "flex", gap: 12 }}>
+                    <Btn variant="secondary" onClick={reset}>← Upload Another</Btn>
+                    <Btn
+                      variant="primary"
+                      disabled={(dryRunResult.ready_count ?? 0) === 0}
+                      onClick={() => router.push("/admin/s1-rewrite")}
+                      style={{
+                        background: (dryRunResult.ready_count ?? 0) > 0 ? A.gold : A.muted,
+                        border: `1px solid ${(dryRunResult.ready_count ?? 0) > 0 ? A.gold : A.muted}`,
+                        display: "flex", alignItems: "center", gap: 8,
+                        opacity: (dryRunResult.ready_count ?? 0) === 0 ? 0.5 : 1,
+                        cursor: (dryRunResult.ready_count ?? 0) === 0 ? "not-allowed" : "pointer",
+                      }}
+                    >
+                      Proceed to S1 Rewrite <ArrowRight size={14} />
+                    </Btn>
+                  </div>
+                </>
+              )}
             </>
           ) : null}
         </div>
