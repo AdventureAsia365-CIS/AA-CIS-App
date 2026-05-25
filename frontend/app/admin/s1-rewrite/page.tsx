@@ -5,14 +5,16 @@
 // GET  /api/admin/tours/{id}/detail       → raw + generated + published
 // POST /api/admin/run-tour                → trigger rewrite
 
-import React, { useState, useEffect, useCallback, useRef } from "react";
-import { Play, RefreshCw, ArrowRight, Search, CheckCircle, XCircle, Loader2, X, ChevronRight } from "lucide-react";
+import React, { useState, useEffect, useCallback } from "react";
+import { Play, RefreshCw, ArrowRight, Search, CheckCircle, XCircle, Loader2, ChevronRight } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
 import {
   A, serif, sans, mono,
   Card, SLabel, Badge, Btn, LoadingScreen,
   TH, TD,
 } from "../_components/adminUi";
+import { TourDetailPanelV2 } from "../_components/TourDetailPanelV2";
+import { CompareModal } from "../_components/CompareModal";
 
 const TENANT_ID = "00000000-0000-0000-0000-000000000001";
 
@@ -28,13 +30,6 @@ function relativeTime(isoStr: string | null | undefined): string {
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
   return new Date(isoStr).toLocaleDateString("en-US", { month: "short", day: "numeric" });
-}
-
-function scoreColor(s: number | null | undefined): string {
-  if (s == null) return A.muted2;
-  if (s >= 9) return A.green;
-  if (s >= 7) return A.amber;
-  return A.red;
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -68,61 +63,8 @@ interface RunResult {
   error?: string;
 }
 
-interface HistoryRow {
-  id: string;
-  version_num: number;
-  created_at: string | null;
-  status: string;
-  model_editorial: string | null;
-  score_overall: number | null;
-  score_brand: number | null;
-  score_seo: number | null;
-  score_structure: number | null;
-  llm_model: string | null;
-  cost_usd: number | null;
-}
 
-interface TourDetail {
-  raw: {
-    tour_id: string;
-    src_name: string;
-    src_subtitle: string | null;
-    src_summary: string | null;
-    src_highlights: string[] | string | null;
-    src_itineraries: string | null;
-    country: string | null;
-    duration: string | null;
-    price_raw: string | null;
-    group_size: string | null;
-    pipeline_status: string;
-    ingest_at: string | null;
-  };
-  generated: {
-    id: string;
-    version_num: number;
-    status: string;
-    aa_name: string;
-    aa_subtitle: string | null;
-    aa_summary: string | null;
-    aa_highlights: string[] | null;
-    aa_itineraries: string | null;
-    seo_title: string | null;
-    seo_meta: string | null;
-    seo_keywords_used: string[] | null;
-    score_overall: number | null;
-    score_brand: number | null;
-    score_seo: number | null;
-    score_structure: number | null;
-    model_editorial: string | null;
-  } | null;
-  published: {
-    aa_name: string;
-    quality_score: number | null;
-    published_at: string | null;
-  } | null;
-}
-
-// ── Status badge ──────────────────────────────────────────────────────────────
+// ── Pipeline status badge ─────────────────────────────────────────────────────
 
 function PipelineStatusBadge({ tour, runStatus, result }: {
   tour: Tour;
@@ -169,290 +111,6 @@ function PipelineStatusBadge({ tour, runStatus, result }: {
   return <Badge color="gray">Ready</Badge>;
 }
 
-// ── Detail panel ──────────────────────────────────────────────────────────────
-
-function DetailPanel({ tour, onClose }: { tour: Tour; onClose: () => void }) {
-  const [tab, setTab]           = useState<"original" | "rewrite" | "history">("original");
-  const [detail, setDetail]     = useState<TourDetail | null>(null);
-  const [history, setHistory]   = useState<HistoryRow[]>([]);
-  const [loadingDetail, setLoadingDetail] = useState(true);
-  const [loadingHistory, setLoadingHistory] = useState(false);
-
-  useEffect(() => {
-    setLoadingDetail(true);
-    fetch(`/api/admin/tours/${tour.tour_id}/detail`)
-      .then(r => r.json())
-      .then(setDetail)
-      .catch(() => {})
-      .finally(() => setLoadingDetail(false));
-  }, [tour.tour_id]);
-
-  useEffect(() => {
-    if (tab !== "history") return;
-    setLoadingHistory(true);
-    fetch(`/api/admin/tours/${tour.tour_id}/history`)
-      .then(r => r.json())
-      .then(d => setHistory(d.history || []))
-      .catch(() => {})
-      .finally(() => setLoadingHistory(false));
-  }, [tab, tour.tour_id]);
-
-  const tabStyle = (active: boolean): React.CSSProperties => ({
-    padding: "8px 16px",
-    fontSize: 13,
-    fontWeight: active ? 600 : 400,
-    color: active ? A.ink : A.muted,
-    cursor: "pointer",
-    background: "none",
-    border: "none",
-    borderBottom: active ? `2px solid ${A.gold}` : "2px solid transparent",
-    fontFamily: sans,
-  });
-
-  const highlights = (arr: string[] | string | null | undefined): string[] => {
-    if (!arr) return [];
-    if (typeof arr === "string") {
-      try { return JSON.parse(arr); } catch { return [arr]; }
-    }
-    return arr;
-  };
-
-  const keywords = (arr: string[] | null | undefined): string[] => {
-    if (!arr) return [];
-    return arr;
-  };
-
-  return (
-    <div style={{
-      position: "fixed", top: 0, right: 0, bottom: 0,
-      width: 620, background: "#fff",
-      boxShadow: "-4px 0 32px rgba(0,0,0,0.12)",
-      zIndex: 200, display: "flex", flexDirection: "column",
-      fontFamily: sans,
-    }}>
-      {/* Header */}
-      <div style={{ padding: "20px 24px 0", borderBottom: `1px solid ${A.line}` }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
-          <div style={{ flex: 1, paddingRight: 12 }}>
-            <div style={{ fontFamily: serif, fontSize: 17, fontWeight: 600, color: A.ink, lineHeight: 1.3 }}>
-              {tour.src_name}
-            </div>
-            <div style={{ fontSize: 12, color: A.muted, marginTop: 3 }}>
-              {tour.country || "—"} · {tour.rewrite_count > 0 ? `Rewritten ${tour.rewrite_count}×` : "Not yet rewritten"}
-            </div>
-          </div>
-          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: A.muted, padding: 4 }}>
-            <X size={18} />
-          </button>
-        </div>
-        {/* Tabs */}
-        <div style={{ display: "flex", gap: 0 }}>
-          <button style={tabStyle(tab === "original")} onClick={() => setTab("original")}>Original Content</button>
-          <button style={{ ...tabStyle(tab === "rewrite"), opacity: tour.rewrite_count === 0 ? 0.4 : 1 }} onClick={() => tour.rewrite_count > 0 && setTab("rewrite")}>Latest Rewrite</button>
-          <button style={tabStyle(tab === "history")} onClick={() => setTab("history")}>Rewrite History</button>
-        </div>
-      </div>
-
-      {/* Body */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
-        {loadingDetail ? (
-          <div style={{ textAlign: "center", padding: 40, color: A.muted }}>Loading…</div>
-        ) : !detail ? (
-          <div style={{ textAlign: "center", padding: 40, color: A.red }}>Failed to load detail</div>
-        ) : tab === "original" ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-              {[
-                ["Tour Name", detail.raw.src_name],
-                ["Country", detail.raw.country || "—"],
-                ["Duration", detail.raw.duration || "—"],
-                ["Price", detail.raw.price_raw || "—"],
-                ["Group Size", detail.raw.group_size || "—"],
-                ["Status", detail.raw.pipeline_status],
-              ].map(([label, val]) => (
-                <div key={label}>
-                  <div style={{ fontSize: 11, color: A.muted, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 4 }}>{label}</div>
-                  <div style={{ fontSize: 13, color: A.ink }}>{val}</div>
-                </div>
-              ))}
-            </div>
-
-            {detail.raw.src_summary && (
-              <div>
-                <div style={{ fontSize: 11, color: A.muted, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 6 }}>Summary</div>
-                <div style={{ fontSize: 13, color: A.body, lineHeight: 1.6 }}>{detail.raw.src_summary}</div>
-              </div>
-            )}
-
-            {highlights(detail.raw.src_highlights).length > 0 && (
-              <div>
-                <div style={{ fontSize: 11, color: A.muted, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 6 }}>Highlights</div>
-                <ul style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 4 }}>
-                  {highlights(detail.raw.src_highlights).map((h, i) => (
-                    <li key={i} style={{ fontSize: 13, color: A.body }}>{h}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            {detail.raw.src_itineraries && (
-              <div>
-                <div style={{ fontSize: 11, color: A.muted, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 6 }}>Itineraries</div>
-                <div style={{ fontSize: 12, color: A.body, lineHeight: 1.7, whiteSpace: "pre-wrap", background: A.bg, padding: 12, borderRadius: 8, maxHeight: 280, overflowY: "auto" }}>
-                  {detail.raw.src_itineraries}
-                </div>
-              </div>
-            )}
-          </div>
-        ) : tab === "rewrite" ? (
-          detail.generated ? (
-            <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                {[
-                  ["Version", `v${detail.generated.version_num}`],
-                  ["Status", detail.generated.status],
-                  ["Model", detail.generated.model_editorial?.split(".").pop()?.replace(/-v\d+:\d+$/, "") ?? "—"],
-                ].map(([label, val]) => (
-                  <div key={label}>
-                    <div style={{ fontSize: 11, color: A.muted, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 4 }}>{label}</div>
-                    <div style={{ fontSize: 13, color: A.ink }}>{val}</div>
-                  </div>
-                ))}
-              </div>
-
-              <div>
-                <div style={{ fontSize: 11, color: A.muted, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 4 }}>AA Name</div>
-                <div style={{ fontSize: 15, fontFamily: serif, fontWeight: 600, color: A.ink }}>{detail.generated.aa_name}</div>
-              </div>
-
-              {detail.generated.aa_subtitle && (
-                <div>
-                  <div style={{ fontSize: 11, color: A.muted, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 4 }}>Subtitle</div>
-                  <div style={{ fontSize: 13, color: A.body, fontStyle: "italic" }}>{detail.generated.aa_subtitle}</div>
-                </div>
-              )}
-
-              {detail.generated.aa_summary && (
-                <div>
-                  <div style={{ fontSize: 11, color: A.muted, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 6 }}>Summary</div>
-                  <div style={{ fontSize: 13, color: A.body, lineHeight: 1.6 }}>{detail.generated.aa_summary}</div>
-                </div>
-              )}
-
-              {detail.generated.aa_highlights && detail.generated.aa_highlights.length > 0 && (
-                <div>
-                  <div style={{ fontSize: 11, color: A.muted, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 6 }}>Highlights</div>
-                  <ul style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 4 }}>
-                    {detail.generated.aa_highlights.map((h, i) => (
-                      <li key={i} style={{ fontSize: 13, color: A.body }}>{h}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-
-              {detail.generated.aa_itineraries && (
-                <div>
-                  <div style={{ fontSize: 11, color: A.muted, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 6 }}>Itineraries</div>
-                  <div style={{ fontSize: 12, color: A.body, lineHeight: 1.7, whiteSpace: "pre-wrap", background: A.bg, padding: 12, borderRadius: 8, maxHeight: 220, overflowY: "auto" }}>
-                    {detail.generated.aa_itineraries}
-                  </div>
-                </div>
-              )}
-
-              {/* SEO */}
-              <div style={{ borderTop: `1px solid ${A.line}`, paddingTop: 16 }}>
-                <SLabel>SEO</SLabel>
-                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                  {detail.generated.seo_title && (
-                    <div>
-                      <div style={{ fontSize: 11, color: A.muted, marginBottom: 3 }}>Title ({detail.generated.seo_title.length}/70)</div>
-                      <div style={{ fontSize: 13, color: A.ink }}>{detail.generated.seo_title}</div>
-                    </div>
-                  )}
-                  {detail.generated.seo_meta && (
-                    <div>
-                      <div style={{ fontSize: 11, color: A.muted, marginBottom: 3 }}>Meta ({detail.generated.seo_meta.length}/170)</div>
-                      <div style={{ fontSize: 13, color: A.body }}>{detail.generated.seo_meta}</div>
-                    </div>
-                  )}
-                  {keywords(detail.generated.seo_keywords_used).length > 0 && (
-                    <div>
-                      <div style={{ fontSize: 11, color: A.muted, marginBottom: 6 }}>Keywords used</div>
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                        {keywords(detail.generated.seo_keywords_used).map((kw, i) => (
-                          <span key={i} style={{ fontSize: 11, padding: "2px 8px", borderRadius: 12, background: A.goldTint, color: A.gold, border: `1px solid ${A.line}` }}>{kw}</span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Quality scores */}
-              <div style={{ borderTop: `1px solid ${A.line}`, paddingTop: 16 }}>
-                <SLabel>Quality Scores</SLabel>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                  {[
-                    ["Overall", detail.generated.score_overall],
-                    ["Brand", detail.generated.score_brand],
-                    ["SEO", detail.generated.score_seo],
-                    ["Structure", detail.generated.score_structure],
-                  ].map(([label, score]) => (
-                    <div key={label as string} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", background: A.bg, borderRadius: 8 }}>
-                      <span style={{ fontSize: 12, color: A.muted }}>{label}</span>
-                      <span style={{ fontSize: 15, fontWeight: 700, fontFamily: mono, color: scoreColor(score as number | null) }}>
-                        {score != null ? (score as number).toFixed(1) : "—"}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div style={{ textAlign: "center", padding: 40, color: A.muted }}>No rewrite data available</div>
-          )
-        ) : (
-          /* History tab */
-          loadingHistory ? (
-            <div style={{ textAlign: "center", padding: 40, color: A.muted }}>Loading history…</div>
-          ) : history.length === 0 ? (
-            <div style={{ textAlign: "center", padding: 40, color: A.muted, fontSize: 13 }}>No rewrites yet</div>
-          ) : (
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-              <thead>
-                <tr style={{ background: A.line2 }}>
-                  {["Version", "Model", "Score", "Cost", "Date"].map(h => (
-                    <th key={h} style={{ ...TH, padding: "8px 10px", textAlign: "left" as const }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {history.map((h, i) => (
-                  <tr key={h.id} style={{ borderTop: i > 0 ? `1px solid ${A.line}` : undefined }}>
-                    <td style={{ ...TD, padding: "8px 10px" }}><Badge color="blue">v{h.version_num}</Badge></td>
-                    <td style={{ ...TD, padding: "8px 10px", fontFamily: mono, fontSize: 11, color: A.muted }}>
-                      {h.model_editorial?.split(".").pop()?.replace(/-v\d+:\d+$/, "") ?? "—"}
-                    </td>
-                    <td style={{ ...TD, padding: "8px 10px", fontWeight: 700, color: scoreColor(h.score_overall) }}>
-                      {h.score_overall != null ? h.score_overall.toFixed(1) : "—"}
-                    </td>
-                    <td style={{ ...TD, padding: "8px 10px", color: A.gold }}>
-                      {h.cost_usd != null ? `$${h.cost_usd.toFixed(4)}` : "—"}
-                    </td>
-                    <td style={{ ...TD, padding: "8px 10px", color: A.muted2, fontSize: 12 }}>
-                      {relativeTime(h.created_at)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )
-        )}
-      </div>
-    </div>
-  );
-}
-
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function S1RewritePage() {
@@ -472,6 +130,7 @@ export default function S1RewritePage() {
   const [runResults, setRunResults]         = useState<Record<string, RunResult>>({});
   const [runComplete, setRunComplete]       = useState(false);
   const [detailTour, setDetailTour]         = useState<Tour | null>(null);
+  const [compareOpen, setCompareOpen]       = useState(false);
 
   const loadTours = useCallback(async () => {
     setLoading(true);
@@ -793,21 +452,34 @@ export default function S1RewritePage() {
                   <option value="gpt4">GPT-4.1 (~$0.01/tour)</option>
                 </select>
               </div>
-              <Btn
-                variant="primary"
-                size="lg"
-                disabled={running}
-                onClick={() => setShowConfirm(true)}
-                style={{
-                  background: running ? A.muted : A.gold,
-                  border: `1px solid ${running ? A.muted : A.gold}`,
-                  display: "flex", alignItems: "center", gap: 8,
-                  whiteSpace: "nowrap" as const,
-                }}
-              >
-                <Play size={14} />
-                {running ? "Running…" : `Run Rewrite (${selectedIds.size})`}
-              </Btn>
+              <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                {selectedIds.size >= 2 && selectedIds.size <= 4 && (
+                  <Btn
+                    variant="secondary"
+                    size="lg"
+                    onClick={() => setCompareOpen(true)}
+                    disabled={running}
+                    style={{ whiteSpace: "nowrap" as const }}
+                  >
+                    Compare ({selectedIds.size})
+                  </Btn>
+                )}
+                <Btn
+                  variant="primary"
+                  size="lg"
+                  disabled={running}
+                  onClick={() => setShowConfirm(true)}
+                  style={{
+                    background: running ? A.muted : A.gold,
+                    border: `1px solid ${running ? A.muted : A.gold}`,
+                    display: "flex", alignItems: "center", gap: 8,
+                    whiteSpace: "nowrap" as const,
+                  }}
+                >
+                  <Play size={14} />
+                  {running ? "Running…" : `Run Rewrite (${selectedIds.size})`}
+                </Btn>
+              </div>
             </div>
           </Card>
         )}
@@ -883,17 +555,22 @@ export default function S1RewritePage() {
         )}
       </main>
 
-      {/* Detail panel overlay backdrop */}
+      {/* Detail panel v2 (handles its own backdrop) */}
       {detailTour && (
-        <div
-          style={{ position: "fixed", inset: 0, zIndex: 199 }}
-          onClick={() => setDetailTour(null)}
+        <TourDetailPanelV2
+          tourId={detailTour.tour_id}
+          tourName={detailTour.src_name}
+          rewriteCount={detailTour.rewrite_count}
+          onClose={() => setDetailTour(null)}
         />
       )}
 
-      {/* Detail slide-in panel */}
-      {detailTour && (
-        <DetailPanel tour={detailTour} onClose={() => setDetailTour(null)} />
+      {/* Compare modal */}
+      {compareOpen && (
+        <CompareModal
+          tourIds={[...selectedIds]}
+          onClose={() => setCompareOpen(false)}
+        />
       )}
     </div>
   );

@@ -629,7 +629,8 @@ async def get_tour_detail(tour_id: str, request: Request, x_admin_secret: str = 
         raw = await conn.fetchrow("""
             SELECT tour_id::text, src_name, src_subtitle, src_summary, src_description,
                    src_highlights, src_itineraries, country, duration, price_raw,
-                   group_size, pipeline_status::text, ingest_at
+                   group_size, period, provider, inclusions, exclusions,
+                   pipeline_status::text, ingest_at
             FROM silver_aa_internal.raw_tours
             WHERE tour_id = $1::uuid
         """, tour_id)
@@ -680,6 +681,10 @@ async def get_tour_detail(tour_id: str, request: Request, x_admin_secret: str = 
             "duration":        raw["duration"],
             "price_raw":       raw["price_raw"],
             "group_size":      raw["group_size"],
+            "period":          raw["period"],
+            "provider":        raw["provider"],
+            "inclusions":      raw["inclusions"],
+            "exclusions":      raw["exclusions"],
             "pipeline_status": raw["pipeline_status"],
             "ingest_at":       str(raw["ingest_at"]) if raw["ingest_at"] else None,
         },
@@ -732,6 +737,99 @@ async def update_tour_country(
     if not updated:
         raise HTTPException(status_code=404, detail=f"Tour {tour_id} not found")
     return {"tour_id": tour_id, "country": body.country.strip()}
+
+
+# ── PATCH /admin/tours/{tour_id}/raw ─────────────────────────────────────────
+
+_ALLOWED_RAW_FIELDS = {
+    "src_name", "country", "duration", "group_size", "price_raw",
+    "period", "provider", "src_summary", "src_highlights",
+    "src_itineraries", "src_description", "inclusions", "exclusions",
+}
+_JSONB_RAW_FIELDS = {"src_highlights"}
+
+
+@router.patch("/tours/{tour_id}/raw")
+async def update_raw_tour_fields(
+    tour_id: str,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    body = await request.json()
+    invalid = set(body.keys()) - _ALLOWED_RAW_FIELDS
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Fields not allowed: {sorted(invalid)}")
+    if not body:
+        raise HTTPException(status_code=400, detail="No fields provided")
+
+    import json as _j_raw
+    fields = list(body.keys())
+    values = []
+    for f in fields:
+        v = body[f]
+        values.append(_j_raw.dumps(v) if f in _JSONB_RAW_FIELDS and isinstance(v, list) else v)
+
+    set_clause = ", ".join(
+        f"{f} = ${i+1}::jsonb" if f in _JSONB_RAW_FIELDS else f"{f} = ${i+1}"
+        for i, f in enumerate(fields)
+    )
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        updated = await conn.fetchval(
+            f"UPDATE silver_aa_internal.raw_tours SET {set_clause} WHERE tour_id = ${len(fields)+1}::uuid RETURNING tour_id",
+            *values, tour_id,
+        )
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Tour {tour_id} not found")
+    return {"tour_id": tour_id, "updated": fields}
+
+
+# ── PATCH /admin/tours/{tour_id}/generated/{content_id} ──────────────────────
+
+_ALLOWED_GC_FIELDS = {
+    "aa_name", "aa_subtitle", "aa_summary", "aa_highlights",
+    "aa_itineraries", "seo_title", "seo_meta", "seo_keywords_used",
+}
+_JSONB_GC_FIELDS = {"aa_highlights", "seo_keywords_used"}
+
+
+@router.patch("/tours/{tour_id}/generated/{content_id}")
+async def update_generated_content_fields(
+    tour_id: str,
+    content_id: str,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    body = await request.json()
+    invalid = set(body.keys()) - _ALLOWED_GC_FIELDS
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Fields not allowed: {sorted(invalid)}")
+    if not body:
+        raise HTTPException(status_code=400, detail="No fields provided")
+
+    import json as _j_gc
+    fields = list(body.keys())
+    values = []
+    for f in fields:
+        v = body[f]
+        values.append(_j_gc.dumps(v) if f in _JSONB_GC_FIELDS and isinstance(v, list) else v)
+
+    set_clause = ", ".join(
+        f"{f} = ${i+1}::jsonb" if f in _JSONB_GC_FIELDS else f"{f} = ${i+1}"
+        for i, f in enumerate(fields)
+    )
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        updated = await conn.fetchval(
+            f"UPDATE silver_aa_internal.generated_content SET {set_clause}"
+            f" WHERE id = ${len(fields)+1}::uuid AND tour_id = ${len(fields)+2}::uuid RETURNING id",
+            *values, content_id, tour_id,
+        )
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Content {content_id} not found")
+    return {"content_id": content_id, "updated": fields}
 
 
 # ── GET /admin/metrics ────────────────────────────────────────────────────────
