@@ -341,7 +341,7 @@ async def ingest_s3(
 
             # CHECK 1: File duplicate (same s3_key already in raw_sources)
             existing_source = await conn.fetchrow("""
-                SELECT source_id, filename, parsed_at
+                SELECT id, filename, parsed_at
                 FROM silver_aa_internal.raw_sources
                 WHERE s3_path = $1
                 ORDER BY parsed_at DESC LIMIT 1
