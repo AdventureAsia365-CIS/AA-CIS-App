@@ -522,7 +522,7 @@ function TourContentTab() {
                       <div style={{ padding: "16px 20px 12px", borderBottom: `1px solid ${A.line}`,
                         display: "flex", alignItems: "center", gap: 8 }}>
                         <CheckCircle size={14} style={{ color: "#22C55E" }} />
-                        <SLabel style={{ margin: 0 }}>Ready Tours — {file?.name}</SLabel>
+                        <SLabel>Ready Tours — {file?.name}</SLabel>
                       </div>
                       <div style={{ overflowX: "auto" }}>
                         <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -555,7 +555,7 @@ function TourContentTab() {
                       <div style={{ padding: "16px 20px 12px", borderBottom: `1px solid ${A.line}`,
                         display: "flex", alignItems: "center", gap: 8 }}>
                         <XCircle size={14} style={{ color: A.red }} />
-                        <SLabel style={{ margin: 0 }}>Blocked Tours</SLabel>
+                        <SLabel>Blocked Tours</SLabel>
                       </div>
                       <div style={{ overflowX: "auto" }}>
                         <table style={{ width: "100%", borderCollapse: "collapse" }}>
