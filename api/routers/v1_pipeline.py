@@ -457,7 +457,7 @@ def _get_tenant(
 ):
     import os
     admin_secret = os.environ.get("ADMIN_SECRET", "")
-    x_admin = request.headers.get("X-Admin-Secret", "")
+    x_admin = request.headers.get("x-admin-secret", "")
     if admin_secret and x_admin == admin_secret:
         return {"sub": "00000000-0000-0000-0000-000000000001", "role": "admin"}
     if credentials:
@@ -879,6 +879,7 @@ async def get_pipeline_metrics(
                 COALESCE(ROUND(SUM(cost_usd)::numeric,4), 0) AS cost
             FROM shared.pipeline_runs
             WHERE started_at >= NOW() - ($1 || ' days')::interval
+              AND status != 'ingesting'
             GROUP BY DATE(started_at)
             ORDER BY day ASC
         """, str(days))
@@ -898,6 +899,7 @@ async def get_pipeline_metrics(
                 COALESCE(SUM(cost_usd), 0)       AS total_cost
             FROM shared.pipeline_runs
             WHERE cost_usd > 0
+              AND status != 'ingesting'
             GROUP BY 1
             ORDER BY total_cost DESC
         """)
@@ -925,6 +927,7 @@ async def get_pipeline_metrics(
             SELECT ROUND(SUM(cost_usd) / NULLIF(COUNT(*), 0)::numeric, 6)
             FROM shared.pipeline_runs
             WHERE cost_usd > 0
+              AND status != 'ingesting'
         """)
 
         # Canonical tour count — source of truth for all "Tours Processed" metrics
@@ -936,6 +939,15 @@ async def get_pipeline_metrics(
         # AA-60: all-tenant rewrite volume
         tenant_rewrite_count = await conn.fetchval("""
             SELECT COUNT(*) FROM gold_aa_internal.tenant_tour_versions
+        """)
+
+        # Breakdown by tenant — top rewrite volume
+        tenant_breakdown = await conn.fetch("""
+            SELECT t.slug, t.plan_tier, COUNT(ttv.id) AS rewrite_count
+            FROM gold_aa_internal.tenant_tour_versions ttv
+            JOIN shared.tenants t ON t.tenant_id = ttv.tenant_id
+            GROUP BY t.slug, t.plan_tier
+            ORDER BY rewrite_count DESC
         """)
 
         # AA-60: per-day rewrites for the volume chart (same window as pipeline daily)
@@ -1080,6 +1092,15 @@ async def get_pipeline_metrics(
         "published_count":       int(published_count or 0),
         "tenant_rewrite_count":  int(tenant_rewrite_count or 0),
         "llm_calls":             int(llm_calls or 0),
+        "content_summary": {
+            "total_published_master":   int(published_count or 0),
+            "total_tenant_rewrites":    int(tenant_rewrite_count or 0),
+            "total_content_all_tenants": int(published_count or 0) + int(tenant_rewrite_count or 0),
+            "tenant_breakdown": [
+                {"slug": r["slug"], "plan_tier": r["plan_tier"], "rewrite_count": int(r["rewrite_count"])}
+                for r in tenant_breakdown
+            ],
+        },
     }
 
 
