@@ -200,7 +200,7 @@ function SeoTab() {
   const [error, setError]     = useState(false);
 
   useEffect(() => {
-    fetch("/api/tenant/v1/pipeline/metrics/seo")
+    fetch("/api/admin/metrics/seo")
       .then(r => { if (!r.ok) throw new Error(); return r.json(); })
       .then(setData)
       .catch(() => setError(true))
@@ -296,7 +296,7 @@ function LibraryTab() {
   const [error, setError]     = useState(false);
 
   useEffect(() => {
-    fetch("/api/tenant/v1/pipeline/metrics/library")
+    fetch("/api/admin/metrics/library")
       .then(r => { if (!r.ok) throw new Error(); return r.json(); })
       .then(setData)
       .catch(() => setError(true))
@@ -406,7 +406,7 @@ export default function DashboardPage() {
   const [loading, setLoading]     = useState(true);
 
   useEffect(() => {
-    fetch("/api/tenant/v1/pipeline/metrics?days=7")
+    fetch("/api/admin/metrics?days=7")
       .then(r => r.ok ? r.json() : null)
       .then(d => { if (d) setMetrics(d); })
       .catch(() => {})
