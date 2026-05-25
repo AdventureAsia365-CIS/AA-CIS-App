@@ -1,10 +1,12 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import AdminSidebar from "../_components/AdminSidebar";
 import {
   A, serif, mono, sans,
   Card, SLabel, TabBar, LoadingScreen, TH, TD,
+  ChartCard, CHART_TOOLTIP,
 } from "../_components/adminUi";
 
 const STATUS_COLOR: Record<string, string> = {
@@ -12,8 +14,8 @@ const STATUS_COLOR: Record<string, string> = {
   running: "#22C55E", interrupted: "#EF4444", idle: "#9099A6",
 };
 
-function MetricCard({ label, value, sub, color = A.ink }: {
-  label: string; value: string | number; sub?: string; color?: string;
+function MetricCard({ label, value, sub, src, color = A.ink }: {
+  label: string; value: string | number; sub?: string; src?: string; color?: string;
 }) {
   return (
     <Card>
@@ -22,6 +24,7 @@ function MetricCard({ label, value, sub, color = A.ink }: {
         {value}
       </div>
       {sub && <div style={{ fontSize: 11, color: A.muted2, marginTop: 4 }}>{sub}</div>}
+      {src && <div style={{ fontSize: 10, color: A.muted2, marginTop: 2, fontFamily: mono }}>{src}</div>}
     </Card>
   );
 }
@@ -37,37 +40,49 @@ function OverviewTab({ data }: { data: any }) {
   const published = data.published_count ?? 0;
   const rewrites  = data.tenant_rewrite_count ?? 0;
   const breakdown = (cs.tenant_breakdown ?? []).filter((r: any) => r.rewrite_count > 0);
-  const daily     = (data.daily_runs ?? []).filter((r: any) => r.runs > 0);
+  const dailyAll  = data.daily_runs ?? [];
+  const daily     = dailyAll.filter((r: any) => r.runs > 0);
   const models    = data.model_usage ?? [];
   const health    = data.pipeline_health ?? [];
 
+  const totalPassed = dailyAll.reduce((s: number, r: any) => s + (r.passed ?? 0), 0);
+  const totalTours  = dailyAll.reduce((s: number, r: any) => s + (r.tours  ?? 0), 0);
+  const passRate    = totalTours > 0 ? Math.round(totalPassed / totalTours * 100) : 0;
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      {/* Row 1 — 4 metric cards */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
+      {/* Row 1 — 5 metric cards */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 14 }}>
         <MetricCard
           label="Total Content"
           value={total}
           sub={`${published} master + ${rewrites} tenant rewrites`}
-          color={A.ink}
+          src="↳ published_tours + tenant_tour_versions"
+          color={A.gold}
         />
         <MetricCard
           label="Master Tours"
           value={published}
-          sub="aa_internal published"
+          src="↳ gold_aa_internal.published_tours"
           color={A.gold}
         />
         <MetricCard
           label="Tenant Rewrites"
           value={rewrites}
-          sub={`${breakdown.length} active tenants`}
+          src="↳ gold_aa_internal.tenant_tour_versions"
           color="#7C3AED"
+        />
+        <MetricCard
+          label="Pass Rate"
+          value={`${passRate}%`}
+          src="↳ pipeline_runs · 7d window"
+          color="#22C55E"
         />
         <MetricCard
           label="LLM Calls"
           value={data.llm_calls ?? 0}
-          sub={`avg $${Number(data.avg_cost_per_run ?? 0).toFixed(4)}/run`}
-          color="#22C55E"
+          src="↳ generated_content · all runs"
+          color={A.muted}
         />
       </div>
 
@@ -96,7 +111,23 @@ function OverviewTab({ data }: { data: any }) {
         </Card>
       )}
 
-      {/* Row 3 — Pipeline Activity */}
+      {/* Row 3 — Daily Volume Chart */}
+      {dailyAll.length > 0 && (
+        <ChartCard title="Daily Volume — Pipeline Activity (7d)">
+          <ResponsiveContainer width="100%" height={220}>
+            <BarChart data={dailyAll} margin={{ top: 4, right: 4, left: -20, bottom: 0 }}>
+              <XAxis dataKey="date" tick={{ fontSize: 11 }} tickFormatter={(v: string) => v?.slice(5) ?? v} />
+              <YAxis tick={{ fontSize: 11 }} />
+              <Tooltip {...CHART_TOOLTIP} />
+              <Bar dataKey="passed" name="Passed" fill="#22C55E" radius={[3, 3, 0, 0]} />
+              <Bar dataKey="hitl"   name="HITL"   fill={A.gold}  radius={[3, 3, 0, 0]} />
+              <Bar dataKey="failed" name="Failed" fill="#EF4444" radius={[3, 3, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </ChartCard>
+      )}
+
+      {/* Row 4 — Pipeline Activity */}
       <Card>
         <SLabel>Pipeline Activity (7d)</SLabel>
         {daily.length === 0 ? (
@@ -128,7 +159,7 @@ function OverviewTab({ data }: { data: any }) {
         )}
       </Card>
 
-      {/* Row 4 — Model Usage */}
+      {/* Row 5 — Model Usage */}
       {models.length > 0 && (
         <Card>
           <SLabel>Model Usage</SLabel>
@@ -143,7 +174,7 @@ function OverviewTab({ data }: { data: any }) {
             <tbody>
               {models.map((m: any, idx: number) => {
                 const score = m.avg_score != null ? parseFloat(m.avg_score) : null;
-                const sc    = score == null ? A.muted2 : score >= 9 ? "#22C55E" : score >= 7 ? A.gold : A.red;
+                const sc    = score == null ? A.muted2 : score >= 9.5 ? "#22C55E" : score >= 8.0 ? A.gold : A.red;
                 return (
                   <tr key={m.model} style={{ background: idx % 2 === 1 ? A.bg : "transparent" }}>
                     <td style={TD}><code style={{ fontFamily: mono, fontSize: 12, color: A.gold }}>{m.model}</code></td>
@@ -161,7 +192,7 @@ function OverviewTab({ data }: { data: any }) {
         </Card>
       )}
 
-      {/* Row 5 — Pipeline Health */}
+      {/* Row 6 — Pipeline Health */}
       {health.length > 0 && (
         <Card>
           <SLabel>Pipeline Health</SLabel>
