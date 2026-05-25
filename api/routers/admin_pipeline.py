@@ -346,9 +346,29 @@ async def ingest_s3(
         )
         if req.dry_run:
             tour_details = await conn.fetch("""
-                SELECT tour_id, src_name, country, duration, price_raw,
-                       group_size, period, pipeline_status, ingest_at,
-                       src_highlights, src_summary
+                SELECT
+                    tour_id,
+                    src_name,
+                    country,
+                    duration,
+                    price_raw,
+                    group_size,
+                    period,
+                    pipeline_status,
+                    ingest_at,
+                    src_subtitle,
+                    src_summary,
+                    src_highlights,
+                    src_itineraries,
+                    provider,
+                    activities,
+                    inclusions,
+                    exclusions,
+                    sku,
+                    src_description,
+                    links,
+                    feature,
+                    best_time_to_go
                 FROM silver_aa_internal.raw_tours
                 WHERE batch_id = $1::uuid
                 ORDER BY ingest_at
@@ -373,7 +393,19 @@ async def ingest_s3(
                     "period":          t["period"],
                     "pipeline_status": t["pipeline_status"],
                     "ingest_at":       str(t["ingest_at"]),
+                    "src_subtitle":    t["src_subtitle"],
                     "src_summary":     t["src_summary"],
+                    "src_highlights":  t["src_highlights"],
+                    "src_itineraries": t["src_itineraries"],
+                    "provider":        t["provider"],
+                    "activities":      t["activities"],
+                    "inclusions":      t["inclusions"],
+                    "exclusions":      t["exclusions"],
+                    "sku":             t["sku"],
+                    "src_description": t["src_description"],
+                    "links":           t["links"],
+                    "feature":         t["feature"],
+                    "best_time_to_go": t["best_time_to_go"],
                     "missing_fields":  missing,
                     "is_duplicate":    t["src_name"] in existing_names,
                 })

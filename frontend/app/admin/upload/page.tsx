@@ -20,13 +20,25 @@ interface DryRunTour {
   tour_id: string;
   src_name: string;
   country: string;
-  duration: string;
-  price_raw: string;
+  duration: string | null;
+  price_raw: string | null;
   group_size: string | null;
   period: string | null;
   pipeline_status: string;
   ingest_at: string;
-  src_summary?: string | null;
+  src_subtitle: string | null;
+  src_summary: string | null;
+  src_highlights: string | null;
+  src_itineraries: string | null;
+  provider: string | null;
+  activities: string | null;
+  inclusions: string | null;
+  exclusions: string | null;
+  sku: string | null;
+  src_description: string | null;
+  links: string | null;
+  feature: string | null;
+  best_time_to_go: string | null;
   missing_fields: string[];
   is_duplicate: boolean;
 }
@@ -104,8 +116,27 @@ function StepIndicator({ step }: { step: 1 | 2 | 3 }) {
 
 // ─── TourRow (expandable) ─────────────────────────────────────────────────────
 
-function TourRow({ tour, idx }: { tour: DryRunTour; idx: number }) {
-  const [open, setOpen] = useState(false);
+const DL_LABEL: React.CSSProperties = {
+  fontSize: 10, fontWeight: 700, textTransform: "uppercase",
+  letterSpacing: "0.12em", color: A.muted, marginBottom: 2,
+};
+const DL_VAL: React.CSSProperties = {
+  fontSize: 12, color: A.body, lineHeight: 1.6, marginBottom: 10,
+};
+
+function DetailField({ label, value }: { label: string; value: string | null | undefined }) {
+  if (!value) return null;
+  return (
+    <div>
+      <div style={DL_LABEL}>{label}</div>
+      <div style={DL_VAL}>{value}</div>
+    </div>
+  );
+}
+
+function TourRow({ tour, idx, isExpanded, onToggle }: {
+  tour: DryRunTour; idx: number; isExpanded: boolean; onToggle: () => void;
+}) {
   const hasMissing  = tour.missing_fields.length > 0;
   const isDuplicate = tour.is_duplicate;
 
@@ -115,11 +146,17 @@ function TourRow({ tour, idx }: { tour: DryRunTour; idx: number }) {
   else if (hasMissing)           { badgeColor = "amber"; badgeLabel = "Incomplete"; }
   else if (isDuplicate)          { badgeColor = "blue";  badgeLabel = "Duplicate"; }
 
+  const itinPreview = tour.src_itineraries
+    ? (tour.src_itineraries.length > 200
+        ? tour.src_itineraries.slice(0, 200) + "..."
+        : tour.src_itineraries)
+    : null;
+
   return (
     <>
       <tr
         style={{ cursor: "pointer", background: idx % 2 === 1 ? A.bg : "transparent" }}
-        onClick={() => setOpen(o => !o)}
+        onClick={onToggle}
       >
         <td style={{ ...TD, textAlign: "center" as const, color: A.muted2 }}>{idx}</td>
         <td style={{ ...TD, fontWeight: 600, color: hasMissing ? A.red : A.ink }}>{tour.src_name || "—"}</td>
@@ -127,33 +164,56 @@ function TourRow({ tour, idx }: { tour: DryRunTour; idx: number }) {
         <td style={TD}>{tour.duration || "—"}</td>
         <td style={TD}>{tour.price_raw || "—"}</td>
         <td style={TD}>{tour.group_size || "—"}</td>
-        <td style={TD}>
-          {hasMissing
-            ? <span style={{ fontSize: 11, color: A.red }}>{tour.missing_fields.join(", ")}</span>
-            : "—"}
-        </td>
+        <td style={TD}>{tour.period || "—"}</td>
+        <td style={TD}>{tour.provider || "—"}</td>
+        <td style={TD}>{tour.sku || "—"}</td>
         <td style={TD}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <Badge color={badgeColor}>{badgeLabel}</Badge>
-            {open
+            {isExpanded
               ? <ChevronUp size={13} style={{ color: A.muted2 }} />
               : <ChevronDown size={13} style={{ color: A.muted2 }} />}
           </div>
         </td>
       </tr>
-      {open && (
+      {isExpanded && (
         <tr>
-          <td colSpan={8} style={{ padding: 0, background: A.bg }}>
-            <div style={{ padding: "12px 20px 14px", borderBottom: `1px solid ${A.line}`,
-              fontSize: 13, color: A.body, lineHeight: 1.65 }}>
-              {tour.src_summary ? (
-                <>
-                  <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase",
-                    letterSpacing: "0.12em", color: A.muted, marginRight: 8 }}>Summary</span>
-                  {tour.src_summary}
-                </>
-              ) : (
-                <span style={{ color: A.muted2, fontSize: 12 }}>No summary available</span>
+          <td colSpan={10} style={{ padding: 0, background: A.bg }}>
+            <div style={{ padding: "16px 20px 18px", borderBottom: `1px solid ${A.line}` }}>
+              {/* 2-column grid */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 32px" }}>
+                {/* Left column */}
+                <div>
+                  <DetailField label="Subtitle"        value={tour.src_subtitle} />
+                  <DetailField label="Summary"         value={tour.src_summary} />
+                  <DetailField label="Description"     value={tour.src_description} />
+                  <DetailField label="Best Time to Go" value={tour.best_time_to_go} />
+                  <DetailField label="Feature"         value={tour.feature} />
+                </div>
+                {/* Right column */}
+                <div>
+                  <DetailField label="Highlights"  value={tour.src_highlights} />
+                  <DetailField label="Activities"  value={tour.activities} />
+                  <DetailField label="Includes"    value={tour.inclusions} />
+                  <DetailField label="Excludes"    value={tour.exclusions} />
+                  <DetailField label="Itinerary"   value={itinPreview} />
+                  <DetailField label="Links"       value={tour.links} />
+                </div>
+              </div>
+              {/* Full-width alerts */}
+              {hasMissing && (
+                <div style={{ marginTop: 10, fontSize: 12, color: "#92400E",
+                  background: "#FFFBEB", border: "1px solid #FDE68A",
+                  borderRadius: 6, padding: "6px 12px" }}>
+                  <strong>Missing fields:</strong> {tour.missing_fields.join(", ")}
+                </div>
+              )}
+              {isDuplicate && (
+                <div style={{ marginTop: 6, fontSize: 12, color: "#9A3412",
+                  background: "#FFF7ED", border: "1px solid #FDBA74",
+                  borderRadius: 6, padding: "6px 12px" }}>
+                  <strong>Duplicate:</strong> Yes — tour name already exists in catalog
+                </div>
               )}
             </div>
           </td>
@@ -238,6 +298,8 @@ function TourContentTab() {
   const [dryRunResult, setDryRunResult]   = useState<DryRunResult | null>(null);
   const [dryRunError, setDryRunError]     = useState("");
   const [dryRunLoading, setDryRunLoading] = useState(false);
+  const [expandedRow, setExpandedRow]     = useState<string | null>(null);
+  const toggleRow = (id: string) => setExpandedRow(prev => prev === id ? null : id);
 
   function selectFile(f: File) {
     if (!f.name.match(/\.xlsx$/i)) { setFileError("Only .xlsx files are supported"); return; }
@@ -460,14 +522,20 @@ function TourContentTab() {
                   <table style={{ width: "100%", borderCollapse: "collapse" }}>
                     <thead>
                       <tr>
-                        {["#", "Tour Name", "Country", "Duration", "Price", "Group", "Missing Fields", "Status"].map((h, i) => (
+                        {["#", "Tour Name", "Country", "Duration", "Price", "Group Size", "Period", "Provider", "SKU", "Status"].map((h, i) => (
                           <th key={h} style={{ ...TH, textAlign: i === 0 ? "center" : "left" }}>{h}</th>
                         ))}
                       </tr>
                     </thead>
                     <tbody>
                       {dryRunResult.tours.map((tour, i) => (
-                        <TourRow key={tour.tour_id} tour={tour} idx={i + 1} />
+                        <TourRow
+                          key={tour.tour_id}
+                          tour={tour}
+                          idx={i + 1}
+                          isExpanded={expandedRow === tour.tour_id}
+                          onToggle={() => toggleRow(tour.tour_id)}
+                        />
                       ))}
                     </tbody>
                   </table>
