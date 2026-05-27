@@ -246,9 +246,16 @@ export default function AdminBrandPage() {
     if (!file) return;
     setParsing(true); setMsg(null);
     try {
-      const fd = new FormData();
-      fd.append("file", file);
-      const r = await fetch("/api/admin/brands/parse-docx", { method: "POST", body: fd });
+      const arrayBuf = await file.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuf);
+      let binary = "";
+      for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+      const file_base64 = btoa(binary);
+      const r = await fetch("/api/admin/brands/parse-docx", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file_base64, filename: file.name }),
+      });
       if (!r.ok) { setMsg({ text: "DOCX parse failed", ok: false }); return; }
       const { parsed } = await r.json();
       setForm(f => ({
