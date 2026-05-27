@@ -228,12 +228,15 @@ export default function AdminBrandPage() {
   async function deleteBrand() {
     if (!selected) return;
     if (!confirm(`Delete brand "${selected}"? This will mark all versions as inactive.`)) return;
-    setDeleting(true);
+    setDeleting(true); setMsg(null);
     try {
       const r = await fetch(`/api/admin/brands/${encodeURIComponent(selected)}`, { method: "DELETE" });
       if (r.ok) {
         setSelected(null); setDetail(null); setForm(emptyForm());
         await loadBrands();
+      } else {
+        const e = await r.json().catch(() => ({}));
+        setMsg({ text: e.detail || "Delete failed", ok: false });
       }
     } finally { setDeleting(false); }
   }

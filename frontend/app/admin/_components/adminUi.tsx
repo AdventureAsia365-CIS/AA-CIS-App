@@ -47,12 +47,12 @@ export function Card({ children, style = {}, dark = false }: {
 }
 
 // ── Section label ─────────────────────────────────────────────────────────────
-export function SLabel({ children, light = false }: { children: React.ReactNode; light?: boolean }) {
+export function SLabel({ children, light = false, style }: { children: React.ReactNode; light?: boolean; style?: React.CSSProperties }) {
   return (
     <div style={{
       fontSize: 11, fontWeight: 600, textTransform: "uppercase",
       letterSpacing: "0.14em", color: light ? "rgba(255,255,255,0.5)" : A.muted,
-      marginBottom: 14,
+      marginBottom: 14, ...style,
     }}>{children}</div>
   );
 }
