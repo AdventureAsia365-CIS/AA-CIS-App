@@ -1,7 +1,5 @@
 "use client";
 // app/admin/master-content/page.tsx
-// GET /api/tenant/admin/tenants/AA_INTERNAL_ID/details → rewritten_tours, summary, pipeline_runs
-// GET /api/admin/tours/{tour_id}/detail → detail panel
 
 import React, { useState, useEffect, useCallback } from "react";
 import { RefreshCw, ChevronDown, ChevronRight, Download, X } from "lucide-react";
@@ -68,16 +66,27 @@ interface TourVersion {
 }
 
 interface VersionDetail {
+  id: string;
   version_num: number;
   model_id: string | null;
   quality_score: number | null;
+  score_brand: number | null;
+  score_seo: number | null;
+  score_structure: number | null;
   created_at: string | null;
   aa_name: string | null;
   aa_subtitle: string | null;
   aa_summary: string | null;
   aa_description: string | null;
+  aa_highlights: string[];
+  aa_itineraries: string | null;
   seo_title: string | null;
   seo_meta: string | null;
+  brand_name: string | null;
+  seo_mode: string | null;
+  dataforseo_used: boolean;
+  llm_cost_usd: number | null;
+  top_keywords: string[];
 }
 
 function scoreColor(s: number | null | undefined): string {
@@ -97,135 +106,238 @@ function statusBadge(status: string) {
   return <Badge color={color}>{status}</Badge>;
 }
 
-// ── Version Compare Modal ─────────────────────────────────────────────────────
+// ── Score Bar ─────────────────────────────────────────────────────────────────
+
+function ScoreBar({ label, value }: { label: string; value: number | null }) {
+  const pct = value != null ? Math.min(100, (value / 10) * 100) : 0;
+  const color = scoreColor(value);
+  return (
+    <div style={{ marginBottom: 6 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
+        <span style={{ fontSize: 11, color: A.muted }}>{label}</span>
+        <span style={{ fontSize: 11, fontWeight: 700, color, fontFamily: mono }}>
+          {value != null ? value.toFixed(1) : "—"}
+        </span>
+      </div>
+      <div style={{ height: 4, background: A.line, borderRadius: 2 }}>
+        <div style={{ height: 4, width: `${pct}%`, background: color, borderRadius: 2, transition: "width .3s" }} />
+      </div>
+    </div>
+  );
+}
+
+// ── Version Compare Modal (full-screen) ───────────────────────────────────────
 
 function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
-  tourId: string; tourName: string; versionNums: [number, number]; onClose: () => void;
+  tourId: string;
+  tourName: string;
+  versionNums: [number, number];
+  onClose: () => void;
 }) {
+  const [leftNum, setLeftNum]   = useState(versionNums[0]);
+  const [rightNum, setRightNum] = useState(versionNums[1]);
   const [left, setLeft]   = useState<VersionDetail | null>(null);
   const [right, setRight] = useState<VersionDetail | null>(null);
+  const [allVersions, setAllVersions] = useState<TourVersion[]>([]);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    async function load() {
-      try {
-        const [r1, r2] = await Promise.all([
-          fetch(`/api/admin/tours/${tourId}/versions/${versionNums[0]}`),
-          fetch(`/api/admin/tours/${tourId}/versions/${versionNums[1]}`),
-        ]);
-        if (!r1.ok || !r2.ok) throw new Error("Failed to load version details");
-        const [d1, d2] = await Promise.all([r1.json(), r2.json()]);
-        setLeft(d1); setRight(d2);
-      } catch (e: any) {
-        setError(e.message || "Load failed");
-      }
-    }
-    load();
-  }, [tourId, versionNums]);
+    fetch(`/api/admin/tours/${tourId}/versions`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d) setAllVersions(d.versions ?? []); })
+      .catch(() => {});
+  }, [tourId]);
 
-  const FIELD_LABELS: [keyof VersionDetail, string][] = [
+  useEffect(() => {
+    setLeft(null);
+    fetch(`/api/admin/tours/${tourId}/versions/${leftNum}`)
+      .then(r => r.ok ? r.json() : Promise.reject("left load failed"))
+      .then(setLeft)
+      .catch(e => setError(String(e)));
+  }, [tourId, leftNum]);
+
+  useEffect(() => {
+    setRight(null);
+    fetch(`/api/admin/tours/${tourId}/versions/${rightNum}`)
+      .then(r => r.ok ? r.json() : Promise.reject("right load failed"))
+      .then(setRight)
+      .catch(e => setError(String(e)));
+  }, [tourId, rightNum]);
+
+  const CONTENT_FIELDS: [keyof VersionDetail, string][] = [
     ["aa_name",       "Tour Name"],
     ["aa_subtitle",   "Subtitle"],
     ["aa_summary",    "Summary"],
+    ["aa_itineraries","Itineraries"],
     ["seo_title",     "SEO Title"],
     ["seo_meta",      "SEO Meta"],
     ["aa_description","Description"],
   ];
 
-  return (
-    <div style={{
-      position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)",
-      display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200,
-    }}>
-      <div style={{
-        background: "#fff", borderRadius: 12, width: "92vw", maxWidth: 1100,
-        maxHeight: "88vh", display: "flex", flexDirection: "column",
-        boxShadow: "0 20px 60px rgba(0,0,0,0.25)",
-      }}>
-        {/* Modal header */}
-        <div style={{
-          padding: "16px 24px", borderBottom: `1px solid ${A.line}`,
-          display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0,
-        }}>
-          <div>
-            <div style={{ fontFamily: serif, fontSize: 16, fontWeight: 500, color: A.ink }}>
-              Version Compare — {tourName}
-            </div>
-            <div style={{ fontSize: 12, color: A.muted, marginTop: 2 }}>
-              v{versionNums[0]} vs v{versionNums[1]}
+  function modelLabel(m: string | null) {
+    return m?.split(".").pop()?.replace(/-v\d+:\d+$/, "") ?? "—";
+  }
+
+  function colHeader(v: VersionDetail | null, vNum: number, isLeft: boolean) {
+    const vBg = isLeft ? A.gold : "#3B82F6";
+    const colBg = isLeft ? "#FAFAF8" : "#F8FAFF";
+    return (
+      <div style={{ padding: "12px 20px", background: colBg, borderRight: isLeft ? `1px solid ${A.line}` : undefined, position: "sticky", top: 0, zIndex: 5 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+          <select
+            value={vNum}
+            onChange={e => isLeft ? setLeftNum(Number(e.target.value)) : setRightNum(Number(e.target.value))}
+            style={{ padding: "3px 8px", fontSize: 12, fontWeight: 700, background: vBg, color: "#fff", border: "none", borderRadius: 10, cursor: "pointer" }}
+          >
+            {allVersions.map(av => (
+              <option key={av.version_num} value={av.version_num}>v{av.version_num}</option>
+            ))}
+          </select>
+          {v && (
+            <>
+              <span style={{ fontSize: 12, color: A.muted }}>{modelLabel(v.model_id)}</span>
+              {v.created_at && <span style={{ fontSize: 11, color: A.muted2, marginLeft: "auto" }}>{relDate(v.created_at)}</span>}
+            </>
+          )}
+        </div>
+
+        {/* Score bars */}
+        {v && (
+          <div style={{ padding: "8px 0", borderTop: `1px solid ${A.line}`, marginTop: 6 }}>
+            <ScoreBar label="Overall" value={v.quality_score} />
+            <ScoreBar label="Brand"   value={v.score_brand} />
+            <ScoreBar label="SEO"     value={v.score_seo} />
+            <ScoreBar label="Structure" value={v.score_structure} />
+          </div>
+        )}
+
+        {/* Rewrite config */}
+        {v && (
+          <div style={{ padding: "8px 0", borderTop: `1px solid ${A.line}`, marginTop: 4, fontSize: 11 }}>
+            <div style={{ fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Rewrite Config</div>
+            <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "3px 8px", color: A.body }}>
+              <span style={{ color: A.muted }}>Model</span>
+              <span style={{ fontFamily: mono }}>{modelLabel(v.model_id)}</span>
+              <span style={{ color: A.muted }}>Brand</span>
+              <span>{v.brand_name || "default"}</span>
+              <span style={{ color: A.muted }}>SEO Mode</span>
+              <span>{v.seo_mode || "standard"}</span>
+              <span style={{ color: A.muted }}>DataForSEO</span>
+              <span style={{ color: v.dataforseo_used ? A.green : A.muted2 }}>{v.dataforseo_used ? "Live" : "Mock"}</span>
+              <span style={{ color: A.muted }}>Cost</span>
+              <span style={{ fontFamily: mono }}>{v.llm_cost_usd != null ? `$${v.llm_cost_usd.toFixed(4)}` : "—"}</span>
             </div>
           </div>
-          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: A.muted2, padding: 4 }}>
-            <X size={18} />
-          </button>
-        </div>
+        )}
 
-        {/* Column headers */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", borderBottom: `1px solid ${A.line}`, flexShrink: 0 }}>
-          {[left, right].map((v, i) => (
-            <div key={i} style={{
-              padding: "10px 20px",
-              background: i === 0 ? "#FAFAF8" : "#F8FAFF",
-              borderRight: i === 0 ? `1px solid ${A.line}` : undefined,
-            }}>
-              {v ? (
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <span style={{ padding: "2px 9px", borderRadius: 10, background: v.version_num === versionNums[0] ? A.gold : "#3B82F6", color: "#fff", fontSize: 12, fontWeight: 700 }}>
-                    v{v.version_num}
-                  </span>
-                  <span style={{ fontSize: 12, color: A.muted }}>
-                    {v.model_id?.split(".").pop()?.replace(/-v\d+:\d+$/, "") ?? "—"}
-                  </span>
-                  {v.quality_score != null && (
-                    <span style={{ fontSize: 13, fontWeight: 700, color: scoreColor(v.quality_score) }}>
-                      {v.quality_score.toFixed(1)}
-                    </span>
-                  )}
-                  {v.created_at && (
-                    <span style={{ fontSize: 11, color: A.muted2, marginLeft: "auto" }}>
-                      {relDate(v.created_at)}
-                    </span>
-                  )}
-                </div>
-              ) : (
-                <span style={{ fontSize: 12, color: A.muted2 }}>Loading…</span>
-              )}
-            </div>
-          ))}
-        </div>
+        {!v && <div style={{ fontSize: 12, color: A.muted2, padding: "8px 0" }}>Loading…</div>}
+      </div>
+    );
+  }
 
-        {/* Content comparison */}
-        <div style={{ flex: 1, overflowY: "auto" }}>
-          {error ? (
-            <div style={{ padding: 24, color: A.red, fontSize: 13 }}>{error}</div>
-          ) : !left || !right ? (
-            <div style={{ padding: 24, textAlign: "center", color: A.muted, fontSize: 13 }}>Loading version details…</div>
-          ) : (
-            FIELD_LABELS.map(([key, label]) => (
-              <div key={key} style={{ borderBottom: `1px solid ${A.line}` }}>
-                <div style={{
-                  padding: "6px 20px", background: A.line2,
-                  fontSize: 10, fontWeight: 700, textTransform: "uppercase",
-                  letterSpacing: "0.12em", color: A.muted,
-                }}>
-                  {label}
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr" }}>
-                  {[left[key], right[key]].map((val, i) => (
-                    <div key={i} style={{
-                      padding: "10px 20px",
-                      background: i === 0 ? "#FAFAF8" : "#F8FAFF",
-                      borderRight: i === 0 ? `1px solid ${A.line}` : undefined,
-                      fontSize: 13, color: val ? A.body : A.muted2,
-                      lineHeight: 1.6, whiteSpace: "pre-wrap",
-                    }}>
-                      {val || "—"}
-                    </div>
-                  ))}
+  function cellVal(v: VersionDetail | null, key: keyof VersionDetail, label: string) {
+    if (!v) return <div style={{ padding: "10px 20px", fontSize: 12, color: A.muted2 }}>—</div>;
+    let raw: unknown = v[key];
+    let display: React.ReactNode;
+
+    if (key === "aa_highlights" && Array.isArray(raw)) {
+      display = (
+        <ul style={{ margin: 0, paddingLeft: 18, lineHeight: 1.7 }}>
+          {(raw as string[]).map((h, i) => <li key={i}>{h}</li>)}
+        </ul>
+      );
+    } else if (key === "seo_title") {
+      const len = typeof raw === "string" ? raw.length : 0;
+      display = <><span>{raw as string || "—"}</span>{typeof raw === "string" && <span style={{ marginLeft: 6, fontSize: 10, color: A.muted2 }}>{len} chars</span>}</>;
+    } else if (key === "seo_meta") {
+      const len = typeof raw === "string" ? raw.length : 0;
+      const over = len > 170;
+      display = <><span style={{ color: over ? A.red : "inherit" }}>{raw as string || "—"}</span>{typeof raw === "string" && <span style={{ marginLeft: 6, fontSize: 10, color: over ? A.red : A.muted2 }}>{len} chars{over ? " (>170)" : ""}</span>}</>;
+    } else {
+      display = <span>{typeof raw === "string" ? raw : raw == null ? "—" : String(raw)}</span>;
+    }
+
+    return (
+      <div style={{ padding: "10px 20px", fontSize: 13, color: raw ? A.body : A.muted2, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
+        {display}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{
+      position: "fixed", top: 0, left: 240, width: "calc(100vw - 240px)", height: "100vh",
+      background: "#fff", zIndex: 300, display: "flex", flexDirection: "column",
+      boxShadow: "-4px 0 24px rgba(0,0,0,0.12)",
+    }}>
+      {/* Modal header */}
+      <div style={{
+        padding: "14px 24px", borderBottom: `1px solid ${A.line}`,
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        flexShrink: 0, background: "#fff", zIndex: 10,
+      }}>
+        <div>
+          <div style={{ fontFamily: serif, fontSize: 16, fontWeight: 500, color: A.ink }}>
+            Version Compare — {tourName}
+          </div>
+          <div style={{ fontSize: 12, color: A.muted, marginTop: 2 }}>
+            v{leftNum} vs v{rightNum} · Select different versions using the dropdowns below
+          </div>
+        </div>
+        <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: A.muted2, padding: 6 }}>
+          <X size={20} />
+        </button>
+      </div>
+
+      {error && (
+        <div style={{ padding: "8px 24px", background: A.redSoft, color: A.red, fontSize: 12, flexShrink: 0 }}>
+          {error}
+        </div>
+      )}
+
+      {/* Two columns */}
+      <div style={{ flex: 1, display: "grid", gridTemplateColumns: "1fr 1fr", overflow: "hidden" }}>
+        {/* Left column */}
+        <div style={{ overflow: "hidden", display: "flex", flexDirection: "column", borderRight: `1px solid ${A.line}` }}>
+          <div style={{ overflowY: "auto", flex: 1 }}>
+            {colHeader(left, leftNum, true)}
+            {/* Keywords */}
+            {left && left.top_keywords.length > 0 && (
+              <div style={{ borderBottom: `1px solid ${A.line}` }}>
+                <div style={{ padding: "5px 20px", background: A.line2, fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.12em", color: A.muted }}>Keywords</div>
+                <div style={{ padding: "8px 20px", fontSize: 12, color: A.body }}>
+                  {left.top_keywords.slice(0, 15).join(", ")}
                 </div>
               </div>
-            ))
-          )}
+            )}
+            {CONTENT_FIELDS.map(([key, label]) => (
+              <div key={key} style={{ borderBottom: `1px solid ${A.line}` }}>
+                <div style={{ padding: "5px 20px", background: A.line2, fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.12em", color: A.muted }}>{label}</div>
+                {cellVal(left, key, label)}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Right column */}
+        <div style={{ overflow: "hidden", display: "flex", flexDirection: "column" }}>
+          <div style={{ overflowY: "auto", flex: 1 }}>
+            {colHeader(right, rightNum, false)}
+            {right && right.top_keywords.length > 0 && (
+              <div style={{ borderBottom: `1px solid ${A.line}` }}>
+                <div style={{ padding: "5px 20px", background: A.line2, fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.12em", color: A.muted }}>Keywords</div>
+                <div style={{ padding: "8px 20px", fontSize: 12, color: A.body }}>
+                  {right.top_keywords.slice(0, 15).join(", ")}
+                </div>
+              </div>
+            )}
+            {CONTENT_FIELDS.map(([key, label]) => (
+              <div key={key} style={{ borderBottom: `1px solid ${A.line}` }}>
+                <div style={{ padding: "5px 20px", background: A.line2, fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.12em", color: A.muted }}>{label}</div>
+                {cellVal(right, key, label)}
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     </div>
@@ -251,9 +363,11 @@ export default function MasterContentPage() {
   const [page, setPage]                 = useState(1);
   const [runsPage, setRunsPage]         = useState(1);
   const [statusFilter, setStatusFilter] = useState("");
+  const [countryFilter, setCountryFilter] = useState("");
+  const [scoreFilter, setScoreFilter]   = useState("");
+  const [versionFilter, setVersionFilter] = useState("");
   const [exporting, setExporting]       = useState(false);
 
-  // Per-tour version compare selection: tourId → selected version nums
   const [compareVersionSel, setCompareVersionSel] = useState<Record<string, Set<number>>>({});
   const [compareVersionOpen, setCompareVersionOpen] = useState<{ tourId: string; tourName: string; vNums: [number, number] } | null>(null);
 
@@ -286,12 +400,29 @@ export default function MasterContentPage() {
     ? tours.reduce((s, t) => s + (t.quality_score ?? 0), 0) / tours.length
     : 0;
 
-  const filtered = tours.filter(t =>
-    (!search ||
-      t.tour_name.toLowerCase().includes(search.toLowerCase()) ||
-      (t.country || "").toLowerCase().includes(search.toLowerCase())) &&
-    (!statusFilter || t.status === statusFilter)
-  );
+  const uniqueCountries = Array.from(new Set(tours.map(t => t.country).filter(Boolean))).sort() as string[];
+
+  const filtered = tours.filter(t => {
+    if (search && !t.tour_name.toLowerCase().includes(search.toLowerCase()) &&
+        !(t.country || "").toLowerCase().includes(search.toLowerCase())) return false;
+    if (statusFilter && t.status !== statusFilter) return false;
+    if (countryFilter && t.country !== countryFilter) return false;
+    if (scoreFilter) {
+      const s = t.quality_score ?? 0;
+      if (scoreFilter === "9.5+" && s < 9.5) return false;
+      if (scoreFilter === "9.0+" && s < 9.0) return false;
+      if (scoreFilter === "8.0+" && s < 8.0) return false;
+      if (scoreFilter === "below8" && s >= 8.0) return false;
+    }
+    if (versionFilter) {
+      const v = t.version_number ?? 0;
+      if (versionFilter === "v1" && v !== 1) return false;
+      if (versionFilter === "v2+" && v < 2) return false;
+      if (versionFilter === "v3+" && v < 3) return false;
+    }
+    return true;
+  });
+
   const paginated = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   const paginatedRuns = runs.slice((runsPage - 1) * RUNS_PAGE_SIZE, runsPage * RUNS_PAGE_SIZE);
 
@@ -312,6 +443,18 @@ export default function MasterContentPage() {
   }
 
   const statusOptions = ["published", "active", "pending", "failed"].map(s => ({ label: s, value: s }));
+  const countryOptions = uniqueCountries.map(c => ({ label: c, value: c }));
+  const scoreOptions = [
+    { label: "9.5+", value: "9.5+" },
+    { label: "9.0+", value: "9.0+" },
+    { label: "8.0+", value: "8.0+" },
+    { label: "Below 8.0", value: "below8" },
+  ];
+  const versionOptions = [
+    { label: "v1 only", value: "v1" },
+    { label: "v2+",     value: "v2+" },
+    { label: "v3+",     value: "v3+" },
+  ];
 
   const toggleExpand = useCallback(async (tourId: string) => {
     setExpandedTours(prev => {
@@ -365,7 +508,7 @@ export default function MasterContentPage() {
 
   if (loading) {
     return (
-      <div style={{ display: "flex", minHeight: "100vh", background: A.bg, fontFamily: sans }}>
+      <div style={{ display: "flex", height: "100vh", background: A.bg, fontFamily: sans }}>
         <AdminSidebar />
         <main style={{ flex: 1, padding: "32px 36px" }}>
           <LoadingScreen msg="Loading master content…" />
@@ -375,65 +518,100 @@ export default function MasterContentPage() {
   }
 
   return (
-    <div style={{ display: "flex", minHeight: "100vh", background: A.bg, fontFamily: sans }}>
+    <div style={{ display: "flex", height: "100vh", background: A.bg, fontFamily: sans, overflow: "hidden" }}>
       <AdminSidebar />
-      <main style={{ flex: 1, padding: "32px 36px", overflowY: "auto" }}>
 
-        {/* Header */}
-        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 28 }}>
-          <div>
-            <div style={{ fontFamily: serif, fontSize: 26, fontWeight: 500, color: A.ink, letterSpacing: "-0.02em" }}>
-              Master Content
+      {/* Main area: flex column, fills height */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
+
+        {/* ── Section 1: Page header + Stats (fixed) ──────────────────────── */}
+        <div style={{ flexShrink: 0, padding: "20px 32px 16px", background: A.bg, borderBottom: `1px solid ${A.line}` }}>
+          <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 16 }}>
+            <div>
+              <div style={{ fontFamily: serif, fontSize: 22, fontWeight: 500, color: A.ink, letterSpacing: "-0.02em" }}>
+                Master Content
+              </div>
+              <div style={{ fontSize: 12, color: A.muted, marginTop: 2 }}>
+                aa_internal tenant · {AA_INTERNAL_ID.slice(0, 8)}…
+              </div>
             </div>
-            <div style={{ fontSize: 13, color: A.muted, marginTop: 4 }}>
-              aa_internal tenant · {AA_INTERNAL_ID.slice(0, 8)}…
-            </div>
+            <Btn variant="secondary" size="sm" onClick={refresh} disabled={refreshing}>
+              <RefreshCw size={13} style={{ animation: refreshing ? "spin 1s linear infinite" : "none" }} />
+              {refreshing ? "Refreshing…" : "Refresh"}
+            </Btn>
           </div>
-          <Btn variant="secondary" size="sm" onClick={refresh} disabled={refreshing}>
-            <RefreshCw size={13} style={{ animation: refreshing ? "spin 1s linear infinite" : "none" }} />
-            {refreshing ? "Refreshing…" : "Refresh"}
-          </Btn>
+
+          {error && (
+            <div style={{ padding: "10px 14px", background: A.redSoft, color: A.red, borderRadius: 7, fontSize: 13, marginBottom: 12 }}>
+              {error}
+            </div>
+          )}
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12 }}>
+            <StatCard icon={<BarChart2 size={16} />}    label="Total Tours"    value={String(tours.length)}       sub={`↳ ${summary?.tours_view ?? tours.length} visible`} />
+            <StatCard icon={<Star size={16} />}          label="Avg Quality"   value={avgScore.toFixed(1)}        sub="↳ quality_score avg" accent={scoreColor(avgScore)} />
+            <StatCard icon={<DollarSign size={16} />}   label="Total LLM Cost" value={`$${(summary?.total_llm_cost_usd ?? 0).toFixed(4)}`} sub="↳ all pipeline runs" />
+            <StatCard icon={<CalendarClock size={16} />} label="Pipeline Runs" value={String(runs.length)}        sub={`↳ ${summary?.pipeline_note ?? "pipeline_runs"}`} />
+          </div>
         </div>
 
-        {error && (
-          <div style={{ padding: "12px 16px", background: A.redSoft, color: A.red, borderRadius: 8, fontSize: 13, marginBottom: 20 }}>
-            {error}
-          </div>
-        )}
+        {/* ── Section 2: Rewritten Tours (flex, scrollable) ───────────────── */}
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", borderBottom: `2px solid ${A.line}` }}>
+          {/* Sticky inner header */}
+          <div style={{
+            position: "sticky", top: 0, zIndex: 5, background: "#fff",
+            padding: "10px 32px 8px", borderBottom: `1px solid ${A.line}`,
+            display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexShrink: 0,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <SLabel style={{ margin: 0 }}>Rewritten Tours</SLabel>
+              <span style={{ fontSize: 12, color: A.muted2 }}>
+                {filtered.length < tours.length ? `${filtered.length} of ${tours.length}` : `${tours.length}`} tours
+              </span>
+            </div>
 
-        {/* Summary cards */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 16, marginBottom: 24 }}>
-          <StatCard icon={<BarChart2 size={16} />}    label="Total Tours"    value={String(tours.length)}       sub={`↳ rewritten_tours · ${summary?.tours_view ?? tours.length} visible`} />
-          <StatCard icon={<Star size={16} />}          label="Avg Quality"   value={avgScore.toFixed(1)}        sub="↳ quality_score avg" accent={scoreColor(avgScore)} />
-          <StatCard icon={<DollarSign size={16} />}   label="Total LLM Cost" value={`$${(summary?.total_llm_cost_usd ?? 0).toFixed(4)}`} sub="↳ summary.total_llm_cost_usd" />
-          <StatCard icon={<CalendarClock size={16} />} label="Pipeline Runs" value={String(runs.length)}        sub={`↳ ${summary?.pipeline_note ?? "pipeline_runs"}`} />
-        </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              {/* Inline filters */}
+              <input
+                value={search}
+                onChange={e => handleSearch(e.target.value)}
+                placeholder="Search name or country…"
+                style={{ padding: "5px 10px", border: `1px solid ${A.line}`, borderRadius: 6, fontSize: 12, fontFamily: sans, width: 180, background: "#fff", color: A.ink, outline: "none" }}
+              />
+              <select value={statusFilter} onChange={e => handleStatusFilter(e.target.value)}
+                style={{ padding: "5px 8px", border: `1px solid ${A.line}`, borderRadius: 6, fontSize: 12, fontFamily: sans, background: "#fff", color: A.ink }}>
+                <option value="">All Status</option>
+                {statusOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+              <select value={countryFilter} onChange={e => { setCountryFilter(e.target.value); setPage(1); }}
+                style={{ padding: "5px 8px", border: `1px solid ${A.line}`, borderRadius: 6, fontSize: 12, fontFamily: sans, background: "#fff", color: A.ink }}>
+                <option value="">All Countries</option>
+                {countryOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+              <select value={scoreFilter} onChange={e => { setScoreFilter(e.target.value); setPage(1); }}
+                style={{ padding: "5px 8px", border: `1px solid ${A.line}`, borderRadius: 6, fontSize: 12, fontFamily: sans, background: "#fff", color: A.ink }}>
+                <option value="">All Scores</option>
+                {scoreOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+              <select value={versionFilter} onChange={e => { setVersionFilter(e.target.value); setPage(1); }}
+                style={{ padding: "5px 8px", border: `1px solid ${A.line}`, borderRadius: 6, fontSize: 12, fontFamily: sans, background: "#fff", color: A.ink }}>
+                <option value="">All Versions</option>
+                {versionOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
 
-        {/* Toolbar: filter + compare + export */}
-        <FilterBar
-          search={search}
-          onSearch={handleSearch}
-          placeholder="Search by tour name or country…"
-          filters={[{
-            label: "Status", value: "status", current: statusFilter,
-            options: statusOptions, onChange: handleStatusFilter,
-          }]}
-          extra={
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              {/* Compare + export */}
               {selectedIds.size >= 2 && selectedIds.size <= 4 && (
                 <Btn variant="secondary" size="sm" onClick={() => setCompareOpen(true)}>
                   Compare ({selectedIds.size})
                 </Btn>
               )}
               {selectedIds.size > 0 && (
-                <button
-                  onClick={() => setSelectedIds(new Set())}
-                  style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: A.muted, padding: "4px 8px" }}
-                >
+                <button onClick={() => setSelectedIds(new Set())}
+                  style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: A.muted, padding: "4px 8px" }}>
                   Clear ({selectedIds.size})
                 </button>
               )}
-              <div style={{ position: "relative", display: "inline-flex" }}>
+              <div style={{ display: "inline-flex" }}>
                 <Btn variant="secondary" size="sm" disabled={exporting} onClick={() => exportTours("csv")}
                   style={{ borderRadius: "6px 0 0 6px", borderRight: "none" }}>
                   <Download size={12} /> {exporting ? "…" : "CSV"}
@@ -444,21 +622,17 @@ export default function MasterContentPage() {
                 </Btn>
               </div>
             </div>
-          }
-        />
-
-        {/* Tours table */}
-        <Card style={{ padding: 0, marginBottom: 28 }}>
-          <div style={{ padding: "14px 20px 10px", borderBottom: `1px solid ${A.line}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <SLabel>Rewritten Tours</SLabel>
-            <span style={{ fontSize: 12, color: A.muted2 }}>{tours.length} total</span>
           </div>
-          {filtered.length === 0 ? (
-            <div style={{ padding: 40, textAlign: "center" as const, color: A.muted, fontSize: 13 }}>
-              {search || statusFilter ? "No tours match your filters" : "No rewritten tours found"}
-            </div>
-          ) : (
-            <div style={{ overflowX: "auto" }}>
+
+          {/* Scrollable table area */}
+          <div style={{ flex: 1, overflowY: "auto" }}>
+            {filtered.length === 0 ? (
+              <div style={{ padding: 40, textAlign: "center" as const, color: A.muted, fontSize: 13 }}>
+                {search || statusFilter || countryFilter || scoreFilter || versionFilter
+                  ? "No tours match your filters"
+                  : "No rewritten tours found"}
+              </div>
+            ) : (
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead style={{ position: "sticky", top: 0, zIndex: 2, background: A.bg }}>
                   <tr>
@@ -501,18 +675,11 @@ export default function MasterContentPage() {
                         }}>
                           <td style={{ ...TD, paddingLeft: 16 }} onClick={e => e.stopPropagation()}>
                             {t.tour_id && (
-                              <input
-                                type="checkbox"
-                                checked={isSelected}
-                                onChange={() => toggleSelect(t.tour_id!)}
-                                style={{ accentColor: A.gold }}
-                              />
+                              <input type="checkbox" checked={isSelected} onChange={() => toggleSelect(t.tour_id!)} style={{ accentColor: A.gold }} />
                             )}
                           </td>
                           <td style={{ ...TD, color: A.muted2 }}>{absIdx + 1}</td>
-                          <td style={{ ...TD, fontWeight: 600, color: A.ink, fontFamily: serif }}>
-                            {t.tour_name}
-                          </td>
+                          <td style={{ ...TD, fontWeight: 600, color: A.ink, fontFamily: serif }}>{t.tour_name}</td>
                           <td style={TD}>{t.country || "—"}</td>
                           <td style={TD}>
                             <span style={{ fontFamily: mono, fontWeight: 700, fontSize: 15, color: scoreColor(t.quality_score) }}>
@@ -525,14 +692,12 @@ export default function MasterContentPage() {
                               : <span style={{ color: A.muted2, fontSize: 12 }}>—</span>}
                           </td>
                           <td style={TD}>{statusBadge(t.status)}</td>
-                          <td style={{ ...TD }}>
+                          <td style={TD}>
                             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                               <button
                                 onClick={() => { if (t.tour_id) { setDetailTourId(t.tour_id); setDetailTourName(t.tour_name); } }}
                                 style={{ padding: "3px 8px", fontSize: 11, border: `1px solid ${A.line}`, borderRadius: 5, background: "#fff", cursor: "pointer", color: A.body }}
-                              >
-                                View
-                              </button>
+                              >View</button>
                               {t.tour_id && (
                                 <button
                                   onClick={() => toggleExpand(t.tour_id!)}
@@ -626,9 +791,7 @@ export default function MasterContentPage() {
                                       <button
                                         onClick={() => t.tour_id && setCompareVersionSel(p => ({ ...p, [t.tour_id!]: new Set() }))}
                                         style={{ fontSize: 11, color: A.muted2, background: "none", border: "none", cursor: "pointer" }}
-                                      >
-                                        Clear
-                                      </button>
+                                      >Clear</button>
                                     </div>
                                   )}
                                 </>
@@ -641,24 +804,27 @@ export default function MasterContentPage() {
                   })}
                 </tbody>
               </table>
-            </div>
-          )}
-          {filtered.length > PAGE_SIZE && (
-            <div style={{ padding: "14px 20px", borderTop: `1px solid ${A.line}`, display: "flex", justifyContent: "flex-end" }}>
-              <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onPage={setPage} />
-            </div>
-          )}
-        </Card>
+            )}
+            {filtered.length > PAGE_SIZE && (
+              <div style={{ padding: "12px 20px", borderTop: `1px solid ${A.line}`, display: "flex", justifyContent: "flex-end" }}>
+                <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onPage={setPage} />
+              </div>
+            )}
+          </div>
+        </div>
 
-        {/* Recent pipeline runs */}
-        {runs.length > 0 && (
-          <Card style={{ padding: 0 }}>
-            <div style={{ padding: "14px 20px 10px", borderBottom: `1px solid ${A.line}` }}>
-              <SLabel>Recent Pipeline Runs</SLabel>
-            </div>
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead>
+        {/* ── Section 3: Pipeline Runs (fixed height) ──────────────────────── */}
+        <div style={{ height: 280, display: "flex", flexDirection: "column", flexShrink: 0 }}>
+          {/* Sticky section header */}
+          <div style={{ padding: "8px 32px 6px", borderBottom: `1px solid ${A.line}`, flexShrink: 0, background: "#fff" }}>
+            <SLabel style={{ margin: 0 }}>Recent Pipeline Runs</SLabel>
+          </div>
+          {runs.length === 0 ? (
+            <div style={{ padding: "16px 32px", fontSize: 12, color: A.muted }}>No pipeline runs found.</div>
+          ) : (
+            <div style={{ flex: 1, overflowY: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead style={{ position: "sticky", top: 0, background: A.bg, zIndex: 2 }}>
                   <tr>
                     <th style={TH}>Run ID</th>
                     <th style={TH}>Date</th>
@@ -672,36 +838,30 @@ export default function MasterContentPage() {
                 <tbody>
                   {paginatedRuns.map((r, i) => (
                     <tr key={r.run_id} style={{ background: i % 2 === 0 ? "#fff" : A.bg }}>
-                      <td style={{ ...TD, fontFamily: mono, fontSize: 11, color: A.muted2 }}>
-                        {r.run_id.slice(0, 8)}…
-                      </td>
-                      <td style={{ ...TD, fontSize: 12, color: A.muted2 }}>{relDate(r.started_at)}</td>
+                      <td style={{ ...TD, fontFamily: mono, fontSize: 11, color: A.muted2 }}>{r.run_id.slice(0, 8)}…</td>
+                      <td style={{ ...TD, fontSize: 11, color: A.muted2 }}>{relDate(r.started_at)}</td>
                       <td style={TD}>{r.tours_processed}</td>
                       <td style={{ ...TD, color: A.green, fontWeight: 600 }}>{r.tours_passed}</td>
-                      <td style={{ ...TD, fontFamily: mono, fontSize: 11 }}>
-                        {r.llm_model?.split(".").pop()?.replace(/-v\d+:\d+$/, "") ?? "—"}
-                      </td>
+                      <td style={{ ...TD, fontFamily: mono, fontSize: 11 }}>{r.llm_model?.split(".").pop()?.replace(/-v\d+:\d+$/, "") ?? "—"}</td>
                       <td style={{ ...TD, color: A.gold, fontWeight: 600 }}>${(r.llm_cost_usd ?? 0).toFixed(4)}</td>
                       <td style={TD}>
-                        <Badge color={r.status === "completed" ? "green" : r.status === "failed" ? "red" : "amber"}>
-                          {r.status}
-                        </Badge>
+                        <Badge color={r.status === "completed" ? "green" : r.status === "failed" ? "red" : "amber"}>{r.status}</Badge>
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+              {runs.length > RUNS_PAGE_SIZE && (
+                <div style={{ padding: "8px 20px", borderTop: `1px solid ${A.line}`, display: "flex", justifyContent: "flex-end" }}>
+                  <Pagination page={runsPage} total={runs.length} pageSize={RUNS_PAGE_SIZE} onPage={setRunsPage} />
+                </div>
+              )}
             </div>
-            {runs.length > RUNS_PAGE_SIZE && (
-              <div style={{ padding: "12px 20px", borderTop: `1px solid ${A.line}`, display: "flex", justifyContent: "flex-end" }}>
-                <Pagination page={runsPage} total={runs.length} pageSize={RUNS_PAGE_SIZE} onPage={setRunsPage} />
-              </div>
-            )}
-          </Card>
-        )}
-      </main>
+          )}
+        </div>
+      </div>
 
-      {/* Detail panel v2 (handles its own backdrop) */}
+      {/* Detail panel v2 */}
       {detailTourId && (
         <TourDetailPanelV2
           tourId={detailTourId}
@@ -710,7 +870,7 @@ export default function MasterContentPage() {
         />
       )}
 
-      {/* Tour compare modal (cross-tour) */}
+      {/* Cross-tour compare modal */}
       {compareOpen && (
         <CompareModal
           tourIds={[...selectedIds]}
@@ -718,7 +878,7 @@ export default function MasterContentPage() {
         />
       )}
 
-      {/* Version compare modal (within-tour) */}
+      {/* Version compare modal (full-screen) */}
       {compareVersionOpen && (
         <VersionCompareModal
           tourId={compareVersionOpen.tourId}

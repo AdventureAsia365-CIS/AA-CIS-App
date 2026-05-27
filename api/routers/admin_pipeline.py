@@ -740,33 +740,63 @@ async def get_tour_version_detail(
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             SELECT gc.id, gc.version_num, gc.model_editorial AS model_id,
-                   qs.score_overall AS quality_score, gc.created_at,
+                   qs.score_overall AS quality_score,
+                   qs.score_brand, qs.score_seo, qs.score_structure,
+                   gc.created_at,
                    gc.aa_name, gc.aa_subtitle, gc.aa_summary, gc.aa_description,
-                   gc.aa_highlights, gc.aa_itineraries, gc.seo_title, gc.seo_meta
+                   gc.aa_highlights, gc.aa_itineraries, gc.seo_title, gc.seo_meta,
+                   gc.metadata,
+                   tbr.brand_name AS brand_name,
+                   sc.top_keywords
             FROM silver_aa_internal.generated_content gc
             LEFT JOIN silver_aa_internal.quality_scores qs
                 ON qs.generated_content_id = gc.id
+            LEFT JOIN shared.tenant_brand_rules tbr
+                ON tbr.id = (gc.metadata->>'brand_rule_id')::uuid
+            LEFT JOIN LATERAL (
+                SELECT top_keywords FROM silver_aa_internal.seo_context
+                WHERE tour_id = gc.tour_id
+                ORDER BY fetched_at DESC LIMIT 1
+            ) sc ON true
             WHERE gc.tour_id = $1::uuid AND gc.version_num = $2
             LIMIT 1
         """, tour_id, version_num)
     if not row:
         raise HTTPException(status_code=404, detail="Version not found")
+    meta = {}
+    if row["metadata"]:
+        try:
+            meta = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else dict(row["metadata"])
+        except Exception:
+            meta = {}
+    highlights = row["aa_highlights"]
+    if not isinstance(highlights, list):
+        highlights = json.loads(highlights) if highlights else []
+    keywords = row["top_keywords"]
+    if not isinstance(keywords, list):
+        keywords = json.loads(keywords) if keywords else []
     return {
         "id":             str(row["id"]),
         "version_num":    row["version_num"],
         "model_id":       row["model_id"],
         "quality_score":  float(row["quality_score"]) if row["quality_score"] else None,
+        "score_brand":    float(row["score_brand"]) if row["score_brand"] else None,
+        "score_seo":      float(row["score_seo"]) if row["score_seo"] else None,
+        "score_structure": float(row["score_structure"]) if row["score_structure"] else None,
         "created_at":     row["created_at"].isoformat() if row["created_at"] else None,
         "aa_name":        row["aa_name"],
         "aa_subtitle":    row["aa_subtitle"],
         "aa_summary":     row["aa_summary"],
         "aa_description": row["aa_description"],
-        "aa_highlights":  row["aa_highlights"] if isinstance(row["aa_highlights"], list) else (
-            json.loads(row["aa_highlights"]) if row["aa_highlights"] else []
-        ),
+        "aa_highlights":  highlights,
         "aa_itineraries": row["aa_itineraries"],
         "seo_title":      row["seo_title"],
         "seo_meta":       row["seo_meta"],
+        "brand_name":     row["brand_name"] or meta.get("brand_rule_id") and "custom" or "default",
+        "seo_mode":       meta.get("seo_mode", "standard"),
+        "dataforseo_used": meta.get("dataforseo_used", False),
+        "llm_cost_usd":   meta.get("llm_cost_usd"),
+        "top_keywords":   keywords,
     }
 
 
@@ -1487,11 +1517,11 @@ async def list_brands(request: Request, x_admin_secret: str = Header(None)):
     try:
         async with pool.acquire() as conn:
             rows = await conn.fetch("""
-                SELECT DISTINCT ON (COALESCE(brand_name, ''))
+                SELECT DISTINCT ON (COALESCE(brand_name, 'default'))
                     id, brand_name, brand_type, core_idea, version, is_active, updated_at
                 FROM shared.tenant_brand_rules
-                WHERE tenant_id = $1
-                ORDER BY COALESCE(brand_name, ''), version DESC
+                WHERE tenant_id = $1 AND is_active = true
+                ORDER BY COALESCE(brand_name, 'default'), version DESC
             """, tenant_id)
     except Exception as e:
         if "brand_name" in str(e).lower() or "column" in str(e).lower():
