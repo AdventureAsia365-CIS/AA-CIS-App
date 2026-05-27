@@ -3,13 +3,14 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
 import {
   Upload, CheckCircle, XCircle, ArrowRight, Loader2,
-  ChevronDown, ChevronUp, FileText, Copy, RefreshCw,
+  ChevronDown, ChevronUp, FileText, Copy, RefreshCw, Search,
 } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
 import {
   A, serif, sans, mono,
   Card, SLabel, Btn, TH, TD, Badge,
 } from "../_components/adminUi";
+import { Pagination } from "../_components/Pagination";
 
 const TENANT_ID = "00000000-0000-0000-0000-000000000001";
 
@@ -253,9 +254,32 @@ function Toast({ msg, type }: { msg: string; type: "success" | "error" }) {
 
 // ─── Section: Tours Ready for Rewrite ─────────────────────────────────────────
 
+const READY_PAGE_SIZE = 10;
+
 function ToursReadySection({ tours, loading, onRefresh }: {
   tours: TourReadyItem[]; loading: boolean; onRefresh: () => void;
 }) {
+  const [page, setPage]               = useState(1);
+  const [filterCountry, setFilterCountry] = useState("");
+  const [filterFile, setFilterFile]   = useState("");
+
+  const uniqueCountries = Array.from(new Set(
+    tours.map(t => t.country).filter((c): c is string => Boolean(c))
+  )).sort();
+  const uniqueFiles = Array.from(new Set(
+    tours.map(t => t.filename).filter((f): f is string => Boolean(f))
+  )).sort();
+
+  const filtered = tours.filter(t => {
+    if (filterCountry && t.country !== filterCountry) return false;
+    if (filterFile && t.filename !== filterFile) return false;
+    return true;
+  });
+  const paginated = filtered.slice((page - 1) * READY_PAGE_SIZE, page * READY_PAGE_SIZE);
+
+  function handleCountry(v: string) { setFilterCountry(v); setPage(1); }
+  function handleFile(v: string)    { setFilterFile(v);    setPage(1); }
+
   return (
     <Card style={{ padding: 0, marginTop: 32 }}>
       <div style={{
@@ -270,7 +294,7 @@ function ToursReadySection({ tours, loading, onRefresh }: {
             <span style={{
               fontSize: 12, background: A.goldTint, color: A.gold,
               padding: "2px 10px", borderRadius: 10, fontWeight: 700,
-            }}>{tours.length}</span>
+            }}>{filtered.length}</span>
           )}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -287,6 +311,22 @@ function ToursReadySection({ tours, loading, onRefresh }: {
         </div>
       </div>
 
+      {/* Filters */}
+      {!loading && tours.length > 0 && (
+        <div style={{ padding: "10px 16px", borderBottom: `1px solid ${A.line}`, display: "flex", gap: 10 }}>
+          <select value={filterCountry} onChange={e => handleCountry(e.target.value)}
+            style={{ padding: "5px 8px", borderRadius: 6, border: `1px solid ${A.line}`, fontSize: 12, fontFamily: sans, background: "#fff" }}>
+            <option value="">All Countries</option>
+            {uniqueCountries.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+          <select value={filterFile} onChange={e => handleFile(e.target.value)}
+            style={{ padding: "5px 8px", borderRadius: 6, border: `1px solid ${A.line}`, fontSize: 12, fontFamily: sans, background: "#fff", maxWidth: 220 }}>
+            <option value="">All Files</option>
+            {uniqueFiles.map(f => <option key={f} value={f}>{stripUuidPrefix(f)}</option>)}
+          </select>
+        </div>
+      )}
+
       {loading ? (
         <div style={{ padding: 28, textAlign: "center", color: A.muted, fontSize: 13 }}>
           <Loader2 size={16} style={{ animation: "spin 1s linear infinite", marginRight: 8 }} />
@@ -296,38 +336,49 @@ function ToursReadySection({ tours, loading, onRefresh }: {
         <div style={{ padding: 28, textAlign: "center", color: A.muted, fontSize: 13 }}>
           No tours ready. Upload an Excel file above to get started.
         </div>
-      ) : (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead style={{ position: "sticky", top: 56, zIndex: 2 }}>
-              <tr>
-                {["Tour Name", "Country", "Source File", "Ingested At", "Action"].map(h => (
-                  <th key={h} style={{ ...TH, textAlign: "left" }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {tours.map((t, i) => (
-                <tr key={t.tour_id} style={{ background: i % 2 === 1 ? A.bg : "transparent" }}>
-                  <td style={{ ...TD, fontWeight: 600, color: A.ink }}>{t.src_name || "—"}</td>
-                  <td style={TD}>{t.country || "—"}</td>
-                  <td style={{ ...TD, color: A.muted, fontSize: 12 }}>
-                    {t.filename ? stripUuidPrefix(t.filename) : "—"}
-                  </td>
-                  <td style={{ ...TD, color: A.muted, fontSize: 12 }}>{relativeTime(t.ingest_at)}</td>
-                  <td style={TD}>
-                    <a href={`/admin/s1-rewrite?tour_id=${t.tour_id}`} style={{
-                      fontSize: 12, fontWeight: 600, color: A.gold,
-                      textDecoration: "none", display: "flex", alignItems: "center", gap: 4,
-                    }}>
-                      Rewrite <ArrowRight size={11} />
-                    </a>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      ) : filtered.length === 0 ? (
+        <div style={{ padding: 28, textAlign: "center", color: A.muted, fontSize: 13 }}>
+          No tours match selected filters.
         </div>
+      ) : (
+        <>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  {["Tour Name", "Country", "Source File", "Ingested At", "Action"].map(h => (
+                    <th key={h} style={{ ...TH, textAlign: "left" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {paginated.map((t, i) => (
+                  <tr key={t.tour_id} style={{ background: i % 2 === 1 ? A.bg : "transparent" }}>
+                    <td style={{ ...TD, fontWeight: 600, color: A.ink }}>{t.src_name || "—"}</td>
+                    <td style={TD}>{t.country || "—"}</td>
+                    <td style={{ ...TD, color: A.muted, fontSize: 12 }}>
+                      {t.filename ? stripUuidPrefix(t.filename) : "—"}
+                    </td>
+                    <td style={{ ...TD, color: A.muted, fontSize: 12 }}>{relativeTime(t.ingest_at)}</td>
+                    <td style={TD}>
+                      <a href={`/admin/s1-rewrite?tour_id=${t.tour_id}`} style={{
+                        fontSize: 12, fontWeight: 600, color: A.gold,
+                        textDecoration: "none", display: "flex", alignItems: "center", gap: 4,
+                      }}>
+                        Rewrite <ArrowRight size={11} />
+                      </a>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {filtered.length > READY_PAGE_SIZE && (
+            <div style={{ padding: "12px 20px", borderTop: `1px solid ${A.line}`, display: "flex", justifyContent: "flex-end" }}>
+              <Pagination page={page} total={filtered.length} pageSize={READY_PAGE_SIZE} onPage={setPage} />
+            </div>
+          )}
+        </>
       )}
     </Card>
   );
@@ -335,16 +386,33 @@ function ToursReadySection({ tours, loading, onRefresh }: {
 
 // ─── Section: Upload History ───────────────────────────────────────────────────
 
+const HISTORY_PAGE_SIZE = 10;
+
 function UploadHistorySection({ history, loading, onRefresh }: {
   history: UploadHistoryItem[]; loading: boolean; onRefresh: () => void;
 }) {
-  const [copied, setCopied] = useState<string | null>(null);
+  const [copied, setCopied]       = useState<string | null>(null);
+  const [page, setPage]           = useState(1);
+  const [dateFilter, setDateFilter] = useState("all");
+  const [search, setSearch]       = useState("");
 
   function copyBatchId(id: string) {
     navigator.clipboard.writeText(id).catch(() => {});
     setCopied(id);
     setTimeout(() => setCopied(null), 1500);
   }
+
+  const now = Date.now();
+  const filtered = history.filter(h => {
+    if (search && !stripUuidPrefix(h.filename).toLowerCase().includes(search.toLowerCase())) return false;
+    if (dateFilter === "today" && (!h.parsed_at || now - new Date(h.parsed_at).getTime() > 86400000)) return false;
+    if (dateFilter === "week"  && (!h.parsed_at || now - new Date(h.parsed_at).getTime() > 7 * 86400000)) return false;
+    return true;
+  });
+  const paginated = filtered.slice((page - 1) * HISTORY_PAGE_SIZE, page * HISTORY_PAGE_SIZE);
+
+  function handleSearch(v: string)   { setSearch(v);      setPage(1); }
+  function handleDate(v: string)     { setDateFilter(v);  setPage(1); }
 
   return (
     <Card style={{ padding: 0, marginTop: 20 }}>
@@ -353,13 +421,34 @@ function UploadHistorySection({ history, loading, onRefresh }: {
         display: "flex", alignItems: "center", justifyContent: "space-between",
       }}>
         <span style={{ fontFamily: serif, fontSize: 16, fontWeight: 500, color: A.ink }}>
-          Upload History (last 20)
+          Upload History
         </span>
         <button onClick={onRefresh} title="Refresh"
           style={{ background: "none", border: "none", cursor: "pointer", color: A.muted2, padding: 4 }}>
           <RefreshCw size={14} />
         </button>
       </div>
+
+      {/* Filters */}
+      {!loading && history.length > 0 && (
+        <div style={{ padding: "10px 16px", borderBottom: `1px solid ${A.line}`, display: "flex", gap: 10, alignItems: "center" }}>
+          <select value={dateFilter} onChange={e => handleDate(e.target.value)}
+            style={{ padding: "5px 8px", borderRadius: 6, border: `1px solid ${A.line}`, fontSize: 12, fontFamily: sans, background: "#fff" }}>
+            <option value="all">All Time</option>
+            <option value="today">Today</option>
+            <option value="week">Last 7 Days</option>
+          </select>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, border: `1px solid ${A.line}`, borderRadius: 6, padding: "5px 8px", background: "#fff", flex: 1, maxWidth: 260 }}>
+            <Search size={12} style={{ color: A.muted2, flexShrink: 0 }} />
+            <input
+              placeholder="Search filename…"
+              value={search}
+              onChange={e => handleSearch(e.target.value)}
+              style={{ border: "none", outline: "none", fontSize: 12, fontFamily: sans, width: "100%", background: "transparent" }}
+            />
+          </div>
+        </div>
+      )}
 
       {loading ? (
         <div style={{ padding: 28, textAlign: "center", color: A.muted, fontSize: 13 }}>
@@ -370,56 +459,67 @@ function UploadHistorySection({ history, loading, onRefresh }: {
         <div style={{ padding: 28, textAlign: "center", color: A.muted, fontSize: 13 }}>
           No uploads yet.
         </div>
-      ) : (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                {["File Name", "File Size", "Tours Parsed", "Parse Errors", "Uploaded At", "Batch ID"].map((h, i) => (
-                  <th key={h} style={{ ...TH, textAlign: i > 0 ? "right" : "left" }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {history.map((h, i) => (
-                <tr key={h.id} style={{ background: i % 2 === 1 ? A.bg : "transparent" }}>
-                  <td style={{ ...TD, maxWidth: 240, overflow: "hidden",
-                    textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 500 }}>
-                    {stripUuidPrefix(h.filename)}
-                  </td>
-                  <td style={{ ...TD, textAlign: "right", color: A.muted }}>
-                    {h.file_size_kb ? `${h.file_size_kb.toFixed(0)} KB` : "—"}
-                  </td>
-                  <td style={{ ...TD, textAlign: "right" }}>{h.row_count ?? "—"}</td>
-                  <td style={{ ...TD, textAlign: "right" }}>
-                    {h.parse_error_count > 0
-                      ? <Badge color="red">{h.parse_error_count} errors</Badge>
-                      : <span style={{ color: A.muted2, fontSize: 12 }}>0</span>}
-                  </td>
-                  <td style={{ ...TD, textAlign: "right", color: A.muted, fontSize: 12 }}>
-                    {relativeTime(h.parsed_at)}
-                  </td>
-                  <td style={{ ...TD, textAlign: "right" }}>
-                    {h.batch_id ? (
-                      <button
-                        onClick={() => copyBatchId(h.batch_id!)}
-                        title="Copy batch ID"
-                        style={{
-                          display: "inline-flex", alignItems: "center", gap: 4,
-                          fontFamily: mono, fontSize: 11, color: copied === h.batch_id ? A.green : A.muted2,
-                          background: "none", border: "none", cursor: "pointer", padding: 0,
-                        }}
-                      >
-                        {h.batch_id.slice(0, 8)}…
-                        <Copy size={10} />
-                      </button>
-                    ) : "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      ) : filtered.length === 0 ? (
+        <div style={{ padding: 28, textAlign: "center", color: A.muted, fontSize: 13 }}>
+          No uploads match your filters.
         </div>
+      ) : (
+        <>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  {["File Name", "File Size", "Tours Parsed", "Parse Errors", "Uploaded At", "Batch ID"].map((h, i) => (
+                    <th key={h} style={{ ...TH, textAlign: i > 0 ? "right" : "left" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {paginated.map((h, i) => (
+                  <tr key={h.id} style={{ background: i % 2 === 1 ? A.bg : "transparent" }}>
+                    <td style={{ ...TD, maxWidth: 240, overflow: "hidden",
+                      textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 500 }}>
+                      {stripUuidPrefix(h.filename)}
+                    </td>
+                    <td style={{ ...TD, textAlign: "right", color: A.muted }}>
+                      {h.file_size_kb ? `${h.file_size_kb.toFixed(0)} KB` : "—"}
+                    </td>
+                    <td style={{ ...TD, textAlign: "right" }}>{h.row_count ?? "—"}</td>
+                    <td style={{ ...TD, textAlign: "right" }}>
+                      {h.parse_error_count > 0
+                        ? <Badge color="red">{h.parse_error_count} errors</Badge>
+                        : <span style={{ color: A.muted2, fontSize: 12 }}>0</span>}
+                    </td>
+                    <td style={{ ...TD, textAlign: "right", color: A.muted, fontSize: 12 }}>
+                      {relativeTime(h.parsed_at)}
+                    </td>
+                    <td style={{ ...TD, textAlign: "right" }}>
+                      {h.batch_id ? (
+                        <button
+                          onClick={() => copyBatchId(h.batch_id!)}
+                          title="Copy batch ID"
+                          style={{
+                            display: "inline-flex", alignItems: "center", gap: 4,
+                            fontFamily: mono, fontSize: 11, color: copied === h.batch_id ? A.green : A.muted2,
+                            background: "none", border: "none", cursor: "pointer", padding: 0,
+                          }}
+                        >
+                          {h.batch_id.slice(0, 8)}…
+                          <Copy size={10} />
+                        </button>
+                      ) : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {filtered.length > HISTORY_PAGE_SIZE && (
+            <div style={{ padding: "12px 20px", borderTop: `1px solid ${A.line}`, display: "flex", justifyContent: "flex-end" }}>
+              <Pagination page={page} total={filtered.length} pageSize={HISTORY_PAGE_SIZE} onPage={setPage} />
+            </div>
+          )}
+        </>
       )}
     </Card>
   );

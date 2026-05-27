@@ -16,22 +16,31 @@ async function handler(
   const search = req.nextUrl.search;
   const url = `${API_URL}/admin/${pathStr}${search}`;
 
-  const headers: Record<string, string> = {
+  const contentType = req.headers.get("content-type") ?? "";
+  const isMultipart = contentType.includes("multipart/form-data");
+
+  const outHeaders: Record<string, string> = {
     "X-Admin-Secret": ADMIN_SECRET,
-    "Content-Type": "application/json",
   };
 
-  let body: string | undefined;
+  let body: ArrayBuffer | string | undefined;
   if (req.method !== "GET" && req.method !== "HEAD") {
-    try { body = await req.text(); } catch { /* empty body */ }
+    if (isMultipart) {
+      outHeaders["Content-Type"] = contentType;
+      body = await req.arrayBuffer();
+    } else {
+      outHeaders["Content-Type"] = "application/json";
+      try { body = await req.text(); } catch { /* empty body */ }
+    }
   }
 
   try {
-    const res = await fetch(url, { method: req.method, headers, body });
-    const data = await res.text();
+    const res = await fetch(url, { method: req.method, headers: outHeaders, body });
+    const resContentType = res.headers.get("content-type") ?? "application/json";
+    const data = await res.arrayBuffer();
     return new NextResponse(data, {
       status: res.status,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": resContentType },
     });
   } catch {
     return NextResponse.json({ detail: "Upstream connection error" }, { status: 502 });

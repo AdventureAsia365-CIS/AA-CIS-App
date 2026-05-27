@@ -4,7 +4,7 @@
 // GET /api/admin/tours/{tour_id}/detail → detail panel
 
 import React, { useState, useEffect, useCallback } from "react";
-import { RefreshCw, ChevronDown, ChevronRight, Download } from "lucide-react";
+import { RefreshCw, ChevronDown, ChevronRight, Download, X } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
 import {
   A, serif, sans, mono,
@@ -17,6 +17,8 @@ import { FilterBar } from "../_components/FilterBar";
 import { Pagination } from "../_components/Pagination";
 
 const AA_INTERNAL_ID = "00000000-0000-0000-0000-000000000001";
+const PAGE_SIZE = 20;
+const RUNS_PAGE_SIZE = 10;
 
 interface RewrittenTour {
   version_id: string;
@@ -65,6 +67,19 @@ interface TourVersion {
   is_current: boolean;
 }
 
+interface VersionDetail {
+  version_num: number;
+  model_id: string | null;
+  quality_score: number | null;
+  created_at: string | null;
+  aa_name: string | null;
+  aa_subtitle: string | null;
+  aa_summary: string | null;
+  aa_description: string | null;
+  seo_title: string | null;
+  seo_meta: string | null;
+}
+
 function scoreColor(s: number | null | undefined): string {
   if (s == null) return A.muted2;
   if (s >= 9) return A.green;
@@ -80,6 +95,141 @@ function relDate(iso: string): string {
 function statusBadge(status: string) {
   const color = status === "published" ? "green" : status === "active" ? "blue" : "gray";
   return <Badge color={color}>{status}</Badge>;
+}
+
+// ── Version Compare Modal ─────────────────────────────────────────────────────
+
+function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
+  tourId: string; tourName: string; versionNums: [number, number]; onClose: () => void;
+}) {
+  const [left, setLeft]   = useState<VersionDetail | null>(null);
+  const [right, setRight] = useState<VersionDetail | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const [r1, r2] = await Promise.all([
+          fetch(`/api/admin/tours/${tourId}/versions/${versionNums[0]}`),
+          fetch(`/api/admin/tours/${tourId}/versions/${versionNums[1]}`),
+        ]);
+        if (!r1.ok || !r2.ok) throw new Error("Failed to load version details");
+        const [d1, d2] = await Promise.all([r1.json(), r2.json()]);
+        setLeft(d1); setRight(d2);
+      } catch (e: any) {
+        setError(e.message || "Load failed");
+      }
+    }
+    load();
+  }, [tourId, versionNums]);
+
+  const FIELD_LABELS: [keyof VersionDetail, string][] = [
+    ["aa_name",       "Tour Name"],
+    ["aa_subtitle",   "Subtitle"],
+    ["aa_summary",    "Summary"],
+    ["seo_title",     "SEO Title"],
+    ["seo_meta",      "SEO Meta"],
+    ["aa_description","Description"],
+  ];
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)",
+      display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200,
+    }}>
+      <div style={{
+        background: "#fff", borderRadius: 12, width: "92vw", maxWidth: 1100,
+        maxHeight: "88vh", display: "flex", flexDirection: "column",
+        boxShadow: "0 20px 60px rgba(0,0,0,0.25)",
+      }}>
+        {/* Modal header */}
+        <div style={{
+          padding: "16px 24px", borderBottom: `1px solid ${A.line}`,
+          display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0,
+        }}>
+          <div>
+            <div style={{ fontFamily: serif, fontSize: 16, fontWeight: 500, color: A.ink }}>
+              Version Compare — {tourName}
+            </div>
+            <div style={{ fontSize: 12, color: A.muted, marginTop: 2 }}>
+              v{versionNums[0]} vs v{versionNums[1]}
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: A.muted2, padding: 4 }}>
+            <X size={18} />
+          </button>
+        </div>
+
+        {/* Column headers */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", borderBottom: `1px solid ${A.line}`, flexShrink: 0 }}>
+          {[left, right].map((v, i) => (
+            <div key={i} style={{
+              padding: "10px 20px",
+              background: i === 0 ? "#FAFAF8" : "#F8FAFF",
+              borderRight: i === 0 ? `1px solid ${A.line}` : undefined,
+            }}>
+              {v ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ padding: "2px 9px", borderRadius: 10, background: v.version_num === versionNums[0] ? A.gold : "#3B82F6", color: "#fff", fontSize: 12, fontWeight: 700 }}>
+                    v{v.version_num}
+                  </span>
+                  <span style={{ fontSize: 12, color: A.muted }}>
+                    {v.model_id?.split(".").pop()?.replace(/-v\d+:\d+$/, "") ?? "—"}
+                  </span>
+                  {v.quality_score != null && (
+                    <span style={{ fontSize: 13, fontWeight: 700, color: scoreColor(v.quality_score) }}>
+                      {v.quality_score.toFixed(1)}
+                    </span>
+                  )}
+                  {v.created_at && (
+                    <span style={{ fontSize: 11, color: A.muted2, marginLeft: "auto" }}>
+                      {relDate(v.created_at)}
+                    </span>
+                  )}
+                </div>
+              ) : (
+                <span style={{ fontSize: 12, color: A.muted2 }}>Loading…</span>
+              )}
+            </div>
+          ))}
+        </div>
+
+        {/* Content comparison */}
+        <div style={{ flex: 1, overflowY: "auto" }}>
+          {error ? (
+            <div style={{ padding: 24, color: A.red, fontSize: 13 }}>{error}</div>
+          ) : !left || !right ? (
+            <div style={{ padding: 24, textAlign: "center", color: A.muted, fontSize: 13 }}>Loading version details…</div>
+          ) : (
+            FIELD_LABELS.map(([key, label]) => (
+              <div key={key} style={{ borderBottom: `1px solid ${A.line}` }}>
+                <div style={{
+                  padding: "6px 20px", background: A.line2,
+                  fontSize: 10, fontWeight: 700, textTransform: "uppercase",
+                  letterSpacing: "0.12em", color: A.muted,
+                }}>
+                  {label}
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr" }}>
+                  {[left[key], right[key]].map((val, i) => (
+                    <div key={i} style={{
+                      padding: "10px 20px",
+                      background: i === 0 ? "#FAFAF8" : "#F8FAFF",
+                      borderRight: i === 0 ? `1px solid ${A.line}` : undefined,
+                      fontSize: 13, color: val ? A.body : A.muted2,
+                      lineHeight: 1.6, whiteSpace: "pre-wrap",
+                    }}>
+                      {val || "—"}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ── Main page ─────────────────────────────────────────────────────────────────
@@ -99,9 +249,13 @@ export default function MasterContentPage() {
   const [versionLoading, setVersionLoading] = useState<Record<string, boolean>>({});
   const [promoting, setPromoting]       = useState<string | null>(null);
   const [page, setPage]                 = useState(1);
+  const [runsPage, setRunsPage]         = useState(1);
   const [statusFilter, setStatusFilter] = useState("");
   const [exporting, setExporting]       = useState(false);
-  const PAGE_SIZE = 25;
+
+  // Per-tour version compare selection: tourId → selected version nums
+  const [compareVersionSel, setCompareVersionSel] = useState<Record<string, Set<number>>>({});
+  const [compareVersionOpen, setCompareVersionOpen] = useState<{ tourId: string; tourName: string; vNums: [number, number] } | null>(null);
 
   async function load() {
     try {
@@ -139,6 +293,7 @@ export default function MasterContentPage() {
     (!statusFilter || t.status === statusFilter)
   );
   const paginated = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const paginatedRuns = runs.slice((runsPage - 1) * RUNS_PAGE_SIZE, runsPage * RUNS_PAGE_SIZE);
 
   function handleSearch(v: string) { setSearch(v); setPage(1); }
   function handleStatusFilter(v: string) { setStatusFilter(v); setPage(1); }
@@ -197,6 +352,14 @@ export default function MasterContentPage() {
       const next = new Set(prev);
       next.has(tourId) ? next.delete(tourId) : next.add(tourId);
       return next;
+    });
+  }
+
+  function toggleVersionSel(tourId: string, vNum: number) {
+    setCompareVersionSel(prev => {
+      const cur = new Set(prev[tourId] ?? []);
+      cur.has(vNum) ? cur.delete(vNum) : cur.add(vNum);
+      return { ...prev, [tourId]: cur };
     });
   }
 
@@ -287,7 +450,7 @@ export default function MasterContentPage() {
         {/* Tours table */}
         <Card style={{ padding: 0, marginBottom: 28 }}>
           <div style={{ padding: "14px 20px 10px", borderBottom: `1px solid ${A.line}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <SLabel>Rewritten Tours — aa_internal</SLabel>
+            <SLabel>Rewritten Tours</SLabel>
             <span style={{ fontSize: 12, color: A.muted2 }}>{tours.length} total</span>
           </div>
           {filtered.length === 0 ? (
@@ -329,6 +492,7 @@ export default function MasterContentPage() {
                     const isSelected = t.tour_id ? selectedIds.has(t.tour_id) : false;
                     const versions   = t.tour_id ? (tourVersions[t.tour_id] ?? []) : [];
                     const vLoading   = t.tour_id ? (versionLoading[t.tour_id] ?? false) : false;
+                    const vSel       = t.tour_id ? (compareVersionSel[t.tour_id] ?? new Set<number>()) : new Set<number>();
                     return (
                       <React.Fragment key={t.version_id}>
                         <tr style={{
@@ -388,53 +552,86 @@ export default function MasterContentPage() {
                               ) : versions.length === 0 ? (
                                 <div style={{ padding: "12px 16px", fontSize: 12, color: A.muted }}>No versions found</div>
                               ) : (
-                                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                                  <thead>
-                                    <tr style={{ background: A.line2 }}>
-                                      {["Version", "Model", "Score", "Date", ""].map(h => (
-                                        <th key={h} style={{ padding: "6px 10px", textAlign: "left" as const, fontSize: 10, fontWeight: 600, color: A.muted, textTransform: "uppercase" as const, letterSpacing: "0.08em" }}>{h}</th>
-                                      ))}
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {versions.map(v => (
-                                      <tr key={v.id} style={{ borderTop: `1px solid ${A.line}`, background: v.is_current ? "#FEFCE8" : "transparent" }}>
-                                        <td style={{ padding: "6px 10px" }}>
-                                          <span style={{ padding: "2px 7px", borderRadius: 10, background: v.is_current ? A.gold : A.goldTint, color: v.is_current ? "#fff" : A.gold, fontSize: 11, fontWeight: 600 }}>
-                                            v{v.version_num}
-                                          </span>
-                                          {v.is_current && <span style={{ marginLeft: 6, fontSize: 10, color: A.gold }}>current</span>}
-                                        </td>
-                                        <td style={{ padding: "6px 10px", fontFamily: mono, fontSize: 11, color: A.muted2 }}>
-                                          {v.model_id?.split(".").pop()?.replace(/-v\d+:\d+$/, "") ?? "—"}
-                                        </td>
-                                        <td style={{ padding: "6px 10px", fontWeight: 700, color: scoreColor(v.quality_score) }}>
-                                          {v.quality_score != null ? v.quality_score.toFixed(1) : "—"}
-                                        </td>
-                                        <td style={{ padding: "6px 10px", color: A.muted2 }}>
-                                          {v.created_at ? relDate(v.created_at) : "—"}
-                                        </td>
-                                        <td style={{ padding: "6px 10px" }}>
-                                          <div style={{ display: "flex", gap: 5 }}>
-                                            <button
-                                              onClick={() => { if (t.tour_id) { setDetailTourId(t.tour_id); setDetailTourName(t.tour_name); } }}
-                                              style={{ padding: "2px 7px", fontSize: 11, border: `1px solid ${A.line}`, borderRadius: 4, background: "#fff", cursor: "pointer", color: A.body }}
-                                            >View</button>
-                                            {!v.is_current && (
-                                              <button
-                                                onClick={() => t.tour_id && promoteVersion(t.tour_id, t.tour_name, v.version_num)}
-                                                disabled={promoting === `${t.tour_id}-${v.version_num}`}
-                                                style={{ padding: "2px 7px", fontSize: 11, border: `1px solid ${A.gold}`, borderRadius: 4, background: A.goldTint, cursor: "pointer", color: A.gold, fontWeight: 600 }}
-                                              >
-                                                {promoting === `${t.tour_id}-${v.version_num}` ? "…" : "Promote"}
-                                              </button>
-                                            )}
-                                          </div>
-                                        </td>
+                                <>
+                                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                                    <thead>
+                                      <tr style={{ background: A.line2 }}>
+                                        {["", "Version", "Model", "Score", "Date", ""].map((h, hi) => (
+                                          <th key={hi} style={{ padding: "6px 10px", textAlign: "left" as const, fontSize: 10, fontWeight: 600, color: A.muted, textTransform: "uppercase" as const, letterSpacing: "0.08em" }}>{h}</th>
+                                        ))}
                                       </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
+                                    </thead>
+                                    <tbody>
+                                      {versions.map(v => (
+                                        <tr key={v.id} style={{ borderTop: `1px solid ${A.line}`, background: v.is_current ? "#FEFCE8" : "transparent" }}>
+                                          <td style={{ padding: "6px 10px", width: 32 }}>
+                                            <input
+                                              type="checkbox"
+                                              checked={vSel.has(v.version_num)}
+                                              onChange={() => t.tour_id && toggleVersionSel(t.tour_id, v.version_num)}
+                                              disabled={!vSel.has(v.version_num) && vSel.size >= 2}
+                                              style={{ accentColor: A.gold }}
+                                            />
+                                          </td>
+                                          <td style={{ padding: "6px 10px" }}>
+                                            <span style={{ padding: "2px 7px", borderRadius: 10, background: v.is_current ? A.gold : A.goldTint, color: v.is_current ? "#fff" : A.gold, fontSize: 11, fontWeight: 600 }}>
+                                              v{v.version_num}
+                                            </span>
+                                            {v.is_current && <span style={{ marginLeft: 6, fontSize: 10, color: A.gold }}>current</span>}
+                                          </td>
+                                          <td style={{ padding: "6px 10px", fontFamily: mono, fontSize: 11, color: A.muted2 }}>
+                                            {v.model_id?.split(".").pop()?.replace(/-v\d+:\d+$/, "") ?? "—"}
+                                          </td>
+                                          <td style={{ padding: "6px 10px", fontWeight: 700, color: scoreColor(v.quality_score) }}>
+                                            {v.quality_score != null ? v.quality_score.toFixed(1) : "—"}
+                                          </td>
+                                          <td style={{ padding: "6px 10px", color: A.muted2 }}>
+                                            {v.created_at ? relDate(v.created_at) : "—"}
+                                          </td>
+                                          <td style={{ padding: "6px 10px" }}>
+                                            <div style={{ display: "flex", gap: 5 }}>
+                                              <button
+                                                onClick={() => { if (t.tour_id) { setDetailTourId(t.tour_id); setDetailTourName(t.tour_name); } }}
+                                                style={{ padding: "2px 7px", fontSize: 11, border: `1px solid ${A.line}`, borderRadius: 4, background: "#fff", cursor: "pointer", color: A.body }}
+                                              >View</button>
+                                              {!v.is_current && (
+                                                <button
+                                                  onClick={() => t.tour_id && promoteVersion(t.tour_id, t.tour_name, v.version_num)}
+                                                  disabled={promoting === `${t.tour_id}-${v.version_num}`}
+                                                  style={{ padding: "2px 7px", fontSize: 11, border: `1px solid ${A.gold}`, borderRadius: 4, background: A.goldTint, cursor: "pointer", color: A.gold, fontWeight: 600 }}
+                                                >
+                                                  {promoting === `${t.tour_id}-${v.version_num}` ? "…" : "Promote"}
+                                                </button>
+                                              )}
+                                            </div>
+                                          </td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                  {vSel.size === 2 && t.tour_id && (
+                                    <div style={{ padding: "8px 12px", borderTop: `1px solid ${A.line}`, display: "flex", alignItems: "center", gap: 10 }}>
+                                      <span style={{ fontSize: 12, color: A.muted }}>
+                                        v{[...vSel].sort((a,b)=>a-b).join(" vs v")} selected
+                                      </span>
+                                      <button
+                                        onClick={() => {
+                                          const nums = [...vSel].sort((a,b)=>a-b) as [number, number];
+                                          setCompareVersionOpen({ tourId: t.tour_id!, tourName: t.tour_name, vNums: nums });
+                                        }}
+                                        style={{ padding: "4px 12px", fontSize: 12, fontWeight: 600, border: `1px solid ${A.gold}`, borderRadius: 6, background: A.goldTint, cursor: "pointer", color: A.gold }}
+                                      >
+                                        Compare Versions
+                                      </button>
+                                      <button
+                                        onClick={() => t.tour_id && setCompareVersionSel(p => ({ ...p, [t.tour_id!]: new Set() }))}
+                                        style={{ fontSize: 11, color: A.muted2, background: "none", border: "none", cursor: "pointer" }}
+                                      >
+                                        Clear
+                                      </button>
+                                    </div>
+                                  )}
+                                </>
                               )}
                             </td>
                           </tr>
@@ -473,7 +670,7 @@ export default function MasterContentPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {runs.slice(0, 10).map((r, i) => (
+                  {paginatedRuns.map((r, i) => (
                     <tr key={r.run_id} style={{ background: i % 2 === 0 ? "#fff" : A.bg }}>
                       <td style={{ ...TD, fontFamily: mono, fontSize: 11, color: A.muted2 }}>
                         {r.run_id.slice(0, 8)}…
@@ -495,6 +692,11 @@ export default function MasterContentPage() {
                 </tbody>
               </table>
             </div>
+            {runs.length > RUNS_PAGE_SIZE && (
+              <div style={{ padding: "12px 20px", borderTop: `1px solid ${A.line}`, display: "flex", justifyContent: "flex-end" }}>
+                <Pagination page={runsPage} total={runs.length} pageSize={RUNS_PAGE_SIZE} onPage={setRunsPage} />
+              </div>
+            )}
           </Card>
         )}
       </main>
@@ -508,11 +710,21 @@ export default function MasterContentPage() {
         />
       )}
 
-      {/* Compare modal */}
+      {/* Tour compare modal (cross-tour) */}
       {compareOpen && (
         <CompareModal
           tourIds={[...selectedIds]}
           onClose={() => setCompareOpen(false)}
+        />
+      )}
+
+      {/* Version compare modal (within-tour) */}
+      {compareVersionOpen && (
+        <VersionCompareModal
+          tourId={compareVersionOpen.tourId}
+          tourName={compareVersionOpen.tourName}
+          versionNums={compareVersionOpen.vNums}
+          onClose={() => setCompareVersionOpen(null)}
         />
       )}
     </div>

@@ -15,8 +15,10 @@ import {
 } from "../_components/adminUi";
 import { TourDetailPanelV2 } from "../_components/TourDetailPanelV2";
 import { CompareModal } from "../_components/CompareModal";
+import { Pagination } from "../_components/Pagination";
 
 const TENANT_ID = "00000000-0000-0000-0000-000000000001";
+const PAGE_SIZE = 20;
 
 function stripUuidPrefix(filename: string | null | undefined): string {
   if (!filename) return "—";
@@ -121,7 +123,9 @@ export default function S1RewritePage() {
   const [selectedIds, setSelectedIds]       = useState<Set<string>>(new Set());
   const [filterCountry, setFilterCountry]   = useState("");
   const [filterFile, setFilterFile]         = useState("");
+  const [filterStatus, setFilterStatus]     = useState("");
   const [filterSearch, setFilterSearch]     = useState("");
+  const [page, setPage]                     = useState(1);
   const [seoMode, setSeoMode]               = useState("standard");
   const [modelTier, setModelTier]           = useState("haiku");
   const [brandList, setBrandList]           = useState<BrandSummary[]>([]);
@@ -171,8 +175,17 @@ export default function S1RewritePage() {
     if (filterCountry && t.country !== filterCountry) return false;
     if (filterFile && t.filename !== filterFile) return false;
     if (filterSearch && !t.src_name.toLowerCase().includes(filterSearch.toLowerCase())) return false;
+    if (filterStatus === "published" && t.pipeline_status !== "published") return false;
+    if (filterStatus === "ready"     && t.pipeline_status === "published") return false;
     return true;
   });
+
+  const paginatedTours = filteredTours.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
+  function handleFilterChange(setter: (v: string) => void, v: string) {
+    setter(v);
+    setPage(1);
+  }
 
   function toggleTour(id: string, e: React.MouseEvent) {
     e.stopPropagation();
@@ -267,295 +280,318 @@ export default function S1RewritePage() {
   return (
     <div style={{ display: "flex", minHeight: "100vh", background: A.bg, fontFamily: sans }}>
       <AdminSidebar />
-      <main style={{ flex: 1, padding: "32px 36px", overflowY: "auto" }}>
 
-        {/* Header */}
-        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 24 }}>
-          <div>
-            <div style={{ fontFamily: serif, fontSize: 26, fontWeight: 500, color: A.ink, letterSpacing: "-0.02em" }}>
-              S1 Rewrite
+      {/* Right column: sticky config + scrollable main */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
+
+        {/* ── Sticky Config Panel ─────────────────────────────────────────── */}
+        <div style={{
+          position: "sticky", top: 0, zIndex: 20,
+          background: "#fff", borderBottom: `1px solid ${A.line}`,
+          padding: "12px 36px",
+        }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 12, alignItems: "flex-end" }}>
+            <div>
+              <label style={{ fontSize: 11, color: A.muted, display: "block", marginBottom: 4 }}>Brand Identity</label>
+              <select
+                value={brandName ?? ""}
+                onChange={e => setBrandName(e.target.value || null)}
+                disabled={running}
+                style={{ width: "100%", padding: "7px 10px", borderRadius: 6, border: `1px solid ${A.line}`, fontSize: 13, fontFamily: sans, background: "#fff" }}
+              >
+                {brandList.length === 0 && <option value="">No brand configured</option>}
+                {brandList.map(b => (
+                  <option key={b.brand_name} value={b.brand_name}>
+                    {b.brand_name}{b.is_active ? " (active)" : ""}
+                    {b.brand_type ? ` · ${b.brand_type}` : ""}
+                  </option>
+                ))}
+              </select>
             </div>
-            <div style={{ fontSize: 13, color: A.muted, marginTop: 4 }}>
-              {tours.length} tours total — select to rewrite with AI
+            <div>
+              <label style={{ fontSize: 11, color: A.muted, display: "block", marginBottom: 4 }}>SEO Mode</label>
+              <select
+                value={seoMode}
+                onChange={e => setSeoMode(e.target.value)}
+                disabled={running}
+                style={{ width: "100%", padding: "7px 10px", borderRadius: 6, border: `1px solid ${A.line}`, fontSize: 13, fontFamily: sans, background: "#fff" }}
+              >
+                <option value="standard">Standard — DataForSEO keywords, balanced</option>
+                <option value="aggressive">Aggressive — keyword-heavy, SEO-first</option>
+                <option value="minimal">Minimal — brand-only, no SEO enrichment</option>
+              </select>
+            </div>
+            <div>
+              <label style={{ fontSize: 11, color: A.muted, display: "block", marginBottom: 4 }}>Model</label>
+              <select
+                value={modelTier}
+                onChange={e => setModelTier(e.target.value)}
+                disabled={running}
+                style={{ width: "100%", padding: "7px 10px", borderRadius: 6, border: `1px solid ${A.line}`, fontSize: 13, fontFamily: sans, background: "#fff" }}
+              >
+                <option value="haiku">Haiku 4.5 (~$0.002/tour)</option>
+                <option value="sonnet">Sonnet 4.5 (~$0.02/tour)</option>
+                <option value="gpt4">GPT-4.1 (~$0.01/tour)</option>
+              </select>
+            </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+              {selectedIds.size >= 2 && selectedIds.size <= 4 && (
+                <Btn
+                  variant="secondary"
+                  size="lg"
+                  onClick={() => setCompareOpen(true)}
+                  disabled={running}
+                  style={{ whiteSpace: "nowrap" as const }}
+                >
+                  Compare ({selectedIds.size})
+                </Btn>
+              )}
+              <Btn
+                variant="primary"
+                size="lg"
+                disabled={running || selectedIds.size === 0}
+                onClick={() => setShowConfirm(true)}
+                style={{
+                  background: (running || selectedIds.size === 0) ? A.muted : A.gold,
+                  border: `1px solid ${(running || selectedIds.size === 0) ? A.muted : A.gold}`,
+                  display: "flex", alignItems: "center", gap: 8,
+                  whiteSpace: "nowrap" as const,
+                  opacity: selectedIds.size === 0 ? 0.5 : 1,
+                }}
+              >
+                <Play size={14} />
+                {running ? "Running…" : `Run Rewrite${selectedIds.size > 0 ? ` (${selectedIds.size})` : ""}`}
+              </Btn>
             </div>
           </div>
-          <Btn size="sm" variant="ghost" onClick={loadTours} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <RefreshCw size={13} /> Refresh
-          </Btn>
         </div>
 
-        {/* Filter bar */}
-        <Card style={{ marginBottom: 16, padding: "12px 16px" }}>
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <select
-              value={filterCountry}
-              onChange={e => setFilterCountry(e.target.value)}
-              style={{ padding: "6px 10px", borderRadius: 6, border: `1px solid ${A.line}`, fontSize: 13, fontFamily: sans, background: "#fff", minWidth: 140 }}
-            >
-              <option value="">All Countries</option>
-              {uniqueCountries.map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
+        {/* ── Scrollable Content ──────────────────────────────────────────── */}
+        <main style={{ flex: 1, padding: "24px 36px 56px", overflowY: "auto" }}>
 
-            <select
-              value={filterFile}
-              onChange={e => setFilterFile(e.target.value)}
-              style={{ padding: "6px 10px", borderRadius: 6, border: `1px solid ${A.line}`, fontSize: 13, fontFamily: sans, background: "#fff", minWidth: 180 }}
-            >
-              <option value="">All Files</option>
-              {uniqueFiles.map(f => <option key={f} value={f}>{stripUuidPrefix(f)}</option>)}
-            </select>
-
-            <div style={{ display: "flex", alignItems: "center", gap: 6, border: `1px solid ${A.line}`, borderRadius: 6, padding: "6px 10px", background: "#fff", flex: 1, minWidth: 200 }}>
-              <Search size={13} style={{ color: A.muted2, flexShrink: 0 }} />
-              <input
-                placeholder="Search by tour name…"
-                value={filterSearch}
-                onChange={e => setFilterSearch(e.target.value)}
-                style={{ border: "none", outline: "none", fontSize: 13, fontFamily: sans, width: "100%", background: "transparent" }}
-              />
+          {/* Header */}
+          <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 20 }}>
+            <div>
+              <div style={{ fontFamily: serif, fontSize: 26, fontWeight: 500, color: A.ink, letterSpacing: "-0.02em" }}>
+                S1 Rewrite
+              </div>
+              <div style={{ fontSize: 13, color: A.muted, marginTop: 4 }}>
+                {tours.length} tours total — select to rewrite with AI
+              </div>
             </div>
-
-            <Btn size="sm" variant="ghost" onClick={selectAll}>Select All ({filteredTours.length})</Btn>
-            <Btn size="sm" variant="ghost" onClick={deselectAll} disabled={selectedIds.size === 0}>Deselect All</Btn>
-          </div>
-        </Card>
-
-        {/* Tours table */}
-        {tours.length === 0 ? (
-          <Card style={{ textAlign: "center", padding: "48px 24px" }}>
-            <div style={{ fontSize: 15, color: A.muted, marginBottom: 14 }}>No tours found.</div>
-            <div style={{ fontSize: 13, color: A.muted2, marginBottom: 20 }}>Upload Excel files in Upload (S0) first.</div>
-            <Btn size="sm" variant="secondary" onClick={() => window.location.href = "/admin/upload"}
-              style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-              Go to Upload <ArrowRight size={12} />
+            <Btn size="sm" variant="ghost" onClick={loadTours} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <RefreshCw size={13} /> Refresh
             </Btn>
-          </Card>
-        ) : (
-          <Card style={{ marginBottom: 20, padding: 0, overflow: "hidden" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead style={{ position: "sticky", top: 0, zIndex: 2 }}>
-                <tr style={{ background: A.line2 }}>
-                  <th style={{ ...TH, width: 36, paddingLeft: 16 }}>
-                    <input
-                      type="checkbox"
-                      checked={filteredTours.length > 0 && filteredTours.every(t => selectedIds.has(t.tour_id))}
-                      onChange={e => e.target.checked ? selectAll() : deselectAll()}
-                      style={{ accentColor: A.gold }}
-                    />
-                  </th>
-                  <th style={TH}>Tour Name</th>
-                  <th style={TH}>Country</th>
-                  <th style={TH}>Source File</th>
-                  <th style={TH}>Rewrites</th>
-                  <th style={TH}>Last Rewritten</th>
-                  <th style={TH}>Ingested</th>
-                  <th style={TH}>Status</th>
-                  <th style={{ ...TH, width: 28 }}></th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredTours.map((t, i) => {
-                  const runStatus = tourStatuses[t.tour_id] || "idle";
-                  const result = runResults[t.tour_id];
-                  const isSelected = selectedIds.has(t.tour_id);
-                  const isDetail = detailTour?.tour_id === t.tour_id;
-                  return (
-                    <tr
-                      key={t.tour_id}
-                      onClick={() => setDetailTour(isDetail ? null : t)}
-                      style={{
-                        borderTop: i > 0 ? `1px solid ${A.line}` : undefined,
-                        background: isDetail ? `${A.gold}18` : isSelected ? `${A.gold}10` : "transparent",
-                        cursor: "pointer",
-                        transition: "background .12s",
-                      }}
-                    >
-                      <td style={{ ...TD, paddingLeft: 16 }} onClick={e => e.stopPropagation()}>
-                        <input
-                          type="checkbox"
-                          checked={isSelected}
-                          onChange={() => {}}
-                          onClick={e => { e.stopPropagation(); setSelectedIds(prev => { const next = new Set(prev); next.has(t.tour_id) ? next.delete(t.tour_id) : next.add(t.tour_id); return next; }); }}
-                          disabled={running}
-                          style={{ accentColor: A.gold }}
-                        />
-                      </td>
-                      <td style={{ ...TD, fontWeight: 500, color: A.ink }}>{t.src_name}</td>
-                      <td style={TD}>
-                        <span style={{ color: t.country ? A.body : A.muted2 }}>{t.country || "—"}</span>
-                      </td>
-                      <td style={TD}>
-                        <span style={{ fontFamily: mono, fontSize: 11, color: A.muted }}>
-                          {stripUuidPrefix(t.filename)}
-                        </span>
-                      </td>
-                      <td style={{ ...TD, textAlign: "center" as const }}>
-                        {t.rewrite_count > 0
-                          ? <span style={{ fontFamily: mono, fontSize: 13, fontWeight: 600, color: A.ink }}>{t.rewrite_count}</span>
-                          : <span style={{ color: A.muted2 }}>—</span>}
-                      </td>
-                      <td style={{ ...TD, color: A.muted2, fontSize: 12 }}>{relativeTime(t.last_rewritten_at)}</td>
-                      <td style={{ ...TD, color: A.muted2, fontSize: 12 }}>{relativeTime(t.ingest_at)}</td>
-                      <td style={TD}><PipelineStatusBadge tour={t} runStatus={runStatus} result={result} /></td>
-                      <td style={{ ...TD, color: A.muted2 }}><ChevronRight size={14} /></td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </Card>
-        )}
+          </div>
 
-        {/* Config + Run panel */}
-        {selectedIds.size > 0 && (
-          <Card style={{ marginBottom: 20 }}>
-            <SLabel>Rewrite Config</SLabel>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 12, alignItems: "flex-end" }}>
-              <div>
-                <label style={{ fontSize: 11, color: A.muted, display: "block", marginBottom: 4 }}>Brand Identity</label>
-                <select
-                  value={brandName ?? ""}
-                  onChange={e => setBrandName(e.target.value || null)}
-                  disabled={running}
-                  style={{ width: "100%", padding: "7px 10px", borderRadius: 6, border: `1px solid ${A.line}`, fontSize: 13, fontFamily: sans, background: "#fff" }}
-                >
-                  {brandList.length === 0 && <option value="">No brand configured</option>}
-                  {brandList.map(b => (
-                    <option key={b.brand_name} value={b.brand_name}>
-                      {b.brand_name}{b.is_active ? " (active)" : ""}
-                      {b.brand_type ? ` · ${b.brand_type}` : ""}
-                    </option>
-                  ))}
-                </select>
+          {/* Filter bar */}
+          <Card style={{ marginBottom: 16, padding: "12px 16px" }}>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <select
+                value={filterCountry}
+                onChange={e => handleFilterChange(setFilterCountry, e.target.value)}
+                style={{ padding: "6px 10px", borderRadius: 6, border: `1px solid ${A.line}`, fontSize: 13, fontFamily: sans, background: "#fff", minWidth: 140 }}
+              >
+                <option value="">All Countries</option>
+                {uniqueCountries.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+
+              <select
+                value={filterFile}
+                onChange={e => handleFilterChange(setFilterFile, e.target.value)}
+                style={{ padding: "6px 10px", borderRadius: 6, border: `1px solid ${A.line}`, fontSize: 13, fontFamily: sans, background: "#fff", minWidth: 180 }}
+              >
+                <option value="">All Files</option>
+                {uniqueFiles.map(f => <option key={f} value={f}>{stripUuidPrefix(f)}</option>)}
+              </select>
+
+              <select
+                value={filterStatus}
+                onChange={e => handleFilterChange(setFilterStatus, e.target.value)}
+                style={{ padding: "6px 10px", borderRadius: 6, border: `1px solid ${A.line}`, fontSize: 13, fontFamily: sans, background: "#fff", minWidth: 130 }}
+              >
+                <option value="">All Status</option>
+                <option value="published">Published</option>
+                <option value="ready">Ready</option>
+              </select>
+
+              <div style={{ display: "flex", alignItems: "center", gap: 6, border: `1px solid ${A.line}`, borderRadius: 6, padding: "6px 10px", background: "#fff", flex: 1, minWidth: 200 }}>
+                <Search size={13} style={{ color: A.muted2, flexShrink: 0 }} />
+                <input
+                  placeholder="Search by tour name…"
+                  value={filterSearch}
+                  onChange={e => handleFilterChange(setFilterSearch, e.target.value)}
+                  style={{ border: "none", outline: "none", fontSize: 13, fontFamily: sans, width: "100%", background: "transparent" }}
+                />
               </div>
-              <div>
-                <label style={{ fontSize: 11, color: A.muted, display: "block", marginBottom: 4 }}>SEO Mode</label>
-                <select
-                  value={seoMode}
-                  onChange={e => setSeoMode(e.target.value)}
-                  disabled={running}
-                  style={{ width: "100%", padding: "7px 10px", borderRadius: 6, border: `1px solid ${A.line}`, fontSize: 13, fontFamily: sans, background: "#fff" }}
-                >
-                  <option value="standard">Standard — DataForSEO keywords, balanced</option>
-                  <option value="aggressive">Aggressive — keyword-heavy, SEO-first</option>
-                  <option value="minimal">Minimal — brand-only, no SEO enrichment</option>
-                </select>
-              </div>
-              <div>
-                <label style={{ fontSize: 11, color: A.muted, display: "block", marginBottom: 4 }}>Model</label>
-                <select
-                  value={modelTier}
-                  onChange={e => setModelTier(e.target.value)}
-                  disabled={running}
-                  style={{ width: "100%", padding: "7px 10px", borderRadius: 6, border: `1px solid ${A.line}`, fontSize: 13, fontFamily: sans, background: "#fff" }}
-                >
-                  <option value="haiku">Haiku 4.5 (~$0.002/tour)</option>
-                  <option value="sonnet">Sonnet 4.5 (~$0.02/tour)</option>
-                  <option value="gpt4">GPT-4.1 (~$0.01/tour)</option>
-                </select>
-              </div>
-              <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-                {selectedIds.size >= 2 && selectedIds.size <= 4 && (
+
+              <Btn size="sm" variant="ghost" onClick={selectAll}>Select All ({filteredTours.length})</Btn>
+              <Btn size="sm" variant="ghost" onClick={deselectAll} disabled={selectedIds.size === 0}>Deselect All</Btn>
+            </div>
+          </Card>
+
+          {/* Tours table */}
+          {tours.length === 0 ? (
+            <Card style={{ textAlign: "center", padding: "48px 24px" }}>
+              <div style={{ fontSize: 15, color: A.muted, marginBottom: 14 }}>No tours found.</div>
+              <div style={{ fontSize: 13, color: A.muted2, marginBottom: 20 }}>Upload Excel files in Upload (S0) first.</div>
+              <Btn size="sm" variant="secondary" onClick={() => window.location.href = "/admin/upload"}
+                style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                Go to Upload <ArrowRight size={12} />
+              </Btn>
+            </Card>
+          ) : (
+            <Card style={{ marginBottom: 20, padding: 0, overflow: "hidden" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead style={{ position: "sticky", top: 0, zIndex: 2 }}>
+                  <tr style={{ background: A.line2 }}>
+                    <th style={{ ...TH, width: 36, paddingLeft: 16 }}>
+                      <input
+                        type="checkbox"
+                        checked={filteredTours.length > 0 && filteredTours.every(t => selectedIds.has(t.tour_id))}
+                        onChange={e => e.target.checked ? selectAll() : deselectAll()}
+                        style={{ accentColor: A.gold }}
+                      />
+                    </th>
+                    <th style={TH}>Tour Name</th>
+                    <th style={TH}>Country</th>
+                    <th style={TH}>Source File</th>
+                    <th style={TH}>Rewrites</th>
+                    <th style={TH}>Last Rewritten</th>
+                    <th style={TH}>Ingested</th>
+                    <th style={TH}>Status</th>
+                    <th style={{ ...TH, width: 28 }}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {paginatedTours.map((t, i) => {
+                    const runStatus = tourStatuses[t.tour_id] || "idle";
+                    const result = runResults[t.tour_id];
+                    const isSelected = selectedIds.has(t.tour_id);
+                    const isDetail = detailTour?.tour_id === t.tour_id;
+                    return (
+                      <tr
+                        key={t.tour_id}
+                        onClick={() => setDetailTour(isDetail ? null : t)}
+                        style={{
+                          borderTop: i > 0 ? `1px solid ${A.line}` : undefined,
+                          background: isDetail ? `${A.gold}18` : isSelected ? `${A.gold}10` : "transparent",
+                          cursor: "pointer",
+                          transition: "background .12s",
+                        }}
+                      >
+                        <td style={{ ...TD, paddingLeft: 16 }} onClick={e => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => {}}
+                            onClick={e => { e.stopPropagation(); setSelectedIds(prev => { const next = new Set(prev); next.has(t.tour_id) ? next.delete(t.tour_id) : next.add(t.tour_id); return next; }); }}
+                            disabled={running}
+                            style={{ accentColor: A.gold }}
+                          />
+                        </td>
+                        <td style={{ ...TD, fontWeight: 500, color: A.ink }}>{t.src_name}</td>
+                        <td style={TD}>
+                          <span style={{ color: t.country ? A.body : A.muted2 }}>{t.country || "—"}</span>
+                        </td>
+                        <td style={TD}>
+                          <span style={{ fontFamily: mono, fontSize: 11, color: A.muted }}>
+                            {stripUuidPrefix(t.filename)}
+                          </span>
+                        </td>
+                        <td style={{ ...TD, textAlign: "center" as const }}>
+                          {t.rewrite_count > 0
+                            ? <span style={{ fontFamily: mono, fontSize: 13, fontWeight: 600, color: A.ink }}>{t.rewrite_count}</span>
+                            : <span style={{ color: A.muted2 }}>—</span>}
+                        </td>
+                        <td style={{ ...TD, color: A.muted2, fontSize: 12 }}>{relativeTime(t.last_rewritten_at)}</td>
+                        <td style={{ ...TD, color: A.muted2, fontSize: 12 }}>{relativeTime(t.ingest_at)}</td>
+                        <td style={TD}><PipelineStatusBadge tour={t} runStatus={runStatus} result={result} /></td>
+                        <td style={{ ...TD, color: A.muted2 }}><ChevronRight size={14} /></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {filteredTours.length > PAGE_SIZE && (
+                <div style={{ padding: "12px 20px", borderTop: `1px solid ${A.line}`, display: "flex", justifyContent: "flex-end" }}>
+                  <Pagination page={page} total={filteredTours.length} pageSize={PAGE_SIZE} onPage={setPage} />
+                </div>
+              )}
+            </Card>
+          )}
+
+          {/* Confirm dialog */}
+          {showConfirm && (
+            <div style={{
+              position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
+              display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100,
+            }}>
+              <Card style={{ maxWidth: 420, width: "90%", padding: 28 }}>
+                <div style={{ fontFamily: serif, fontSize: 18, fontWeight: 500, color: A.ink, marginBottom: 12 }}>
+                  Confirm Rewrite
+                </div>
+                <div style={{ fontSize: 14, color: A.body, marginBottom: 20, lineHeight: 1.6 }}>
+                  This will rewrite{" "}
+                  <strong>{selectedIds.size} tour{selectedIds.size !== 1 ? "s" : ""}</strong>{" "}
+                  using <strong>{seoModeLabel(seoMode)} SEO</strong> mode
+                  with <strong>{modelLabel(modelTier)}</strong>
+                  {brandName ? ` (Brand: ${brandName})` : ""}. Continue?
+                </div>
+                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                  <Btn size="sm" variant="ghost" onClick={() => setShowConfirm(false)}>Cancel</Btn>
                   <Btn
-                    variant="secondary"
-                    size="lg"
-                    onClick={() => setCompareOpen(true)}
-                    disabled={running}
-                    style={{ whiteSpace: "nowrap" as const }}
+                    size="sm"
+                    variant="primary"
+                    onClick={startRun}
+                    style={{ background: A.gold, border: `1px solid ${A.gold}` }}
                   >
-                    Compare ({selectedIds.size})
+                    Yes, Run Rewrite
+                  </Btn>
+                </div>
+              </Card>
+            </div>
+          )}
+
+          {/* Progress summary */}
+          {(running || runComplete) && Object.keys(tourStatuses).length > 0 && (
+            <Card style={{ marginBottom: 20 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.14em", color: A.muted }}>
+                  Rewrite Progress
+                </div>
+                <span style={{ fontSize: 13, color: A.muted }}>
+                  {(statusCounts.done || 0) + (statusCounts.failed || 0)} / {Object.keys(tourStatuses).length} complete
+                </span>
+                {(statusCounts.done || 0) > 0 && (
+                  <span style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13, color: A.green }}>
+                    <CheckCircle size={13} /> {statusCounts.done} done
+                  </span>
+                )}
+                {(statusCounts.failed || 0) > 0 && (
+                  <span style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13, color: A.red }}>
+                    <XCircle size={13} /> {statusCounts.failed} failed
+                  </span>
+                )}
+                {running && <span style={{ fontSize: 13, color: A.amber }}>Processing…</span>}
+                {runComplete && (
+                  <Btn
+                    size="sm"
+                    variant="primary"
+                    onClick={() => window.location.href = "/admin/master-content"}
+                    style={{
+                      background: A.gold, border: `1px solid ${A.gold}`,
+                      display: "flex", alignItems: "center", gap: 6, marginLeft: "auto",
+                    }}
+                  >
+                    View in Master Content <ArrowRight size={12} />
                   </Btn>
                 )}
-                <Btn
-                  variant="primary"
-                  size="lg"
-                  disabled={running}
-                  onClick={() => setShowConfirm(true)}
-                  style={{
-                    background: running ? A.muted : A.gold,
-                    border: `1px solid ${running ? A.muted : A.gold}`,
-                    display: "flex", alignItems: "center", gap: 8,
-                    whiteSpace: "nowrap" as const,
-                  }}
-                >
-                  <Play size={14} />
-                  {running ? "Running…" : `Run Rewrite (${selectedIds.size})`}
-                </Btn>
-              </div>
-            </div>
-          </Card>
-        )}
-
-        {/* Confirm dialog */}
-        {showConfirm && (
-          <div style={{
-            position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
-            display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100,
-          }}>
-            <Card style={{ maxWidth: 420, width: "90%", padding: 28 }}>
-              <div style={{ fontFamily: serif, fontSize: 18, fontWeight: 500, color: A.ink, marginBottom: 12 }}>
-                Confirm Rewrite
-              </div>
-              <div style={{ fontSize: 14, color: A.body, marginBottom: 20, lineHeight: 1.6 }}>
-                This will rewrite{" "}
-                <strong>{selectedIds.size} tour{selectedIds.size !== 1 ? "s" : ""}</strong>{" "}
-                using <strong>{seoModeLabel(seoMode)} SEO</strong> mode
-                with <strong>{modelLabel(modelTier)}</strong>
-                {brandName ? ` (Brand: ${brandName})` : ""}. Continue?
-              </div>
-              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-                <Btn size="sm" variant="ghost" onClick={() => setShowConfirm(false)}>Cancel</Btn>
-                <Btn
-                  size="sm"
-                  variant="primary"
-                  onClick={startRun}
-                  style={{ background: A.gold, border: `1px solid ${A.gold}` }}
-                >
-                  Yes, Run Rewrite
-                </Btn>
               </div>
             </Card>
-          </div>
-        )}
-
-        {/* Progress summary */}
-        {(running || runComplete) && Object.keys(tourStatuses).length > 0 && (
-          <Card style={{ marginBottom: 20 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
-              <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.14em", color: A.muted }}>
-                Rewrite Progress
-              </div>
-              <span style={{ fontSize: 13, color: A.muted }}>
-                {(statusCounts.done || 0) + (statusCounts.failed || 0)} / {Object.keys(tourStatuses).length} complete
-              </span>
-              {(statusCounts.done || 0) > 0 && (
-                <span style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13, color: A.green }}>
-                  <CheckCircle size={13} /> {statusCounts.done} done
-                </span>
-              )}
-              {(statusCounts.failed || 0) > 0 && (
-                <span style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13, color: A.red }}>
-                  <XCircle size={13} /> {statusCounts.failed} failed
-                </span>
-              )}
-              {running && <span style={{ fontSize: 13, color: A.amber }}>Processing…</span>}
-              {runComplete && (
-                <Btn
-                  size="sm"
-                  variant="primary"
-                  onClick={() => window.location.href = "/admin/master-content"}
-                  style={{
-                    background: A.gold, border: `1px solid ${A.gold}`,
-                    display: "flex", alignItems: "center", gap: 6, marginLeft: "auto",
-                  }}
-                >
-                  View in Master Content <ArrowRight size={12} />
-                </Btn>
-              )}
-            </div>
-          </Card>
-        )}
-      </main>
+          )}
+        </main>
+      </div>
 
       {/* Detail panel v2 (handles its own backdrop) */}
       {detailTour && (

@@ -161,6 +161,7 @@ async def list_tenants(
             FROM shared.tenants t
             LEFT JOIN shared.v_tenant_monthly_usage u
                 ON u.tenant_id = t.tenant_id
+            WHERE t.is_active = true
             ORDER BY t.created_at
         """)
     return {
