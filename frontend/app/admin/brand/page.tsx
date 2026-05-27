@@ -1,9 +1,10 @@
 "use client";
-// app/admin/brand/page.tsx — Brand Identity v2 (AA-129)
+// app/admin/brand/page.tsx — Brand Identity v3 (AA-129)
 // GET  /api/admin/brands         → list brands
-// GET  /api/admin/brands/{name}  → brand detail + history
+// GET  /api/admin/brands/{name}  → brand detail + history (with full version data)
 // POST /api/admin/brands         → create brand
 // PUT  /api/admin/brands/{name}  → update brand (new version)
+// POST /api/admin/brands/{name}/activate → {version: N} → set version as active
 // DELETE /api/admin/brands/{name} → soft delete
 
 import { useState, useEffect, useCallback, useRef } from "react";
@@ -22,6 +23,22 @@ interface BrandSummary {
   updated_at: string | null;
 }
 
+interface VersionHistoryEntry {
+  version: number;
+  is_active: boolean;
+  updated_at: string | null;
+  brand_type: string;
+  core_idea: string;
+  customer_segment: string;
+  customer_mindset: string;
+  tone_of_voice: string[];
+  writing_style: string;
+  should_write: string;
+  forbidden_words: string[];
+  target_markets: string[];
+  rewrite_language: string;
+}
+
 interface BrandDetail {
   brand_name: string;
   brand_type: string;
@@ -38,15 +55,16 @@ interface BrandDetail {
   version: number;
   is_active: boolean;
   updated_at: string | null;
-  history: { version: number; is_active: boolean; updated_at: string | null }[];
+  history: VersionHistoryEntry[];
 }
 
 // ─── Tags input ───────────────────────────────────────────────────────────────
 
-function TagsInput({ value, onChange, placeholder }: {
+function TagsInput({ value, onChange, placeholder, readOnly }: {
   value: string[];
   onChange: (v: string[]) => void;
   placeholder?: string;
+  readOnly?: boolean;
 }) {
   const [input, setInput] = useState("");
   function add() {
@@ -64,27 +82,31 @@ function TagsInput({ value, onChange, placeholder }: {
             background: A.goldTint, color: A.gold, fontWeight: 600,
           }}>
             {t}
-            <button onClick={() => onChange(value.filter(x => x !== t))} style={{
-              background: "none", border: "none", cursor: "pointer", padding: 0,
-              color: A.gold, lineHeight: 1, fontSize: 13,
-            }}>×</button>
+            {!readOnly && (
+              <button onClick={() => onChange(value.filter(x => x !== t))} style={{
+                background: "none", border: "none", cursor: "pointer", padding: 0,
+                color: A.gold, lineHeight: 1, fontSize: 13,
+              }}>×</button>
+            )}
           </span>
         ))}
       </div>
-      <div style={{ display: "flex", gap: 6 }}>
-        <input
-          value={input}
-          onChange={e => setInput(e.target.value)}
-          onKeyDown={e => { if (e.key === "Enter" || e.key === ",") { e.preventDefault(); add(); } }}
-          placeholder={placeholder || "Type and press Enter…"}
-          style={{
-            flex: 1, padding: "7px 10px", border: `1px solid ${A.line}`,
-            borderRadius: 6, fontSize: 13, fontFamily: sans,
-            background: "#fff", color: A.ink, outline: "none",
-          }}
-        />
-        <Btn variant="secondary" onClick={add} style={{ padding: "7px 12px" }}>Add</Btn>
-      </div>
+      {!readOnly && (
+        <div style={{ display: "flex", gap: 6 }}>
+          <input
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter" || e.key === ",") { e.preventDefault(); add(); } }}
+            placeholder={placeholder || "Type and press Enter…"}
+            style={{
+              flex: 1, padding: "7px 10px", border: `1px solid ${A.line}`,
+              borderRadius: 6, fontSize: 13, fontFamily: sans,
+              background: "#fff", color: A.ink, outline: "none",
+            }}
+          />
+          <Btn variant="secondary" onClick={add} style={{ padding: "7px 12px" }}>Add</Btn>
+        </div>
+      )}
     </div>
   );
 }
@@ -155,128 +177,131 @@ function detailToForm(d: BrandDetail): BrandForm {
   };
 }
 
-// ─── DOCX parser ──────────────────────────────────────────────────────────────
+function versionToForm(brand_name: string, v: VersionHistoryEntry): BrandForm {
+  return {
+    brand_name,
+    brand_type: v.brand_type || "",
+    core_idea: v.core_idea || "",
+    target_markets: v.target_markets || [],
+    customer_segment: v.customer_segment || "",
+    customer_mindset: v.customer_mindset || "",
+    tone_of_voice: v.tone_of_voice || [],
+    writing_style: v.writing_style || "",
+    good_examples: "",
+    should_write: v.should_write || "",
+    forbidden_words: v.forbidden_words || [],
+    rewrite_language: v.rewrite_language || "en",
+  };
+}
 
-function parseBrandText(rawText: string): Partial<BrandForm> {
-  const lines = rawText.split("\n").map(l => l.trim());
+// ─── DOCX parser — HTML mode ──────────────────────────────────────────────────
+
+const KNOWN_HEADINGS = [
+  "Brand Identity", "Target Market", "Target Markets",
+  "Tone of Voice", "Writing Style",
+  "Good Example", "Good Examples",
+  "Should Write", "Should Not Write",
+];
+
+function isHeading(p: string) {
+  return KNOWN_HEADINGS.some(h => p.toLowerCase() === h.toLowerCase());
+}
+
+function getInlineLabel(p: string): { key: string; value: string } | null {
+  const LABELED_KEYS = ["Brand type", "Core idea", "Primary markets", "Customer segment", "Customer mindset"];
+  for (const k of LABELED_KEYS) {
+    if (p.toLowerCase().startsWith(k.toLowerCase() + ":")) {
+      const colon = p.indexOf(":");
+      return { key: k.toLowerCase(), value: p.slice(colon + 1).trim() };
+    }
+  }
+  return null;
+}
+
+function parseBrandText(paragraphs: string[]): Partial<BrandForm> {
   const result: Partial<BrandForm> = {};
 
-  const SECTION_HEADINGS = new Set([
-    "brand identity", "target market", "target markets",
-    "tone of voice", "writing style",
-    "good example", "good examples",
-    "should write", "should not write",
-  ]);
-
-  function isSection(line: string) { return SECTION_HEADINGS.has(line.toLowerCase()); }
-  function isApiKey(line: string) { return /^cis_[A-Za-z0-9]/.test(line); }
-  function isLabeledField(line: string) {
-    return /^(brand type|core idea|primary markets|customer segment|customer mindset):/i.test(line);
-  }
-
-  // Brand name: first non-empty line without colon, not a heading, not an API key
-  for (const line of lines) {
-    if (!line || isApiKey(line) || isSection(line) || line.includes(":")) continue;
-    result.brand_name = line;
+  // Brand name: first non-empty paragraph that is NOT a known heading, NOT a cis_ key, has no ":"
+  for (const p of paragraphs) {
+    if (!p || /^cis_[A-Za-z0-9]/.test(p) || isHeading(p) || p.includes(":")) continue;
+    result.brand_name = p;
     break;
   }
 
   let i = 0;
-  while (i < lines.length) {
-    const line = lines[i];
-    if (!line) { i++; continue; }
+  while (i < paragraphs.length) {
+    const p = paragraphs[i].trim();
+    if (!p) { i++; continue; }
 
-    if (/^brand type:/i.test(line)) {
-      result.brand_type = line.replace(/^brand type:\s*/i, "").trim();
-    }
-
-    if (/^core idea:/i.test(line)) {
-      const parts: string[] = [];
-      const inline = line.replace(/^core idea:\s*/i, "").trim();
-      if (inline) parts.push(inline);
-      for (let j = i + 1; j < lines.length; j++) {
-        const next = lines[j];
-        if (!next || isSection(next) || isLabeledField(next)) break;
-        parts.push(next);
+    const labeled = getInlineLabel(p);
+    if (labeled) {
+      switch (labeled.key) {
+        case "brand type":
+          result.brand_type = labeled.value;
+          break;
+        case "core idea":
+          result.core_idea = labeled.value;
+          break;
+        case "primary markets":
+          if (labeled.value)
+            result.target_markets = labeled.value.split(/[,;]/).map(s => s.trim()).filter(Boolean);
+          break;
+        case "customer segment":
+          result.customer_segment = labeled.value;
+          break;
+        case "customer mindset":
+          result.customer_mindset = labeled.value;
+          break;
       }
-      result.core_idea = parts.join(" ");
+      i++;
+      continue;
     }
 
-    if (/^primary markets:/i.test(line)) {
-      let val = line.replace(/^primary markets:\s*/i, "").trim();
-      if (!val) val = lines[i + 1]?.trim() || "";
-      if (val) result.target_markets = val.split(/[,;]/).map(s => s.trim()).filter(Boolean);
-    }
-
-    if (/^customer segment:/i.test(line)) {
-      const parts: string[] = [];
-      const inline = line.replace(/^customer segment:\s*/i, "").trim();
-      if (inline) parts.push(inline);
-      for (let j = i + 1; j < lines.length; j++) {
-        const next = lines[j];
-        if (!next || isSection(next) || isLabeledField(next)) break;
-        parts.push(next);
-      }
-      result.customer_segment = parts.join(" ");
-    }
-
-    if (/^customer mindset:/i.test(line)) {
-      const parts: string[] = [];
-      const inline = line.replace(/^customer mindset:\s*/i, "").trim();
-      if (inline) parts.push(inline);
-      for (let j = i + 1; j < lines.length; j++) {
-        const next = lines[j];
-        if (!next || isSection(next) || isLabeledField(next)) break;
-        parts.push(next);
-      }
-      result.customer_mindset = parts.join(" ");
-    }
-
-    if (/^tone of voice$/i.test(line)) {
+    if (/^tone of voice$/i.test(p)) {
       const traits: string[] = [];
-      for (let j = i + 1; j < lines.length; j++) {
-        const next = lines[j];
-        if (isSection(next)) break;
-        if (next && next.split(" ").length <= 4) traits.push(next);
+      for (let j = i + 1; j < paragraphs.length; j++) {
+        const next = paragraphs[j].trim();
+        if (isHeading(next)) break;
+        if (next) traits.push(next);
       }
       if (traits.length) result.tone_of_voice = traits;
     }
 
-    if (/^writing style$/i.test(line)) {
+    if (/^writing style$/i.test(p)) {
       const parts: string[] = [];
-      for (let j = i + 1; j < lines.length; j++) {
-        const next = lines[j];
-        if (isSection(next)) break;
+      for (let j = i + 1; j < paragraphs.length; j++) {
+        const next = paragraphs[j].trim();
+        if (isHeading(next)) break;
         if (next) parts.push(next);
       }
       if (parts.length) result.writing_style = parts.join("\n");
     }
 
-    if (/^good examples?$/i.test(line)) {
+    if (/^good examples?$/i.test(p)) {
       const parts: string[] = [];
-      for (let j = i + 1; j < lines.length; j++) {
-        const next = lines[j];
-        if (isSection(next)) break;
+      for (let j = i + 1; j < paragraphs.length; j++) {
+        const next = paragraphs[j].trim();
+        if (isHeading(next)) break;
         if (next) parts.push(next);
       }
       if (parts.length) result.good_examples = parts.join("\n");
     }
 
-    if (/^should write$/i.test(line)) {
+    if (/^should write$/i.test(p)) {
       const parts: string[] = [];
-      for (let j = i + 1; j < lines.length; j++) {
-        const next = lines[j];
-        if (isSection(next)) break;
+      for (let j = i + 1; j < paragraphs.length; j++) {
+        const next = paragraphs[j].trim();
+        if (isHeading(next)) break;
         if (next) parts.push(next);
       }
       if (parts.length) result.should_write = parts.join("\n");
     }
 
-    if (/^should not write$/i.test(line)) {
+    if (/^should not write$/i.test(p)) {
       const words: string[] = [];
-      for (let j = i + 1; j < lines.length; j++) {
-        const next = lines[j];
-        if (isSection(next)) break;
+      for (let j = i + 1; j < paragraphs.length; j++) {
+        const next = paragraphs[j].trim();
+        if (isHeading(next)) break;
         if (next) words.push(next);
       }
       if (words.length) result.forbidden_words = words;
@@ -291,18 +316,21 @@ function parseBrandText(rawText: string): Partial<BrandForm> {
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function AdminBrandPage() {
-  const [brands, setBrands]         = useState<BrandSummary[]>([]);
-  const [selected, setSelected]     = useState<string | null>(null);
-  const [detail, setDetail]         = useState<BrandDetail | null>(null);
-  const [form, setForm]             = useState<BrandForm>(emptyForm());
-  const [isNew, setIsNew]           = useState(false);
-  const [saving, setSaving]         = useState(false);
-  const [msg, setMsg]               = useState<{ text: string; ok: boolean } | null>(null);
+  const [brands, setBrands]           = useState<BrandSummary[]>([]);
+  const [selected, setSelected]       = useState<string | null>(null);
+  const [detail, setDetail]           = useState<BrandDetail | null>(null);
+  const [form, setForm]               = useState<BrandForm>(emptyForm());
+  const [isNew, setIsNew]             = useState(false);
+  const [saving, setSaving]           = useState(false);
+  const [msg, setMsg]                 = useState<{ text: string; ok: boolean } | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [loading, setLoading]       = useState(true);
-  const [deleting, setDeleting]     = useState(false);
-  const [parsing, setParsing]       = useState(false);
-  const docxRef                     = useRef<HTMLInputElement>(null);
+  const [loading, setLoading]         = useState(true);
+  const [deleting, setDeleting]       = useState(false);
+  const [parsing, setParsing]         = useState(false);
+  // viewingVersion: null = editing active version, N = viewing read-only version N
+  const [viewingVersion, setViewingVersion] = useState<number | null>(null);
+  const [activating, setActivating]   = useState(false);
+  const docxRef                       = useRef<HTMLInputElement>(null);
 
   const loadBrands = useCallback(async () => {
     setLoading(true);
@@ -316,6 +344,7 @@ export default function AdminBrandPage() {
 
   async function selectBrand(name: string) {
     setSelected(name); setIsNew(false); setMsg(null); setHistoryOpen(false);
+    setViewingVersion(null);
     const r = await fetch(`/api/admin/brands/${encodeURIComponent(name)}`);
     if (r.ok) {
       const d: BrandDetail = await r.json();
@@ -327,10 +356,45 @@ export default function AdminBrandPage() {
   function startNew() {
     setSelected(null); setDetail(null);
     setForm(emptyForm()); setIsNew(true); setMsg(null);
+    setViewingVersion(null);
   }
 
   function upd<K extends keyof BrandForm>(key: K, val: BrandForm[K]) {
     setForm(f => ({ ...f, [key]: val }));
+  }
+
+  function viewVersion(v: VersionHistoryEntry) {
+    setViewingVersion(v.version);
+    setForm(versionToForm(selected!, v));
+    setMsg(null);
+  }
+
+  function exitVersionView() {
+    setViewingVersion(null);
+    if (detail) setForm(detailToForm(detail));
+    setMsg(null);
+  }
+
+  async function activateVersion(version: number) {
+    if (!selected) return;
+    if (!confirm(`Set v${version} as the active version for "${selected}"?`)) return;
+    setActivating(true); setMsg(null);
+    try {
+      const r = await fetch(`/api/admin/brands/${encodeURIComponent(selected)}/activate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ version }),
+      });
+      if (r.ok) {
+        setMsg({ text: `v${version} activated ✓`, ok: true });
+        setViewingVersion(null);
+        await loadBrands();
+        await selectBrand(selected);
+      } else {
+        const e = await r.json().catch(() => ({}));
+        setMsg({ text: e.detail || "Activate failed", ok: false });
+      }
+    } finally { setActivating(false); }
   }
 
   async function save() {
@@ -366,6 +430,7 @@ export default function AdminBrandPage() {
       const r = await fetch(`/api/admin/brands/${encodeURIComponent(selected)}`, { method: "DELETE" });
       if (r.ok) {
         setSelected(null); setDetail(null); setForm(emptyForm());
+        setViewingVersion(null);
         await loadBrands();
       } else {
         const e = await r.json().catch(() => ({}));
@@ -381,8 +446,12 @@ export default function AdminBrandPage() {
     try {
       const arrayBuf = await file.arrayBuffer();
       const mammoth = await import("mammoth");
-      const { value: rawText } = await mammoth.extractRawText({ arrayBuffer: arrayBuf });
-      const parsed = parseBrandText(rawText);
+      const result = await mammoth.convertToHtml({ arrayBuffer: arrayBuf });
+      const html = result.value;
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(html, "text/html");
+      const paragraphs = Array.from(doc.querySelectorAll("p")).map(p => p.textContent?.trim() || "");
+      const parsed = parseBrandText(paragraphs);
       const fieldCount = Object.keys(parsed).length;
       setForm(f => ({
         ...f,
@@ -409,6 +478,7 @@ export default function AdminBrandPage() {
   }
 
   const canSave = isNew ? form.brand_name.trim().length > 0 : selected != null;
+  const isReadOnly = viewingVersion !== null;
 
   return (
     <div style={{ display: "flex", minHeight: "100vh", fontFamily: sans, background: A.bg }}>
@@ -486,6 +556,25 @@ export default function AdminBrandPage() {
               </div>
             ) : (
               <>
+                {/* Read-only banner when viewing old version */}
+                {isReadOnly && (
+                  <div style={{
+                    marginBottom: 16, padding: "10px 16px", borderRadius: 8,
+                    background: "#FFF7ED", border: "1px solid #FED7AA",
+                    display: "flex", justifyContent: "space-between", alignItems: "center",
+                  }}>
+                    <span style={{ fontSize: 13, color: "#C2410C", fontWeight: 500 }}>
+                      Read-only — version {viewingVersion}
+                    </span>
+                    <button onClick={exitVersionView} style={{
+                      background: "none", border: "none", cursor: "pointer",
+                      fontSize: 12, color: "#C2410C", fontWeight: 600, textDecoration: "underline",
+                    }}>
+                      Back to current
+                    </button>
+                  </div>
+                )}
+
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 24 }}>
                   <div>
                     <div style={{ fontFamily: serif, fontSize: 24, fontWeight: 500, color: A.ink, letterSpacing: "-0.01em" }}>
@@ -500,7 +589,7 @@ export default function AdminBrandPage() {
                       </div>
                     )}
                   </div>
-                  {!isNew && selected && (
+                  {!isNew && selected && !isReadOnly && (
                     <button onClick={deleteBrand} disabled={deleting} style={{
                       background: "none", border: `1px solid ${A.line}`, borderRadius: 6,
                       cursor: "pointer", color: A.red, padding: "6px 10px",
@@ -517,9 +606,9 @@ export default function AdminBrandPage() {
                       <input
                         value={form.brand_name}
                         onChange={e => upd("brand_name", e.target.value)}
-                        disabled={!isNew}
+                        disabled={!isNew || isReadOnly}
                         placeholder="e.g. Adventure Asia"
-                        style={{ ...inputStyle, opacity: isNew ? 1 : 0.6 }}
+                        style={{ ...inputStyle, opacity: (isNew && !isReadOnly) ? 1 : 0.6 }}
                       />
                     </Field>
                     <Field label="Brand Type">
@@ -527,7 +616,8 @@ export default function AdminBrandPage() {
                         value={form.brand_type}
                         onChange={e => upd("brand_type", e.target.value)}
                         placeholder="e.g. luxury adventure, family, budget"
-                        style={inputStyle}
+                        style={{ ...inputStyle, opacity: isReadOnly ? 0.7 : 1 }}
+                        readOnly={isReadOnly}
                       />
                     </Field>
                   </div>
@@ -538,7 +628,8 @@ export default function AdminBrandPage() {
                       onChange={e => upd("core_idea", e.target.value)}
                       rows={2}
                       placeholder="1-2 sentences describing the brand's core positioning"
-                      style={textareaStyle}
+                      style={{ ...textareaStyle, opacity: isReadOnly ? 0.7 : 1 }}
+                      readOnly={isReadOnly}
                     />
                   </Field>
 
@@ -547,6 +638,7 @@ export default function AdminBrandPage() {
                       value={form.target_markets}
                       onChange={v => upd("target_markets", v)}
                       placeholder="Country or region, press Enter…"
+                      readOnly={isReadOnly}
                     />
                   </Field>
 
@@ -557,7 +649,8 @@ export default function AdminBrandPage() {
                         onChange={e => upd("customer_segment", e.target.value)}
                         rows={3}
                         placeholder="Demographics: age, income, profession…"
-                        style={textareaStyle}
+                        style={{ ...textareaStyle, opacity: isReadOnly ? 0.7 : 1 }}
+                        readOnly={isReadOnly}
                       />
                     </Field>
                     <Field label="Customer Mindset">
@@ -566,7 +659,8 @@ export default function AdminBrandPage() {
                         onChange={e => upd("customer_mindset", e.target.value)}
                         rows={3}
                         placeholder="Psychographics: values, motivations, fears…"
-                        style={textareaStyle}
+                        style={{ ...textareaStyle, opacity: isReadOnly ? 0.7 : 1 }}
+                        readOnly={isReadOnly}
                       />
                     </Field>
                   </div>
@@ -576,6 +670,7 @@ export default function AdminBrandPage() {
                       value={form.tone_of_voice}
                       onChange={v => upd("tone_of_voice", v)}
                       placeholder="Trait, press Enter… (e.g. calm, refined)"
+                      readOnly={isReadOnly}
                     />
                   </Field>
 
@@ -585,7 +680,8 @@ export default function AdminBrandPage() {
                       onChange={e => upd("writing_style", e.target.value)}
                       rows={3}
                       placeholder="e.g. Active verbs. No superlatives. Present tense…"
-                      style={textareaStyle}
+                      style={{ ...textareaStyle, opacity: isReadOnly ? 0.7 : 1 }}
+                      readOnly={isReadOnly}
                     />
                   </Field>
 
@@ -595,7 +691,8 @@ export default function AdminBrandPage() {
                       onChange={e => upd("good_examples", e.target.value)}
                       rows={4}
                       placeholder="Paste example paragraphs that match the brand voice…"
-                      style={textareaStyle}
+                      style={{ ...textareaStyle, opacity: isReadOnly ? 0.7 : 1 }}
+                      readOnly={isReadOnly}
                     />
                   </Field>
 
@@ -605,7 +702,8 @@ export default function AdminBrandPage() {
                       onChange={e => upd("should_write", e.target.value)}
                       rows={5}
                       placeholder="Instructions for the AI: e.g. You are a travel editor for Adventure Asia…"
-                      style={textareaStyle}
+                      style={{ ...textareaStyle, opacity: isReadOnly ? 0.7 : 1 }}
+                      readOnly={isReadOnly}
                     />
                   </Field>
 
@@ -614,22 +712,42 @@ export default function AdminBrandPage() {
                       value={form.forbidden_words}
                       onChange={v => upd("forbidden_words", v)}
                       placeholder="Word, press Enter… (e.g. cheap, stunning, curated)"
+                      readOnly={isReadOnly}
                     />
                   </Field>
 
-                  <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 8 }}>
-                    <Btn
-                      onClick={save}
-                      disabled={saving || !canSave}
-                      variant="primary"
-                      style={{ background: A.gold, border: `1px solid ${A.gold}` }}
-                    >
-                      {saving ? "Saving…" : isNew ? "Create Brand" : "Save (new version)"}
-                    </Btn>
-                    {msg && (
-                      <span style={{ fontSize: 12, color: msg.ok ? A.green : A.red }}>{msg.text}</span>
-                    )}
-                  </div>
+                  {!isReadOnly && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 8 }}>
+                      <Btn
+                        onClick={save}
+                        disabled={saving || !canSave}
+                        variant="primary"
+                        style={{ background: A.gold, border: `1px solid ${A.gold}` }}
+                      >
+                        {saving ? "Saving…" : isNew ? "Create Brand" : "Save (new version)"}
+                      </Btn>
+                      {msg && (
+                        <span style={{ fontSize: 12, color: msg.ok ? A.green : A.red }}>{msg.text}</span>
+                      )}
+                    </div>
+                  )}
+
+                  {isReadOnly && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 8 }}>
+                      <Btn
+                        onClick={() => activateVersion(viewingVersion!)}
+                        disabled={activating || detail?.history.find(h => h.version === viewingVersion)?.is_active}
+                        variant="primary"
+                        style={{ background: A.gold, border: `1px solid ${A.gold}` }}
+                      >
+                        {activating ? "Activating…" : `Set v${viewingVersion} as Active`}
+                      </Btn>
+                      <Btn variant="secondary" onClick={exitVersionView}>Cancel</Btn>
+                      {msg && (
+                        <span style={{ fontSize: 12, color: msg.ok ? A.green : A.red }}>{msg.text}</span>
+                      )}
+                    </div>
+                  )}
                 </Card>
 
                 {/* Version history */}
@@ -658,6 +776,32 @@ export default function AdminBrandPage() {
                               <span style={{ fontSize: 11, color: A.muted }}>{v.updated_at?.slice(0, 10) || "—"}</span>
                               {v.is_active && (
                                 <span style={{ fontSize: 10, background: A.gold, color: "#fff", borderRadius: 4, padding: "1px 6px" }}>active</span>
+                              )}
+                            </div>
+                            <div style={{ display: "flex", gap: 6 }}>
+                              <button
+                                onClick={() => viewVersion(v)}
+                                style={{
+                                  background: "#EEF2FF", border: "none", borderRadius: 5,
+                                  color: "#3730A3", cursor: "pointer", padding: "3px 10px",
+                                  fontSize: 12, fontWeight: 600,
+                                }}
+                              >
+                                View
+                              </button>
+                              {!v.is_active && (
+                                <button
+                                  onClick={() => activateVersion(v.version)}
+                                  disabled={activating}
+                                  style={{
+                                    background: A.goldTint, border: `1px solid ${A.gold}`,
+                                    borderRadius: 5, color: A.gold, cursor: "pointer",
+                                    padding: "3px 10px", fontSize: 12, fontWeight: 600,
+                                    opacity: activating ? 0.6 : 1,
+                                  }}
+                                >
+                                  Set Active
+                                </button>
                               )}
                             </div>
                           </div>
