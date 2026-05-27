@@ -3,6 +3,7 @@
 # Auth: x-admin-secret header only (no tenant JWT accepted)
 
 import asyncio
+import base64
 import json
 import os
 from uuid import UUID
@@ -10,7 +11,7 @@ from uuid import UUID
 import asyncpg
 import boto3 as _boto3
 import structlog
-from fastapi import APIRouter, File, Header, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional, List
 
@@ -1471,6 +1472,11 @@ async def get_spot_workers(request: Request, x_admin_secret: str = Header(None))
 # ── /admin/brands — multi-brand CRUD ─────────────────────────────────────────
 
 
+class ParseDocxRequest(BaseModel):
+    file_base64: str
+    filename: str = "brand.docx"
+
+
 class BrandCreateRequest(BaseModel):
     brand_name: str
     brand_type: Optional[str] = None
@@ -1545,16 +1551,15 @@ async def list_brands(request: Request, x_admin_secret: str = Header(None)):
 
 @router.post("/brands/parse-docx")
 async def parse_brand_docx(
-    request: Request,
-    file: UploadFile = File(...),
+    body: ParseDocxRequest,
     x_admin_secret: str = Header(None),
 ):
-    """Parse a brand brief DOCX and return pre-filled brand fields."""
+    """Parse a brand brief DOCX (base64-encoded JSON) and return pre-filled brand fields."""
     verify_admin_secret(x_admin_secret)
     try:
         from docx import Document  # type: ignore
         import io
-        content = await file.read()
+        content = base64.b64decode(body.file_base64)
         doc = Document(io.BytesIO(content))
     except ImportError:
         raise HTTPException(status_code=501, detail="python-docx not installed on this server")
@@ -1609,7 +1614,7 @@ async def parse_brand_docx(
 
     _flush()
 
-    return {"parsed": result, "filename": file.filename}
+    return {"parsed": result, "filename": body.filename}
 
 
 @router.get("/brands/{brand_name}")
