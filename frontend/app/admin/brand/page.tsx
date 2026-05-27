@@ -218,6 +218,21 @@ function getInlineLabel(p: string): { key: string; value: string } | null {
   return null;
 }
 
+// Convert mammoth HTML to a flat array of clean paragraph strings.
+// Normalises <br> → paragraph boundaries and <li> → paragraphs so that
+// traits / rules spread across <br>-joined lines become separate entries.
+function htmlToParagraphs(html: string): string[] {
+  const normalised = html
+    .replace(/<br\s*\/?>/gi, "</p><p>")
+    .replace(/<\/li>/gi, "</p>")
+    .replace(/<li[^>]*>/gi, "<p>");
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(normalised, "text/html");
+  return Array.from(doc.querySelectorAll("p"))
+    .map(el => el.textContent?.trim() || "")
+    .filter(Boolean);
+}
+
 function parseBrandText(paragraphs: string[]): Partial<BrandForm> {
   const result: Partial<BrandForm> = {};
 
@@ -228,41 +243,67 @@ function parseBrandText(paragraphs: string[]): Partial<BrandForm> {
     break;
   }
 
+  // Collect subsequent paragraphs after index startIdx until the next heading or labeled field.
+  // Stops at a heading or another inline label — returns collected lines joined by sep.
+  function collectAfter(startIdx: number, sep = "\n"): string {
+    const parts: string[] = [];
+    for (let j = startIdx + 1; j < paragraphs.length; j++) {
+      const next = paragraphs[j];
+      if (!next) continue;
+      if (isHeading(next) || getInlineLabel(next)) break;
+      parts.push(next);
+    }
+    return parts.join(sep);
+  }
+
   let i = 0;
   while (i < paragraphs.length) {
-    const p = paragraphs[i].trim();
+    const p = paragraphs[i];
     if (!p) { i++; continue; }
 
     const labeled = getInlineLabel(p);
     if (labeled) {
       switch (labeled.key) {
         case "brand type":
-          result.brand_type = labeled.value;
+          // inline value or next paragraph (when label is a standalone bold heading)
+          result.brand_type = labeled.value || collectAfter(i, " ");
           break;
+
         case "core idea":
-          result.core_idea = labeled.value;
+          // inline value or next paragraph; do NOT collect multiple (one sentence field)
+          result.core_idea = labeled.value || collectAfter(i, " ");
           break;
-        case "primary markets":
-          if (labeled.value)
-            result.target_markets = labeled.value.split(/[,;]/).map(s => s.trim()).filter(Boolean);
+
+        case "primary markets": {
+          const raw = labeled.value || collectAfter(i, ",");
+          if (raw) result.target_markets = raw.split(/[,;]/).map(s => s.trim()).filter(Boolean);
           break;
-        case "customer segment":
-          result.customer_segment = labeled.value;
+        }
+
+        case "customer segment": {
+          // May have inline start + continuation lines (e.g. "25-40 years old\nSolo travellers...")
+          const continuation = collectAfter(i);
+          result.customer_segment = [labeled.value, continuation].filter(Boolean).join("\n");
           break;
-        case "customer mindset":
-          result.customer_mindset = labeled.value;
+        }
+
+        case "customer mindset": {
+          const continuation = collectAfter(i);
+          result.customer_mindset = [labeled.value, continuation].filter(Boolean).join("\n");
           break;
+        }
       }
       i++;
       continue;
     }
 
+    // Section headings — collect everything until the next known heading
     if (/^tone of voice$/i.test(p)) {
       const traits: string[] = [];
       for (let j = i + 1; j < paragraphs.length; j++) {
-        const next = paragraphs[j].trim();
+        const next = paragraphs[j];
         if (isHeading(next)) break;
-        if (next) traits.push(next);
+        if (next) traits.push(next);  // each paragraph = one trait
       }
       if (traits.length) result.tone_of_voice = traits;
     }
@@ -270,7 +311,7 @@ function parseBrandText(paragraphs: string[]): Partial<BrandForm> {
     if (/^writing style$/i.test(p)) {
       const parts: string[] = [];
       for (let j = i + 1; j < paragraphs.length; j++) {
-        const next = paragraphs[j].trim();
+        const next = paragraphs[j];
         if (isHeading(next)) break;
         if (next) parts.push(next);
       }
@@ -280,7 +321,7 @@ function parseBrandText(paragraphs: string[]): Partial<BrandForm> {
     if (/^good examples?$/i.test(p)) {
       const parts: string[] = [];
       for (let j = i + 1; j < paragraphs.length; j++) {
-        const next = paragraphs[j].trim();
+        const next = paragraphs[j];
         if (isHeading(next)) break;
         if (next) parts.push(next);
       }
@@ -290,7 +331,7 @@ function parseBrandText(paragraphs: string[]): Partial<BrandForm> {
     if (/^should write$/i.test(p)) {
       const parts: string[] = [];
       for (let j = i + 1; j < paragraphs.length; j++) {
-        const next = paragraphs[j].trim();
+        const next = paragraphs[j];
         if (isHeading(next)) break;
         if (next) parts.push(next);
       }
@@ -300,9 +341,9 @@ function parseBrandText(paragraphs: string[]): Partial<BrandForm> {
     if (/^should not write$/i.test(p)) {
       const words: string[] = [];
       for (let j = i + 1; j < paragraphs.length; j++) {
-        const next = paragraphs[j].trim();
+        const next = paragraphs[j];
         if (isHeading(next)) break;
-        if (next) words.push(next);
+        if (next) words.push(next);  // each paragraph = one forbidden rule
       }
       if (words.length) result.forbidden_words = words;
     }
@@ -447,10 +488,7 @@ export default function AdminBrandPage() {
       const arrayBuf = await file.arrayBuffer();
       const mammoth = await import("mammoth");
       const result = await mammoth.convertToHtml({ arrayBuffer: arrayBuf });
-      const html = result.value;
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(html, "text/html");
-      const paragraphs = Array.from(doc.querySelectorAll("p")).map(p => p.textContent?.trim() || "");
+      const paragraphs = htmlToParagraphs(result.value);
       const parsed = parseBrandText(paragraphs);
       const fieldCount = Object.keys(parsed).length;
       setForm(f => ({
