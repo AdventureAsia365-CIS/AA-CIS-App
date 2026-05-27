@@ -4,7 +4,7 @@
 // GET /api/admin/tours/{tour_id}/detail → detail panel
 
 import React, { useState, useEffect, useCallback } from "react";
-import { RefreshCw, ChevronDown, ChevronRight } from "lucide-react";
+import { RefreshCw, ChevronDown, ChevronRight, Download } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
 import {
   A, serif, sans, mono,
@@ -13,6 +13,8 @@ import {
 import { BarChart2, Star, DollarSign, CalendarClock } from "lucide-react";
 import { TourDetailPanelV2 } from "../_components/TourDetailPanelV2";
 import { CompareModal } from "../_components/CompareModal";
+import { FilterBar } from "../_components/FilterBar";
+import { Pagination } from "../_components/Pagination";
 
 const AA_INTERNAL_ID = "00000000-0000-0000-0000-000000000001";
 
@@ -58,7 +60,6 @@ interface TourVersion {
   id: string;
   version_num: number;
   model_id: string | null;
-  seo_mode: string | null;
   quality_score: number | null;
   created_at: string | null;
   is_current: boolean;
@@ -97,6 +98,10 @@ export default function MasterContentPage() {
   const [tourVersions, setTourVersions] = useState<Record<string, TourVersion[]>>({});
   const [versionLoading, setVersionLoading] = useState<Record<string, boolean>>({});
   const [promoting, setPromoting]       = useState<string | null>(null);
+  const [page, setPage]                 = useState(1);
+  const [statusFilter, setStatusFilter] = useState("");
+  const [exporting, setExporting]       = useState(false);
+  const PAGE_SIZE = 25;
 
   async function load() {
     try {
@@ -128,10 +133,30 @@ export default function MasterContentPage() {
     : 0;
 
   const filtered = tours.filter(t =>
-    !search ||
-    t.tour_name.toLowerCase().includes(search.toLowerCase()) ||
-    (t.country || "").toLowerCase().includes(search.toLowerCase())
+    (!search ||
+      t.tour_name.toLowerCase().includes(search.toLowerCase()) ||
+      (t.country || "").toLowerCase().includes(search.toLowerCase())) &&
+    (!statusFilter || t.status === statusFilter)
   );
+  const paginated = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
+  function handleSearch(v: string) { setSearch(v); setPage(1); }
+  function handleStatusFilter(v: string) { setStatusFilter(v); setPage(1); }
+
+  async function exportTours(format: "csv" | "xlsx") {
+    setExporting(true);
+    try {
+      const r = await fetch(`/api/admin/tours/export?format=${format}`);
+      if (!r.ok) return;
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `master_content_export.${format}`; a.click();
+      URL.revokeObjectURL(url);
+    } finally { setExporting(false); }
+  }
+
+  const statusOptions = ["published", "active", "pending", "failed"].map(s => ({ label: s, value: s }));
 
   const toggleExpand = useCallback(async (tourId: string) => {
     setExpandedTours(prev => {
@@ -221,42 +246,43 @@ export default function MasterContentPage() {
           <StatCard icon={<CalendarClock size={16} />} label="Pipeline Runs" value={String(runs.length)}        sub={`↳ ${summary?.pipeline_note ?? "pipeline_runs"}`} />
         </div>
 
-        {/* Toolbar: search + compare */}
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
-          <input
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            placeholder="Search by tour name or country…"
-            style={{
-              width: 300, padding: "8px 12px", borderRadius: 8,
-              border: `1px solid ${A.line}`, fontSize: 13, fontFamily: sans,
-              background: "#fff", color: A.ink, outline: "none",
-            }}
-          />
-          {search && (
-            <span style={{ fontSize: 12, color: A.muted }}>
-              {filtered.length} of {tours.length} tours
-            </span>
-          )}
-          {selectedIds.size >= 2 && selectedIds.size <= 4 && (
-            <Btn
-              variant="secondary"
-              size="sm"
-              onClick={() => setCompareOpen(true)}
-              style={{ marginLeft: "auto" }}
-            >
-              Compare ({selectedIds.size})
-            </Btn>
-          )}
-          {selectedIds.size > 0 && (
-            <button
-              onClick={() => setSelectedIds(new Set())}
-              style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: A.muted, padding: "4px 8px" }}
-            >
-              Clear ({selectedIds.size})
-            </button>
-          )}
-        </div>
+        {/* Toolbar: filter + compare + export */}
+        <FilterBar
+          search={search}
+          onSearch={handleSearch}
+          placeholder="Search by tour name or country…"
+          filters={[{
+            label: "Status", value: "status", current: statusFilter,
+            options: statusOptions, onChange: handleStatusFilter,
+          }]}
+          extra={
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              {selectedIds.size >= 2 && selectedIds.size <= 4 && (
+                <Btn variant="secondary" size="sm" onClick={() => setCompareOpen(true)}>
+                  Compare ({selectedIds.size})
+                </Btn>
+              )}
+              {selectedIds.size > 0 && (
+                <button
+                  onClick={() => setSelectedIds(new Set())}
+                  style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: A.muted, padding: "4px 8px" }}
+                >
+                  Clear ({selectedIds.size})
+                </button>
+              )}
+              <div style={{ position: "relative", display: "inline-flex" }}>
+                <Btn variant="secondary" size="sm" disabled={exporting} onClick={() => exportTours("csv")}
+                  style={{ borderRadius: "6px 0 0 6px", borderRight: "none" }}>
+                  <Download size={12} /> {exporting ? "…" : "CSV"}
+                </Btn>
+                <Btn variant="secondary" size="sm" disabled={exporting} onClick={() => exportTours("xlsx")}
+                  style={{ borderRadius: "0 6px 6px 0" }}>
+                  XLSX
+                </Btn>
+              </div>
+            </div>
+          }
+        />
 
         {/* Tours table */}
         <Card style={{ padding: 0, marginBottom: 28 }}>
@@ -266,22 +292,22 @@ export default function MasterContentPage() {
           </div>
           {filtered.length === 0 ? (
             <div style={{ padding: 40, textAlign: "center" as const, color: A.muted, fontSize: 13 }}>
-              {search ? "No tours match your search" : "No rewritten tours found"}
+              {search || statusFilter ? "No tours match your filters" : "No rewritten tours found"}
             </div>
           ) : (
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead>
+                <thead style={{ position: "sticky", top: 0, zIndex: 2, background: A.bg }}>
                   <tr>
                     <th style={{ ...TH, width: 36, paddingLeft: 16 }}>
                       <input
                         type="checkbox"
-                        checked={filtered.length > 0 && filtered.filter(t => t.tour_id).every(t => selectedIds.has(t.tour_id!))}
+                        checked={paginated.length > 0 && paginated.filter(t => t.tour_id).every(t => selectedIds.has(t.tour_id!))}
                         onChange={e => {
                           if (e.target.checked) {
-                            setSelectedIds(new Set(filtered.filter(t => t.tour_id).map(t => t.tour_id!)));
+                            setSelectedIds(new Set([...selectedIds, ...paginated.filter(t => t.tour_id).map(t => t.tour_id!)]));
                           } else {
-                            setSelectedIds(new Set());
+                            setSelectedIds(new Set([...selectedIds].filter(id => !paginated.some(t => t.tour_id === id))));
                           }
                         }}
                         style={{ accentColor: A.gold }}
@@ -297,7 +323,8 @@ export default function MasterContentPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((t, i) => {
+                  {paginated.map((t, i) => {
+                    const absIdx = (page - 1) * PAGE_SIZE + i;
                     const isExpanded = t.tour_id ? expandedTours.has(t.tour_id) : false;
                     const isSelected = t.tour_id ? selectedIds.has(t.tour_id) : false;
                     const versions   = t.tour_id ? (tourVersions[t.tour_id] ?? []) : [];
@@ -305,7 +332,7 @@ export default function MasterContentPage() {
                     return (
                       <React.Fragment key={t.version_id}>
                         <tr style={{
-                          background: isExpanded ? `${A.gold}14` : isSelected ? `${A.gold}10` : i % 2 === 0 ? "#fff" : A.bg,
+                          background: isExpanded ? `${A.gold}14` : isSelected ? `${A.gold}10` : absIdx % 2 === 0 ? "#fff" : A.bg,
                           borderBottom: isExpanded ? "none" : undefined,
                         }}>
                           <td style={{ ...TD, paddingLeft: 16 }} onClick={e => e.stopPropagation()}>
@@ -318,7 +345,7 @@ export default function MasterContentPage() {
                               />
                             )}
                           </td>
-                          <td style={{ ...TD, color: A.muted2 }}>{i + 1}</td>
+                          <td style={{ ...TD, color: A.muted2 }}>{absIdx + 1}</td>
                           <td style={{ ...TD, fontWeight: 600, color: A.ink, fontFamily: serif }}>
                             {t.tour_name}
                           </td>
@@ -364,7 +391,7 @@ export default function MasterContentPage() {
                                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                                   <thead>
                                     <tr style={{ background: A.line2 }}>
-                                      {["Version", "Model", "SEO Mode", "Score", "Date", ""].map(h => (
+                                      {["Version", "Model", "Score", "Date", ""].map(h => (
                                         <th key={h} style={{ padding: "6px 10px", textAlign: "left" as const, fontSize: 10, fontWeight: 600, color: A.muted, textTransform: "uppercase" as const, letterSpacing: "0.08em" }}>{h}</th>
                                       ))}
                                     </tr>
@@ -381,7 +408,6 @@ export default function MasterContentPage() {
                                         <td style={{ padding: "6px 10px", fontFamily: mono, fontSize: 11, color: A.muted2 }}>
                                           {v.model_id?.split(".").pop()?.replace(/-v\d+:\d+$/, "") ?? "—"}
                                         </td>
-                                        <td style={{ padding: "6px 10px", color: A.muted }}>{v.seo_mode ?? "—"}</td>
                                         <td style={{ padding: "6px 10px", fontWeight: 700, color: scoreColor(v.quality_score) }}>
                                           {v.quality_score != null ? v.quality_score.toFixed(1) : "—"}
                                         </td>
@@ -418,6 +444,11 @@ export default function MasterContentPage() {
                   })}
                 </tbody>
               </table>
+            </div>
+          )}
+          {filtered.length > PAGE_SIZE && (
+            <div style={{ padding: "14px 20px", borderTop: `1px solid ${A.line}`, display: "flex", justifyContent: "flex-end" }}>
+              <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onPage={setPage} />
             </div>
           )}
         </Card>

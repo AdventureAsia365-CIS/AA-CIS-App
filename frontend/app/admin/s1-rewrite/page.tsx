@@ -333,7 +333,7 @@ export default function S1RewritePage() {
         ) : (
           <Card style={{ marginBottom: 20, padding: 0, overflow: "hidden" }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
+              <thead style={{ position: "sticky", top: 0, zIndex: 2 }}>
                 <tr style={{ background: A.line2 }}>
                   <th style={{ ...TH, width: 36, paddingLeft: 16 }}>
                     <input
