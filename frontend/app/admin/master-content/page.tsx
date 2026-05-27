@@ -126,7 +126,26 @@ function ScoreBar({ label, value }: { label: string; value: number | null }) {
   );
 }
 
-// ── Version Compare Modal (full-screen) ───────────────────────────────────────
+// ── Version Compare Modal (full-screen, 2-4 panels) ───────────────────────────
+
+interface PanelState {
+  versionNum: number;
+  data: VersionDetail | null;
+  loading: boolean;
+}
+
+const PANEL_COLORS = [A.gold, "#3B82F6", "#16A34A", "#7C3AED"];
+const PANEL_BG     = ["#FAFAF8", "#F8FAFF", "#F0FDF4", "#F5F3FF"];
+
+const CONTENT_FIELDS: [keyof VersionDetail, string][] = [
+  ["aa_name",        "Tour Name"],
+  ["aa_subtitle",    "Subtitle"],
+  ["aa_summary",     "Summary"],
+  ["aa_itineraries", "Itineraries"],
+  ["seo_title",      "SEO Title"],
+  ["seo_meta",       "SEO Meta"],
+  ["aa_description", "Description"],
+];
 
 function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
   tourId: string;
@@ -134,12 +153,11 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
   versionNums: [number, number];
   onClose: () => void;
 }) {
-  const [leftNum, setLeftNum]   = useState(versionNums[0]);
-  const [rightNum, setRightNum] = useState(versionNums[1]);
-  const [left, setLeft]   = useState<VersionDetail | null>(null);
-  const [right, setRight] = useState<VersionDetail | null>(null);
-  const [allVersions, setAllVersions] = useState<TourVersion[]>([]);
-  const [error, setError] = useState("");
+  const [panels, setPanels] = useState<PanelState[]>(
+    versionNums.map(n => ({ versionNum: n, data: null, loading: true }))
+  );
+  const [allVersions, setAllVersions]   = useState<TourVersion[]>([]);
+  const [error, setError]               = useState("");
 
   useEffect(() => {
     fetch(`/api/admin/tours/${tourId}/versions`)
@@ -148,96 +166,67 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
       .catch(() => {});
   }, [tourId]);
 
+  // Fetch data for any panel that is still loading (loading: true means data needed)
   useEffect(() => {
-    setLeft(null);
-    fetch(`/api/admin/tours/${tourId}/versions/${leftNum}`)
-      .then(r => r.ok ? r.json() : Promise.reject("left load failed"))
-      .then(setLeft)
-      .catch(e => setError(String(e)));
-  }, [tourId, leftNum]);
+    panels.forEach((panel, idx) => {
+      if (!panel.loading) return;
+      fetch(`/api/admin/tours/${tourId}/versions/${Number(panel.versionNum)}`)
+        .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
+        .then(data => {
+          setPanels(prev => prev.map((p, i) =>
+            i === idx && p.versionNum === panel.versionNum ? { ...p, data, loading: false } : p
+          ));
+        })
+        .catch(e => {
+          setError(String(e));
+          setPanels(prev => prev.map((p, i) =>
+            i === idx && p.versionNum === panel.versionNum ? { ...p, data: null, loading: false } : p
+          ));
+        });
+    });
+  }, [panels.map(p => `${p.versionNum}:${p.loading}`).join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => {
-    setRight(null);
-    fetch(`/api/admin/tours/${tourId}/versions/${rightNum}`)
-      .then(r => r.ok ? r.json() : Promise.reject("right load failed"))
-      .then(setRight)
-      .catch(e => setError(String(e)));
-  }, [tourId, rightNum]);
+  function changePanel(idx: number, vNum: number) {
+    setPanels(prev => prev.map((p, i) =>
+      i === idx ? { versionNum: vNum, data: null, loading: true } : p
+    ));
+  }
 
-  const CONTENT_FIELDS: [keyof VersionDetail, string][] = [
-    ["aa_name",       "Tour Name"],
-    ["aa_subtitle",   "Subtitle"],
-    ["aa_summary",    "Summary"],
-    ["aa_itineraries","Itineraries"],
-    ["seo_title",     "SEO Title"],
-    ["seo_meta",      "SEO Meta"],
-    ["aa_description","Description"],
-  ];
+  function addPanel() {
+    if (panels.length >= 4 || allVersions.length === 0) return;
+    const used = new Set(panels.map(p => p.versionNum));
+    const nextVNum = allVersions.find(v => !used.has(v.version_num))?.version_num ?? allVersions[0].version_num;
+    setPanels(prev => [...prev, { versionNum: nextVNum, data: null, loading: true }]);
+  }
+
+  function removePanel(idx: number) {
+    if (panels.length <= 2) return;
+    setPanels(prev => prev.filter((_, i) => i !== idx));
+  }
 
   function modelLabel(m: string | null) {
     return m?.split(".").pop()?.replace(/-v\d+:\d+$/, "") ?? "—";
   }
 
-  function colHeader(v: VersionDetail | null, vNum: number, isLeft: boolean) {
-    const vBg = isLeft ? A.gold : "#3B82F6";
-    const colBg = isLeft ? "#FAFAF8" : "#F8FAFF";
-    return (
-      <div style={{ padding: "12px 20px", background: colBg, borderRight: isLeft ? `1px solid ${A.line}` : undefined, position: "sticky", top: 0, zIndex: 5 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-          <select
-            value={vNum}
-            onChange={e => isLeft ? setLeftNum(Number(e.target.value)) : setRightNum(Number(e.target.value))}
-            style={{ padding: "3px 8px", fontSize: 12, fontWeight: 700, background: vBg, color: "#fff", border: "none", borderRadius: 10, cursor: "pointer" }}
-          >
-            {allVersions.map(av => (
-              <option key={av.version_num} value={av.version_num}>v{av.version_num}</option>
-            ))}
-          </select>
-          {v && (
-            <>
-              <span style={{ fontSize: 12, color: A.muted }}>{modelLabel(v.model_id)}</span>
-              {v.created_at && <span style={{ fontSize: 11, color: A.muted2, marginLeft: "auto" }}>{relDate(v.created_at)}</span>}
-            </>
-          )}
-        </div>
-
-        {/* Score bars */}
-        {v && (
-          <div style={{ padding: "8px 0", borderTop: `1px solid ${A.line}`, marginTop: 6 }}>
-            <ScoreBar label="Overall" value={v.quality_score} />
-            <ScoreBar label="Brand"   value={v.score_brand} />
-            <ScoreBar label="SEO"     value={v.score_seo} />
-            <ScoreBar label="Structure" value={v.score_structure} />
-          </div>
-        )}
-
-        {/* Rewrite config */}
-        {v && (
-          <div style={{ padding: "8px 0", borderTop: `1px solid ${A.line}`, marginTop: 4, fontSize: 11 }}>
-            <div style={{ fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Rewrite Config</div>
-            <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "3px 8px", color: A.body }}>
-              <span style={{ color: A.muted }}>Model</span>
-              <span style={{ fontFamily: mono }}>{modelLabel(v.model_id)}</span>
-              <span style={{ color: A.muted }}>Brand</span>
-              <span>{v.brand_name || "default"}</span>
-              <span style={{ color: A.muted }}>SEO Mode</span>
-              <span>{v.seo_mode || "standard"}</span>
-              <span style={{ color: A.muted }}>DataForSEO</span>
-              <span style={{ color: v.dataforseo_used ? A.green : A.muted2 }}>{v.dataforseo_used ? "Live" : "Mock"}</span>
-              <span style={{ color: A.muted }}>Cost</span>
-              <span style={{ fontFamily: mono }}>{v.llm_cost_usd != null ? `$${v.llm_cost_usd.toFixed(4)}` : "—"}</span>
-            </div>
-          </div>
-        )}
-
-        {!v && <div style={{ fontSize: 12, color: A.muted2, padding: "8px 0" }}>Loading…</div>}
-      </div>
-    );
+  function fieldSerial(v: VersionDetail | null, key: keyof VersionDetail): string {
+    if (!v) return "\x00";
+    const raw = v[key];
+    if (raw == null) return "";
+    if (Array.isArray(raw)) return JSON.stringify(raw);
+    return String(raw);
   }
 
-  function cellVal(v: VersionDetail | null, key: keyof VersionDetail, label: string) {
+  function isFieldDiff(idx: number, key: keyof VersionDetail): boolean {
+    if (idx === 0 || panels.length < 2) return false;
+    if (!panels[0].data || !panels[idx].data) return false;
+    return fieldSerial(panels[0].data, key) !== fieldSerial(panels[idx].data, key);
+  }
+
+  function cellVal(panel: PanelState, key: keyof VersionDetail): React.ReactNode {
+    if (panel.loading) return <div style={{ padding: "10px 20px", fontSize: 12, color: A.muted2 }}>Loading…</div>;
+    const v = panel.data;
     if (!v) return <div style={{ padding: "10px 20px", fontSize: 12, color: A.muted2 }}>—</div>;
-    let raw: unknown = v[key];
+    const raw: unknown = v[key];
     let display: React.ReactNode;
 
     if (key === "aa_highlights" && Array.isArray(raw)) {
@@ -248,11 +237,11 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
       );
     } else if (key === "seo_title") {
       const len = typeof raw === "string" ? raw.length : 0;
-      display = <><span>{raw as string || "—"}</span>{typeof raw === "string" && <span style={{ marginLeft: 6, fontSize: 10, color: A.muted2 }}>{len} chars</span>}</>;
+      display = <><span>{(raw as string) || "—"}</span>{typeof raw === "string" && <span style={{ marginLeft: 6, fontSize: 10, color: A.muted2 }}>{len} chars</span>}</>;
     } else if (key === "seo_meta") {
       const len = typeof raw === "string" ? raw.length : 0;
       const over = len > 170;
-      display = <><span style={{ color: over ? A.red : "inherit" }}>{raw as string || "—"}</span>{typeof raw === "string" && <span style={{ marginLeft: 6, fontSize: 10, color: over ? A.red : A.muted2 }}>{len} chars{over ? " (>170)" : ""}</span>}</>;
+      display = <><span style={{ color: over ? A.red : "inherit" }}>{(raw as string) || "—"}</span>{typeof raw === "string" && <span style={{ marginLeft: 6, fontSize: 10, color: over ? A.red : A.muted2 }}>{len} chars{over ? " (>170)" : ""}</span>}</>;
     } else {
       display = <span>{typeof raw === "string" ? raw : raw == null ? "—" : String(raw)}</span>;
     }
@@ -263,6 +252,8 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
       </div>
     );
   }
+
+  const n = panels.length;
 
   return (
     <div style={{
@@ -281,12 +272,29 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
             Version Compare — {tourName}
           </div>
           <div style={{ fontSize: 12, color: A.muted, marginTop: 2 }}>
-            v{leftNum} vs v{rightNum} · Select different versions using the dropdowns below
+            {n} panel{n > 1 ? "s" : ""} · Use version dropdowns to switch · Highlighted cells differ from panel 1
           </div>
         </div>
-        <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: A.muted2, padding: 6 }}>
-          <X size={20} />
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {n < 4 && (
+            <button
+              onClick={addPanel}
+              disabled={allVersions.length === 0}
+              style={{
+                padding: "6px 12px", fontSize: 12, fontWeight: 600,
+                border: `1px solid ${A.gold}`, borderRadius: 6,
+                background: A.goldTint, color: A.gold,
+                cursor: allVersions.length === 0 ? "not-allowed" : "pointer",
+                opacity: allVersions.length === 0 ? 0.5 : 1,
+              }}
+            >
+              + Add Panel
+            </button>
+          )}
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: A.muted2, padding: 6 }}>
+            <X size={20} />
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -295,50 +303,122 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
         </div>
       )}
 
-      {/* Two columns */}
-      <div style={{ flex: 1, display: "grid", gridTemplateColumns: "1fr 1fr", overflow: "hidden" }}>
-        {/* Left column */}
-        <div style={{ overflow: "hidden", display: "flex", flexDirection: "column", borderRight: `1px solid ${A.line}` }}>
-          <div style={{ overflowY: "auto", flex: 1 }}>
-            {colHeader(left, leftNum, true)}
-            {/* Keywords */}
-            {left && left.top_keywords.length > 0 && (
-              <div style={{ borderBottom: `1px solid ${A.line}` }}>
-                <div style={{ padding: "5px 20px", background: A.line2, fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.12em", color: A.muted }}>Keywords</div>
-                <div style={{ padding: "8px 20px", fontSize: 12, color: A.body }}>
-                  {left.top_keywords.slice(0, 15).join(", ")}
-                </div>
-              </div>
-            )}
-            {CONTENT_FIELDS.map(([key, label]) => (
-              <div key={key} style={{ borderBottom: `1px solid ${A.line}` }}>
-                <div style={{ padding: "5px 20px", background: A.line2, fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.12em", color: A.muted }}>{label}</div>
-                {cellVal(left, key, label)}
-              </div>
-            ))}
-          </div>
-        </div>
+      {/* Panels grid — each panel scrolls independently */}
+      <div style={{ flex: 1, display: "grid", gridTemplateColumns: `repeat(${n}, 1fr)`, overflow: "hidden" }}>
+        {panels.map((panel, idx) => {
+          const v         = panel.data;
+          const color     = PANEL_COLORS[idx] ?? PANEL_COLORS[0];
+          const panelBg   = PANEL_BG[idx] ?? PANEL_BG[0];
+          return (
+            <div key={idx} style={{
+              display: "flex", flexDirection: "column", overflow: "hidden",
+              borderRight: idx < n - 1 ? `1px solid ${A.line}` : undefined,
+            }}>
+              <div style={{ overflowY: "auto", flex: 1 }}>
+                {/* Sticky column header */}
+                <div style={{ padding: "12px 20px", background: panelBg, position: "sticky", top: 0, zIndex: 5, borderBottom: `1px solid ${A.line}` }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                    <select
+                      value={panel.versionNum}
+                      onChange={e => changePanel(idx, parseInt(e.target.value))}
+                      style={{
+                        padding: "3px 8px", fontSize: 12, fontWeight: 700,
+                        background: color, color: "#fff",
+                        border: "none", borderRadius: 10, cursor: "pointer",
+                      }}
+                    >
+                      {allVersions.map(av => (
+                        <option key={av.version_num} value={av.version_num}>v{av.version_num}</option>
+                      ))}
+                    </select>
+                    {v && (
+                      <span style={{ fontSize: 12, color: A.muted }}>{modelLabel(v.model_id)}</span>
+                    )}
+                    {v?.created_at && (
+                      <span style={{ fontSize: 11, color: A.muted2, marginLeft: "auto" }}>{relDate(v.created_at)}</span>
+                    )}
+                    {n > 2 && (
+                      <button
+                        onClick={() => removePanel(idx)}
+                        title="Remove panel"
+                        style={{
+                          marginLeft: v?.created_at ? 0 : "auto",
+                          background: "none", border: "none", cursor: "pointer",
+                          color: A.muted, padding: "0 4px", fontSize: 16, lineHeight: 1,
+                        }}
+                      >×</button>
+                    )}
+                  </div>
 
-        {/* Right column */}
-        <div style={{ overflow: "hidden", display: "flex", flexDirection: "column" }}>
-          <div style={{ overflowY: "auto", flex: 1 }}>
-            {colHeader(right, rightNum, false)}
-            {right && right.top_keywords.length > 0 && (
-              <div style={{ borderBottom: `1px solid ${A.line}` }}>
-                <div style={{ padding: "5px 20px", background: A.line2, fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.12em", color: A.muted }}>Keywords</div>
-                <div style={{ padding: "8px 20px", fontSize: 12, color: A.body }}>
-                  {right.top_keywords.slice(0, 15).join(", ")}
+                  {/* Score bars */}
+                  {v ? (
+                    <div style={{ padding: "8px 0", borderTop: `1px solid ${A.line}`, marginTop: 4 }}>
+                      <ScoreBar label="Overall"   value={v.quality_score} />
+                      <ScoreBar label="Brand"     value={v.score_brand} />
+                      <ScoreBar label="SEO"       value={v.score_seo} />
+                      <ScoreBar label="Structure" value={v.score_structure} />
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 12, color: A.muted2, padding: "8px 0" }}>
+                      {panel.loading ? "Loading…" : "No data"}
+                    </div>
+                  )}
+
+                  {/* Rewrite config */}
+                  {v && (
+                    <div style={{ padding: "8px 0", borderTop: `1px solid ${A.line}`, marginTop: 4, fontSize: 11 }}>
+                      <div style={{ fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Rewrite Config</div>
+                      <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "3px 8px", color: A.body }}>
+                        <span style={{ color: A.muted }}>Model</span>
+                        <span style={{ fontFamily: mono }}>{modelLabel(v.model_id)}</span>
+                        <span style={{ color: A.muted }}>Brand</span>
+                        <span>{v.brand_name || "default"}</span>
+                        <span style={{ color: A.muted }}>SEO Mode</span>
+                        <span>{v.seo_mode || "standard"}</span>
+                        <span style={{ color: A.muted }}>DataForSEO</span>
+                        <span style={{ color: v.dataforseo_used ? A.green : A.muted2 }}>{v.dataforseo_used ? "Live" : "Mock"}</span>
+                        <span style={{ color: A.muted }}>Cost</span>
+                        <span style={{ fontFamily: mono }}>{v.llm_cost_usd != null ? `$${v.llm_cost_usd.toFixed(4)}` : "—"}</span>
+                      </div>
+                    </div>
+                  )}
                 </div>
+
+                {/* Keywords */}
+                {v && v.top_keywords.length > 0 && (
+                  <div style={{ borderBottom: `1px solid ${A.line}` }}>
+                    <div style={{ padding: "5px 20px", background: A.line2, fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.12em", color: A.muted }}>
+                      Keywords
+                    </div>
+                    <div style={{ padding: "8px 20px", fontSize: 12, color: A.body }}>
+                      {v.top_keywords.slice(0, 15).join(", ")}
+                    </div>
+                  </div>
+                )}
+
+                {/* Content fields with diff highlight */}
+                {CONTENT_FIELDS.map(([key, label]) => {
+                  const diff = isFieldDiff(idx, key);
+                  return (
+                    <div key={key} style={{ borderBottom: `1px solid ${A.line}`, background: diff ? "#FFF9E6" : "transparent" }}>
+                      <div style={{
+                        padding: "5px 20px",
+                        background: diff ? "#FFF0C4" : A.line2,
+                        fontSize: 10, fontWeight: 700,
+                        textTransform: "uppercase" as const, letterSpacing: "0.12em", color: A.muted,
+                        display: "flex", alignItems: "center", gap: 6,
+                      }}>
+                        {label}
+                        {diff && <span style={{ color: "#C2410C", fontSize: 9 }}>↕ diff</span>}
+                      </div>
+                      {cellVal(panel, key)}
+                    </div>
+                  );
+                })}
               </div>
-            )}
-            {CONTENT_FIELDS.map(([key, label]) => (
-              <div key={key} style={{ borderBottom: `1px solid ${A.line}` }}>
-                <div style={{ padding: "5px 20px", background: A.line2, fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.12em", color: A.muted }}>{label}</div>
-                {cellVal(right, key, label)}
-              </div>
-            ))}
-          </div>
-        </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
