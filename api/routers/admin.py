@@ -145,7 +145,10 @@ async def list_tenants(
             SELECT
                 t.tenant_id, t.name, t.slug, t.plan_tier::text,
                 t.rate_limit_rpm, t.is_active, t.created_at,
-                COALESCE(u.tours_rewritten, 0)      AS tours_rewritten,
+                CASE WHEN t.plan_tier::text = 'internal'
+                     THEN (SELECT COUNT(*) FROM gold_aa_internal.published_tours)
+                     ELSE COALESCE(u.tours_rewritten, 0)
+                END                                 AS tours_rewritten,
                 COALESCE(u.api_calls_used, 0)       AS api_calls_used,
                 COALESCE(u.quota_tours_pct, 0)      AS quota_tours_pct,
                 COALESCE(u.quota_calls_pct, 0)      AS quota_calls_pct,
@@ -298,6 +301,27 @@ def _parse_fw(value) -> list:
         except Exception:
             return []
     return list(value)
+
+
+# ── DELETE /admin/tenants/{id} — soft delete ─────────────────────────────────
+
+
+@router.delete("/tenants/{tenant_id}", summary="Soft-delete tenant (is_active=false)")
+async def delete_tenant(
+    tenant_id: UUID,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        updated = await conn.fetchval("""
+            UPDATE shared.tenants SET is_active=false, updated_at=NOW()
+            WHERE tenant_id=$1 RETURNING tenant_id
+        """, tenant_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return {"status": "deleted", "tenant_id": str(tenant_id)}
 
 
 # ── GET /admin/tenants/{id}/details — 4-tab detail view ─────────────────────

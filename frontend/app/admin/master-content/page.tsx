@@ -3,8 +3,8 @@
 // GET /api/tenant/admin/tenants/AA_INTERNAL_ID/details → rewritten_tours, summary, pipeline_runs
 // GET /api/admin/tours/{tour_id}/detail → detail panel
 
-import React, { useState, useEffect } from "react";
-import { RefreshCw } from "lucide-react";
+import React, { useState, useEffect, useCallback } from "react";
+import { RefreshCw, ChevronDown, ChevronRight } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
 import {
   A, serif, sans, mono,
@@ -54,6 +54,16 @@ interface DetailsResponse {
   pipeline_runs: PipelineRun[];
 }
 
+interface TourVersion {
+  id: string;
+  version_num: number;
+  model_id: string | null;
+  seo_mode: string | null;
+  quality_score: number | null;
+  created_at: string | null;
+  is_current: boolean;
+}
+
 function scoreColor(s: number | null | undefined): string {
   if (s == null) return A.muted2;
   if (s >= 9) return A.green;
@@ -83,6 +93,10 @@ export default function MasterContentPage() {
   const [detailTourName, setDetailTourName] = useState("");
   const [selectedIds, setSelectedIds]   = useState<Set<string>>(new Set());
   const [compareOpen, setCompareOpen]   = useState(false);
+  const [expandedTours, setExpandedTours] = useState<Set<string>>(new Set());
+  const [tourVersions, setTourVersions] = useState<Record<string, TourVersion[]>>({});
+  const [versionLoading, setVersionLoading] = useState<Record<string, boolean>>({});
+  const [promoting, setPromoting]       = useState<string | null>(null);
 
   async function load() {
     try {
@@ -118,6 +132,40 @@ export default function MasterContentPage() {
     t.tour_name.toLowerCase().includes(search.toLowerCase()) ||
     (t.country || "").toLowerCase().includes(search.toLowerCase())
   );
+
+  const toggleExpand = useCallback(async (tourId: string) => {
+    setExpandedTours(prev => {
+      const next = new Set(prev);
+      next.has(tourId) ? next.delete(tourId) : next.add(tourId);
+      return next;
+    });
+    if (!tourVersions[tourId]) {
+      setVersionLoading(prev => ({ ...prev, [tourId]: true }));
+      try {
+        const r = await fetch(`/api/admin/tours/${tourId}/versions`);
+        if (r.ok) {
+          const d = await r.json();
+          setTourVersions(prev => ({ ...prev, [tourId]: d.versions ?? [] }));
+        }
+      } finally {
+        setVersionLoading(prev => ({ ...prev, [tourId]: false }));
+      }
+    }
+  }, [tourVersions]);
+
+  async function promoteVersion(tourId: string, tourName: string, versionNum: number) {
+    if (!confirm(`Make v${versionNum} the current published version for "${tourName}"?`)) return;
+    setPromoting(`${tourId}-${versionNum}`);
+    try {
+      const r = await fetch(`/api/admin/tours/${tourId}/versions/${versionNum}/promote`, { method: "POST" });
+      if (r.ok) {
+        setTourVersions(prev => ({
+          ...prev,
+          [tourId]: (prev[tourId] ?? []).map(v => ({ ...v, is_current: v.version_num === versionNum })),
+        }));
+      }
+    } finally { setPromoting(null); }
+  }
 
   function toggleSelect(tourId: string) {
     setSelectedIds(prev => {
@@ -242,59 +290,130 @@ export default function MasterContentPage() {
                     <th style={TH}>#</th>
                     <th style={TH}>Tour Name</th>
                     <th style={TH}>Country</th>
-                    <th style={TH}>Quality</th>
-                    <th style={TH}>Version</th>
+                    <th style={TH}>Score</th>
+                    <th style={TH}>Versions</th>
                     <th style={TH}>Status</th>
-                    <th style={TH}>Date</th>
+                    <th style={TH}>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {filtered.map((t, i) => {
-                    const isDetail = detailTourId === t.tour_id;
+                    const isExpanded = t.tour_id ? expandedTours.has(t.tour_id) : false;
                     const isSelected = t.tour_id ? selectedIds.has(t.tour_id) : false;
+                    const versions   = t.tour_id ? (tourVersions[t.tour_id] ?? []) : [];
+                    const vLoading   = t.tour_id ? (versionLoading[t.tour_id] ?? false) : false;
                     return (
-                      <tr
-                        key={t.version_id}
-                        onClick={() => {
-                          if (!t.tour_id) return;
-                          if (isDetail) { setDetailTourId(null); return; }
-                          setDetailTourId(t.tour_id);
-                          setDetailTourName(t.tour_name);
-                        }}
-                        style={{
-                          background: isDetail ? `${A.gold}18` : isSelected ? `${A.gold}10` : i % 2 === 0 ? "#fff" : A.bg,
-                          cursor: t.tour_id ? "pointer" : "default",
-                          transition: "background .12s",
-                        }}
-                      >
-                        <td style={{ ...TD, paddingLeft: 16 }} onClick={e => e.stopPropagation()}>
-                          {t.tour_id && (
-                            <input
-                              type="checkbox"
-                              checked={isSelected}
-                              onChange={() => toggleSelect(t.tour_id!)}
-                              style={{ accentColor: A.gold }}
-                            />
-                          )}
-                        </td>
-                        <td style={{ ...TD, color: A.muted2 }}>{i + 1}</td>
-                        <td style={{ ...TD, fontWeight: 600, color: A.ink, fontFamily: serif }}>
-                          {t.tour_name}
-                        </td>
-                        <td style={TD}>{t.country || "—"}</td>
-                        <td style={TD}>
-                          <span style={{ fontFamily: mono, fontWeight: 700, fontSize: 15, color: scoreColor(t.quality_score) }}>
-                            {t.quality_score != null ? t.quality_score.toFixed(1) : "—"}
-                          </span>
-                        </td>
-                        <td style={TD}>
-                          {t.version_number != null
-                            ? <Badge color="blue">v{t.version_number}</Badge>
-                            : <span style={{ color: A.muted2, fontSize: 12 }}>—</span>}
-                        </td>
-                        <td style={TD}>{statusBadge(t.status)}</td>
-                        <td style={{ ...TD, color: A.muted2, fontSize: 12 }}>{relDate(t.created_at)}</td>
-                      </tr>
+                      <React.Fragment key={t.version_id}>
+                        <tr style={{
+                          background: isExpanded ? `${A.gold}14` : isSelected ? `${A.gold}10` : i % 2 === 0 ? "#fff" : A.bg,
+                          borderBottom: isExpanded ? "none" : undefined,
+                        }}>
+                          <td style={{ ...TD, paddingLeft: 16 }} onClick={e => e.stopPropagation()}>
+                            {t.tour_id && (
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => toggleSelect(t.tour_id!)}
+                                style={{ accentColor: A.gold }}
+                              />
+                            )}
+                          </td>
+                          <td style={{ ...TD, color: A.muted2 }}>{i + 1}</td>
+                          <td style={{ ...TD, fontWeight: 600, color: A.ink, fontFamily: serif }}>
+                            {t.tour_name}
+                          </td>
+                          <td style={TD}>{t.country || "—"}</td>
+                          <td style={TD}>
+                            <span style={{ fontFamily: mono, fontWeight: 700, fontSize: 15, color: scoreColor(t.quality_score) }}>
+                              {t.quality_score != null ? t.quality_score.toFixed(1) : "—"}
+                            </span>
+                          </td>
+                          <td style={TD}>
+                            {t.version_number != null
+                              ? <Badge color="blue">v{t.version_number}</Badge>
+                              : <span style={{ color: A.muted2, fontSize: 12 }}>—</span>}
+                          </td>
+                          <td style={TD}>{statusBadge(t.status)}</td>
+                          <td style={{ ...TD }}>
+                            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                              <button
+                                onClick={() => { if (t.tour_id) { setDetailTourId(t.tour_id); setDetailTourName(t.tour_name); } }}
+                                style={{ padding: "3px 8px", fontSize: 11, border: `1px solid ${A.line}`, borderRadius: 5, background: "#fff", cursor: "pointer", color: A.body }}
+                              >
+                                View
+                              </button>
+                              {t.tour_id && (
+                                <button
+                                  onClick={() => toggleExpand(t.tour_id!)}
+                                  style={{ padding: "3px 8px", fontSize: 11, border: `1px solid ${A.line}`, borderRadius: 5, background: isExpanded ? `${A.gold}22` : "#fff", cursor: "pointer", color: A.gold, display: "flex", alignItems: "center", gap: 3 }}
+                                >
+                                  {isExpanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />} Versions
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                        {isExpanded && (
+                          <tr style={{ background: `${A.gold}08` }}>
+                            <td colSpan={8} style={{ padding: "0 0 0 48px", borderBottom: `1px solid ${A.line}` }}>
+                              {vLoading ? (
+                                <div style={{ padding: "12px 16px", fontSize: 12, color: A.muted }}>Loading versions…</div>
+                              ) : versions.length === 0 ? (
+                                <div style={{ padding: "12px 16px", fontSize: 12, color: A.muted }}>No versions found</div>
+                              ) : (
+                                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                                  <thead>
+                                    <tr style={{ background: A.line2 }}>
+                                      {["Version", "Model", "SEO Mode", "Score", "Date", ""].map(h => (
+                                        <th key={h} style={{ padding: "6px 10px", textAlign: "left" as const, fontSize: 10, fontWeight: 600, color: A.muted, textTransform: "uppercase" as const, letterSpacing: "0.08em" }}>{h}</th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {versions.map(v => (
+                                      <tr key={v.id} style={{ borderTop: `1px solid ${A.line}`, background: v.is_current ? "#FEFCE8" : "transparent" }}>
+                                        <td style={{ padding: "6px 10px" }}>
+                                          <span style={{ padding: "2px 7px", borderRadius: 10, background: v.is_current ? A.gold : A.goldTint, color: v.is_current ? "#fff" : A.gold, fontSize: 11, fontWeight: 600 }}>
+                                            v{v.version_num}
+                                          </span>
+                                          {v.is_current && <span style={{ marginLeft: 6, fontSize: 10, color: A.gold }}>current</span>}
+                                        </td>
+                                        <td style={{ padding: "6px 10px", fontFamily: mono, fontSize: 11, color: A.muted2 }}>
+                                          {v.model_id?.split(".").pop()?.replace(/-v\d+:\d+$/, "") ?? "—"}
+                                        </td>
+                                        <td style={{ padding: "6px 10px", color: A.muted }}>{v.seo_mode ?? "—"}</td>
+                                        <td style={{ padding: "6px 10px", fontWeight: 700, color: scoreColor(v.quality_score) }}>
+                                          {v.quality_score != null ? v.quality_score.toFixed(1) : "—"}
+                                        </td>
+                                        <td style={{ padding: "6px 10px", color: A.muted2 }}>
+                                          {v.created_at ? relDate(v.created_at) : "—"}
+                                        </td>
+                                        <td style={{ padding: "6px 10px" }}>
+                                          <div style={{ display: "flex", gap: 5 }}>
+                                            <button
+                                              onClick={() => { if (t.tour_id) { setDetailTourId(t.tour_id); setDetailTourName(t.tour_name); } }}
+                                              style={{ padding: "2px 7px", fontSize: 11, border: `1px solid ${A.line}`, borderRadius: 4, background: "#fff", cursor: "pointer", color: A.body }}
+                                            >View</button>
+                                            {!v.is_current && (
+                                              <button
+                                                onClick={() => t.tour_id && promoteVersion(t.tour_id, t.tour_name, v.version_num)}
+                                                disabled={promoting === `${t.tour_id}-${v.version_num}`}
+                                                style={{ padding: "2px 7px", fontSize: 11, border: `1px solid ${A.gold}`, borderRadius: 4, background: A.goldTint, cursor: "pointer", color: A.gold, fontWeight: 600 }}
+                                              >
+                                                {promoting === `${t.tour_id}-${v.version_num}` ? "…" : "Promote"}
+                                              </button>
+                                            )}
+                                          </div>
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              )}
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
                     );
                   })}
                 </tbody>

@@ -577,6 +577,109 @@ async def get_all_tours(request: Request, x_admin_secret: str = Header(None)):
     }
 
 
+# ── Tour version endpoints ────────────────────────────────────────────────────
+# NOTE: /versions/{num}/promote MUST come before /versions/{num} — FastAPI greedy matching
+
+@router.post("/tours/{tour_id}/versions/{version_num}/promote")
+async def promote_tour_version(
+    tour_id: str, version_num: int,
+    request: Request, x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        updated = await conn.fetchval("""
+            WITH gc AS (
+                SELECT id, aa_name, aa_subtitle, aa_summary, aa_highlights,
+                       aa_itineraries, seo_title, seo_meta, score_overall
+                FROM silver_aa_internal.generated_content
+                WHERE tour_id = $1::uuid AND version_num = $2
+                LIMIT 1
+            )
+            UPDATE gold_aa_internal.published_tours pt
+            SET generated_content_id = gc.id,
+                aa_name              = gc.aa_name,
+                aa_subtitle          = gc.aa_subtitle,
+                quality_score        = gc.score_overall,
+                published_at         = NOW()
+            FROM gc
+            WHERE pt.tour_id = $1::uuid
+            RETURNING pt.id::text
+        """, tour_id, version_num)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Tour or version not found")
+    return {"promoted": True, "published_tour_id": updated, "version_num": version_num}
+
+
+@router.get("/tours/{tour_id}/versions/{version_num}")
+async def get_tour_version_detail(
+    tour_id: str, version_num: int,
+    request: Request, x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT id, version_num, model_editorial AS model_id,
+                   seo_mode, score_overall AS quality_score, created_at,
+                   aa_name, aa_subtitle, aa_summary, aa_description,
+                   aa_highlights, aa_itineraries, seo_title, seo_meta
+            FROM silver_aa_internal.generated_content
+            WHERE tour_id = $1::uuid AND version_num = $2
+            LIMIT 1
+        """, tour_id, version_num)
+    if not row:
+        raise HTTPException(status_code=404, detail="Version not found")
+    return {
+        "id":            str(row["id"]),
+        "version_num":   row["version_num"],
+        "model_id":      row["model_id"],
+        "seo_mode":      row["seo_mode"],
+        "quality_score": float(row["quality_score"]) if row["quality_score"] else None,
+        "created_at":    row["created_at"].isoformat() if row["created_at"] else None,
+        "aa_name":       row["aa_name"],
+        "aa_subtitle":   row["aa_subtitle"],
+        "aa_summary":    row["aa_summary"],
+        "aa_description": row["aa_description"],
+        "aa_highlights": row["aa_highlights"] if isinstance(row["aa_highlights"], list) else (
+            json.loads(row["aa_highlights"]) if row["aa_highlights"] else []
+        ),
+        "aa_itineraries": row["aa_itineraries"],
+        "seo_title":     row["seo_title"],
+        "seo_meta":      row["seo_meta"],
+    }
+
+
+@router.get("/tours/{tour_id}/versions")
+async def list_tour_versions(
+    tour_id: str, request: Request, x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT gc.id, gc.version_num, gc.model_editorial AS model_id,
+                   gc.seo_mode, gc.score_overall AS quality_score, gc.created_at,
+                   (pt.generated_content_id = gc.id) AS is_current
+            FROM silver_aa_internal.generated_content gc
+            LEFT JOIN gold_aa_internal.published_tours pt ON pt.tour_id = gc.tour_id
+            WHERE gc.tour_id = $1::uuid
+            ORDER BY gc.version_num DESC
+        """, tour_id)
+    return {"versions": [
+        {
+            "id":            str(r["id"]),
+            "version_num":   r["version_num"],
+            "model_id":      r["model_id"],
+            "seo_mode":      r["seo_mode"],
+            "quality_score": float(r["quality_score"]) if r["quality_score"] else None,
+            "created_at":    r["created_at"].isoformat() if r["created_at"] else None,
+            "is_current":    bool(r["is_current"]),
+        }
+        for r in rows
+    ]}
+
+
 # ── GET /admin/tours/{tour_id}/history ───────────────────────────────────────
 
 @router.get("/tours/{tour_id}/history")
@@ -1210,6 +1313,218 @@ async def get_spot_workers(request: Request, x_admin_secret: str = Header(None))
     except Exception as e:
         return {"total_tasks": 0, "spot_tasks": 0, "on_demand_tasks": 0,
                 "spot_pct": 0, "saving_per_hr": 0, "tasks": [], "error": str(e)}
+
+
+# ── /admin/brands — multi-brand CRUD ─────────────────────────────────────────
+
+
+class BrandCreateRequest(BaseModel):
+    brand_name: str
+    brand_type: Optional[str] = None
+    core_idea: Optional[str] = None
+    customer_segment: Optional[str] = None
+    customer_mindset: Optional[str] = None
+    tone_of_voice: Optional[List[str]] = None
+    writing_style: Optional[str] = None
+    good_examples: Optional[str] = None
+    should_write: Optional[str] = None
+    forbidden_words: Optional[List[str]] = None
+    target_markets: Optional[List[str]] = None
+    rewrite_language: str = "en"
+
+
+def _parse_fw(fw):
+    if fw is None:
+        return []
+    if isinstance(fw, list):
+        return fw
+    try:
+        return json.loads(fw)
+    except Exception:
+        return []
+
+
+def _parse_jsonb_list(val) -> list:
+    if val is None:
+        return []
+    if isinstance(val, list):
+        return val
+    try:
+        parsed = json.loads(val)
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
+@router.get("/brands")
+async def list_brands(request: Request, x_admin_secret: str = Header(None)):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    tenant_id = "00000000-0000-0000-0000-000000000001"
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT DISTINCT ON (COALESCE(brand_name, ''))
+                id, brand_name, brand_type, core_idea, version, is_active, updated_at
+            FROM shared.tenant_brand_rules
+            WHERE tenant_id = $1
+            ORDER BY COALESCE(brand_name, ''), version DESC
+        """, tenant_id)
+    return {"brands": [
+        {
+            "brand_name":  r["brand_name"] or "default",
+            "brand_type":  r["brand_type"],
+            "core_idea":   r["core_idea"],
+            "version":     r["version"],
+            "is_active":   r["is_active"],
+            "updated_at":  r["updated_at"].isoformat() if r["updated_at"] else None,
+        }
+        for r in rows
+    ]}
+
+
+@router.get("/brands/{brand_name}")
+async def get_brand(brand_name: str, request: Request, x_admin_secret: str = Header(None)):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    tenant_id = "00000000-0000-0000-0000-000000000001"
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, brand_name, brand_type, core_idea,
+                   customer_segment, customer_mindset, voice_examples,
+                   style_guide, system_prompt, forbidden_words,
+                   target_markets, rewrite_language,
+                   version, is_active, updated_at, created_at
+            FROM shared.tenant_brand_rules
+            WHERE tenant_id = $1 AND COALESCE(brand_name, 'default') = $2
+            ORDER BY version DESC
+        """, tenant_id, brand_name)
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"Brand '{brand_name}' not found")
+    current = rows[0]
+    voice = _parse_jsonb_list(current["voice_examples"]) if current["voice_examples"] else []
+    history = [
+        {
+            "version":    r["version"],
+            "is_active":  r["is_active"],
+            "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+        }
+        for r in rows
+    ]
+    return {
+        "brand_name":       current["brand_name"] or "default",
+        "brand_type":       current["brand_type"] or "",
+        "core_idea":        current["core_idea"] or "",
+        "customer_segment": current["customer_segment"] or "",
+        "customer_mindset": current["customer_mindset"] or "",
+        "tone_of_voice":    voice,
+        "writing_style":    current["style_guide"] or "",
+        "should_write":     current["system_prompt"] or "",
+        "forbidden_words":  _parse_fw(current["forbidden_words"]),
+        "target_markets":   list(current["target_markets"]) if current["target_markets"] else [],
+        "rewrite_language": current["rewrite_language"] or "en",
+        "version":          current["version"],
+        "is_active":        current["is_active"],
+        "updated_at":       current["updated_at"].isoformat() if current["updated_at"] else None,
+        "history":          history,
+    }
+
+
+@router.post("/brands")
+async def create_brand(
+    body: BrandCreateRequest,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    tenant_id = "00000000-0000-0000-0000-000000000001"
+    voice = body.tone_of_voice or []
+    async with pool.acquire() as conn:
+        existing = await conn.fetchval(
+            "SELECT COUNT(*) FROM shared.tenant_brand_rules WHERE tenant_id=$1 AND brand_name=$2",
+            tenant_id, body.brand_name,
+        )
+        if existing:
+            raise HTTPException(status_code=409, detail=f"Brand '{body.brand_name}' already exists — use PUT to update")
+        await conn.execute(
+            "UPDATE shared.tenant_brand_rules SET is_active=false WHERE tenant_id=$1 AND brand_name=$2",
+            tenant_id, body.brand_name,
+        )
+        row = await conn.fetchrow("""
+            INSERT INTO shared.tenant_brand_rules
+                (tenant_id, brand_name, brand_type, core_idea,
+                 customer_segment, customer_mindset, voice_examples,
+                 style_guide, system_prompt, forbidden_words,
+                 target_markets, rewrite_language, version, is_active, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10::jsonb,$11,$12,1,true,NOW())
+            RETURNING id, version
+        """,
+            tenant_id, body.brand_name, body.brand_type, body.core_idea,
+            body.customer_segment, body.customer_mindset,
+            json.dumps(voice),
+            body.writing_style, body.should_write,
+            json.dumps(body.forbidden_words or []),
+            body.target_markets or [], body.rewrite_language,
+        )
+    return {"status": "created", "brand_name": body.brand_name, "version": row["version"]}
+
+
+@router.put("/brands/{brand_name}")
+async def update_brand(
+    brand_name: str,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    body_raw = await request.json()
+    pool = request.app.state.pool
+    tenant_id = "00000000-0000-0000-0000-000000000001"
+    async with pool.acquire() as conn:
+        current_ver = await conn.fetchval(
+            "SELECT COALESCE(MAX(version),0) FROM shared.tenant_brand_rules WHERE tenant_id=$1 AND brand_name=$2",
+            tenant_id, brand_name,
+        )
+        await conn.execute(
+            "UPDATE shared.tenant_brand_rules SET is_active=false WHERE tenant_id=$1 AND brand_name=$2",
+            tenant_id, brand_name,
+        )
+        voice = body_raw.get("tone_of_voice") or []
+        row = await conn.fetchrow("""
+            INSERT INTO shared.tenant_brand_rules
+                (tenant_id, brand_name, brand_type, core_idea,
+                 customer_segment, customer_mindset, voice_examples,
+                 style_guide, system_prompt, forbidden_words,
+                 target_markets, rewrite_language, version, is_active, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10::jsonb,$11,$12,$13,true,NOW())
+            RETURNING version
+        """,
+            tenant_id, brand_name,
+            body_raw.get("brand_type"), body_raw.get("core_idea"),
+            body_raw.get("customer_segment"), body_raw.get("customer_mindset"),
+            json.dumps(voice if isinstance(voice, list) else [voice]),
+            body_raw.get("writing_style"), body_raw.get("should_write"),
+            json.dumps(body_raw.get("forbidden_words") or []),
+            body_raw.get("target_markets") or [],
+            body_raw.get("rewrite_language", "en"),
+            current_ver + 1,
+        )
+    return {"status": "updated", "brand_name": brand_name, "version": row["version"]}
+
+
+@router.delete("/brands/{brand_name}")
+async def delete_brand(brand_name: str, request: Request, x_admin_secret: str = Header(None)):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    tenant_id = "00000000-0000-0000-0000-000000000001"
+    async with pool.acquire() as conn:
+        updated = await conn.fetchval("""
+            UPDATE shared.tenant_brand_rules SET is_active=false
+            WHERE tenant_id=$1 AND brand_name=$2
+            RETURNING id
+        """, tenant_id, brand_name)
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Brand '{brand_name}' not found")
+    return {"status": "deleted", "brand_name": brand_name}
 
 
 # ── GET/POST /admin/brand-identity ────────────────────────────────────────────

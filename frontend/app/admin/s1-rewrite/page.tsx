@@ -47,7 +47,9 @@ interface Tour {
   last_rewritten_at: string | null;
 }
 
-interface BrandVersion {
+interface BrandSummary {
+  brand_name: string;
+  brand_type: string | null;
   version: number;
   is_active: boolean;
   updated_at: string | null;
@@ -122,8 +124,8 @@ export default function S1RewritePage() {
   const [filterSearch, setFilterSearch]     = useState("");
   const [seoMode, setSeoMode]               = useState("standard");
   const [modelTier, setModelTier]           = useState("haiku");
-  const [brandVersions, setBrandVersions]   = useState<BrandVersion[]>([]);
-  const [brandVersion, setBrandVersion]     = useState<number | null>(null);
+  const [brandList, setBrandList]           = useState<BrandSummary[]>([]);
+  const [brandName, setBrandName]           = useState<string | null>(null);
   const [showConfirm, setShowConfirm]       = useState(false);
   const [running, setRunning]               = useState(false);
   const [tourStatuses, setTourStatuses]     = useState<Record<string, TourRunStatus>>({});
@@ -144,19 +146,19 @@ export default function S1RewritePage() {
     }
   }, []);
 
-  const loadBrandVersions = useCallback(async () => {
+  const loadBrandList = useCallback(async () => {
     try {
-      const res = await fetch("/api/admin/brand-identity");
+      const res = await fetch("/api/admin/brands");
       if (!res.ok) return;
       const data = await res.json();
-      const history: BrandVersion[] = data.history || [];
-      setBrandVersions(history);
-      const active = history.find(h => h.is_active);
-      if (active) setBrandVersion(active.version);
+      const list: BrandSummary[] = data.brands || [];
+      setBrandList(list);
+      const active = list.find(b => b.is_active) ?? list[0];
+      if (active) setBrandName(active.brand_name);
     } catch {}
   }, []);
 
-  useEffect(() => { loadTours(); loadBrandVersions(); }, [loadTours, loadBrandVersions]);
+  useEffect(() => { loadTours(); loadBrandList(); }, [loadTours, loadBrandList]);
 
   const uniqueCountries = Array.from(new Set(
     tours.map(t => t.country).filter((c): c is string => Boolean(c))
@@ -198,7 +200,7 @@ export default function S1RewritePage() {
           tenant_id:            TENANT_ID,
           seo_mode:             seoMode,
           model_tier:           modelTier,
-          brand_rules_version:  brandVersion,
+          brand_rules_version:  brandList.find(b => b.brand_name === brandName)?.version ?? null,
         }),
       });
       if (!res.ok) {
@@ -412,16 +414,16 @@ export default function S1RewritePage() {
               <div>
                 <label style={{ fontSize: 11, color: A.muted, display: "block", marginBottom: 4 }}>Brand Identity</label>
                 <select
-                  value={brandVersion ?? ""}
-                  onChange={e => setBrandVersion(e.target.value ? Number(e.target.value) : null)}
+                  value={brandName ?? ""}
+                  onChange={e => setBrandName(e.target.value || null)}
                   disabled={running}
                   style={{ width: "100%", padding: "7px 10px", borderRadius: 6, border: `1px solid ${A.line}`, fontSize: 13, fontFamily: sans, background: "#fff" }}
                 >
-                  {brandVersions.length === 0 && <option value="">No brand configured</option>}
-                  {brandVersions.map(bv => (
-                    <option key={bv.version} value={bv.version}>
-                      v{bv.version}{bv.is_active ? " (active)" : ""}
-                      {bv.updated_at ? ` · ${new Date(bv.updated_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}` : ""}
+                  {brandList.length === 0 && <option value="">No brand configured</option>}
+                  {brandList.map(b => (
+                    <option key={b.brand_name} value={b.brand_name}>
+                      {b.brand_name}{b.is_active ? " (active)" : ""}
+                      {b.brand_type ? ` · ${b.brand_type}` : ""}
                     </option>
                   ))}
                 </select>
@@ -499,7 +501,7 @@ export default function S1RewritePage() {
                 <strong>{selectedIds.size} tour{selectedIds.size !== 1 ? "s" : ""}</strong>{" "}
                 using <strong>{seoModeLabel(seoMode)} SEO</strong> mode
                 with <strong>{modelLabel(modelTier)}</strong>
-                {brandVersion ? ` (Brand v${brandVersion})` : ""}. Continue?
+                {brandName ? ` (Brand: ${brandName})` : ""}. Continue?
               </div>
               <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
                 <Btn size="sm" variant="ghost" onClick={() => setShowConfirm(false)}>Cancel</Btn>

@@ -4,7 +4,7 @@
 // Design: Fraunces + IBM Plex Sans, light theme, red accent
 
 import { useState, useEffect, useCallback } from "react";
-import { Users, Plus, Key, RefreshCw, ChevronDown, ChevronUp, AlertCircle, Loader2, CheckCircle, Eye, EyeOff, Copy, X } from "lucide-react";
+import { Users, Plus, Key, RefreshCw, ChevronDown, ChevronUp, AlertCircle, Loader2, CheckCircle, Eye, EyeOff, Copy, X, Trash2 } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
 import {
   A, serif, mono, sans,
@@ -445,10 +445,11 @@ function TenantDetail({ tenantId, planTier }: { tenantId: string; planTier: stri
 }
 
 // ─── Tenant Row ───────────────────────────────────────────────────────────────
-function TenantRow({ tenant, onRotateKey }: { tenant: Tenant; onRotateKey: (t: Tenant) => void }) {
+function TenantRow({ tenant, onRotateKey, onDeleted }: { tenant: Tenant; onRotateKey: (t: Tenant) => void; onDeleted: (id: string) => void }) {
   const [expanded, setExpanded] = useState(false);
   const [toggling, setToggling] = useState(false);
   const [isActive, setIsActive] = useState(tenant.is_active);
+  const [deleting, setDeleting] = useState(false);
 
   async function toggle() {
     setToggling(true);
@@ -459,6 +460,15 @@ function TenantRow({ tenant, onRotateKey }: { tenant: Tenant; onRotateKey: (t: T
       });
       setIsActive(!isActive);
     } finally { setToggling(false); }
+  }
+
+  async function deleteTenant() {
+    if (!confirm(`Delete tenant "${tenant.name}"? This cannot be undone.`)) return;
+    setDeleting(true);
+    try {
+      await fetch(`/api/admin/tenants/${tenant.tenant_id}`, { method: "DELETE" });
+      onDeleted(tenant.tenant_id);
+    } finally { setDeleting(false); }
   }
 
   return (
@@ -492,6 +502,9 @@ function TenantRow({ tenant, onRotateKey }: { tenant: Tenant; onRotateKey: (t: T
           <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
             <button onClick={() => onRotateKey(tenant)} style={{ padding: "5px 10px", background: A.bg, border: `1px solid ${A.line}`, borderRadius: 6, cursor: "pointer", color: A.muted, display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
               <Key size={12} /> Key
+            </button>
+            <button onClick={deleteTenant} disabled={deleting} title="Delete tenant" style={{ padding: "5px 10px", background: A.bg, border: `1px solid ${A.line}`, borderRadius: 6, cursor: "pointer", color: A.red, display: "flex", alignItems: "center" }}>
+              {deleting ? <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} /> : <Trash2 size={12} />}
             </button>
             <button onClick={() => setExpanded(!expanded)} style={{ padding: "5px 10px", background: A.bg, border: `1px solid ${A.line}`, borderRadius: 6, cursor: "pointer", color: A.muted, display: "flex", alignItems: "center" }}>
               {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
@@ -537,6 +550,10 @@ export default function TenantsPage() {
       const data = await res.json();
       if (res.ok) setNewKey({ tenant_id: tenant.tenant_id, tenant_name: tenant.name, api_key: data.api_key });
     } catch { /* silent */ }
+  }
+
+  function handleDeleted(tenantId: string) {
+    setTenants(prev => prev.filter(t => t.tenant_id !== tenantId));
   }
 
   const totalActive = tenants.filter(t => t.is_active).length;
@@ -605,7 +622,7 @@ export default function TenantsPage() {
                   {tenants.length === 0 ? (
                     <tr><td colSpan={7} style={{ padding: 48, textAlign: "center", color: A.muted, fontSize: 13 }}>No tenants yet</td></tr>
                   ) : tenants.map(t => (
-                    <TenantRow key={t.tenant_id} tenant={t} onRotateKey={rotateKey} />
+                    <TenantRow key={t.tenant_id} tenant={t} onRotateKey={rotateKey} onDeleted={handleDeleted} />
                   ))}
                 </tbody>
               </table>

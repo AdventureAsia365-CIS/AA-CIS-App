@@ -70,6 +70,21 @@ interface HistoryRow {
   cost_usd: number | null;
 }
 
+interface VersionContent {
+  id: string;
+  version_num: number;
+  model_id: string | null;
+  quality_score: number | null;
+  created_at: string | null;
+  aa_name: string | null;
+  aa_subtitle: string | null;
+  aa_summary: string | null;
+  aa_highlights: string[];
+  aa_itineraries: string | null;
+  seo_title: string | null;
+  seo_meta: string | null;
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 export function scoreColor(s: number | null | undefined): string {
@@ -217,6 +232,9 @@ export function TourDetailPanelV2({ tourId, tourName, rewriteCount = 0, onClose 
   const [history, setHistory] = useState<HistoryRow[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [toast, setToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
+  const [selectedVersion, setSelectedVersion] = useState<VersionContent | null>(null);
+  const [loadingVersion, setLoadingVersion] = useState(false);
+  const [promoting, setPromoting] = useState(false);
 
   useEffect(() => {
     setLoading(true);
@@ -241,6 +259,29 @@ export function TourDetailPanelV2({ tourId, tourName, rewriteCount = 0, onClose 
   function showToast(msg: string, type: "success" | "error") {
     setToast({ msg, type });
     setTimeout(() => setToast(null), 3000);
+  }
+
+  async function loadVersion(versionNum: number) {
+    setLoadingVersion(true);
+    setSelectedVersion(null);
+    try {
+      const r = await fetch(`/api/admin/tours/${tourId}/versions/${versionNum}`);
+      if (r.ok) setSelectedVersion(await r.json());
+    } finally { setLoadingVersion(false); }
+  }
+
+  async function promoteVersion(versionNum: number) {
+    if (!confirm(`Make v${versionNum} the current published version for this tour?`)) return;
+    setPromoting(true);
+    try {
+      const r = await fetch(`/api/admin/tours/${tourId}/versions/${versionNum}/promote`, { method: "POST" });
+      if (r.ok) {
+        showToast(`v${versionNum} is now the published version`, "success");
+        setHistory(prev => prev.map(h => ({ ...h })));
+      } else {
+        showToast("Promote failed", "error");
+      }
+    } finally { setPromoting(false); }
   }
 
   async function saveRaw(field: string, value: string | string[]) {
@@ -409,36 +450,105 @@ export function TourDetailPanelV2({ tourId, tourName, rewriteCount = 0, onClose 
             ) : history.length === 0 ? (
               <div style={{ textAlign: "center", padding: 40, color: A.muted, fontSize: 13 }}>No rewrites yet</div>
             ) : (
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                <thead>
-                  <tr style={{ background: A.line2 }}>
-                    {["Version", "Model", "Overall", "Brand", "SEO", "Cost", "Date"].map(h => (
-                      <th key={h} style={{
-                        padding: "8px 12px", textAlign: "left" as const,
-                        fontSize: 11, fontWeight: 600, color: A.muted,
-                        textTransform: "uppercase" as const, letterSpacing: "0.1em",
-                      }}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {history.map((h, i) => (
-                    <tr key={h.id} style={{ borderTop: `1px solid ${A.line}`, background: i % 2 === 0 ? "#fff" : A.bg }}>
-                      <td style={{ padding: "8px 12px" }}>
-                        <span style={{ fontSize: 12, padding: "2px 8px", borderRadius: 10, background: A.goldTint, color: A.gold, fontWeight: 600 }}>
-                          v{h.version_num}
-                        </span>
-                      </td>
-                      <td style={{ padding: "8px 12px", fontFamily: mono, fontSize: 11, color: A.muted }}>{modelShort(h.model_editorial)}</td>
-                      <td style={{ padding: "8px 12px", fontWeight: 700, color: scoreColor(h.score_overall) }}>{h.score_overall != null ? h.score_overall.toFixed(1) : "—"}</td>
-                      <td style={{ padding: "8px 12px", color: scoreColor(h.score_brand) }}>{h.score_brand != null ? h.score_brand.toFixed(1) : "—"}</td>
-                      <td style={{ padding: "8px 12px", color: scoreColor(h.score_seo) }}>{h.score_seo != null ? h.score_seo.toFixed(1) : "—"}</td>
-                      <td style={{ padding: "8px 12px", color: A.gold }}>{h.cost_usd != null ? `$${h.cost_usd.toFixed(4)}` : "—"}</td>
-                      <td style={{ padding: "8px 12px", color: A.muted2, fontSize: 12 }}>{relTime(h.created_at)}</td>
+              <div>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ background: A.line2 }}>
+                      {["Version", "Model", "Overall", "Brand", "SEO", "Cost", "Date", ""].map(h => (
+                        <th key={h} style={{
+                          padding: "8px 12px", textAlign: "left" as const,
+                          fontSize: 11, fontWeight: 600, color: A.muted,
+                          textTransform: "uppercase" as const, letterSpacing: "0.1em",
+                        }}>{h}</th>
+                      ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {history.map((h, i) => {
+                      const isActive = selectedVersion?.version_num === h.version_num;
+                      return (
+                        <tr
+                          key={h.id}
+                          onClick={() => loadVersion(h.version_num)}
+                          style={{
+                            borderTop: `1px solid ${A.line}`,
+                            background: isActive ? `${A.gold}18` : i % 2 === 0 ? "#fff" : A.bg,
+                            cursor: "pointer",
+                          }}
+                        >
+                          <td style={{ padding: "8px 12px" }}>
+                            <span style={{ fontSize: 12, padding: "2px 8px", borderRadius: 10, background: isActive ? A.gold : A.goldTint, color: isActive ? "#fff" : A.gold, fontWeight: 600 }}>
+                              v{h.version_num}
+                            </span>
+                          </td>
+                          <td style={{ padding: "8px 12px", fontFamily: mono, fontSize: 11, color: A.muted }}>{modelShort(h.model_editorial)}</td>
+                          <td style={{ padding: "8px 12px", fontWeight: 700, color: scoreColor(h.score_overall) }}>{h.score_overall != null ? h.score_overall.toFixed(1) : "—"}</td>
+                          <td style={{ padding: "8px 12px", color: scoreColor(h.score_brand) }}>{h.score_brand != null ? h.score_brand.toFixed(1) : "—"}</td>
+                          <td style={{ padding: "8px 12px", color: scoreColor(h.score_seo) }}>{h.score_seo != null ? h.score_seo.toFixed(1) : "—"}</td>
+                          <td style={{ padding: "8px 12px", color: A.gold }}>{h.cost_usd != null ? `$${h.cost_usd.toFixed(4)}` : "—"}</td>
+                          <td style={{ padding: "8px 12px", color: A.muted2, fontSize: 12 }}>{relTime(h.created_at)}</td>
+                          <td style={{ padding: "8px 12px" }}>
+                            <button
+                              onClick={e => { e.stopPropagation(); promoteVersion(h.version_num); }}
+                              disabled={promoting}
+                              style={{ padding: "3px 8px", fontSize: 11, border: `1px solid ${A.gold}`, borderRadius: 4, background: A.goldTint, cursor: "pointer", color: A.gold, fontWeight: 600 }}
+                            >
+                              {promoting ? "…" : "Make Current"}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+
+                {/* Version content preview */}
+                {loadingVersion && (
+                  <div style={{ marginTop: 16, padding: 20, textAlign: "center", color: A.muted, fontSize: 13 }}>Loading version content…</div>
+                )}
+                {selectedVersion && !loadingVersion && (
+                  <div style={{ marginTop: 20, padding: "16px 20px", background: A.bg, borderRadius: 8, border: `1px solid ${A.line}` }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                        v{selectedVersion.version_num} — {selectedVersion.model_id?.split(".").pop()?.replace(/-v\d+:\d+$/, "") ?? "—"}
+                        {selectedVersion.quality_score != null && (
+                          <span style={{ marginLeft: 10, color: scoreColor(selectedVersion.quality_score) }}>
+                            ★ {selectedVersion.quality_score.toFixed(1)}
+                          </span>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => promoteVersion(selectedVersion.version_num)}
+                        disabled={promoting}
+                        style={{ padding: "5px 12px", fontSize: 12, border: `1px solid ${A.gold}`, borderRadius: 6, background: A.gold, cursor: "pointer", color: "#fff", fontWeight: 600 }}
+                      >
+                        {promoting ? "Promoting…" : "Make Current"}
+                      </button>
+                    </div>
+                    {[
+                      { label: "Name",        val: selectedVersion.aa_name },
+                      { label: "Subtitle",    val: selectedVersion.aa_subtitle },
+                      { label: "Summary",     val: selectedVersion.aa_summary },
+                      { label: "Itineraries", val: selectedVersion.aa_itineraries },
+                      { label: "SEO Title",   val: selectedVersion.seo_title },
+                      { label: "SEO Meta",    val: selectedVersion.seo_meta },
+                    ].map(({ label, val }) => val ? (
+                      <div key={label} style={{ marginBottom: 12 }}>
+                        <div style={{ fontSize: 10, fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>{label}</div>
+                        <div style={{ fontSize: 13, color: A.body, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{val}</div>
+                      </div>
+                    ) : null)}
+                    {selectedVersion.aa_highlights.length > 0 && (
+                      <div style={{ marginBottom: 12 }}>
+                        <div style={{ fontSize: 10, fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Highlights</div>
+                        <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: A.body }}>
+                          {selectedVersion.aa_highlights.map((h, i) => <li key={i}>{h}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             )
           ) : (
             /* Published tab */
