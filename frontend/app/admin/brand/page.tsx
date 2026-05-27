@@ -228,7 +228,7 @@ function htmlToParagraphs(html: string): string[] {
     .replace(/<li[^>]*>/gi, "<p>");
   const parser = new DOMParser();
   const doc = parser.parseFromString(normalised, "text/html");
-  return Array.from(doc.querySelectorAll("p"))
+  return Array.from(doc.querySelectorAll("p, h1, h2, h3, h4, h5, h6"))
     .map(el => el.textContent?.trim() || "")
     .filter(Boolean);
 }
@@ -427,10 +427,10 @@ export default function AdminBrandPage() {
         body: JSON.stringify({ version }),
       });
       if (r.ok) {
-        setMsg({ text: `v${version} activated ✓`, ok: true });
-        setViewingVersion(null);
         await loadBrands();
         await selectBrand(selected);
+        setViewingVersion(null);
+        setMsg({ text: `v${version} activated ✓`, ok: true });
       } else {
         const e = await r.json().catch(() => ({}));
         setMsg({ text: e.detail || "Activate failed", ok: false });
@@ -465,7 +465,7 @@ export default function AdminBrandPage() {
 
   async function deleteBrand() {
     if (!selected) return;
-    if (!confirm(`Delete brand "${selected}"? This will mark all versions as inactive.`)) return;
+    if (!confirm(`Delete brand "${selected}"? This will permanently remove all versions.`)) return;
     setDeleting(true); setMsg(null);
     try {
       const r = await fetch(`/api/admin/brands/${encodeURIComponent(selected)}`, { method: "DELETE" });
