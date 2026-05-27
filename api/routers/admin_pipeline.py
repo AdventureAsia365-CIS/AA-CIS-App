@@ -1626,7 +1626,7 @@ async def get_brand(brand_name: str, request: Request, x_admin_secret: str = Hea
         rows = await conn.fetch("""
             SELECT id, brand_name, brand_type, core_idea,
                    customer_segment, customer_mindset, voice_examples,
-                   style_guide, system_prompt, forbidden_words,
+                   style_guide, good_examples, system_prompt, forbidden_words,
                    target_markets, rewrite_language,
                    version, is_active, updated_at, created_at
             FROM shared.tenant_brand_rules
@@ -1663,6 +1663,7 @@ async def get_brand(brand_name: str, request: Request, x_admin_secret: str = Hea
         "customer_mindset": current["customer_mindset"] or "",
         "tone_of_voice":    voice,
         "writing_style":    current["style_guide"] or "",
+        "good_examples":    current["good_examples"] or "",
         "should_write":     current["system_prompt"] or "",
         "forbidden_words":  _parse_fw(current["forbidden_words"]),
         "target_markets":   list(current["target_markets"]) if current["target_markets"] else [],
@@ -1699,15 +1700,15 @@ async def create_brand(
             INSERT INTO shared.tenant_brand_rules
                 (tenant_id, brand_name, brand_type, core_idea,
                  customer_segment, customer_mindset, voice_examples,
-                 style_guide, system_prompt, forbidden_words,
+                 style_guide, good_examples, system_prompt, forbidden_words,
                  target_markets, rewrite_language, version, is_active, updated_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10::jsonb,$11,$12,1,true,NOW())
+            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11::jsonb,$12,$13,1,true,NOW())
             RETURNING id, version
         """,
             tenant_id, body.brand_name, body.brand_type, body.core_idea,
             body.customer_segment, body.customer_mindset,
             json.dumps(voice),
-            body.writing_style, body.should_write,
+            body.writing_style, body.good_examples, body.should_write,
             json.dumps(body.forbidden_words or []),
             body.target_markets or [], body.rewrite_language,
         )
@@ -1738,16 +1739,17 @@ async def update_brand(
             INSERT INTO shared.tenant_brand_rules
                 (tenant_id, brand_name, brand_type, core_idea,
                  customer_segment, customer_mindset, voice_examples,
-                 style_guide, system_prompt, forbidden_words,
+                 style_guide, good_examples, system_prompt, forbidden_words,
                  target_markets, rewrite_language, version, is_active, updated_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10::jsonb,$11,$12,$13,true,NOW())
+            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11::jsonb,$12,$13,$14,true,NOW())
             RETURNING version
         """,
             tenant_id, brand_name,
             body_raw.get("brand_type"), body_raw.get("core_idea"),
             body_raw.get("customer_segment"), body_raw.get("customer_mindset"),
             json.dumps(voice if isinstance(voice, list) else [voice]),
-            body_raw.get("writing_style"), body_raw.get("should_write"),
+            body_raw.get("writing_style"), body_raw.get("good_examples"),
+            body_raw.get("should_write"),
             json.dumps(body_raw.get("forbidden_words") or []),
             body_raw.get("target_markets") or [],
             body_raw.get("rewrite_language", "en"),
@@ -1792,12 +1794,12 @@ async def delete_brand(brand_name: str, request: Request, x_admin_secret: str = 
     pool = request.app.state.pool
     tenant_id = "00000000-0000-0000-0000-000000000001"
     async with pool.acquire() as conn:
-        updated = await conn.fetchval("""
-            UPDATE shared.tenant_brand_rules SET is_active=false
+        deleted = await conn.fetchval("""
+            DELETE FROM shared.tenant_brand_rules
             WHERE tenant_id=$1 AND brand_name=$2
             RETURNING id
         """, tenant_id, brand_name)
-    if not updated:
+    if not deleted:
         raise HTTPException(status_code=404, detail=f"Brand '{brand_name}' not found")
     return {"status": "deleted", "brand_name": brand_name}
 
