@@ -62,6 +62,8 @@ interface HistoryRow {
   created_at: string | null;
   status: string;
   model_editorial: string | null;
+  brand_rules_version: number | null;
+  prompt_version: string | null;
   score_overall: number | null;
   score_brand: number | null;
   score_seo: number | null;
@@ -138,10 +140,11 @@ function Toast({ msg, type }: { msg: string; type: "success" | "error" }) {
 
 // ── EditableField ─────────────────────────────────────────────────────────────
 
-function EditableField({ label, initialValue, onSave, rows, charLimit, placeholder }: {
+function EditableField({ label, initialValue, onSave, onChange, rows, charLimit, placeholder }: {
   label: string;
   initialValue: string;
   onSave: (v: string) => Promise<void>;
+  onChange?: (v: string) => void;
   rows?: number;
   charLimit?: number;
   placeholder?: string;
@@ -167,6 +170,11 @@ function EditableField({ label, initialValue, onSave, rows, charLimit, placehold
       setState("error");
       setTimeout(() => setState("idle"), 3000);
     }
+  }
+
+  function handleChange(v: string) {
+    setValue(v);
+    onChange?.(v);
   }
 
   const inputStyle: React.CSSProperties = {
@@ -199,7 +207,7 @@ function EditableField({ label, initialValue, onSave, rows, charLimit, placehold
         <textarea
           value={value}
           rows={rows}
-          onChange={e => setValue(e.target.value)}
+          onChange={e => handleChange(e.target.value)}
           onBlur={handleBlur}
           placeholder={placeholder}
           style={inputStyle}
@@ -208,7 +216,7 @@ function EditableField({ label, initialValue, onSave, rows, charLimit, placehold
         <input
           type="text"
           value={value}
-          onChange={e => setValue(e.target.value)}
+          onChange={e => handleChange(e.target.value)}
           onBlur={handleBlur}
           placeholder={placeholder}
           style={inputStyle}
@@ -235,13 +243,33 @@ export function TourDetailPanelV2({ tourId, tourName, rewriteCount = 0, onClose 
   const [selectedVersion, setSelectedVersion] = useState<VersionContent | null>(null);
   const [loadingVersion, setLoadingVersion] = useState(false);
   const [promoting, setPromoting] = useState(false);
+  const [rawDraft, setRawDraft] = useState<Record<string, string>>({});
+  const [savingAll, setSavingAll] = useState(false);
 
   useEffect(() => {
     setLoading(true);
     setDetail(null);
     fetch(`/api/admin/tours/${tourId}/detail`)
       .then(r => r.json())
-      .then(setDetail)
+      .then(d => {
+        setDetail(d);
+        const r = d?.raw ?? {};
+        setRawDraft({
+          src_name: r.src_name ?? "",
+          country: r.country ?? "",
+          duration: r.duration ?? "",
+          group_size: r.group_size ?? "",
+          price_raw: r.price_raw ?? "",
+          period: r.period ?? "",
+          provider: r.provider ?? "",
+          src_summary: r.src_summary ?? "",
+          src_highlights: arrayToText(r.src_highlights),
+          src_itineraries: r.src_itineraries ?? "",
+          src_description: r.src_description ?? "",
+          inclusions: r.inclusions ?? "",
+          exclusions: r.exclusions ?? "",
+        });
+      })
       .catch(() => {})
       .finally(() => setLoading(false));
   }, [tourId]);
@@ -292,6 +320,21 @@ export function TourDetailPanelV2({ tourId, tourName, rewriteCount = 0, onClose 
     });
     if (!res.ok) { showToast("Save failed", "error"); throw new Error("Save failed"); }
     showToast("Saved", "success");
+  }
+
+  async function saveAllRaw() {
+    setSavingAll(true);
+    try {
+      const body: Record<string, string | string[]> = { ...rawDraft };
+      body.src_highlights = textToArray(rawDraft.src_highlights ?? "");
+      const res = await fetch(`/api/admin/tours/${tourId}/raw`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) { showToast("Save failed", "error"); return; }
+      showToast("All changes saved", "success");
+    } finally { setSavingAll(false); }
   }
 
   async function saveGenerated(field: string, value: string | string[]) {
@@ -388,26 +431,39 @@ export function TourDetailPanelV2({ tourId, tourName, rewriteCount = 0, onClose 
           ) : tab === "original" ? (
             <div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 24px" }}>
-                <EditableField label="Tour Name" initialValue={raw?.src_name || ""} onSave={v => saveRaw("src_name", v)} />
-                <EditableField label="Country" initialValue={raw?.country || ""} onSave={v => saveRaw("country", v)} />
-                <EditableField label="Duration" initialValue={raw?.duration || ""} onSave={v => saveRaw("duration", v)} />
-                <EditableField label="Group Size" initialValue={raw?.group_size || ""} onSave={v => saveRaw("group_size", v)} />
-                <EditableField label="Price" initialValue={raw?.price_raw || ""} onSave={v => saveRaw("price_raw", v)} />
-                <EditableField label="Period" initialValue={raw?.period || ""} onSave={v => saveRaw("period", v)} />
-                <EditableField label="Provider" initialValue={raw?.provider || ""} onSave={v => saveRaw("provider", v)} />
+                <EditableField label="Tour Name" initialValue={raw?.src_name || ""} onSave={v => saveRaw("src_name", v)} onChange={v => setRawDraft(d => ({ ...d, src_name: v }))} />
+                <EditableField label="Country" initialValue={raw?.country || ""} onSave={v => saveRaw("country", v)} onChange={v => setRawDraft(d => ({ ...d, country: v }))} />
+                <EditableField label="Duration" initialValue={raw?.duration || ""} onSave={v => saveRaw("duration", v)} onChange={v => setRawDraft(d => ({ ...d, duration: v }))} />
+                <EditableField label="Group Size" initialValue={raw?.group_size || ""} onSave={v => saveRaw("group_size", v)} onChange={v => setRawDraft(d => ({ ...d, group_size: v }))} />
+                <EditableField label="Price" initialValue={raw?.price_raw || ""} onSave={v => saveRaw("price_raw", v)} onChange={v => setRawDraft(d => ({ ...d, price_raw: v }))} />
+                <EditableField label="Period" initialValue={raw?.period || ""} onSave={v => saveRaw("period", v)} onChange={v => setRawDraft(d => ({ ...d, period: v }))} />
+                <EditableField label="Provider" initialValue={raw?.provider || ""} onSave={v => saveRaw("provider", v)} onChange={v => setRawDraft(d => ({ ...d, provider: v }))} />
               </div>
-              <EditableField label="Summary" initialValue={raw?.src_summary || ""} onSave={v => saveRaw("src_summary", v)} rows={6} />
+              <EditableField label="Summary" initialValue={raw?.src_summary || ""} onSave={v => saveRaw("src_summary", v)} onChange={v => setRawDraft(d => ({ ...d, src_summary: v }))} rows={6} />
               <EditableField
                 label="Highlights (one per line)"
                 initialValue={arrayToText(raw?.src_highlights)}
                 onSave={v => saveRaw("src_highlights", textToArray(v))}
+                onChange={v => setRawDraft(d => ({ ...d, src_highlights: v }))}
                 rows={4}
                 placeholder="One highlight per line"
               />
-              <EditableField label="Itineraries" initialValue={raw?.src_itineraries || ""} onSave={v => saveRaw("src_itineraries", v)} rows={10} />
-              <EditableField label="Description" initialValue={raw?.src_description || ""} onSave={v => saveRaw("src_description", v)} rows={6} />
-              <EditableField label="Inclusions" initialValue={raw?.inclusions || ""} onSave={v => saveRaw("inclusions", v)} rows={4} />
-              <EditableField label="Exclusions" initialValue={raw?.exclusions || ""} onSave={v => saveRaw("exclusions", v)} rows={4} />
+              <EditableField label="Itineraries" initialValue={raw?.src_itineraries || ""} onSave={v => saveRaw("src_itineraries", v)} onChange={v => setRawDraft(d => ({ ...d, src_itineraries: v }))} rows={10} />
+              <EditableField label="Description" initialValue={raw?.src_description || ""} onSave={v => saveRaw("src_description", v)} onChange={v => setRawDraft(d => ({ ...d, src_description: v }))} rows={6} />
+              <EditableField label="Inclusions" initialValue={raw?.inclusions || ""} onSave={v => saveRaw("inclusions", v)} onChange={v => setRawDraft(d => ({ ...d, inclusions: v }))} rows={4} />
+              <EditableField label="Exclusions" initialValue={raw?.exclusions || ""} onSave={v => saveRaw("exclusions", v)} onChange={v => setRawDraft(d => ({ ...d, exclusions: v }))} rows={4} />
+              <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+                <button
+                  onClick={saveAllRaw}
+                  disabled={savingAll}
+                  style={{
+                    padding: "9px 22px", borderRadius: 7, border: "none", cursor: savingAll ? "not-allowed" : "pointer",
+                    background: "#2563EB", color: "#fff", fontSize: 13, fontWeight: 600, opacity: savingAll ? 0.6 : 1,
+                  }}
+                >
+                  {savingAll ? "Saving…" : "Save All"}
+                </button>
+              </div>
             </div>
           ) : tab === "rewrite" ? (
             gen ? (
@@ -454,7 +510,7 @@ export function TourDetailPanelV2({ tourId, tourName, rewriteCount = 0, onClose 
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                   <thead>
                     <tr style={{ background: A.line2 }}>
-                      {["Version", "Model", "Overall", "Brand", "SEO", "Cost", "Date", ""].map(h => (
+                      {["Version", "Model", "Brand v", "Overall", "Brand", "SEO", "Cost", "Date", ""].map(h => (
                         <th key={h} style={{
                           padding: "8px 12px", textAlign: "left" as const,
                           fontSize: 11, fontWeight: 600, color: A.muted,
@@ -482,6 +538,9 @@ export function TourDetailPanelV2({ tourId, tourName, rewriteCount = 0, onClose 
                             </span>
                           </td>
                           <td style={{ padding: "8px 12px", fontFamily: mono, fontSize: 11, color: A.muted }}>{modelShort(h.model_editorial)}</td>
+                          <td style={{ padding: "8px 12px", fontSize: 11, color: A.muted2 }}>
+                            {h.brand_rules_version != null ? <span style={{ padding: "1px 6px", borderRadius: 8, background: A.goldTint, color: A.gold, fontWeight: 600, fontSize: 10 }}>v{h.brand_rules_version}</span> : "—"}
+                          </td>
                           <td style={{ padding: "8px 12px", fontWeight: 700, color: scoreColor(h.score_overall) }}>{h.score_overall != null ? h.score_overall.toFixed(1) : "—"}</td>
                           <td style={{ padding: "8px 12px", color: scoreColor(h.score_brand) }}>{h.score_brand != null ? h.score_brand.toFixed(1) : "—"}</td>
                           <td style={{ padding: "8px 12px", color: scoreColor(h.score_seo) }}>{h.score_seo != null ? h.score_seo.toFixed(1) : "—"}</td>

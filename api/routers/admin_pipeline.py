@@ -10,7 +10,7 @@ from uuid import UUID
 import asyncpg
 import boto3 as _boto3
 import structlog
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, File, Header, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 from typing import Optional, List
 
@@ -577,6 +577,123 @@ async def get_all_tours(request: Request, x_admin_secret: str = Header(None)):
     }
 
 
+# ── GET /admin/tours/export ──────────────────────────────────────────────────
+# NOTE: /tours/export MUST come before /tours/{tour_id}/... — FastAPI greedy matching
+
+@router.get("/tours/export")
+async def export_tours(
+    request: Request,
+    format: str = "csv",
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    if format not in ("csv", "xlsx"):
+        raise HTTPException(status_code=400, detail="format must be csv or xlsx")
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT
+                rt.tour_id::text, rt.src_name, rt.country,
+                rt.pipeline_status::text, rt.ingest_at,
+                rs.filename,
+                COUNT(gc.id)       AS rewrite_count,
+                MAX(gc.created_at) AS last_rewritten_at,
+                pt.aa_name, pt.aa_subtitle, pt.quality_score, pt.published_at
+            FROM silver_aa_internal.raw_tours rt
+            LEFT JOIN silver_aa_internal.raw_sources rs ON rs.id = rt.source_id
+            LEFT JOIN silver_aa_internal.generated_content gc ON gc.tour_id = rt.tour_id
+            LEFT JOIN gold_aa_internal.published_tours pt ON pt.tour_id = rt.tour_id
+            GROUP BY rt.tour_id, rt.src_name, rt.country, rt.pipeline_status,
+                     rt.ingest_at, rs.filename,
+                     pt.aa_name, pt.aa_subtitle, pt.quality_score, pt.published_at
+            ORDER BY rt.ingest_at DESC
+        """)
+
+    import io
+    import pandas as pd
+    from fastapi.responses import StreamingResponse
+
+    data = [
+        {
+            "tour_id":          r["tour_id"],
+            "src_name":         r["src_name"],
+            "aa_name":          r["aa_name"] or "",
+            "aa_subtitle":      r["aa_subtitle"] or "",
+            "country":          r["country"] or "",
+            "pipeline_status":  r["pipeline_status"],
+            "rewrite_count":    int(r["rewrite_count"]),
+            "quality_score":    float(r["quality_score"]) if r["quality_score"] else None,
+            "filename":         r["filename"] or "",
+            "ingest_at":        str(r["ingest_at"]) if r["ingest_at"] else "",
+            "last_rewritten_at": str(r["last_rewritten_at"]) if r["last_rewritten_at"] else "",
+            "published_at":     str(r["published_at"]) if r["published_at"] else "",
+        }
+        for r in rows
+    ]
+    df = pd.DataFrame(data)
+
+    if format == "csv":
+        buf = io.StringIO()
+        df.to_csv(buf, index=False)
+        buf.seek(0)
+        return StreamingResponse(
+            iter([buf.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=master_content_export.csv"},
+        )
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False, sheet_name="Master Content")
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.read()]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=master_content_export.xlsx"},
+    )
+
+
+# ── Review queue (admin alias — no JWT required) ─────────────────────────────
+
+@router.get("/review-queue")
+async def admin_review_queue(
+    request: Request,
+    x_admin_secret: str = Header(None),
+    page: int = 1,
+    page_size: int = 20,
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    tenant_id = "00000000-0000-0000-0000-000000000001"
+    offset = (page - 1) * page_size
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT rq.id, rq.tour_id, rq.generated_content_id,
+                   rq.review_status, rq.score_overall, rq.failure_summary, rq.created_at,
+                   gc.aa_name, gc.aa_subtitle, gc.aa_summary,
+                   gc.seo_title, gc.seo_meta,
+                   rt.src_name, rt.country, rt.duration
+            FROM silver_aa_internal.review_queue rq
+            JOIN silver_aa_internal.generated_content gc ON gc.id = rq.generated_content_id
+            JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = rq.tour_id
+            WHERE rq.tenant_id = $1::uuid
+              AND rq.review_status = 'pending'
+            ORDER BY rq.created_at DESC
+            LIMIT $2 OFFSET $3
+        """, tenant_id, page_size, offset)
+        total = await conn.fetchval("""
+            SELECT COUNT(*) FROM silver_aa_internal.review_queue
+            WHERE tenant_id = $1::uuid AND review_status = 'pending'
+        """, tenant_id)
+    return {
+        "data": [
+            {k: str(v) if hasattr(v, "hex") else v for k, v in dict(r).items()}
+            for r in rows
+        ],
+        "pagination": {"page": page, "page_size": page_size, "total": total},
+    }
+
+
 # ── Tour version endpoints ────────────────────────────────────────────────────
 # NOTE: /versions/{num}/promote MUST come before /versions/{num} — FastAPI greedy matching
 
@@ -590,10 +707,12 @@ async def promote_tour_version(
     async with pool.acquire() as conn:
         updated = await conn.fetchval("""
             WITH gc AS (
-                SELECT id, aa_name, aa_subtitle, aa_summary, aa_highlights,
-                       aa_itineraries, seo_title, seo_meta, score_overall
-                FROM silver_aa_internal.generated_content
-                WHERE tour_id = $1::uuid AND version_num = $2
+                SELECT gc.id, gc.aa_name, gc.aa_subtitle,
+                       qs.score_overall
+                FROM silver_aa_internal.generated_content gc
+                LEFT JOIN silver_aa_internal.quality_scores qs
+                    ON qs.generated_content_id = gc.id
+                WHERE gc.tour_id = $1::uuid AND gc.version_num = $2
                 LIMIT 1
             )
             UPDATE gold_aa_internal.published_tours pt
@@ -620,33 +739,34 @@ async def get_tour_version_detail(
     pool = request.app.state.pool
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            SELECT id, version_num, model_editorial AS model_id,
-                   seo_mode, score_overall AS quality_score, created_at,
-                   aa_name, aa_subtitle, aa_summary, aa_description,
-                   aa_highlights, aa_itineraries, seo_title, seo_meta
-            FROM silver_aa_internal.generated_content
-            WHERE tour_id = $1::uuid AND version_num = $2
+            SELECT gc.id, gc.version_num, gc.model_editorial AS model_id,
+                   qs.score_overall AS quality_score, gc.created_at,
+                   gc.aa_name, gc.aa_subtitle, gc.aa_summary, gc.aa_description,
+                   gc.aa_highlights, gc.aa_itineraries, gc.seo_title, gc.seo_meta
+            FROM silver_aa_internal.generated_content gc
+            LEFT JOIN silver_aa_internal.quality_scores qs
+                ON qs.generated_content_id = gc.id
+            WHERE gc.tour_id = $1::uuid AND gc.version_num = $2
             LIMIT 1
         """, tour_id, version_num)
     if not row:
         raise HTTPException(status_code=404, detail="Version not found")
     return {
-        "id":            str(row["id"]),
-        "version_num":   row["version_num"],
-        "model_id":      row["model_id"],
-        "seo_mode":      row["seo_mode"],
-        "quality_score": float(row["quality_score"]) if row["quality_score"] else None,
-        "created_at":    row["created_at"].isoformat() if row["created_at"] else None,
-        "aa_name":       row["aa_name"],
-        "aa_subtitle":   row["aa_subtitle"],
-        "aa_summary":    row["aa_summary"],
+        "id":             str(row["id"]),
+        "version_num":    row["version_num"],
+        "model_id":       row["model_id"],
+        "quality_score":  float(row["quality_score"]) if row["quality_score"] else None,
+        "created_at":     row["created_at"].isoformat() if row["created_at"] else None,
+        "aa_name":        row["aa_name"],
+        "aa_subtitle":    row["aa_subtitle"],
+        "aa_summary":     row["aa_summary"],
         "aa_description": row["aa_description"],
-        "aa_highlights": row["aa_highlights"] if isinstance(row["aa_highlights"], list) else (
+        "aa_highlights":  row["aa_highlights"] if isinstance(row["aa_highlights"], list) else (
             json.loads(row["aa_highlights"]) if row["aa_highlights"] else []
         ),
         "aa_itineraries": row["aa_itineraries"],
-        "seo_title":     row["seo_title"],
-        "seo_meta":      row["seo_meta"],
+        "seo_title":      row["seo_title"],
+        "seo_meta":       row["seo_meta"],
     }
 
 
@@ -659,9 +779,11 @@ async def list_tour_versions(
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT gc.id, gc.version_num, gc.model_editorial AS model_id,
-                   gc.seo_mode, gc.score_overall AS quality_score, gc.created_at,
+                   qs.score_overall AS quality_score, gc.created_at,
                    (pt.generated_content_id = gc.id) AS is_current
             FROM silver_aa_internal.generated_content gc
+            LEFT JOIN silver_aa_internal.quality_scores qs
+                ON qs.generated_content_id = gc.id
             LEFT JOIN gold_aa_internal.published_tours pt ON pt.tour_id = gc.tour_id
             WHERE gc.tour_id = $1::uuid
             ORDER BY gc.version_num DESC
@@ -671,7 +793,6 @@ async def list_tour_versions(
             "id":            str(r["id"]),
             "version_num":   r["version_num"],
             "model_id":      r["model_id"],
-            "seo_mode":      r["seo_mode"],
             "quality_score": float(r["quality_score"]) if r["quality_score"] else None,
             "created_at":    r["created_at"].isoformat() if r["created_at"] else None,
             "is_current":    bool(r["is_current"]),
@@ -690,7 +811,7 @@ async def get_tour_history(tour_id: str, request: Request, x_admin_secret: str =
         rows = await conn.fetch("""
             SELECT
                 gc.id::text, gc.version_num, gc.created_at, gc.status::text,
-                gc.model_editorial,
+                gc.model_editorial, gc.brand_rules_version, gc.prompt_version,
                 qs.score_overall, qs.score_brand, qs.score_seo, qs.score_structure,
                 pr.llm_model, pr.cost_usd, pr.started_at
             FROM silver_aa_internal.generated_content gc
@@ -704,18 +825,20 @@ async def get_tour_history(tour_id: str, request: Request, x_admin_secret: str =
     return {
         "history": [
             {
-                "id":              r["id"],
-                "version_num":     r["version_num"],
-                "created_at":      str(r["created_at"]) if r["created_at"] else None,
-                "status":          r["status"],
-                "model_editorial": r["model_editorial"],
-                "score_overall":   float(r["score_overall"]) if r["score_overall"] is not None else None,
-                "score_brand":     float(r["score_brand"])   if r["score_brand"] is not None else None,
-                "score_seo":       float(r["score_seo"])     if r["score_seo"] is not None else None,
-                "score_structure": float(r["score_structure"]) if r["score_structure"] is not None else None,
-                "llm_model":       r["llm_model"],
-                "cost_usd":        float(r["cost_usd"]) if r["cost_usd"] is not None else None,
-                "started_at":      str(r["started_at"]) if r["started_at"] else None,
+                "id":                   r["id"],
+                "version_num":          r["version_num"],
+                "created_at":           str(r["created_at"]) if r["created_at"] else None,
+                "status":               r["status"],
+                "model_editorial":      r["model_editorial"],
+                "brand_rules_version":  r["brand_rules_version"],
+                "prompt_version":       r["prompt_version"],
+                "score_overall":        float(r["score_overall"]) if r["score_overall"] is not None else None,
+                "score_brand":          float(r["score_brand"])   if r["score_brand"] is not None else None,
+                "score_seo":            float(r["score_seo"])     if r["score_seo"] is not None else None,
+                "score_structure":      float(r["score_structure"]) if r["score_structure"] is not None else None,
+                "llm_model":            r["llm_model"],
+                "cost_usd":             float(r["cost_usd"]) if r["cost_usd"] is not None else None,
+                "started_at":           str(r["started_at"]) if r["started_at"] else None,
             }
             for r in rows
         ]
@@ -1361,14 +1484,22 @@ async def list_brands(request: Request, x_admin_secret: str = Header(None)):
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
     tenant_id = "00000000-0000-0000-0000-000000000001"
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT DISTINCT ON (COALESCE(brand_name, ''))
-                id, brand_name, brand_type, core_idea, version, is_active, updated_at
-            FROM shared.tenant_brand_rules
-            WHERE tenant_id = $1
-            ORDER BY COALESCE(brand_name, ''), version DESC
-        """, tenant_id)
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT DISTINCT ON (COALESCE(brand_name, ''))
+                    id, brand_name, brand_type, core_idea, version, is_active, updated_at
+                FROM shared.tenant_brand_rules
+                WHERE tenant_id = $1
+                ORDER BY COALESCE(brand_name, ''), version DESC
+            """, tenant_id)
+    except Exception as e:
+        if "brand_name" in str(e).lower() or "column" in str(e).lower():
+            raise HTTPException(
+                status_code=503,
+                detail="Migration 043 not applied — run 043_add_brand_name_to_brand_rules.sql first",
+            )
+        raise
     return {"brands": [
         {
             "brand_name":  r["brand_name"] or "default",
@@ -1380,6 +1511,75 @@ async def list_brands(request: Request, x_admin_secret: str = Header(None)):
         }
         for r in rows
     ]}
+
+
+@router.post("/brands/parse-docx")
+async def parse_brand_docx(
+    request: Request,
+    file: UploadFile = File(...),
+    x_admin_secret: str = Header(None),
+):
+    """Parse a brand brief DOCX and return pre-filled brand fields."""
+    verify_admin_secret(x_admin_secret)
+    try:
+        from docx import Document  # type: ignore
+        import io
+        content = await file.read()
+        doc = Document(io.BytesIO(content))
+    except ImportError:
+        raise HTTPException(status_code=501, detail="python-docx not installed on this server")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not parse DOCX: {e}")
+
+    _FIELD_KEYS = {
+        "brand name": "brand_name",
+        "brand type": "brand_type",
+        "core idea": "core_idea",
+        "target market": "target_markets",
+        "customer segment": "customer_segment",
+        "customer mindset": "customer_mindset",
+        "tone of voice": "tone_of_voice",
+        "tone": "tone_of_voice",
+        "writing style": "writing_style",
+        "good example": "good_examples",
+        "should write": "should_write",
+        "forbidden word": "forbidden_words",
+        "forbidden": "forbidden_words",
+    }
+    _LIST_FIELDS = {"target_markets", "tone_of_voice", "forbidden_words"}
+
+    result: dict = {}
+    current_field: str | None = None
+    buffer: list[str] = []
+
+    def _flush():
+        if current_field and buffer:
+            text = "\n".join(buffer).strip()
+            if current_field in _LIST_FIELDS:
+                items = [l.lstrip("-•·*").strip() for l in text.splitlines() if l.strip()]
+                result[current_field] = items or [text]
+            else:
+                result[current_field] = text
+
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if not text:
+            continue
+        lower = text.lower().rstrip(":").strip()
+        matched = next((v for k, v in _FIELD_KEYS.items() if lower == k or lower.startswith(k)), None)
+        if matched or para.style.name.startswith("Heading"):
+            _flush()
+            buffer = []
+            current_field = matched or current_field
+            inline = text.split(":", 1)[1].strip() if ":" in text else ""
+            if inline:
+                buffer.append(inline)
+        else:
+            buffer.append(text)
+
+    _flush()
+
+    return {"parsed": result, "filename": file.filename}
 
 
 @router.get("/brands/{brand_name}")

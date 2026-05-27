@@ -6,8 +6,8 @@
 // PUT  /api/admin/brands/{name}  → update brand (new version)
 // DELETE /api/admin/brands/{name} → soft delete
 
-import { useState, useEffect, useCallback } from "react";
-import { Plus, Trash2, ChevronDown, ChevronUp, RefreshCw } from "lucide-react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { Plus, Trash2, ChevronDown, ChevronUp, RefreshCw, Upload } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
 import { A, serif, sans, Card, SLabel, Btn } from "../_components/adminUi";
 
@@ -168,6 +168,8 @@ export default function AdminBrandPage() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [loading, setLoading]       = useState(true);
   const [deleting, setDeleting]     = useState(false);
+  const [parsing, setParsing]       = useState(false);
+  const docxRef                     = useRef<HTMLInputElement>(null);
 
   const loadBrands = useCallback(async () => {
     setLoading(true);
@@ -236,6 +238,38 @@ export default function AdminBrandPage() {
     } finally { setDeleting(false); }
   }
 
+  async function handleDocx(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setParsing(true); setMsg(null);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const r = await fetch("/api/admin/brands/parse-docx", { method: "POST", body: fd });
+      if (!r.ok) { setMsg({ text: "DOCX parse failed", ok: false }); return; }
+      const { parsed } = await r.json();
+      setForm(f => ({
+        ...f,
+        ...(parsed.brand_name      ? { brand_name: parsed.brand_name }           : {}),
+        ...(parsed.brand_type      ? { brand_type: parsed.brand_type }           : {}),
+        ...(parsed.core_idea       ? { core_idea: parsed.core_idea }             : {}),
+        ...(parsed.customer_segment ? { customer_segment: parsed.customer_segment } : {}),
+        ...(parsed.customer_mindset ? { customer_mindset: parsed.customer_mindset } : {}),
+        ...(parsed.writing_style   ? { writing_style: parsed.writing_style }     : {}),
+        ...(parsed.good_examples   ? { good_examples: parsed.good_examples }     : {}),
+        ...(parsed.should_write    ? { should_write: parsed.should_write }       : {}),
+        ...(parsed.target_markets  ? { target_markets: parsed.target_markets }   : {}),
+        ...(parsed.tone_of_voice   ? { tone_of_voice: parsed.tone_of_voice }     : {}),
+        ...(parsed.forbidden_words ? { forbidden_words: parsed.forbidden_words } : {}),
+      }));
+      setIsNew(true);
+      setMsg({ text: `DOCX parsed — ${Object.keys(parsed).length} field(s) filled. Review and save.`, ok: true });
+    } finally {
+      setParsing(false);
+      if (docxRef.current) docxRef.current.value = "";
+    }
+  }
+
   const canSave = isNew ? form.brand_name.trim().length > 0 : selected != null;
 
   return (
@@ -256,6 +290,19 @@ export default function AdminBrandPage() {
                 <button onClick={loadBrands} style={{ background: "none", border: "none", cursor: "pointer", color: A.muted, padding: 4 }}>
                   <RefreshCw size={13} />
                 </button>
+                <button
+                  onClick={() => { startNew(); docxRef.current?.click(); }}
+                  disabled={parsing}
+                  title="Upload DOCX brand brief"
+                  style={{
+                    background: "#EEF2FF", border: "none", borderRadius: 5, color: "#3730A3",
+                    cursor: "pointer", padding: "4px 8px", fontSize: 12, fontWeight: 600,
+                    display: "flex", alignItems: "center", gap: 3, opacity: parsing ? 0.6 : 1,
+                  }}
+                >
+                  <Upload size={11} /> {parsing ? "…" : "DOCX"}
+                </button>
+                <input ref={docxRef} type="file" accept=".docx" style={{ display: "none" }} onChange={handleDocx} />
                 <button onClick={startNew} style={{
                   background: A.gold, border: "none", borderRadius: 5, color: "#fff",
                   cursor: "pointer", padding: "4px 8px", fontSize: 12, fontWeight: 600,
