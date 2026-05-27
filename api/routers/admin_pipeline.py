@@ -1639,9 +1639,19 @@ async def get_brand(brand_name: str, request: Request, x_admin_secret: str = Hea
     voice = _parse_jsonb_list(current["voice_examples"]) if current["voice_examples"] else []
     history = [
         {
-            "version":    r["version"],
-            "is_active":  r["is_active"],
-            "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+            "version":          r["version"],
+            "is_active":        r["is_active"],
+            "updated_at":       r["updated_at"].isoformat() if r["updated_at"] else None,
+            "brand_type":       r["brand_type"] or "",
+            "core_idea":        r["core_idea"] or "",
+            "customer_segment": r["customer_segment"] or "",
+            "customer_mindset": r["customer_mindset"] or "",
+            "tone_of_voice":    _parse_jsonb_list(r["voice_examples"]) if r["voice_examples"] else [],
+            "writing_style":    r["style_guide"] or "",
+            "should_write":     r["system_prompt"] or "",
+            "forbidden_words":  _parse_fw(r["forbidden_words"]),
+            "target_markets":   list(r["target_markets"]) if r["target_markets"] else [],
+            "rewrite_language": r["rewrite_language"] or "en",
         }
         for r in rows
     ]
@@ -1744,6 +1754,36 @@ async def update_brand(
             current_ver + 1,
         )
     return {"status": "updated", "brand_name": brand_name, "version": row["version"]}
+
+
+@router.post("/brands/{brand_name}/activate")
+async def activate_brand_version(brand_name: str, request: Request, x_admin_secret: str = Header(None)):
+    verify_admin_secret(x_admin_secret)
+    body_raw = await request.json()
+    version = body_raw.get("version")
+    if not version:
+        raise HTTPException(status_code=422, detail="version is required")
+    pool = request.app.state.pool
+    tenant_id = "00000000-0000-0000-0000-000000000001"
+    async with pool.acquire() as conn:
+        exists = await conn.fetchval(
+            "SELECT COUNT(*) FROM shared.tenant_brand_rules"
+            " WHERE tenant_id=$1 AND COALESCE(brand_name,'default')=$2 AND version=$3",
+            tenant_id, brand_name, int(version),
+        )
+        if not exists:
+            raise HTTPException(status_code=404, detail=f"Brand '{brand_name}' version {version} not found")
+        await conn.execute(
+            "UPDATE shared.tenant_brand_rules SET is_active=false"
+            " WHERE tenant_id=$1 AND COALESCE(brand_name,'default')=$2",
+            tenant_id, brand_name,
+        )
+        await conn.execute(
+            "UPDATE shared.tenant_brand_rules SET is_active=true"
+            " WHERE tenant_id=$1 AND COALESCE(brand_name,'default')=$2 AND version=$3",
+            tenant_id, brand_name, int(version),
+        )
+    return {"status": "activated", "brand_name": brand_name, "version": version}
 
 
 @router.delete("/brands/{brand_name}")

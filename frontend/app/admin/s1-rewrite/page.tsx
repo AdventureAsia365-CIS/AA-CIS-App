@@ -302,8 +302,7 @@ export default function S1RewritePage() {
                 {brandList.length === 0 && <option value="">No brand configured</option>}
                 {brandList.map(b => (
                   <option key={b.brand_name} value={b.brand_name}>
-                    {b.brand_name}{b.is_active ? " (active)" : ""}
-                    {b.brand_type ? ` · ${b.brand_type}` : ""}
+                    {b.brand_name} · v{b.version}{b.is_active ? " (active)" : ""}
                   </option>
                 ))}
               </select>
