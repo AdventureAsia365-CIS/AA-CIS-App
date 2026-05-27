@@ -517,6 +517,9 @@ export default function AdminBrandPage() {
 
   const canSave = isNew ? form.brand_name.trim().length > 0 : selected != null;
   const isReadOnly = viewingVersion !== null;
+  const viewedEntry = isReadOnly && detail
+    ? detail.history.find(h => h.version === viewingVersion) ?? null
+    : null;
 
   return (
     <div style={{ display: "flex", minHeight: "100vh", fontFamily: sans, background: A.bg }}>
@@ -620,8 +623,8 @@ export default function AdminBrandPage() {
                     </div>
                     {!isNew && detail && (
                       <div style={{ fontSize: 12, color: A.muted, marginTop: 4 }}>
-                        v{detail.version} · {detail.updated_at?.slice(0, 10) || "—"}
-                        {detail.is_active
+                        v{viewedEntry ? viewedEntry.version : detail.version} · {(viewedEntry ? viewedEntry.updated_at : detail.updated_at)?.slice(0, 10) || "—"}
+                        {(viewedEntry ? viewedEntry.is_active : detail.is_active)
                           ? <span style={{ color: A.green, marginLeft: 8 }}>● active</span>
                           : <span style={{ color: A.red, marginLeft: 8 }}>● inactive</span>}
                       </div>
