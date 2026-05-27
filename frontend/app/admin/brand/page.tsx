@@ -155,6 +155,139 @@ function detailToForm(d: BrandDetail): BrandForm {
   };
 }
 
+// ─── DOCX parser ──────────────────────────────────────────────────────────────
+
+function parseBrandText(rawText: string): Partial<BrandForm> {
+  const lines = rawText.split("\n").map(l => l.trim());
+  const result: Partial<BrandForm> = {};
+
+  const SECTION_HEADINGS = new Set([
+    "brand identity", "target market", "target markets",
+    "tone of voice", "writing style",
+    "good example", "good examples",
+    "should write", "should not write",
+  ]);
+
+  function isSection(line: string) { return SECTION_HEADINGS.has(line.toLowerCase()); }
+  function isApiKey(line: string) { return /^cis_[A-Za-z0-9]/.test(line); }
+  function isLabeledField(line: string) {
+    return /^(brand type|core idea|primary markets|customer segment|customer mindset):/i.test(line);
+  }
+
+  // Brand name: first non-empty line without colon, not a heading, not an API key
+  for (const line of lines) {
+    if (!line || isApiKey(line) || isSection(line) || line.includes(":")) continue;
+    result.brand_name = line;
+    break;
+  }
+
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line) { i++; continue; }
+
+    if (/^brand type:/i.test(line)) {
+      result.brand_type = line.replace(/^brand type:\s*/i, "").trim();
+    }
+
+    if (/^core idea:/i.test(line)) {
+      const parts: string[] = [];
+      const inline = line.replace(/^core idea:\s*/i, "").trim();
+      if (inline) parts.push(inline);
+      for (let j = i + 1; j < lines.length; j++) {
+        const next = lines[j];
+        if (!next || isSection(next) || isLabeledField(next)) break;
+        parts.push(next);
+      }
+      result.core_idea = parts.join(" ");
+    }
+
+    if (/^primary markets:/i.test(line)) {
+      let val = line.replace(/^primary markets:\s*/i, "").trim();
+      if (!val) val = lines[i + 1]?.trim() || "";
+      if (val) result.target_markets = val.split(/[,;]/).map(s => s.trim()).filter(Boolean);
+    }
+
+    if (/^customer segment:/i.test(line)) {
+      const parts: string[] = [];
+      const inline = line.replace(/^customer segment:\s*/i, "").trim();
+      if (inline) parts.push(inline);
+      for (let j = i + 1; j < lines.length; j++) {
+        const next = lines[j];
+        if (!next || isSection(next) || isLabeledField(next)) break;
+        parts.push(next);
+      }
+      result.customer_segment = parts.join(" ");
+    }
+
+    if (/^customer mindset:/i.test(line)) {
+      const parts: string[] = [];
+      const inline = line.replace(/^customer mindset:\s*/i, "").trim();
+      if (inline) parts.push(inline);
+      for (let j = i + 1; j < lines.length; j++) {
+        const next = lines[j];
+        if (!next || isSection(next) || isLabeledField(next)) break;
+        parts.push(next);
+      }
+      result.customer_mindset = parts.join(" ");
+    }
+
+    if (/^tone of voice$/i.test(line)) {
+      const traits: string[] = [];
+      for (let j = i + 1; j < lines.length; j++) {
+        const next = lines[j];
+        if (isSection(next)) break;
+        if (next && next.split(" ").length <= 4) traits.push(next);
+      }
+      if (traits.length) result.tone_of_voice = traits;
+    }
+
+    if (/^writing style$/i.test(line)) {
+      const parts: string[] = [];
+      for (let j = i + 1; j < lines.length; j++) {
+        const next = lines[j];
+        if (isSection(next)) break;
+        if (next) parts.push(next);
+      }
+      if (parts.length) result.writing_style = parts.join("\n");
+    }
+
+    if (/^good examples?$/i.test(line)) {
+      const parts: string[] = [];
+      for (let j = i + 1; j < lines.length; j++) {
+        const next = lines[j];
+        if (isSection(next)) break;
+        if (next) parts.push(next);
+      }
+      if (parts.length) result.good_examples = parts.join("\n");
+    }
+
+    if (/^should write$/i.test(line)) {
+      const parts: string[] = [];
+      for (let j = i + 1; j < lines.length; j++) {
+        const next = lines[j];
+        if (isSection(next)) break;
+        if (next) parts.push(next);
+      }
+      if (parts.length) result.should_write = parts.join("\n");
+    }
+
+    if (/^should not write$/i.test(line)) {
+      const words: string[] = [];
+      for (let j = i + 1; j < lines.length; j++) {
+        const next = lines[j];
+        if (isSection(next)) break;
+        if (next) words.push(next);
+      }
+      if (words.length) result.forbidden_words = words;
+    }
+
+    i++;
+  }
+
+  return result;
+}
+
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function AdminBrandPage() {
@@ -247,33 +380,28 @@ export default function AdminBrandPage() {
     setParsing(true); setMsg(null);
     try {
       const arrayBuf = await file.arrayBuffer();
-      const bytes = new Uint8Array(arrayBuf);
-      let binary = "";
-      for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-      const file_base64 = btoa(binary);
-      const r = await fetch("/api/admin/brands/parse-docx", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ file_base64, filename: file.name }),
-      });
-      if (!r.ok) { setMsg({ text: "DOCX parse failed", ok: false }); return; }
-      const { parsed } = await r.json();
+      const mammoth = await import("mammoth");
+      const { value: rawText } = await mammoth.extractRawText({ arrayBuffer: arrayBuf });
+      const parsed = parseBrandText(rawText);
+      const fieldCount = Object.keys(parsed).length;
       setForm(f => ({
         ...f,
-        ...(parsed.brand_name      ? { brand_name: parsed.brand_name }           : {}),
-        ...(parsed.brand_type      ? { brand_type: parsed.brand_type }           : {}),
-        ...(parsed.core_idea       ? { core_idea: parsed.core_idea }             : {}),
-        ...(parsed.customer_segment ? { customer_segment: parsed.customer_segment } : {}),
-        ...(parsed.customer_mindset ? { customer_mindset: parsed.customer_mindset } : {}),
-        ...(parsed.writing_style   ? { writing_style: parsed.writing_style }     : {}),
-        ...(parsed.good_examples   ? { good_examples: parsed.good_examples }     : {}),
-        ...(parsed.should_write    ? { should_write: parsed.should_write }       : {}),
-        ...(parsed.target_markets  ? { target_markets: parsed.target_markets }   : {}),
-        ...(parsed.tone_of_voice   ? { tone_of_voice: parsed.tone_of_voice }     : {}),
-        ...(parsed.forbidden_words ? { forbidden_words: parsed.forbidden_words } : {}),
+        ...(parsed.brand_name          ? { brand_name: parsed.brand_name }             : {}),
+        ...(parsed.brand_type          ? { brand_type: parsed.brand_type }             : {}),
+        ...(parsed.core_idea           ? { core_idea: parsed.core_idea }               : {}),
+        ...(parsed.customer_segment    ? { customer_segment: parsed.customer_segment } : {}),
+        ...(parsed.customer_mindset    ? { customer_mindset: parsed.customer_mindset } : {}),
+        ...(parsed.writing_style       ? { writing_style: parsed.writing_style }       : {}),
+        ...(parsed.good_examples       ? { good_examples: parsed.good_examples }       : {}),
+        ...(parsed.should_write        ? { should_write: parsed.should_write }         : {}),
+        ...(parsed.target_markets?.length  ? { target_markets: parsed.target_markets }   : {}),
+        ...(parsed.tone_of_voice?.length   ? { tone_of_voice: parsed.tone_of_voice }     : {}),
+        ...(parsed.forbidden_words?.length ? { forbidden_words: parsed.forbidden_words } : {}),
       }));
       setIsNew(true);
-      setMsg({ text: `DOCX parsed — ${Object.keys(parsed).length} field(s) filled. Review and save.`, ok: true });
+      setMsg({ text: `DOCX parsed — ${fieldCount} field(s) filled. Review and save.`, ok: true });
+    } catch {
+      setMsg({ text: "DOCX parse failed", ok: false });
     } finally {
       setParsing(false);
       if (docxRef.current) docxRef.current.value = "";
