@@ -1,5 +1,5 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 23/05/2026 | ECS api:185 | CI #280
+# Updated: 27/05/2026 | ECS api:185 | CI pending | Last commit: 755092b
 
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway owq9as3wjl)
