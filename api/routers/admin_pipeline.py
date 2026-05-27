@@ -1556,7 +1556,7 @@ async def parse_brand_docx(
         if current_field and buffer:
             text = "\n".join(buffer).strip()
             if current_field in _LIST_FIELDS:
-                items = [l.lstrip("-•·*").strip() for l in text.splitlines() if l.strip()]
+                items = [line.lstrip("-•·*").strip() for line in text.splitlines() if line.strip()]
                 result[current_field] = items or [text]
             else:
                 result[current_field] = text
