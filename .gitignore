@@ -35,3 +35,4 @@ scripts/
 .env*.local
 SESSION_START_*.md
 *_Implementation_v1.md
+docs/
