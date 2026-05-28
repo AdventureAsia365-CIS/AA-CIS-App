@@ -770,8 +770,8 @@ async def get_tour_source(
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             SELECT rt.tour_id, rt.src_name, rt.src_subtitle, rt.src_summary,
-                   rt.src_highlights, rt.src_itineraries,
-                   rt.country, rt.duration, rt.price_raw, rt.created_at,
+                   rt.src_description, rt.src_highlights, rt.src_itineraries,
+                   rt.country, rt.duration, rt.price_raw, rt.ingest_at AS created_at,
                    sc.top_keywords
             FROM silver_aa_internal.raw_tours rt
             LEFT JOIN LATERAL (
@@ -801,7 +801,7 @@ async def get_tour_source(
         "aa_name":        row["src_name"],
         "aa_subtitle":    row["src_subtitle"],
         "aa_summary":     row["src_summary"],
-        "aa_description": None,
+        "aa_description": row["src_description"],
         "aa_highlights":  highlights,
         "aa_itineraries": row["src_itineraries"],
         "seo_title":      None,
