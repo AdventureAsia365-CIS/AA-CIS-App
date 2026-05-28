@@ -170,7 +170,11 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
   useEffect(() => {
     panels.forEach((panel, idx) => {
       if (!panel.loading) return;
-      fetch(`/api/admin/tours/${tourId}/versions/${Number(panel.versionNum)}`)
+      const vnum = Number(panel.versionNum);
+      const fetchUrl = vnum === -1
+        ? `/api/admin/tours/${tourId}/source`
+        : `/api/admin/tours/${tourId}/versions/${vnum}`;
+      fetch(fetchUrl)
         .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
         .then(data => {
           setPanels(prev => prev.map((p, i) =>
@@ -328,6 +332,7 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
                       }}
                     >
                       {allVersions.map(av => (
+                        {idx === 0 && <option value={-1}>Original (source)</option>}
                         <option key={av.version_num} value={av.version_num}>v{av.version_num}</option>
                       ))}
                     </select>
