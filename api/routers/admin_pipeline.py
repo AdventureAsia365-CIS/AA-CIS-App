@@ -811,6 +811,14 @@ async def get_tour_source(
         "dataforseo_used": False,
         "llm_cost_usd":   None,
         "top_keywords":   keywords,
+        "country":        row["country"],
+        "duration":       row["duration"],
+        "group_size":     row["group_size"],
+        "price_raw":      row["price_raw"],
+        "period":         row["period"],
+        "provider":       row["provider"],
+        "inclusions":     row["inclusions"],
+        "exclusions":     row["exclusions"],
     }
 
 @router.get("/tours/{tour_id}/versions/{version_num}")
@@ -830,12 +838,16 @@ async def get_tour_version_detail(
                    gc.aa_highlights, gc.aa_itineraries, gc.seo_title, gc.seo_meta,
                    gc.metadata,
                    tbr.brand_name AS brand_name,
-                   sc.top_keywords
+                   sc.top_keywords,
+                   rt.country, rt.duration, rt.group_size, rt.price_raw,
+                   rt.period, rt.provider, rt.inclusions, rt.exclusions
             FROM silver_aa_internal.generated_content gc
             LEFT JOIN silver_aa_internal.quality_scores qs
                 ON qs.generated_content_id = gc.id
             LEFT JOIN shared.tenant_brand_rules tbr
                 ON tbr.id = (gc.metadata->>'brand_rule_id')::uuid
+            LEFT JOIN silver_aa_internal.raw_tours rt
+                ON rt.tour_id = gc.tour_id
             LEFT JOIN LATERAL (
                 SELECT top_keywords FROM silver_aa_internal.seo_context
                 WHERE tour_id = gc.tour_id

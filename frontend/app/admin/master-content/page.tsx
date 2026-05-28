@@ -87,6 +87,15 @@ interface VersionDetail {
   dataforseo_used: boolean;
   llm_cost_usd: number | null;
   top_keywords: string[];
+  // Source/metadata fields
+  country: string | null;
+  duration: string | null;
+  group_size: string | null;
+  price_raw: string | null;
+  period: string | null;
+  provider: string | null;
+  inclusions: string | null;
+  exclusions: string | null;
 }
 
 function scoreColor(s: number | null | undefined): string {
@@ -141,10 +150,20 @@ const CONTENT_FIELDS: [keyof VersionDetail, string][] = [
   ["aa_name",        "Tour Name"],
   ["aa_subtitle",    "Subtitle"],
   ["aa_summary",     "Summary"],
+  ["aa_highlights",  "Highlights"],
   ["aa_itineraries", "Itineraries"],
   ["seo_title",      "SEO Title"],
   ["seo_meta",       "SEO Meta"],
   ["aa_description", "Description"],
+  ["top_keywords",   "Keywords"],
+  ["country",        "Country"],
+  ["duration",       "Duration"],
+  ["group_size",     "Group Size"],
+  ["price_raw",      "Price"],
+  ["period",         "Period"],
+  ["provider",       "Provider"],
+  ["inclusions",     "Inclusions"],
+  ["exclusions",     "Exclusions"],
 ];
 
 function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
@@ -233,7 +252,7 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
     const raw: unknown = v[key];
     let display: React.ReactNode;
 
-    if (key === "aa_highlights" && Array.isArray(raw)) {
+    if ((key === "aa_highlights" || key === "top_keywords") && Array.isArray(raw)) {
       display = (
         <ul style={{ margin: 0, paddingLeft: 18, lineHeight: 1.7 }}>
           {(raw as string[]).map((h, i) => <li key={i}>{h}</li>)}
