@@ -132,6 +132,11 @@ def validate_node(state: ContentState) -> ContentState:
     if generated.get("itineraries"):
         import re as _re
         it = generated["itineraries"]
+        if isinstance(it, dict):
+            parts = [f"{k}: {v}" for k, v in it.items()]
+            it = "\n\n".join(parts)
+        elif not isinstance(it, str):
+            it = str(it)
         it = _re.sub(r"\*\*([^*]+)\*\*", r"\1", it)
         it = it.replace("**", "")
         generated = {**generated, "itineraries": it.strip()}
