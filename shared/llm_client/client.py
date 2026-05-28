@@ -10,6 +10,10 @@ logger = structlog.get_logger()
 
 BEDROCK_REGION = os.environ.get("BEDROCK_REGION", "us-west-1")
 
+# Default model tier — override via ECS env var DEFAULT_MODEL_TIER
+# Options: "haiku" (cheapest) | "sonnet" (premium) | "gpt-4.1" (OpenAI)
+DEFAULT_MODEL_TIER = os.environ.get("DEFAULT_MODEL_TIER", "haiku")
+
 # Bedrock model IDs
 # T2 Haiku: cross-region inference profile — ACTIVE (verified working)
 # T1 Sonnet: cross-region inference profile — needs AWS Marketplace subscription (AA-50)
@@ -40,7 +44,15 @@ class LLMClient:
         )
 
     def generate(self, request: LLMRequest) -> LLMResponse:
-        tier = request.model_tier  # "haiku" | "sonnet"
+        tier = request.model_tier or DEFAULT_MODEL_TIER  # "haiku" | "sonnet" | "gpt-4.1"
+
+        # Direct GPT-4.1 — no Bedrock fallback (explicit choice)
+        if tier == "gpt-4.1":
+            try:
+                return self._call_openai(request, model="gpt-4.1")
+            except Exception as e:
+                logger.error("gpt41_direct_failed", error=str(e))
+                raise RuntimeError(f"GPT-4.1 failed: {e}") from e
 
         if tier == "sonnet":
             # T1: Claude Sonnet — premium quality

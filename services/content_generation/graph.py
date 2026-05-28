@@ -129,6 +129,12 @@ def generate_node(state: ContentState) -> ContentState:
 def validate_node(state: ContentState) -> ContentState:
     """Node 2: Quality check — structured failure codes, 4 sub-dimensions, score 0-10."""
     generated = state.get("generated", {})
+    if generated.get("itineraries"):
+        import re as _re
+        it = generated["itineraries"]
+        it = _re.sub(r"\*\*([^*]+)\*\*", r"\1", it)
+        it = it.replace("**", "")
+        generated = {**generated, "itineraries": it.strip()}
     tour      = state.get("tour", {})
     issues: list[str] = []
     fired:  list[str] = []
