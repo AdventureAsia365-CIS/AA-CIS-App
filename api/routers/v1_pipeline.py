@@ -33,6 +33,9 @@ def _normalize_generated(generated: dict, tour: dict) -> dict:
     name = generated.get("name", "")
     if name and name == name.upper():
         generated["name"] = name.title()
+    # Strip markdown bold from itineraries
+    if generated.get("itineraries"):
+        generated["itineraries"] = clean_itinerary(generated["itineraries"])
     return generated
 
 
