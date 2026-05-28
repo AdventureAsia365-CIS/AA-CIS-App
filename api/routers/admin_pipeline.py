@@ -181,14 +181,6 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
                 result = _upgraded
 
         version_id = None
-        logger.info("run_tour_result",
-            status=result.get("status"),
-            has_generated=bool(result.get("generated")),
-            generated_keys=list(result.get("generated", {}).keys()) if result.get("generated") else [],
-            quality_score=result.get("quality_score"),
-            model_used=result.get("model_used"),
-            error=result.get("error", ""),
-        )
         if result.get("status") == "success" and result.get("generated"):
             generated = result["generated"]
             status = "approved" if result.get("quality_score", 0.0) >= 7.0 else "pending"
@@ -780,6 +772,7 @@ async def get_tour_source(
             SELECT rt.tour_id, rt.src_name, rt.src_subtitle, rt.src_summary,
                    rt.src_description, rt.src_highlights, rt.src_itineraries,
                    rt.country, rt.duration, rt.price_raw, rt.ingest_at AS created_at,
+                   rt.group_size, rt.period, rt.provider, rt.inclusions, rt.exclusions,
                    sc.top_keywords
             FROM silver_aa_internal.raw_tours rt
             LEFT JOIN LATERAL (
@@ -791,12 +784,18 @@ async def get_tour_source(
         """, tour_id)
     if not row:
         raise HTTPException(status_code=404, detail="Source tour not found")
-    highlights = row["src_highlights"]
-    if not isinstance(highlights, list):
-        highlights = json.loads(highlights) if highlights else []
-    keywords = row["top_keywords"]
-    if not isinstance(keywords, list):
-        keywords = json.loads(keywords) if keywords else []
+    try:
+        highlights = row["src_highlights"]
+        if not isinstance(highlights, list):
+            highlights = json.loads(highlights) if highlights else []
+    except Exception:
+        highlights = []
+    try:
+        keywords = row["top_keywords"]
+        if not isinstance(keywords, list):
+            keywords = json.loads(keywords) if keywords else []
+    except Exception:
+        keywords = []
     return {
         "id":             str(row["tour_id"]),
         "version_num":    0,
@@ -900,6 +899,14 @@ async def get_tour_version_detail(
         "dataforseo_used": meta.get("dataforseo_used", False),
         "llm_cost_usd":   meta.get("llm_cost_usd"),
         "top_keywords":   keywords,
+        "country":        row["country"],
+        "duration":       row["duration"],
+        "group_size":     row["group_size"],
+        "price_raw":      row["price_raw"],
+        "period":         row["period"],
+        "provider":       row["provider"],
+        "inclusions":     row["inclusions"],
+        "exclusions":     row["exclusions"],
     }
 
 

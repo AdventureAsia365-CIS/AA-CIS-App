@@ -222,7 +222,8 @@ export default function S1RewritePage() {
       }
       const data: RunResult = await res.json();
       setRunResults(prev => ({ ...prev, [tour.tour_id]: data }));
-      setTourStatuses(prev => ({ ...prev, [tour.tour_id]: "done" }));
+      const isDone = data.version_id != null || data.status === "success";
+      setTourStatuses(prev => ({ ...prev, [tour.tour_id]: isDone ? "done" : "failed" }));
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Unknown error";
       setRunResults(prev => ({
