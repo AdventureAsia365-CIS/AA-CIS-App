@@ -759,6 +759,60 @@ async def promote_tour_version(
     return {"promoted": True, "published_tour_id": updated, "version_num": version_num}
 
 
+
+@router.get("/tours/{tour_id}/source")
+async def get_tour_source(
+    tour_id: str,
+    request: Request, x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT rt.tour_id, rt.src_name, rt.src_subtitle, rt.src_summary,
+                   rt.src_description, rt.src_highlights, rt.src_itineraries,
+                   rt.country, rt.duration, rt.price_raw, rt.created_at,
+                   sc.top_keywords
+            FROM silver_aa_internal.raw_tours rt
+            LEFT JOIN LATERAL (
+                SELECT top_keywords FROM silver_aa_internal.seo_context
+                WHERE tour_id = rt.tour_id
+                ORDER BY fetched_at DESC LIMIT 1
+            ) sc ON true
+            WHERE rt.tour_id = $1::uuid
+        """, tour_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Source tour not found")
+    highlights = row["src_highlights"]
+    if not isinstance(highlights, list):
+        highlights = json.loads(highlights) if highlights else []
+    keywords = row["top_keywords"]
+    if not isinstance(keywords, list):
+        keywords = json.loads(keywords) if keywords else []
+    return {
+        "id":             str(row["tour_id"]),
+        "version_num":    0,
+        "model_id":       "source",
+        "quality_score":  None,
+        "score_brand":    None,
+        "score_seo":      None,
+        "score_structure": None,
+        "created_at":     row["created_at"].isoformat() if row["created_at"] else None,
+        "aa_name":        row["src_name"],
+        "aa_subtitle":    row["src_subtitle"],
+        "aa_summary":     row["src_summary"],
+        "aa_description": row["src_description"],
+        "aa_highlights":  highlights,
+        "aa_itineraries": row["src_itineraries"],
+        "seo_title":      None,
+        "seo_meta":       None,
+        "brand_name":     "original",
+        "seo_mode":       None,
+        "dataforseo_used": False,
+        "llm_cost_usd":   None,
+        "top_keywords":   keywords,
+    }
+
 @router.get("/tours/{tour_id}/versions/{version_num}")
 async def get_tour_version_detail(
     tour_id: str, version_num: int,
