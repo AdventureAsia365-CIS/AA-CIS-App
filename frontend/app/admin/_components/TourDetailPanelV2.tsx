@@ -107,6 +107,7 @@ function relTime(iso: string | null): string {
 
 function modelShort(m: string | null | undefined): string {
   if (!m) return "—";
+  if (m.startsWith("gpt")) return m;
   return m.split(".").pop()?.replace(/-v\d+:\d+$/, "") ?? m;
 }
 
@@ -569,7 +570,7 @@ export function TourDetailPanelV2({ tourId, tourName, rewriteCount = 0, onClose 
                   <div style={{ marginTop: 20, padding: "16px 20px", background: A.bg, borderRadius: 8, border: `1px solid ${A.line}` }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
                       <div style={{ fontSize: 12, fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.08em" }}>
-                        v{selectedVersion.version_num} — {selectedVersion.model_id?.split(".").pop()?.replace(/-v\d+:\d+$/, "") ?? "—"}
+                        v{selectedVersion.version_num} — {modelShort(selectedVersion.model_id)}
                         {selectedVersion.quality_score != null && (
                           <span style={{ marginLeft: 10, color: scoreColor(selectedVersion.quality_score) }}>
                             ★ {selectedVersion.quality_score.toFixed(1)}

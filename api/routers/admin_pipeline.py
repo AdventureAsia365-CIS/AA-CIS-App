@@ -181,7 +181,7 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
                 result = _upgraded
 
         version_id = None
-        if result.get("status") == "success" and result.get("generated"):
+        if result.get("generated") and len(result.get("generated", {})) > 0:
             generated = result["generated"]
             status = "approved" if result.get("quality_score", 0.0) >= 7.0 else "pending"
             is_branded = result.get("is_branded", True)

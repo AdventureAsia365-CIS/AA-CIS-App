@@ -293,6 +293,7 @@ def validate_node(state: ContentState) -> ContentState:
 
     return {
         **state,
+        "generated":     generated,
         "quality_score": quality_score,
         "feedback":      feedback,
         "failure_codes": failure_codes,

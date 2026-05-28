@@ -121,7 +121,7 @@ async def _rewrite_tour(
             "sub_scores":    result.get("sub_scores", {}),
             "passed_count":  result.get("passed_count", 0),
             "failed_count":  result.get("failed_count", 0),
-            "status": "success" if result.get("generated") else "failed",
+            "status": "success" if result.get("generated") and len(result.get("generated", {})) > 0 else "failed",
         }
 
     except Exception as e:
