@@ -953,12 +953,10 @@ async def get_tour_history(tour_id: str, request: Request, x_admin_secret: str =
                 gc.id::text, gc.version_num, gc.created_at, gc.status::text,
                 gc.model_editorial, gc.brand_rules_version, gc.prompt_version,
                 qs.score_overall, qs.score_brand, qs.score_seo, qs.score_structure,
-                pr.llm_model, pr.cost_usd, pr.started_at
+                (gc.metadata->>'llm_cost_usd')::numeric AS cost_usd
             FROM silver_aa_internal.generated_content gc
             LEFT JOIN silver_aa_internal.quality_scores qs
                 ON qs.generated_content_id = gc.id
-            LEFT JOIN shared.pipeline_runs pr
-                ON pr.batch_id = gc.tour_id
             WHERE gc.tour_id = $1::uuid
             ORDER BY gc.created_at DESC
         """, tour_id)
@@ -976,9 +974,8 @@ async def get_tour_history(tour_id: str, request: Request, x_admin_secret: str =
                 "score_brand":          float(r["score_brand"])   if r["score_brand"] is not None else None,
                 "score_seo":            float(r["score_seo"])     if r["score_seo"] is not None else None,
                 "score_structure":      float(r["score_structure"]) if r["score_structure"] is not None else None,
-                "llm_model":            r["llm_model"],
+                "llm_model":            r["model_editorial"],
                 "cost_usd":             float(r["cost_usd"]) if r["cost_usd"] is not None else None,
-                "started_at":           str(r["started_at"]) if r["started_at"] else None,
             }
             for r in rows
         ]
