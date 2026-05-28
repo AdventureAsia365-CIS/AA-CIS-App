@@ -181,6 +181,14 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
                 result = _upgraded
 
         version_id = None
+        logger.info("run_tour_result",
+            status=result.get("status"),
+            has_generated=bool(result.get("generated")),
+            generated_keys=list(result.get("generated", {}).keys()) if result.get("generated") else [],
+            quality_score=result.get("quality_score"),
+            model_used=result.get("model_used"),
+            error=result.get("error", ""),
+        )
         if result.get("status") == "success" and result.get("generated"):
             generated = result["generated"]
             status = "approved" if result.get("quality_score", 0.0) >= 7.0 else "pending"
