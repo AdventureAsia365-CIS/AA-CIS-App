@@ -105,18 +105,19 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
         brand_rules: dict = {}
         brand_rule_id: str = ""
         brand_name_val: str = ""
+        brand_rule_version: Optional[int] = None
         try:
             _brand_name_filter = getattr(req, "brand_name", None)
             if _brand_name_filter:
                 br_row = await conn.fetchrow("""
-                    SELECT id, brand_name, system_prompt, style_guide, forbidden_words
+                    SELECT id, brand_name, system_prompt, style_guide, forbidden_words, version
                     FROM shared.tenant_brand_rules
                     WHERE tenant_id = $1::uuid AND brand_name = $2
                     ORDER BY version DESC LIMIT 1
                 """, tenant_uuid, _brand_name_filter)
             else:
                 br_row = await conn.fetchrow("""
-                    SELECT id, brand_name, system_prompt, style_guide, forbidden_words
+                    SELECT id, brand_name, system_prompt, style_guide, forbidden_words, version
                     FROM shared.tenant_brand_rules
                     WHERE tenant_id = $1::uuid AND is_active = true
                     ORDER BY version DESC LIMIT 1
@@ -124,6 +125,7 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
             if br_row:
                 brand_rule_id = str(br_row["id"]) if br_row["id"] else ""
                 brand_name_val = br_row["brand_name"] or ""
+                brand_rule_version = int(br_row["version"]) if br_row["version"] is not None else None
                 brand_rules = {
                     "system_prompt":    br_row["system_prompt"] or "",
                     "style_guide":      br_row["style_guide"] or "",
@@ -206,14 +208,16 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
                         aa_name, aa_subtitle, aa_summary,
                         aa_description, aa_highlights, aa_itineraries,
                         seo_title, seo_meta, seo_keywords_used,
-                        model_editorial, status, og_tags, metadata
+                        model_editorial, status, og_tags, metadata,
+                        brand_rules_version
                     ) VALUES (
                         $1::uuid, $2::uuid,
                         COALESCE((SELECT MAX(version_num) + 1
                         FROM silver_aa_internal.generated_content
                         WHERE tour_id = $1::uuid), 1),
                         $3, $4, $5, $6, $7::jsonb, $8,
-                        $9, $10, $11::jsonb, $12, $13::content_status_enum, $14::jsonb, $15::jsonb
+                        $9, $10, $11::jsonb, $12, $13::content_status_enum, $14::jsonb, $15::jsonb,
+                        $16
                     ) RETURNING id
                 """,
                     req.tour_id, tenant_uuid,
@@ -230,6 +234,7 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
                     status,
                     og_tags_val,
                     metadata_val,
+                    brand_rule_version,
                 )
                 if version_id:
                     logger.info("version_inserted", tour_id=req.tour_id, version_id=str(version_id))
