@@ -36,6 +36,15 @@ def _normalize_generated(generated: dict, tour: dict) -> dict:
     return generated
 
 
+def clean_itinerary(text: str) -> str:
+    """Strip markdown bold markers (**) from itinerary — LLM sometimes adds them."""
+    if not text:
+        return text
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = text.replace("**", "")
+    return text.strip()
+
+
 async def _rewrite_tour(
     tour: dict, idx: int, total: int,
     brand_rules: dict = None,
