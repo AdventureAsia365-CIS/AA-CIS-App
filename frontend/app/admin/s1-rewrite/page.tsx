@@ -256,6 +256,7 @@ export default function S1RewritePage() {
     }
     setRunning(false);
     await loadTours();
+    setTourStatuses({});
     setRunComplete(true);
   }
 
@@ -359,7 +360,7 @@ export default function S1RewritePage() {
                 variant="primary"
                 size="lg"
                 disabled={running || selectedIds.size === 0}
-                onClick={() => setShowConfirm(true)}
+                onClick={() => { setTourStatuses({}); setRunResults({}); setRunComplete(false); setShowConfirm(true); }}
                 style={{
                   background: (running || selectedIds.size === 0) ? A.muted : A.gold,
                   border: `1px solid ${(running || selectedIds.size === 0) ? A.muted : A.gold}`,
@@ -563,15 +564,17 @@ export default function S1RewritePage() {
           )}
 
           {/* Progress summary */}
-          {(running || runComplete) && Object.keys(tourStatuses).length > 0 && (
+          {(running || runComplete) && (Object.keys(tourStatuses).length > 0 || runComplete) && (
             <Card style={{ marginBottom: 20 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
                 <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.14em", color: A.muted }}>
                   Rewrite Progress
                 </div>
-                <span style={{ fontSize: 13, color: A.muted }}>
-                  {(statusCounts.done || 0) + (statusCounts.failed || 0)} / {Object.keys(tourStatuses).length} complete
-                </span>
+                {Object.keys(tourStatuses).length > 0 && (
+                  <span style={{ fontSize: 13, color: A.muted }}>
+                    {(statusCounts.done || 0) + (statusCounts.failed || 0)} / {Object.keys(tourStatuses).length} complete
+                  </span>
+                )}
                 {(statusCounts.done || 0) > 0 && (
                   <span style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13, color: A.green }}>
                     <CheckCircle size={13} /> {statusCounts.done} done
