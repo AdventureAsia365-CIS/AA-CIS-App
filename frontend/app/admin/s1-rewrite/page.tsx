@@ -150,6 +150,14 @@ export default function S1RewritePage() {
     }
   }, []);
 
+  const handleRefresh = useCallback(async () => {
+    if (running) return;
+    setTourStatuses({});
+    setRunResults({});
+    setRunComplete(false);
+    await loadTours();
+  }, [loadTours, running]);
+
   const loadBrandList = useCallback(async () => {
     try {
       const res = await fetch("/api/admin/brands");
@@ -247,6 +255,7 @@ export default function S1RewritePage() {
       await Promise.all(chunk.map(t => runSingleTour(t)));
     }
     setRunning(false);
+    await loadTours();
     setRunComplete(true);
   }
 
@@ -379,7 +388,7 @@ export default function S1RewritePage() {
                 {tours.length} tours total — select to rewrite with AI
               </div>
             </div>
-            <Btn size="sm" variant="ghost" onClick={loadTours} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <Btn size="sm" variant="ghost" onClick={handleRefresh} style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <RefreshCw size={13} /> Refresh
             </Btn>
           </div>
