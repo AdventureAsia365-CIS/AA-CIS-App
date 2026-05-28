@@ -4,6 +4,7 @@
 
 import asyncio
 import base64
+import datetime
 import json
 import os
 from uuid import UUID
@@ -101,14 +102,18 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
         }
 
         brand_rules: dict = {}
+        brand_rule_id: str = ""
+        brand_name_val: str = ""
         try:
             br_row = await conn.fetchrow("""
-                SELECT system_prompt, style_guide, forbidden_words
+                SELECT id, brand_name, system_prompt, style_guide, forbidden_words
                 FROM shared.tenant_brand_rules
                 WHERE tenant_id = $1::uuid AND is_active = true
                 ORDER BY version DESC LIMIT 1
             """, tenant_uuid)
             if br_row:
+                brand_rule_id = str(br_row["id"]) if br_row["id"] else ""
+                brand_name_val = br_row["brand_name"] or ""
                 brand_rules = {
                     "system_prompt":    br_row["system_prompt"] or "",
                     "style_guide":      br_row["style_guide"] or "",
@@ -122,6 +127,7 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
             logger.warning("brand_rules_fetch_failed", error=str(_br_err))
 
         seo_data: dict = {}
+        dataforseo_used: bool = False
         try:
             from services.seo_intelligence.handler import process_seo
             _SEO_MODE_MAP = {"standard": "dataforseo", "aggressive": "dataforseo", "minimal": "disabled"}
@@ -134,6 +140,7 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
                     tour_id=req.tour_id, destination=destination, seo_mode=effective_seo_mode,
                 )
                 seo_data = seo_result.get("data", {})
+                dataforseo_used = seo_result.get("status") == "fetched"
         except Exception as _seo_err:
             logger.warning("seo_step_failed", tour_id=req.tour_id, error=str(_seo_err))
 
@@ -169,20 +176,30 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
             status = "approved" if result.get("quality_score", 0.0) >= 7.0 else "pending"
             is_branded = result.get("is_branded", True)
             og_tags_val = json.dumps({} if is_branded else {"unbranded": True})
+            metadata_val = json.dumps({
+                "brand_rule_id":   brand_rule_id,
+                "brand_name":      brand_name_val,
+                "seo_mode":        req.seo_mode,
+                "model_used":      result.get("model_used", ""),
+                "llm_cost_usd":    float(result.get("cost_usd") or 0.0),
+                "dataforseo_used": dataforseo_used,
+                "generated_at":    datetime.datetime.utcnow().isoformat() + "Z",
+                "pipeline_version": "v2",
+            })
             version_id = await conn.fetchval("""
                 INSERT INTO silver_aa_internal.generated_content (
                     tour_id, tenant_id, version_num,
                     aa_name, aa_subtitle, aa_summary,
                     aa_description, aa_highlights, aa_itineraries,
                     seo_title, seo_meta, seo_keywords_used,
-                    model_editorial, status, og_tags
+                    model_editorial, status, og_tags, metadata
                 ) VALUES (
                     $1::uuid, $2::uuid,
                     COALESCE((SELECT MAX(version_num) + 1
                     FROM silver_aa_internal.generated_content
                     WHERE tour_id = $1::uuid), 1),
                     $3, $4, $5, $6, $7::jsonb, $8,
-                    $9, $10, $11::jsonb, $12, $13::content_status_enum, $14::jsonb
+                    $9, $10, $11::jsonb, $12, $13::content_status_enum, $14::jsonb, $15::jsonb
                 ) RETURNING id
             """,
                 req.tour_id, tenant_uuid,
@@ -198,6 +215,7 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
                 result.get("model_used", ""),
                 status,
                 og_tags_val,
+                metadata_val,
             )
 
         if version_id and result.get("quality_score") is not None:
