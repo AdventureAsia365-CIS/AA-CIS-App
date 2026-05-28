@@ -63,6 +63,7 @@ interface HistoryRow {
   status: string;
   model_editorial: string | null;
   brand_rules_version: number | null;
+  brand_name: string | null;
   prompt_version: string | null;
   score_overall: number | null;
   score_brand: number | null;
@@ -540,7 +541,7 @@ export function TourDetailPanelV2({ tourId, tourName, rewriteCount = 0, onClose 
                           </td>
                           <td style={{ padding: "8px 12px", fontFamily: mono, fontSize: 11, color: A.muted }}>{modelShort(h.model_editorial)}</td>
                           <td style={{ padding: "8px 12px", fontSize: 11, color: A.muted2 }}>
-                            {h.brand_rules_version != null ? <span style={{ padding: "1px 6px", borderRadius: 8, background: A.goldTint, color: A.gold, fontWeight: 600, fontSize: 10 }}>v{h.brand_rules_version}</span> : "—"}
+                            {h.brand_rules_version != null ? <span style={{ padding: "1px 6px", borderRadius: 8, background: A.goldTint, color: A.gold, fontWeight: 600, fontSize: 10 }}>{h.brand_name ? `${h.brand_name} · v${h.brand_rules_version}` : `v${h.brand_rules_version}`}</span> : "—"}
                           </td>
                           <td style={{ padding: "8px 12px", fontWeight: 700, color: scoreColor(h.score_overall) }}>{h.score_overall != null ? h.score_overall.toFixed(1) : "—"}</td>
                           <td style={{ padding: "8px 12px", color: scoreColor(h.score_brand) }}>{h.score_brand != null ? h.score_brand.toFixed(1) : "—"}</td>
