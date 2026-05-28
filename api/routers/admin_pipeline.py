@@ -968,11 +968,17 @@ async def get_tour_history(tour_id: str, request: Request, x_admin_secret: str =
             SELECT
                 gc.id::text, gc.version_num, gc.created_at, gc.status::text,
                 gc.model_editorial, gc.brand_rules_version, gc.prompt_version,
+                gc.tenant_id,
                 qs.score_overall, qs.score_brand, qs.score_seo, qs.score_structure,
-                (gc.metadata->>'llm_cost_usd')::numeric AS cost_usd
+                (gc.metadata->>'llm_cost_usd')::numeric AS cost_usd,
+                tbr.brand_name AS brand_name
             FROM silver_aa_internal.generated_content gc
             LEFT JOIN silver_aa_internal.quality_scores qs
                 ON qs.generated_content_id = gc.id
+            LEFT JOIN shared.tenant_brand_rules tbr
+                ON tbr.version = gc.brand_rules_version
+                AND tbr.tenant_id = gc.tenant_id
+                AND tbr.brand_name = gc.metadata->>'brand_name'
             WHERE gc.tour_id = $1::uuid
             ORDER BY gc.created_at DESC
         """, tour_id)
@@ -985,6 +991,7 @@ async def get_tour_history(tour_id: str, request: Request, x_admin_secret: str =
                 "status":               r["status"],
                 "model_editorial":      r["model_editorial"],
                 "brand_rules_version":  r["brand_rules_version"],
+                "brand_name":           r["brand_name"],
                 "prompt_version":       r["prompt_version"],
                 "score_overall":        float(r["score_overall"]) if r["score_overall"] is not None else None,
                 "score_brand":          float(r["score_brand"])   if r["score_brand"] is not None else None,
