@@ -331,8 +331,8 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
                         border: "none", borderRadius: 10, cursor: "pointer",
                       }}
                     >
+                      {idx === 0 && <option value={-1}>Original (source)</option>}
                       {allVersions.map(av => (
-                        {idx === 0 && <option value={-1}>Original (source)</option>}
                         <option key={av.version_num} value={av.version_num}>v{av.version_num}</option>
                       ))}
                     </select>
