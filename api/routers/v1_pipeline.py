@@ -38,11 +38,30 @@ def _normalize_generated(generated: dict, tour: dict) -> dict:
     itin = generated.get("itineraries")
     if itin:
         if isinstance(itin, dict):
-            # Convert dict itinerary to string
             parts = []
             for k, v in itin.items():
                 parts.append(f"{k} -- {v}" if isinstance(v, str) else str(v))
             itin = "\n\n".join(parts)
+        elif isinstance(itin, list):
+            parts = []
+            for item in itin:
+                if isinstance(item, dict):
+                    day   = item.get("day", "")
+                    title = item.get("title", "")
+                    desc  = item.get("description", "")
+                    acts  = item.get("activities", [])
+                    day_str = f"Day {day}"
+                    if title:
+                        day_str += f" — {title}"
+                    if desc:
+                        day_str += f"\n{desc}"
+                    if acts:
+                        act_list = ", ".join(str(a) for a in acts) if isinstance(acts, list) else str(acts)
+                        day_str += f"\n*Activities: {act_list}*"
+                    parts.append(day_str)
+                else:
+                    parts.append(str(item))
+            itin = "\n\n---\n\n".join(parts)
         generated["itineraries"] = clean_itinerary(str(itin))
     # Same for highlights — ensure list of strings
     highlights = generated.get("highlights")

@@ -132,14 +132,35 @@ def validate_node(state: ContentState) -> ContentState:
     if generated.get("itineraries"):
         import re as _re
         it = generated["itineraries"]
-        if isinstance(it, dict):
+        if isinstance(it, str):
+            it = _re.sub(r"\*\*([^*]+)\*\*", r"\1", it)
+            it = it.replace("**", "")
+        elif isinstance(it, dict):
             parts = [f"{k}: {v}" for k, v in it.items()]
             it = "\n\n".join(parts)
-        elif not isinstance(it, str):
+        elif isinstance(it, list):
+            parts = []
+            for item in it:
+                if isinstance(item, dict):
+                    day   = item.get("day", "")
+                    title = item.get("title", "")
+                    desc  = item.get("description", "")
+                    acts  = item.get("activities", [])
+                    day_str = f"Day {day}"
+                    if title:
+                        day_str += f" — {title}"
+                    if desc:
+                        day_str += f"\n{desc}"
+                    if acts:
+                        act_list = ", ".join(str(a) for a in acts) if isinstance(acts, list) else str(acts)
+                        day_str += f"\n*Activities: {act_list}*"
+                    parts.append(day_str)
+                else:
+                    parts.append(str(item))
+            it = "\n\n---\n\n".join(parts)
+        else:
             it = str(it)
-        it = _re.sub(r"\*\*([^*]+)\*\*", r"\1", it)
-        it = it.replace("**", "")
-        generated = {**generated, "itineraries": it.strip()}
+        generated = {**generated, "itineraries": str(it).strip()}
     tour      = state.get("tour", {})
     issues: list[str] = []
     fired:  list[str] = []
