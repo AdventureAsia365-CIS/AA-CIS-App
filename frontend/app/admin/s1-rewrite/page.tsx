@@ -213,7 +213,7 @@ export default function S1RewritePage() {
           tenant_id:            TENANT_ID,
           seo_mode:             seoMode,
           model_tier:           modelTier,
-          brand_rules_version:  brandList.find(b => b.brand_name === brandName)?.version ?? null,
+          brand_name:           brandName || undefined,
         }),
       });
       if (!res.ok) {

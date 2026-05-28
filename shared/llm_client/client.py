@@ -48,7 +48,11 @@ class LLMClient:
                 resp = self._call_bedrock(request, model=BEDROCK_SONNET, use_cache=True)
                 return resp
             except Exception as e:
-                logger.warning("t1_failed_trying_t2", model=BEDROCK_SONNET, error=str(e))
+                if "AccessDeniedException" in str(e) or "not authorized" in str(e).lower():
+                    logger.warning("t1_sonnet_not_subscribed", model=BEDROCK_SONNET,
+                                   hint="Enable cross-region inference profile in AWS Marketplace (AA-50)")
+                else:
+                    logger.warning("t1_failed_trying_t2", model=BEDROCK_SONNET, error=str(e))
 
         # T2: Claude Haiku — fast / default tier, or Sonnet fallback
         try:
