@@ -135,6 +135,12 @@ function ScoreBar({ label, value }: { label: string; value: number | null }) {
   );
 }
 
+function modelLabel(m: string | null | undefined): string {
+  if (!m) return "—";
+  if (m.startsWith("gpt")) return m;
+  return m.split(".").pop()?.replace(/-v\d+:\d+$/, "") ?? m;
+}
+
 // ── Version Compare Modal (full-screen, 2-4 panels) ───────────────────────────
 
 interface PanelState {
@@ -225,10 +231,6 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
   function removePanel(idx: number) {
     if (panels.length <= 2) return;
     setPanels(prev => prev.filter((_, i) => i !== idx));
-  }
-
-  function modelLabel(m: string | null) {
-    return m?.split(".").pop()?.replace(/-v\d+:\d+$/, "") ?? "—";
   }
 
   function fieldSerial(v: VersionDetail | null, key: keyof VersionDetail): string {
@@ -849,7 +851,7 @@ export default function MasterContentPage() {
                                             {v.is_current && <span style={{ marginLeft: 6, fontSize: 10, color: A.gold }}>current</span>}
                                           </td>
                                           <td style={{ padding: "6px 10px", fontFamily: mono, fontSize: 11, color: A.muted2 }}>
-                                            {v.model_id?.split(".").pop()?.replace(/-v\d+:\d+$/, "") ?? "—"}
+                                            {modelLabel(v.model_id)}
                                           </td>
                                           <td style={{ padding: "6px 10px", fontWeight: 700, color: scoreColor(v.quality_score) }}>
                                             {v.quality_score != null ? v.quality_score.toFixed(1) : "—"}
@@ -946,7 +948,7 @@ export default function MasterContentPage() {
                       <td style={{ ...TD, fontSize: 11, color: A.muted2 }}>{relDate(r.started_at)}</td>
                       <td style={TD}>{r.tours_processed}</td>
                       <td style={{ ...TD, color: A.green, fontWeight: 600 }}>{r.tours_passed}</td>
-                      <td style={{ ...TD, fontFamily: mono, fontSize: 11 }}>{r.llm_model?.split(".").pop()?.replace(/-v\d+:\d+$/, "") ?? "—"}</td>
+                      <td style={{ ...TD, fontFamily: mono, fontSize: 11 }}>{modelLabel(r.llm_model)}</td>
                       <td style={{ ...TD, color: A.gold, fontWeight: 600 }}>${(r.llm_cost_usd ?? 0).toFixed(4)}</td>
                       <td style={TD}>
                         <Badge color={r.status === "completed" ? "green" : r.status === "failed" ? "red" : "amber"}>{r.status}</Badge>
