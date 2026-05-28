@@ -37,6 +37,7 @@ class TourRunRequest(BaseModel):
     model_tier: str = "haiku"
     subtitle_focus: str = "standard"
     brand_rules_version: Optional[int] = None
+    brand_name: Optional[str] = None
 
 
 class UploadUrlRequest(BaseModel):
@@ -105,12 +106,21 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
         brand_rule_id: str = ""
         brand_name_val: str = ""
         try:
-            br_row = await conn.fetchrow("""
-                SELECT id, brand_name, system_prompt, style_guide, forbidden_words
-                FROM shared.tenant_brand_rules
-                WHERE tenant_id = $1::uuid AND is_active = true
-                ORDER BY version DESC LIMIT 1
-            """, tenant_uuid)
+            _brand_name_filter = getattr(req, "brand_name", None)
+            if _brand_name_filter:
+                br_row = await conn.fetchrow("""
+                    SELECT id, brand_name, system_prompt, style_guide, forbidden_words
+                    FROM shared.tenant_brand_rules
+                    WHERE tenant_id = $1::uuid AND brand_name = $2
+                    ORDER BY version DESC LIMIT 1
+                """, tenant_uuid, _brand_name_filter)
+            else:
+                br_row = await conn.fetchrow("""
+                    SELECT id, brand_name, system_prompt, style_guide, forbidden_words
+                    FROM shared.tenant_brand_rules
+                    WHERE tenant_id = $1::uuid AND is_active = true
+                    ORDER BY version DESC LIMIT 1
+                """, tenant_uuid)
             if br_row:
                 brand_rule_id = str(br_row["id"]) if br_row["id"] else ""
                 brand_name_val = br_row["brand_name"] or ""
