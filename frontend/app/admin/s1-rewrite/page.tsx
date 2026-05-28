@@ -263,7 +263,7 @@ export default function S1RewritePage() {
   const modelLabel = (m: string) => ({
     haiku:  "Haiku 4.5",
     sonnet: "Sonnet 4.5",
-    gpt4:   "GPT-4.1",
+    "gpt-4.1": "GPT-4.1",
   }[m] ?? m);
 
   if (loading) {
@@ -330,7 +330,7 @@ export default function S1RewritePage() {
               >
                 <option value="haiku">Haiku 4.5 (~$0.002/tour)</option>
                 <option value="sonnet">Sonnet 4.5 (~$0.02/tour)</option>
-                <option value="gpt4">GPT-4.1 (~$0.01/tour)</option>
+                <option value="gpt-4.1">GPT-4.1 (~$0.01/tour)</option>
               </select>
             </div>
             <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>

@@ -771,7 +771,7 @@ async def get_tour_source(
         row = await conn.fetchrow("""
             SELECT rt.tour_id, rt.src_name, rt.src_subtitle, rt.src_summary,
                    rt.src_description, rt.src_highlights, rt.src_itineraries,
-                   rt.country, rt.duration, rt.price_raw, rt.created_at,
+                   rt.country, rt.duration, rt.price_raw, rt.ingest_at AS created_at,
                    sc.top_keywords
             FROM silver_aa_internal.raw_tours rt
             LEFT JOIN LATERAL (
