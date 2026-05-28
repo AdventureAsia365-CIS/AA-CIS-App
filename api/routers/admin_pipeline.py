@@ -196,37 +196,48 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
                 "generated_at":    datetime.datetime.utcnow().isoformat() + "Z",
                 "pipeline_version": "v2",
             })
-            version_id = await conn.fetchval("""
-                INSERT INTO silver_aa_internal.generated_content (
-                    tour_id, tenant_id, version_num,
-                    aa_name, aa_subtitle, aa_summary,
-                    aa_description, aa_highlights, aa_itineraries,
-                    seo_title, seo_meta, seo_keywords_used,
-                    model_editorial, status, og_tags, metadata
-                ) VALUES (
-                    $1::uuid, $2::uuid,
-                    COALESCE((SELECT MAX(version_num) + 1
-                    FROM silver_aa_internal.generated_content
-                    WHERE tour_id = $1::uuid), 1),
-                    $3, $4, $5, $6, $7::jsonb, $8,
-                    $9, $10, $11::jsonb, $12, $13::content_status_enum, $14::jsonb, $15::jsonb
-                ) RETURNING id
-            """,
-                req.tour_id, tenant_uuid,
-                (generated.get("name") or "")[:500],
-                (generated.get("subtitle") or "")[:500],
-                generated.get("summary"),
-                generated.get("description", ""),
-                json.dumps(generated.get("highlights", [])),
-                generated.get("itineraries", ""),
-                (generated.get("seo_title") or "")[:70],
-                (generated.get("seo_meta") or "")[:170],
-                json.dumps(generated.get("seo_keywords_used", [])),
-                result.get("model_used", ""),
-                status,
-                og_tags_val,
-                metadata_val,
-            )
+            _itin = generated.get("itineraries", "")
+            if not isinstance(_itin, str):
+                _itin = str(_itin)
+            try:
+                version_id = await conn.fetchval("""
+                    INSERT INTO silver_aa_internal.generated_content (
+                        tour_id, tenant_id, version_num,
+                        aa_name, aa_subtitle, aa_summary,
+                        aa_description, aa_highlights, aa_itineraries,
+                        seo_title, seo_meta, seo_keywords_used,
+                        model_editorial, status, og_tags, metadata
+                    ) VALUES (
+                        $1::uuid, $2::uuid,
+                        COALESCE((SELECT MAX(version_num) + 1
+                        FROM silver_aa_internal.generated_content
+                        WHERE tour_id = $1::uuid), 1),
+                        $3, $4, $5, $6, $7::jsonb, $8,
+                        $9, $10, $11::jsonb, $12, $13::content_status_enum, $14::jsonb, $15::jsonb
+                    ) RETURNING id
+                """,
+                    req.tour_id, tenant_uuid,
+                    (generated.get("name") or "")[:500],
+                    (generated.get("subtitle") or "")[:500],
+                    generated.get("summary"),
+                    generated.get("description", ""),
+                    json.dumps(generated.get("highlights", [])),
+                    _itin,
+                    (generated.get("seo_title") or "")[:70],
+                    (generated.get("seo_meta") or "")[:170],
+                    json.dumps(generated.get("seo_keywords_used", [])),
+                    result.get("model_used", ""),
+                    status,
+                    og_tags_val,
+                    metadata_val,
+                )
+                if version_id:
+                    logger.info("version_inserted", tour_id=req.tour_id, version_id=str(version_id))
+                else:
+                    logger.error("version_insert_returned_null", tour_id=req.tour_id)
+            except Exception as _ins_err:
+                logger.error("version_insert_failed", tour_id=req.tour_id, error=str(_ins_err))
+                raise
 
         if version_id and result.get("quality_score") is not None:
             _sub = result.get("sub_scores", {})
