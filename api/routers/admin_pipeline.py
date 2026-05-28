@@ -138,6 +138,31 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
         except Exception as _br_err:
             logger.warning("brand_rules_fetch_failed", error=str(_br_err))
 
+        lessons_text = ""
+        try:
+            lesson_rows = await conn.fetch("""
+                SELECT what_to_do, field, pattern
+                FROM shared.pipeline_lessons
+                WHERE stage IN ('S1_rewrite', 'S1_editor')
+                  AND is_active = true
+                ORDER BY id
+            """)
+            if lesson_rows:
+                lessons_lines = []
+                for lr in lesson_rows:
+                    field_prefix = f"[{lr['field']}] " if lr['field'] else ""
+                    lessons_lines.append(f"- {field_prefix}{lr['what_to_do']}")
+                lessons_text = (
+                    "\n\n## LESSONS FROM PREVIOUS BATCHES\n"
+                    "Apply these rules strictly — they come from real batch failures:\n"
+                    + "\n".join(lessons_lines)
+                )
+        except Exception as _le:
+            logger.warning("lessons_load_failed", error=str(_le))
+
+        if lessons_text:
+            brand_rules["system_prompt"] = (brand_rules.get("system_prompt") or "") + lessons_text
+
         seo_data: dict = {}
         dataforseo_used: bool = False
         try:
