@@ -34,9 +34,20 @@ def _normalize_generated(generated: dict, tour: dict) -> dict:
     name = generated.get("name", "")
     if name and name == name.upper():
         generated["name"] = name.title()
-    # Strip markdown bold from itineraries
-    if generated.get("itineraries"):
-        generated["itineraries"] = clean_itinerary(generated["itineraries"])
+    # Strip markdown bold from itineraries — ensure string type (GPT-4.1 may return dict)
+    itin = generated.get("itineraries")
+    if itin:
+        if isinstance(itin, dict):
+            # Convert dict itinerary to string
+            parts = []
+            for k, v in itin.items():
+                parts.append(f"{k} -- {v}" if isinstance(v, str) else str(v))
+            itin = "\n\n".join(parts)
+        generated["itineraries"] = clean_itinerary(str(itin))
+    # Same for highlights — ensure list of strings
+    highlights = generated.get("highlights")
+    if highlights and isinstance(highlights, list):
+        generated["highlights"] = [str(h) if not isinstance(h, str) else h for h in highlights]
     return generated
 
 
