@@ -376,14 +376,19 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
             )
 
         return {
-            "tour_id":       req.tour_id,
-            "batch_id":      req.batch_id,
-            "version_id":    str(version_id) if version_id else None,
-            "status":        result.get("status"),
-            "quality_score": result.get("quality_score"),
-            "generated":     result.get("generated"),
-            "cost_usd":      result.get("cost_usd"),
-            "model_used":    result.get("model_used"),
+            "tour_id":            req.tour_id,
+            "batch_id":           req.batch_id,
+            "version_id":         str(version_id) if version_id else None,
+            "status":             result.get("status"),
+            "quality_score":      result.get("quality_score"),
+            "generated":          result.get("generated"),
+            "cost_usd":           result.get("cost_usd"),
+            "model_used":         result.get("model_used"),
+            "brand_audit_status": result.get("brand_audit_status"),
+            "brand_audit_codes":  result.get("brand_audit_codes", []),
+            "brand_audit_issues": result.get("brand_audit_issues", []),
+            "fix_pass_applied":   result.get("fix_pass_applied", False),
+            "fix_pass_fields":    result.get("fix_pass_fields", []),
         }
     finally:
         await conn.close()
@@ -1115,7 +1120,9 @@ async def list_tour_versions(
         rows = await conn.fetch("""
             SELECT gc.id, gc.version_num, gc.model_editorial AS model_id,
                    qs.score_overall AS quality_score, gc.created_at,
-                   (pt.generated_content_id = gc.id) AS is_current
+                   (pt.generated_content_id = gc.id) AS is_current,
+                   gc.fix_pass_applied, gc.fix_pass_fields,
+                   qs.brand_audit_status, qs.brand_audit_codes, qs.brand_audit_issues
             FROM silver_aa_internal.generated_content gc
             LEFT JOIN silver_aa_internal.quality_scores qs
                 ON qs.generated_content_id = gc.id
@@ -1125,12 +1132,28 @@ async def list_tour_versions(
         """, tour_id)
     return {"versions": [
         {
-            "id":            str(r["id"]),
-            "version_num":   r["version_num"],
-            "model_id":      r["model_id"],
-            "quality_score": float(r["quality_score"]) if r["quality_score"] else None,
-            "created_at":    r["created_at"].isoformat() if r["created_at"] else None,
-            "is_current":    bool(r["is_current"]),
+            "id":                 str(r["id"]),
+            "version_num":        r["version_num"],
+            "model_id":           r["model_id"],
+            "quality_score":      float(r["quality_score"]) if r["quality_score"] else None,
+            "created_at":         r["created_at"].isoformat() if r["created_at"] else None,
+            "is_current":         bool(r["is_current"]),
+            "brand_audit_status": r["brand_audit_status"],
+            "brand_audit_codes":  (
+                json.loads(r["brand_audit_codes"]) if isinstance(r["brand_audit_codes"], str)
+                else (list(r["brand_audit_codes"]) if r["brand_audit_codes"] else [])
+            ),
+            "brand_audit_issues": (
+                json.loads(r["brand_audit_issues"]) if isinstance(r["brand_audit_issues"], str)
+                else (list(r["brand_audit_issues"]) if r["brand_audit_issues"] else [])
+            ),
+            "fix_pass_applied":   (
+                bool(r["fix_pass_applied"]) if r["fix_pass_applied"] is not None else False
+            ),
+            "fix_pass_fields":    (
+                json.loads(r["fix_pass_fields"]) if isinstance(r["fix_pass_fields"], str)
+                else (list(r["fix_pass_fields"]) if r["fix_pass_fields"] else [])
+            ),
         }
         for r in rows
     ]}
