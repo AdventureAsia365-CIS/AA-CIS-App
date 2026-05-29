@@ -63,6 +63,11 @@ interface TourVersion {
   quality_score: number | null;
   created_at: string | null;
   is_current: boolean;
+  brand_audit_status: string | null;
+  brand_audit_codes: string[];
+  brand_audit_issues: string[];
+  fix_pass_applied: boolean;
+  fix_pass_fields: string[];
 }
 
 interface VersionDetail {
@@ -96,6 +101,12 @@ interface VersionDetail {
   provider: string | null;
   inclusions: string | null;
   exclusions: string | null;
+  // Brand audit fields
+  brand_audit_status: string | null;
+  brand_audit_codes: string[];
+  brand_audit_issues: string[];
+  fix_pass_applied: boolean;
+  fix_pass_fields: string[];
 }
 
 function scoreColor(s: number | null | undefined): string {
@@ -113,6 +124,23 @@ function relDate(iso: string): string {
 function statusBadge(status: string) {
   const color = status === "published" ? "green" : status === "active" ? "blue" : "gray";
   return <Badge color={color}>{status}</Badge>;
+}
+
+function BrandAuditBadge({ status, fixPassApplied, codes }: { status: string | null; fixPassApplied: boolean; codes?: string[] }) {
+  if (!status) return <span style={{ color: A.muted2, fontSize: 11 }}>—</span>;
+  if (status === "pass") return (
+    <span style={{ padding: "2px 7px", borderRadius: 10, background: "#DCFCE7", color: "#15803D", fontSize: 11, fontWeight: 600 }}>✓ Pass</span>
+  );
+  if (status === "flagged" && fixPassApplied) return (
+    <span title={codes?.join(", ")} style={{ padding: "2px 7px", borderRadius: 10, background: "#FEF9C3", color: "#B45309", fontSize: 11, fontWeight: 600, cursor: codes?.length ? "help" : "default" }}>⚡ Fixed</span>
+  );
+  if (status === "flagged") return (
+    <span title={codes?.join(", ")} style={{ padding: "2px 7px", borderRadius: 10, background: "#FEE2E2", color: "#DC2626", fontSize: 11, fontWeight: 600, cursor: codes?.length ? "help" : "default" }}>⚠ Flagged</span>
+  );
+  if (status === "manual_check") return (
+    <span style={{ padding: "2px 7px", borderRadius: 10, background: "#FFEDD5", color: "#C2410C", fontSize: 11, fontWeight: 600 }}>👁 Manual</span>
+  );
+  return <span style={{ color: A.muted2, fontSize: 11 }}>—</span>;
 }
 
 // ── Score Bar ─────────────────────────────────────────────────────────────────
@@ -408,6 +436,32 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
                       </div>
                     </div>
                   )}
+
+                  {/* Brand Audit */}
+                  {v && v.brand_audit_status && (
+                    <div style={{ padding: "8px 0", borderTop: `1px solid ${A.line}`, marginTop: 4, fontSize: 11 }}>
+                      <div style={{ fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Brand Audit</div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                        <BrandAuditBadge
+                          status={v.brand_audit_status}
+                          fixPassApplied={v.fix_pass_applied ?? false}
+                          codes={v.brand_audit_codes}
+                        />
+                      </div>
+                      {v.brand_audit_codes && v.brand_audit_codes.length > 0 && (
+                        <div style={{ color: A.muted, lineHeight: 1.6 }}>
+                          {v.brand_audit_codes.map(code => (
+                            <div key={code} style={{ fontFamily: mono }}>• {code}</div>
+                          ))}
+                        </div>
+                      )}
+                      {v.fix_pass_applied && v.fix_pass_fields && v.fix_pass_fields.length > 0 && (
+                        <div style={{ color: "#3B82F6", marginTop: 4 }}>
+                          Fixed: {v.fix_pass_fields.join(", ")}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* Keywords */}
@@ -544,6 +598,23 @@ export default function MasterContentPage() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url; a.download = `master_content_export.${format}`; a.click();
+      URL.revokeObjectURL(url);
+    } finally { setExporting(false); }
+  }
+
+  async function exportAuditCsv() {
+    setExporting(true);
+    try {
+      const params = new URLSearchParams();
+      if (selectedIds.size > 0) {
+        params.set("tour_ids", [...selectedIds].join(","));
+      }
+      const r = await fetch(`/api/admin/export-audit?${params.toString()}`);
+      if (!r.ok) return;
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = "aa_tours_audit_export.csv"; a.click();
       URL.revokeObjectURL(url);
     } finally { setExporting(false); }
   }
@@ -717,6 +788,9 @@ export default function MasterContentPage() {
                   Clear ({selectedIds.size})
                 </button>
               )}
+              <Btn variant="secondary" size="sm" disabled={exporting} onClick={exportAuditCsv}>
+                <Download size={12} /> {exporting ? "…" : "Export Audit CSV"}
+              </Btn>
               <div style={{ display: "inline-flex" }}>
                 <Btn variant="secondary" size="sm" disabled={exporting} onClick={() => exportTours("csv")}
                   style={{ borderRadius: "6px 0 0 6px", borderRight: "none" }}>
@@ -817,7 +891,7 @@ export default function MasterContentPage() {
                         </tr>
                         {isExpanded && (
                           <tr style={{ background: `${A.gold}08` }}>
-                            <td colSpan={8} style={{ padding: "0 0 0 48px", borderBottom: `1px solid ${A.line}` }}>
+                            <td colSpan={9} style={{ padding: "0 0 0 48px", borderBottom: `1px solid ${A.line}` }}>
                               {vLoading ? (
                                 <div style={{ padding: "12px 16px", fontSize: 12, color: A.muted }}>Loading versions…</div>
                               ) : versions.length === 0 ? (
@@ -827,7 +901,7 @@ export default function MasterContentPage() {
                                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                                     <thead>
                                       <tr style={{ background: A.line2 }}>
-                                        {["", "Version", "Model", "Score", "Date", ""].map((h, hi) => (
+                                        {["", "Version", "Model", "Score", "Audit", "Date", ""].map((h, hi) => (
                                           <th key={hi} style={{ padding: "6px 10px", textAlign: "left" as const, fontSize: 10, fontWeight: 600, color: A.muted, textTransform: "uppercase" as const, letterSpacing: "0.08em" }}>{h}</th>
                                         ))}
                                       </tr>
@@ -855,6 +929,13 @@ export default function MasterContentPage() {
                                           </td>
                                           <td style={{ padding: "6px 10px", fontWeight: 700, color: scoreColor(v.quality_score) }}>
                                             {v.quality_score != null ? v.quality_score.toFixed(1) : "—"}
+                                          </td>
+                                          <td style={{ padding: "6px 10px" }}>
+                                            <BrandAuditBadge
+                                              status={v.brand_audit_status ?? null}
+                                              fixPassApplied={v.fix_pass_applied ?? false}
+                                              codes={v.brand_audit_codes ?? []}
+                                            />
                                           </td>
                                           <td style={{ padding: "6px 10px", color: A.muted2 }}>
                                             {v.created_at ? relDate(v.created_at) : "—"}
