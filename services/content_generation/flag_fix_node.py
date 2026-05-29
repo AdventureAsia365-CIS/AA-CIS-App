@@ -145,7 +145,7 @@ Keep all other fields unchanged."""
 def _write_lessons_safe(lessons: list, state: dict) -> None:
     """Fire-and-forget lessons write-back — swallows all errors."""
     try:
-        batch   = state.get("tour", {}).get("batch_name", "")
+        batch = state.get("tour", {}).get("batch_name", "")
         country = state.get("tour", {}).get("country", "")
         loop = asyncio.get_event_loop()
         new_count = loop.run_until_complete(
@@ -176,7 +176,7 @@ async def write_lessons_log(
     from collections import Counter
 
     def freq_key(lesson): (
-        f"{l.get('failure_code','')}:{l.get('field','')}:{l.get('pattern','')[:50].lower().strip()}"
+        f"{l.get('failure_code', '')}:{l.get('field', '')}:{l.get('pattern', '')[:50].lower().strip()}"
     )
     freq = Counter(freq_key(lesson) for lesson in lessons)
 
@@ -196,8 +196,8 @@ async def write_lessons_log(
     inserted = 0
     try:
         for lesson in unique_lessons:
-            stage   = "audit"
-            field   = lesson.get("field", "")
+            stage = "audit"
+            field = lesson.get("field", "")
             pattern = lesson.get("pattern", "")
             existing = await conn.fetchval(
                 "SELECT id FROM shared.pipeline_lessons WHERE stage=$1 AND field=$2 AND pattern=$3 LIMIT 1",
@@ -215,8 +215,8 @@ async def write_lessons_log(
                 stage,
                 field,
                 pattern,
-                f"Failure code: {lesson.get('failure_code','')} — severity: {lesson.get('severity','')}",
-                f"Fix field {field} — failure code {lesson.get('failure_code','')}",
+                f"Failure code: {lesson.get('failure_code', '')} — severity: {lesson.get('severity', '')}",
+                f"Fix field {field} — failure code {lesson.get('failure_code', '')}",
                 lesson.get("example_before", ""),
             )
             inserted += 1

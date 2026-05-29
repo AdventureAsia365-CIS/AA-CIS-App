@@ -12,8 +12,9 @@ logger = structlog.get_logger()
 
 # ── Deterministic pre-audit checks ───────────────────────────────────────────
 
-CITY_LIST_SUBTITLE = re.compile(r'^[A-Z][a-zA-Z]+(?: [A-Z][a-zA-Z]+)*(?:,\s*[A-Z][a-zA-Z]+(?: [A-Z][a-zA-Z]+)*){2,}$')
-WAYPOINT_SUBTITLE  = re.compile(r'[→❧►]|Route:|^\w[\w\s]+\s*→')
+CITY_LIST_SUBTITLE = re.compile(
+    r'^[A-Z][a-zA-Z]+(?: [A-Z][a-zA-Z]+)*(?:,\s*[A-Z][a-zA-Z]+(?: [A-Z][a-zA-Z]+)*){2,}$')
+WAYPOINT_SUBTITLE = re.compile(r'[→❧►]|Route:|^\w[\w\s]+\s*→')
 META_ROBOTIC_OPENERS = [
     re.compile(r'^This is a\b', re.IGNORECASE),
     re.compile(r'^Discover\b',   re.IGNORECASE),
@@ -21,18 +22,18 @@ META_ROBOTIC_OPENERS = [
     re.compile(r'^Find\b',       re.IGNORECASE),
 ]
 OPTIONAL_HIGHLIGHT = re.compile(r'^Optional\b', re.IGNORECASE)
-ELEPHANT_RIDING    = re.compile(
+ELEPHANT_RIDING = re.compile(
     r'elephant[-\s]?back|elephant\s+ride|elephant\s+trek', re.IGNORECASE
 )
-NAME_ALL_CAPS_RE   = re.compile(r'^[A-Z\s\d&\-]+$')
-NAME_SUPERLATIVES  = ['the best of', 'ultimate', 'must-see', 'and fun', 'expenditures']
+NAME_ALL_CAPS_RE = re.compile(r'^[A-Z\s\d&\-]+$')
+NAME_SUPERLATIVES = ['the best of', 'ultimate', 'must-see', 'and fun', 'expenditures']
 
 
 def pre_audit_checks(generated: dict) -> list[str]:
     codes = []
-    name       = (generated.get("name") or "")
-    subtitle   = (generated.get("subtitle") or "")
-    seo_meta   = (generated.get("seo_meta") or "")
+    name = (generated.get("name") or "")
+    subtitle = (generated.get("subtitle") or "")
+    seo_meta = (generated.get("seo_meta") or "")
     highlights = generated.get("highlights") or []
     if isinstance(highlights, str):
         highlights = [highlights]
@@ -140,7 +141,7 @@ def brand_audit_node(state: dict) -> dict:
         system_prompt = AA_BRAND_IDENTITY_PROMPT + "\n\n" + AA_COWORK_STRUCTURE_PROMPT
 
         tour = state.get("tour", {})
-        dfs  = state.get("seo", {})
+        dfs = state.get("seo", {})
         highlights = generated.get("highlights") or []
         if isinstance(highlights, str):
             highlights = [highlights]
@@ -210,9 +211,9 @@ Return JSON only per schema."""
         all_codes = list(dict.fromkeys(result["failure_codes"] + pre_codes))
         result["failure_codes"] = all_codes
 
-        in_tok  = resp.usage.prompt_tokens if resp.usage else 0
+        in_tok = resp.usage.prompt_tokens if resp.usage else 0
         out_tok = resp.usage.completion_tokens if resp.usage else 0
-        cost    = round((in_tok * 0.002 + out_tok * 0.008) / 1000, 6)
+        cost = round((in_tok * 0.002 + out_tok * 0.008) / 1000, 6)
 
         logger.info("brand_audit_done",
                     status=result["status"],
