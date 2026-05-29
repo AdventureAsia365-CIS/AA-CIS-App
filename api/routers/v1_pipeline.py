@@ -86,6 +86,7 @@ async def _rewrite_tour(
     model_tier: str = "haiku",
     is_tenant_rewrite: bool = False,
     subtitle_focus: str = "standard",
+    seo_mode: str = "dataforseo",
 ) -> dict:
     """Rewrite single tour using LangGraph."""
     logger.info("rewriting_tour", idx=idx, total=total, name=tour.get("name", ""))
@@ -112,6 +113,15 @@ async def _rewrite_tour(
             "brand_forbidden_words": _br.get("forbidden_words", []),
             "rewrite_language":     _br.get("rewrite_language", "en-US"),
             "subtitle_focus":       subtitle_focus,
+            "seo_mode":             seo_mode,
+            # brand audit defaults
+            "brand_audit_status": "",
+            "brand_audit_codes":  [],
+            "brand_audit_issues": [],
+            "brand_audit_fields": [],
+            "lessons_extracted":  [],
+            "fix_pass_applied":   False,
+            "fix_pass_fields":    [],
         }
 
         def run_graph():
@@ -140,6 +150,13 @@ async def _rewrite_tour(
             "sub_scores":    result.get("sub_scores", {}),
             "passed_count":  result.get("passed_count", 0),
             "failed_count":  result.get("failed_count", 0),
+            "brand_audit_status": result.get("brand_audit_status", ""),
+            "brand_audit_codes":  result.get("brand_audit_codes", []),
+            "brand_audit_issues": result.get("brand_audit_issues", []),
+            "brand_audit_fields": result.get("brand_audit_fields", []),
+            "lessons_extracted":  result.get("lessons_extracted", []),
+            "fix_pass_applied":   result.get("fix_pass_applied", False),
+            "fix_pass_fields":    result.get("fix_pass_fields", []),
             "status": "success" if result.get("generated") and len(result.get("generated", {})) > 0 else "failed",
         }
 

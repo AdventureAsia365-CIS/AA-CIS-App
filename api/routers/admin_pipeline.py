@@ -165,10 +165,10 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
 
         seo_data: dict = {}
         dataforseo_used: bool = False
+        _SEO_MODE_MAP = {"standard": "dataforseo", "aggressive": "dataforseo", "minimal": "disabled"}
+        effective_seo_mode = _SEO_MODE_MAP.get(req.seo_mode, req.seo_mode)
         try:
             from services.seo_intelligence.handler import process_seo
-            _SEO_MODE_MAP = {"standard": "dataforseo", "aggressive": "dataforseo", "minimal": "disabled"}
-            effective_seo_mode = _SEO_MODE_MAP.get(req.seo_mode, req.seo_mode)
             destination = (
                 f"{row['country']} tours" if row.get("country") else row.get("src_name", "")
             )
@@ -178,6 +178,13 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
                 )
                 seo_data = seo_result.get("data", {})
                 dataforseo_used = seo_result.get("status") == "fetched"
+                # B2: Normalize seo schema — ensure both flat and nested keys exist
+                if "keywords" in seo_data and "top_keywords" not in seo_data:
+                    seo_data["top_keywords"] = seo_data["keywords"].get("top_keywords", [])
+                elif "top_keywords" in seo_data and "keywords" not in seo_data:
+                    seo_data["keywords"] = {"top_keywords": seo_data["top_keywords"]}
+                seo_data.setdefault("top_keywords", [])
+                seo_data.setdefault("people_also_ask", [])
         except Exception as _seo_err:
             logger.warning("seo_step_failed", tour_id=req.tour_id, error=str(_seo_err))
 
@@ -187,6 +194,7 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
             seo=seo_data,
             model_tier=req.model_tier,
             subtitle_focus=req.subtitle_focus,
+            seo_mode=effective_seo_mode,
         )
 
         _UPGRADE_THRESHOLD = float(os.environ.get("AUTO_UPGRADE_THRESHOLD", "8.5"))
@@ -203,6 +211,7 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
                 seo=seo_data,
                 model_tier="sonnet",
                 subtitle_focus=req.subtitle_focus,
+                seo_mode=effective_seo_mode,
             )
             if _upgraded.get("quality_score", 0.0) > _score:
                 result = _upgraded
@@ -295,6 +304,43 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
                 int(result.get("failed_count", 0)),
                 json.dumps(_fc),
             )
+
+        # BƯỚC 7: Persist brand_audit results to quality_scores
+        if version_id and result.get("brand_audit_status"):
+            try:
+                await conn.execute("""
+                    UPDATE silver_aa_internal.quality_scores
+                    SET brand_audit_status = $1,
+                        brand_audit_codes  = $2::jsonb,
+                        brand_audit_issues = $3::jsonb,
+                        brand_audit_fields = $4::jsonb,
+                        lessons_extracted  = $5::jsonb
+                    WHERE generated_content_id = $6::uuid
+                """,
+                    result["brand_audit_status"],
+                    json.dumps(result.get("brand_audit_codes", [])),
+                    json.dumps(result.get("brand_audit_issues", [])),
+                    json.dumps(result.get("brand_audit_fields", [])),
+                    json.dumps(result.get("lessons_extracted", [])),
+                    version_id,
+                )
+            except Exception as _audit_err:
+                logger.warning("brand_audit_persist_failed", error=str(_audit_err))
+
+        # BƯỚC 7: Persist fix_pass results to generated_content
+        if version_id and result.get("fix_pass_applied"):
+            try:
+                await conn.execute("""
+                    UPDATE silver_aa_internal.generated_content
+                    SET fix_pass_applied = true,
+                        fix_pass_fields  = $1::jsonb
+                    WHERE id = $2::uuid
+                """,
+                    json.dumps(result.get("fix_pass_fields", [])),
+                    version_id,
+                )
+            except Exception as _fix_err:
+                logger.warning("fix_pass_persist_failed", error=str(_fix_err))
 
         status = "approved" if result.get("quality_score", 0.0) >= 7.0 else "pending"
         if version_id and status == "approved":
@@ -720,6 +766,114 @@ async def export_tours(
         iter([buf.read()]),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=master_content_export.xlsx"},
+    )
+
+
+# ── GET /admin/export-audit — AA-134 full 28-col export with brand audit data ──
+# NOTE: Route must come before /tours/{tour_id}/... — placed here with other exports
+
+@router.get("/export-audit")
+async def export_audit(
+    request: Request,
+    format: str = "csv",
+    batch_id: Optional[str] = None,
+    tour_ids: Optional[str] = None,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    if format not in ("csv", "xlsx"):
+        raise HTTPException(status_code=400, detail="format must be csv or xlsx")
+
+    tenant_id = "00000000-0000-0000-0000-000000000001"
+    base_query = """
+        SELECT
+            pt.tour_id::text                                AS tour_id,
+            rt.sku                                          AS "SKU",
+            pt.aa_name                                      AS "NAME",
+            pt.aa_subtitle                                  AS "SUBTITLE",
+            rt.country                                      AS country,
+            rt.src_name                                     AS "SOURCE_NAME",
+            rt.src_subtitle                                 AS "SOURCE_SUBTITLE",
+            rt.src_summary                                  AS "SOURCE_SUMMARY",
+            rt.src_highlights::text                         AS "SOURCE_HIGHLIGHTS",
+            rt.src_itineraries                              AS "SOURCE_ITINERARIES",
+            pt.aa_name                                      AS "AA_NAME",
+            pt.aa_subtitle                                  AS "AA_SUBTITLE",
+            pt.aa_summary                                   AS "AA_SUMMARY",
+            pt.aa_highlights::text                          AS "AA_HIGHLIGHTS",
+            pt.aa_itineraries                               AS "AA_ITINERARIES",
+            pt.seo_title                                    AS "SEO_TITLE",
+            pt.seo_meta                                     AS "SEO_META",
+            COALESCE(qs.brand_audit_status, 'not_audited') AS "AUDIT_STATUS",
+            COALESCE(qs.brand_audit_codes::text, '[]')     AS "AUDIT_FAILURE_CODES",
+            COALESCE(qs.brand_audit_issues::text, '[]')    AS "AUDIT_ISSUES",
+            COALESCE(gc.fix_pass_fields::text, '[]')       AS "FIELDS_UPDATED",
+            CASE
+                WHEN qs.brand_audit_status = 'pass'
+                  OR (qs.brand_audit_status = 'flagged' AND gc.fix_pass_applied = true)
+                THEN 'TRUE'
+                WHEN qs.brand_audit_status = 'manual_check' THEN 'FALSE'
+                WHEN qs.brand_audit_status IS NULL           THEN 'NOT_AUDITED'
+                ELSE 'FALSE'
+            END                                             AS "PUBLISH_READY",
+            COALESCE(sc.keyword_search, '')                 AS "DFS_KEYWORD_SEARCH",
+            qs.score_overall::text                          AS quality_score
+        FROM gold_aa_internal.published_tours pt
+        JOIN silver_aa_internal.raw_tours rt
+            ON rt.tour_id = pt.tour_id
+        LEFT JOIN silver_aa_internal.quality_scores qs
+            ON qs.generated_content_id = pt.generated_content_id
+        LEFT JOIN silver_aa_internal.generated_content gc
+            ON gc.id = pt.generated_content_id
+        LEFT JOIN silver_aa_internal.seo_context sc
+            ON sc.tour_id = pt.tour_id
+        WHERE pt.tenant_id = $1::uuid
+    """
+
+    params: list = [tenant_id]
+    extra = ""
+    if batch_id:
+        params.append(batch_id)
+        extra += f" AND rt.batch_id = ${len(params)}::uuid"
+    if tour_ids:
+        ids = [t.strip() for t in tour_ids.split(",") if t.strip()]
+        if ids:
+            params.append(ids)
+            extra += f" AND pt.tour_id = ANY(${len(params)}::uuid[])"
+
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(base_query + extra + " ORDER BY pt.published_at DESC", *params)
+
+    import csv as _csv
+    import io as _io
+    import pandas as _pd
+    from fastapi.responses import StreamingResponse
+
+    data = [dict(r) for r in rows]
+
+    if format == "csv":
+        buf = _io.StringIO()
+        if data:
+            writer = _csv.DictWriter(buf, fieldnames=list(data[0].keys()))
+            writer.writeheader()
+            writer.writerows(data)
+        buf.seek(0)
+        return StreamingResponse(
+            iter([buf.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=aa_tours_export.csv"},
+        )
+
+    df = _pd.DataFrame(data)
+    buf = _io.BytesIO()
+    with _pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False, sheet_name="AA Tours Audit")
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.read()]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=aa_tours_export.xlsx"},
     )
 
 

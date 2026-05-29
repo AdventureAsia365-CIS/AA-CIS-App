@@ -7,6 +7,8 @@ from langgraph.graph import StateGraph, END
 from shared.llm_client.client import LLMClient
 from shared.llm_client.models import LLMRequest
 from .prompts import SYSTEM_PROMPT, build_rewrite_prompt
+from .brand_audit_node import brand_audit_node
+from .flag_fix_node import flag_fix_node
 
 logger = structlog.get_logger()
 
@@ -36,6 +38,16 @@ class ContentState(TypedDict):
     sub_scores:             dict
     passed_count:           int
     failed_count:           int
+    seo_mode:               str    # "dataforseo" | "custom_keywords" | "disabled"
+    # brand audit fields (AA-133)
+    brand_audit_status:     str    # "pass" | "flagged" | "manual_check" | ""
+    brand_audit_codes:      list
+    brand_audit_issues:     list
+    brand_audit_fields:     list
+    lessons_extracted:      list
+    # flag fix tracking (AA-134)
+    fix_pass_applied:       bool
+    fix_pass_fields:        list
 
 # code → (dimension, deduction)
 _FAILURE_MAP: dict[str, tuple[str, float]] = {
@@ -278,7 +290,9 @@ def validate_node(state: ContentState) -> ContentState:
         score -= 1.0
 
     # DFS_INTENT_UNDERUSED: if SEO keywords exist, at least one should appear in title+meta
-    seo_kws = state.get("seo", {}).get("top_keywords", [])
+    # B1: handle both flat {"top_keywords": [...]} and nested {"keywords": {"top_keywords": [...]}}
+    _seo    = state.get("seo", {})
+    seo_kws = _seo.get("top_keywords", []) or _seo.get("keywords", {}).get("top_keywords", [])
     if seo_kws:
         kw_texts = [
             (kw["keyword"] if isinstance(kw, dict) else str(kw)).lower()
@@ -343,14 +357,18 @@ def build_graph() -> StateGraph:
     graph.add_node("generate", generate_node)
     graph.add_node("validate", validate_node)
     graph.add_node("increment_retry", increment_retry)
+    graph.add_node("brand_audit", brand_audit_node)
+    graph.add_node("flag_fix", flag_fix_node)
 
     graph.set_entry_point("generate")
     graph.add_edge("generate", "validate")
     graph.add_conditional_edges("validate", should_retry, {
-        "done":  END,
+        "done":  "brand_audit",
         "retry": "increment_retry",
         "hitl":  END,
     })
+    graph.add_edge("brand_audit", "flag_fix")
+    graph.add_edge("flag_fix", END)
     graph.add_edge("increment_retry", "generate")
 
     return graph.compile()
