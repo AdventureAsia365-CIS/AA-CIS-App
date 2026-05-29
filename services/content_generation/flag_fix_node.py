@@ -175,18 +175,18 @@ async def write_lessons_log(
 
     from collections import Counter
 
-    freq_key = lambda l: (
+    def freq_key(lesson): (
         f"{l.get('failure_code','')}:{l.get('field','')}:{l.get('pattern','')[:50].lower().strip()}"
     )
-    freq = Counter(freq_key(l) for l in lessons)
+    freq = Counter(freq_key(lesson) for lesson in lessons)
 
-    eligible = [l for l in lessons if freq[freq_key(l)] >= min_frequency]
+    eligible = [lesson for lesson in lessons if freq[freq_key(lesson)] >= min_frequency]
     if not eligible:
         return 0
 
     seen: set = set()
     unique_lessons = []
-    for l in eligible:
+    for lesson in eligible:
         k = freq_key(l)
         if k not in seen:
             seen.add(k)
