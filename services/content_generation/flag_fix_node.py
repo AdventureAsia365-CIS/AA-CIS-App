@@ -175,22 +175,24 @@ async def write_lessons_log(
 
     from collections import Counter
 
-    def freq_key(lesson): (
-        f"{l.get('failure_code', '')}:{l.get('field', '')}:{l.get('pattern', '')[:50].lower().strip()}"
-    )
-    freq = Counter(freq_key(lesson) for lesson in lessons)
+    def freq_key(les):
+        return (
+            f"{les.get('failure_code', '')}:{les.get('field', '')}:"
+            f"{les.get('pattern', '')[:50].lower().strip()}"
+        )
+    freq = Counter(freq_key(les) for les in lessons)
 
-    eligible = [lesson for lesson in lessons if freq[freq_key(lesson)] >= min_frequency]
+    eligible = [les for les in lessons if freq[freq_key(les)] >= min_frequency]
     if not eligible:
         return 0
 
     seen: set = set()
     unique_lessons = []
-    for lesson in eligible:
-        k = freq_key(l)
+    for les in eligible:
+        k = freq_key(les)
         if k not in seen:
             seen.add(k)
-            unique_lessons.append(l)
+            unique_lessons.append(les)
 
     conn = await asyncpg.connect(get_database_url())
     inserted = 0
