@@ -15,8 +15,24 @@ from shared.repository.raw_source_repository import RawSourceRepository
 from shared.secrets import get_database_url
 
 logger = structlog.get_logger()
-s3  = boto3.client("s3")
-sfn = boto3.client("stepfunctions")
+
+_AWS_REGION = os.environ.get("AWS_REGION", "us-west-1")
+_s3_client = None
+_sfn_client = None
+
+
+def _s3():
+    global _s3_client
+    if _s3_client is None:
+        _s3_client = boto3.client("s3", region_name=_AWS_REGION)
+    return _s3_client
+
+
+def _sfn():
+    global _sfn_client
+    if _sfn_client is None:
+        _sfn_client = boto3.client("stepfunctions", region_name=_AWS_REGION)
+    return _sfn_client
 
 
 def compute_file_hash(file_bytes: bytes) -> str:
@@ -35,7 +51,7 @@ async def process_file(s3_bucket: str, s3_key: str, seo_mode: str = "standard") 
     # Download về /tmp
     filename = s3_key.split("/")[-1]
     with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
-        s3.download_fileobj(s3_bucket, s3_key, tmp)
+        _s3().download_fileobj(s3_bucket, s3_key, tmp)
         tmp_path = tmp.name
 
     # Read file bytes for hash computation
@@ -98,7 +114,7 @@ async def process_file(s3_bucket: str, s3_key: str, seo_mode: str = "standard") 
 
         # Get file size from S3 object
         try:
-            s3_meta = s3.head_object(Bucket=s3_bucket, Key=s3_key)
+            s3_meta = _s3().head_object(Bucket=s3_bucket, Key=s3_key)
             file_size_kb = round(s3_meta["ContentLength"] / 1024, 1)
         except Exception:
             file_size_kb = None
@@ -238,7 +254,7 @@ def _start_pipeline(
         "tours":     tours_input,
     }
 
-    response = sfn.start_execution(
+    response = _sfn().start_execution(
         stateMachineArn=sfn_arn,
         name=execution_name,
         input=json.dumps(payload),
@@ -275,7 +291,7 @@ def lambda_handler(event: dict, context) -> dict:
             # Read seo_mode from S3 object metadata (set by upload-url endpoint)
             seo_mode = "standard"
             try:
-                meta = s3.head_object(Bucket=s3_bucket, Key=s3_key)
+                meta = _s3().head_object(Bucket=s3_bucket, Key=s3_key)
                 seo_mode = meta.get("Metadata", {}).get("seo-mode", "standard")
             except Exception:
                 pass

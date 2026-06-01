@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [develop, main]
   push:
-    branches: [develop]
+    branches: [develop, "feature/**"]
 
 permissions:
   id-token: write
@@ -82,6 +82,7 @@ jobs:
         env:
           ENVIRONMENT: test
           AWS_REGION: us-west-1
+          AWS_DEFAULT_REGION: us-west-1
           DATABASE_URL: postgresql://test:test@localhost:5432/test
           OPENAI_API_KEY: sk-test-dummy
           DATAFORSEO_LOGIN: test
