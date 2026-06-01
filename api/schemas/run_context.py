@@ -14,11 +14,13 @@ class RunContextValidationError(Exception):
     def __init__(self, run_id: str, missing_path: str, detail: str = ""):
         self.run_id = run_id
         self.missing_path = missing_path
-        super().__init__(
+        self.detail = detail
+        message = (
             f"run_context validation failed for run_id={run_id}: "
             f"missing or null field '{missing_path}'"
             + (f" — {detail}" if detail else "")
         )
+        super().__init__(message, run_id, missing_path, detail)
 
 
 # ── Per-stage write payloads ──────────────────────────────────────────────────
