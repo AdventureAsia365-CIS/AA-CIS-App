@@ -12,10 +12,17 @@ System prompt built from Ms. Thư's stage-2 prompt files in ../prompts/.
 """
 import json
 import os
+import sys
 import structlog
 from pathlib import Path
 
 import boto3
+
+_repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
+from api.services.run_context_db import write_run_context_stage  # noqa: E402
 
 logger = structlog.get_logger()
 
@@ -146,40 +153,25 @@ def make_synthesize_node(pool, s3_client):
                 json.dumps(primary_keywords),
             )
 
-        # 2. Write S2 outputs to acp_run_context (upsert — S1 may not have run)
+        # 2. Write S2 outputs to acp_run_context (atomic per-stage update)
+        normalized_score = round(confidence_score / 100.0, 4)  # 0-100 → 0.0-1.0
         async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO acp_shared.acp_run_context
-                    (run_id, tenant_id,
-                     s2_keyword_research, s2_visibility_report,
-                     s2_keyword_clusters, s2_market_preference, s2_aa_tour_matches,
-                     s2_confidence_score, updated_at)
-                VALUES
-                    ($1::uuid, $2,
-                     $3::jsonb, $4::jsonb,
-                     $5::jsonb, $6::jsonb, $7::jsonb,
-                     $8, NOW())
-                ON CONFLICT (run_id) DO UPDATE SET
-                    s2_keyword_research  = EXCLUDED.s2_keyword_research,
-                    s2_visibility_report = EXCLUDED.s2_visibility_report,
-                    s2_keyword_clusters  = EXCLUDED.s2_keyword_clusters,
-                    s2_market_preference = EXCLUDED.s2_market_preference,
-                    s2_aa_tour_matches   = EXCLUDED.s2_aa_tour_matches,
-                    s2_confidence_score  = EXCLUDED.s2_confidence_score,
-                    updated_at           = NOW()
-                """,
-                run_id, tenant_id,
-                json.dumps({"top_opportunities": top_opportunities, "content_gaps": keyword_gaps,
-                            "recommended_actions": llm_output.get("recommended_actions", [])}),
-                json.dumps({"summary": llm_output.get("summary", ""),
-                            "risk_flags": llm_output.get("risk_flags", []),
-                            "primary_keywords": primary_keywords}),
-                json.dumps(keyword_clusters),
-                json.dumps(market_preference),
-                json.dumps(aa_tour_matches),
-                round(confidence_score / 100.0, 4),  # normalize 0-100 → 0.0-1.0
-            )
+            await write_run_context_stage(conn, run_id, "s2", {
+                "s2_keyword_research": {
+                    "top_opportunities": top_opportunities,
+                    "content_gaps": keyword_gaps,
+                    "recommended_actions": llm_output.get("recommended_actions", []),
+                },
+                "s2_visibility_report": {
+                    "summary": llm_output.get("summary", ""),
+                    "risk_flags": llm_output.get("risk_flags", []),
+                    "primary_keywords": primary_keywords,
+                },
+                "s2_keyword_clusters": keyword_clusters,
+                "s2_market_preference": market_preference,
+                "s2_aa_tour_matches": aa_tour_matches,
+                "s2_confidence_score": normalized_score,
+            })
 
         # 3. Update acp_runs status
         async with pool.acquire() as conn:

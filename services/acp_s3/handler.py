@@ -29,6 +29,7 @@ import lessons as _lessons
 import planner as _planner
 import validators as _validators
 from models import S3RunResult
+from run_context import get_run_context_sync, write_s3_stage_sync
 
 
 def _get_db_conn():
@@ -45,21 +46,17 @@ def _get_db_conn():
 
 
 def _read_run_inputs(conn, run_id: str, tenant_id: str) -> tuple[dict, dict, str]:
-    """Returns (run_context, tenant_rules, country)."""
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        # acp_run_context
-        cur.execute("""
-            SELECT s2_keyword_research, s2_visibility_report,
-                   s1_keywords_used, brand_brief
-            FROM acp_shared.acp_run_context
-            WHERE run_id = %s
-        """, (run_id,))
-        ctx_row = cur.fetchone()
-        if not ctx_row:
-            raise ValueError(f"No acp_run_context for run_id={run_id}")
-        run_context = dict(ctx_row)
+    """Returns (run_context_dict, tenant_rules, country)."""
+    # Validated read — raises RunContextValidationError if row absent or s2 fields missing
+    ctx = get_run_context_sync(conn, run_id, require_stages=("s2",))
+    run_context = {
+        "s2_keyword_research": ctx.s2_keyword_research or {},
+        "s2_visibility_report": ctx.s2_visibility_report or {},
+        "s1_keywords_used": ctx.s1_keywords_used or [],
+        "brand_brief": ctx.brand_brief or {},
+    }
 
-        # tenant brand rules
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("""
             SELECT system_prompt, style_guide, forbidden_words
             FROM shared.tenant_brand_rules
@@ -68,7 +65,6 @@ def _read_run_inputs(conn, run_id: str, tenant_id: str) -> tuple[dict, dict, str
         rules_row = cur.fetchone()
         tenant_rules = dict(rules_row) if rules_row else {}
 
-        # country from acp_runs
         cur.execute(
             "SELECT country FROM acp_shared.acp_runs WHERE run_id = %s",
             (run_id,),
@@ -140,20 +136,14 @@ def _write_outputs(
         ))
         ads_plan_id = str(cur.fetchone()[0])
 
-        # acp_run_context JSONB update
-        cur.execute("""
-            UPDATE acp_shared.acp_run_context SET
-                s3_content_calendar = %s::jsonb,
-                s3_ads_plan         = %s::jsonb,
-                s3_funnel_mix       = %s::jsonb,
-                updated_at          = NOW()
-            WHERE run_id = %s
-        """, (
-            json.dumps({"calendar_id": calendar_id, "document_title": skeleton.document_title}),
-            json.dumps({"ads_plan_id": ads_plan_id, "campaign_count": len(ads_output.campaigns)}),
-            funnel_json,
-            run_id,
-        ))
+    # Atomic S3 stage write — only touches s3_* columns
+    write_s3_stage_sync(conn, run_id, {
+        "s3_content_calendar": {
+            "calendar_id": calendar_id, "document_title": skeleton.document_title,
+        },
+        "s3_ads_plan": {"ads_plan_id": ads_plan_id, "campaign_count": len(ads_output.campaigns)},
+        "s3_funnel_mix": funnel_mix,
+    })
 
     return calendar_id, ads_plan_id
 
