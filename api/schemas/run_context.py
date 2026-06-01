@@ -11,7 +11,7 @@ from pydantic import BaseModel, field_validator
 class RunContextValidationError(Exception):
     """Raised when a required stage field is absent or None."""
 
-    def __init__(self, run_id: str, missing_path: str, detail: str = ""):
+    def __init__(self, run_id: str, missing_path: str, detail: str = ""):  # noqa: B042
         self.run_id = run_id
         self.missing_path = missing_path
         self.detail = detail
