@@ -24,6 +24,11 @@ def compute_file_hash(file_bytes: bytes) -> str:
     return hashlib.sha256(file_bytes).hexdigest()
 
 
+def normalize_group_key(src_name: str, provider: str | None) -> tuple[str, str]:
+    """Return (normalized_name, normalized_provider) for dedup comparison."""
+    return (src_name.lower().strip(), (provider or "").lower().strip())
+
+
 async def process_file(s3_bucket: str, s3_key: str, seo_mode: str = "standard") -> dict:
     """Download Excel từ S3, parse, insert bronze.raw_sources → bronze.raw_tours."""
 
@@ -113,14 +118,47 @@ async def process_file(s3_bucket: str, s3_key: str, seo_mode: str = "standard") 
             await source_repo.update_status(source_id, "skipped", row_count=0)
             return {"status": "skipped", "rows": 0, "source_id": str(source_id)}
 
-        # 2. Gán source_id → insert raw_tours
+        # 2. Split records: new vs duplicate (normalized dedup against raw_tours)
+        new_records: list[dict] = []
+        staged_ids: list[str]  = []
+
         for r in records:
             r["source_id"] = source_id
             r["batch_id"] = batch_id_new
+            nname, nprov = normalize_group_key(r.get("src_name", ""), r.get("provider"))
+            existing = await conn.fetchrow("""
+                SELECT tour_id, source_group_id
+                FROM silver_aa_internal.raw_tours
+                WHERE tenant_id = $1
+                  AND lower(trim(src_name)) = $2
+                  AND lower(trim(coalesce(provider, ''))) = $3
+                ORDER BY ingest_at DESC LIMIT 1
+            """, tenant_uuid, nname, nprov)
 
-        ids = await tour_repo.insert_batch(records)
-        await source_repo.update_status(source_id, "done", row_count=len(ids))
-        logger.info("inserted", count=len(ids), source_id=source_id)
+            if existing:
+                staging_id = await conn.fetchval("""
+                    INSERT INTO silver_aa_internal.upload_staging
+                        (batch_id, tenant_id, parsed_payload,
+                         matched_tour_id, matched_source_group_id, decision)
+                    VALUES ($1::uuid, $2::uuid, $3::jsonb, $4::uuid, $5, 'pending')
+                    RETURNING id::text
+                """,
+                    batch_id_new,
+                    tenant_uuid,
+                    json.dumps(r, default=str),
+                    str(existing["tour_id"]),
+                    str(existing["source_group_id"]) if existing["source_group_id"] else None,
+                )
+                staged_ids.append(staging_id)
+            else:
+                r["source_group_id"] = str(uuid.uuid4())
+                r["source_version"]  = 1
+                r["source_status"]   = "active"
+                new_records.append(r)
+
+        ids = await tour_repo.insert_batch(new_records)
+        await source_repo.update_status(source_id, "done", row_count=len(ids) + len(staged_ids))
+        logger.info("inserted", count=len(ids), staged=len(staged_ids), source_id=source_id)
 
         # 3. Trigger Step Functions pipeline (S11 Phase 4)
         batch_id = batch_id_new
@@ -139,9 +177,12 @@ async def process_file(s3_bucket: str, s3_key: str, seo_mode: str = "standard") 
             logger.warning("sfn_not_configured", msg="STEP_FUNCTIONS_ARN not set — skipping pipeline trigger")
 
         return {
-            "status":    "done",
-            "rows":      len(ids),
-            "source_id": batch_id,
+            "status":        "done",
+            "rows":          len(ids),
+            "tours_written": len(ids),
+            "tours_staged":  len(staged_ids),
+            "staged_ids":    staged_ids,
+            "source_id":     batch_id,
             "sfn_triggered": bool(sfn_arn),
         }
 
