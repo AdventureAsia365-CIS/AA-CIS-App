@@ -77,6 +77,30 @@ interface DryRunResponse {
   message?: string;
 }
 
+interface CommitResponse {
+  status: string;
+  batch_id?: string | null;
+  tour_count?: number;
+  tours_written?: number;
+  tours_staged?: number;
+  staged_ids?: string[];
+}
+
+interface StagingItem {
+  staging_id: string;
+  matched_tour_id: string | null;
+  decision: string;
+  incoming: Record<string, string | null>;
+  existing: {
+    src_name: string | null;
+    src_summary: string | null;
+    country: string | null;
+    price_raw: string | null;
+    provider: string | null;
+    ingest_at: string | null;
+  };
+}
+
 interface FileState {
   id: string;
   file: File;
@@ -84,7 +108,7 @@ interface FileState {
   s3Key?: string;
   parseResult?: DryRunResponse;
   parseError?: string;
-  commitResult?: { status: string; batch_id?: string; tour_count?: number };
+  commitResult?: CommitResponse;
   commitError?: string;
   expanded: boolean;
 }
@@ -111,12 +135,13 @@ interface TourReadyItem {
 
 // ─── StepIndicator ────────────────────────────────────────────────────────────
 
-function StepIndicator({ step }: { step: 1 | 2 | 3 | 4 }) {
+function StepIndicator({ step }: { step: 1 | 2 | 3 | 4 | 5 }) {
   const STEPS = [
     { n: 1 as const, label: "Select Files" },
     { n: 2 as const, label: "Upload to S3" },
     { n: 3 as const, label: "Parse & Review" },
     { n: 4 as const, label: "Commit" },
+    { n: 5 as const, label: "Dup Review" },
   ];
   return (
     <div style={{ display: "flex", alignItems: "center", marginBottom: 28 }}>
@@ -525,9 +550,273 @@ function UploadHistorySection({ history, loading, onRefresh }: {
   );
 }
 
+// ─── DuplicateReview (Step 5) ─────────────────────────────────────────────────
+
+type Decision = "bypass" | "replace" | "keep_both";
+
+const DECISION_LABELS: Record<Decision, string> = {
+  bypass:    "Bypass — discard incoming",
+  replace:   "Replace — incoming overwrites existing",
+  keep_both: "Keep both — add as extra version",
+};
+
+function DuplicateReviewStep({
+  batchIds,
+  onDone,
+}: {
+  batchIds: string[];
+  onDone: () => void;
+}) {
+  const [items, setItems]         = useState<StagingItem[]>([]);
+  const [loading, setLoading]     = useState(true);
+  const [decisions, setDecisions] = useState<Record<string, Decision>>({});
+  const [submitting, setSubmitting] = useState(false);
+  const [submitted, setSubmitted] = useState<Record<string, boolean>>({});
+  const [error, setError]         = useState("");
+
+  useEffect(() => {
+    async function fetchAll() {
+      setLoading(true);
+      const allItems: StagingItem[] = [];
+      for (const batchId of batchIds) {
+        try {
+          const res = await fetch(`/api/admin/upload-staging/${batchId}`);
+          if (res.ok) {
+            const data = await res.json();
+            allItems.push(...(data.items || []));
+          }
+        } catch { /* ignore */ }
+      }
+      setItems(allItems);
+      const initial: Record<string, Decision> = {};
+      allItems.forEach(it => { initial[it.staging_id] = "bypass"; });
+      setDecisions(initial);
+      setLoading(false);
+    }
+    fetchAll();
+  }, [batchIds.join(",")]);
+
+  async function confirmAll() {
+    setSubmitting(true);
+    setError("");
+    const results: Record<string, boolean> = {};
+    for (const item of items) {
+      if (submitted[item.staging_id]) continue;
+      const dec = decisions[item.staging_id] || "bypass";
+      try {
+        const res = await fetch(`/api/admin/upload-staging/${item.staging_id}/decide`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ decision: dec }),
+        });
+        results[item.staging_id] = res.ok;
+      } catch {
+        results[item.staging_id] = false;
+      }
+    }
+    setSubmitted(prev => ({ ...prev, ...results }));
+    const allOk = Object.values(results).every(Boolean);
+    if (!allOk) setError("Some decisions failed. Check console and retry.");
+    setSubmitting(false);
+    if (allOk) onDone();
+  }
+
+  if (loading) {
+    return (
+      <Card>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, color: A.muted, fontSize: 13 }}>
+          <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} />
+          Loading duplicate tours…
+        </div>
+      </Card>
+    );
+  }
+
+  if (items.length === 0) {
+    return (
+      <Card>
+        <div style={{ color: A.green, fontSize: 14, fontWeight: 600, marginBottom: 16 }}>
+          No pending duplicates — all resolved!
+        </div>
+        <Btn variant="secondary" onClick={onDone}>Back to Upload</Btn>
+      </Card>
+    );
+  }
+
+  const allDecided = items.every(it => submitted[it.staging_id]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <Card>
+        <SLabel>Duplicate Review — {items.length} tour{items.length !== 1 ? "s" : ""} need a decision</SLabel>
+        <p style={{ fontSize: 12, color: A.muted, margin: "0 0 16px" }}>
+          These tours already exist in the catalog. Choose how to handle each one.
+        </p>
+
+        {error && (
+          <div style={{ color: A.red, fontSize: 12, marginBottom: 12 }}>{error}</div>
+        )}
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+          {items.map(item => (
+            <div key={item.staging_id} style={{
+              border: `1px solid ${submitted[item.staging_id] ? A.green : A.line}`,
+              borderRadius: 10, overflow: "hidden",
+            }}>
+              {/* Header */}
+              <div style={{
+                padding: "10px 16px", background: A.bg,
+                borderBottom: `1px solid ${A.line}`,
+                display: "flex", alignItems: "center", justifyContent: "space-between",
+              }}>
+                <span style={{ fontWeight: 600, fontSize: 13, color: A.ink }}>
+                  {item.incoming.src_name || "—"}
+                </span>
+                {submitted[item.staging_id] && (
+                  <Badge color="green">Done</Badge>
+                )}
+              </div>
+
+              {/* Side-by-side */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr" }}>
+                {/* Incoming */}
+                <div style={{ padding: "12px 16px", borderRight: `1px solid ${A.line}` }}>
+                  <div style={{
+                    fontSize: 10, fontWeight: 700, textTransform: "uppercase",
+                    letterSpacing: "0.12em", color: A.gold, marginBottom: 8,
+                  }}>
+                    Incoming (new)
+                  </div>
+                  {[
+                    ["Name",     item.incoming.src_name],
+                    ["Country",  item.incoming.country],
+                    ["Price",    item.incoming.price_raw],
+                    ["Provider", item.incoming.provider],
+                    ["Summary",  item.incoming.src_summary
+                      ? (item.incoming.src_summary.length > 200
+                          ? item.incoming.src_summary.slice(0, 200) + "…"
+                          : item.incoming.src_summary)
+                      : null],
+                  ].map(([label, value]) => (
+                    value ? (
+                      <div key={String(label)} style={{ marginBottom: 6 }}>
+                        <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase",
+                          letterSpacing: "0.1em", color: A.muted, marginBottom: 1 }}>{label}</div>
+                        <div style={{ fontSize: 12, color: A.body }}>{value}</div>
+                      </div>
+                    ) : null
+                  ))}
+                </div>
+
+                {/* Existing */}
+                <div style={{ padding: "12px 16px" }}>
+                  <div style={{
+                    fontSize: 10, fontWeight: 700, textTransform: "uppercase",
+                    letterSpacing: "0.12em", color: A.muted, marginBottom: 8,
+                  }}>
+                    Existing (in catalog)
+                  </div>
+                  {[
+                    ["Name",       item.existing.src_name],
+                    ["Country",    item.existing.country],
+                    ["Price",      item.existing.price_raw],
+                    ["Provider",   item.existing.provider],
+                    ["Ingested",   item.existing.ingest_at
+                      ? relativeTime(item.existing.ingest_at) : null],
+                    ["Summary",    item.existing.src_summary
+                      ? (item.existing.src_summary.length > 200
+                          ? item.existing.src_summary.slice(0, 200) + "…"
+                          : item.existing.src_summary)
+                      : null],
+                  ].map(([label, value]) => (
+                    value ? (
+                      <div key={String(label)} style={{ marginBottom: 6 }}>
+                        <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase",
+                          letterSpacing: "0.1em", color: A.muted, marginBottom: 1 }}>{label}</div>
+                        <div style={{ fontSize: 12, color: A.body }}>{value}</div>
+                      </div>
+                    ) : null
+                  ))}
+                </div>
+              </div>
+
+              {/* Decision */}
+              {!submitted[item.staging_id] && (
+                <div style={{
+                  padding: "10px 16px", borderTop: `1px solid ${A.line}`,
+                  display: "flex", alignItems: "center", gap: 12,
+                }}>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: A.muted, flexShrink: 0 }}>
+                    Decision:
+                  </span>
+                  <select
+                    value={decisions[item.staging_id] || "bypass"}
+                    onChange={e => setDecisions(prev => ({
+                      ...prev, [item.staging_id]: e.target.value as Decision,
+                    }))}
+                    style={{
+                      padding: "5px 8px", borderRadius: 6,
+                      border: `1px solid ${A.line}`, fontSize: 12,
+                      fontFamily: sans, background: "#fff", flex: 1,
+                    }}
+                  >
+                    {(Object.entries(DECISION_LABELS) as [Decision, string][]).map(([val, label]) => (
+                      <option key={val} value={val}>{label}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      {!allDecided && (
+        <div style={{ display: "flex", gap: 12 }}>
+          <Btn variant="secondary" onClick={onDone}>Skip — decide later</Btn>
+          <Btn
+            variant="primary"
+            disabled={submitting}
+            onClick={confirmAll}
+            style={{
+              background: A.gold, border: `1px solid ${A.gold}`,
+              display: "flex", alignItems: "center", gap: 8,
+              opacity: submitting ? 0.6 : 1,
+            }}
+          >
+            {submitting
+              ? <><Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> Saving…</>
+              : <>Confirm decisions ({items.length}) <ArrowRight size={14} /></>}
+          </Btn>
+        </div>
+      )}
+
+      {allDecided && (
+        <Card>
+          <div style={{ color: A.green, fontSize: 14, fontWeight: 600, marginBottom: 16,
+            display: "flex", alignItems: "center", gap: 8 }}>
+            <CheckCircle size={16} /> All decisions applied.
+          </div>
+          <div style={{ display: "flex", gap: 12 }}>
+            <Btn variant="secondary" onClick={onDone}>Back to Upload</Btn>
+            <a href="/admin/s1-rewrite" style={{
+              display: "inline-flex", alignItems: "center", gap: 8,
+              padding: "9px 18px", borderRadius: 8,
+              background: A.gold, border: `1px solid ${A.gold}`,
+              fontSize: 13, fontWeight: 600, color: "#fff", textDecoration: "none",
+            }}>
+              Go to S1 Rewrite <ArrowRight size={14} />
+            </a>
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
 // ─── Tab 1: Tour Content ──────────────────────────────────────────────────────
 
-type Step = 1 | 2 | 3 | 4;
+type Step = 1 | 2 | 3 | 4 | 5;
 
 function TourContentTab() {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -538,6 +827,7 @@ function TourContentTab() {
   const [fileError, setFileError]   = useState("");
   const [maxTours, setMaxTours]     = useState(50);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
+  const [dupBatchIds, setDupBatchIds] = useState<string[]>([]);
 
   const [uploadHistory, setUploadHistory] = useState<UploadHistoryItem[]>([]);
   const [toursReady, setToursReady]       = useState<TourReadyItem[]>([]);
@@ -605,7 +895,7 @@ function TourContentTab() {
 
   function reset() {
     setStep(1); setFileStates([]); setFileError("");
-    setExpandedRow(null);
+    setExpandedRow(null); setDupBatchIds([]);
   }
 
   async function doUploadAndParse() {
@@ -677,6 +967,8 @@ function TourContentTab() {
     }));
     setStep(4);
 
+    const batchIdsWithStaged: string[] = [];
+
     await Promise.all(toCommit.map(async (fs) => {
       try {
         const res = await fetch("/api/admin/ingest-s3", {
@@ -688,8 +980,11 @@ function TourContentTab() {
           const e = await res.json().catch(() => ({}));
           throw new Error(e.detail || `Commit failed (${res.status})`);
         }
-        const data = await res.json();
+        const data: CommitResponse = await res.json();
         updateFile(fs.id, { status: "done", commitResult: data });
+        if ((data.tours_staged ?? 0) > 0 && data.batch_id) {
+          batchIdsWithStaged.push(data.batch_id);
+        }
       } catch (err) {
         updateFile(fs.id, {
           status: "error",
@@ -699,7 +994,14 @@ function TourContentTab() {
     }));
 
     setRefreshKey(k => k + 1);
-    showToast(`Tours saved to database successfully`, "success");
+
+    if (batchIdsWithStaged.length > 0) {
+      setDupBatchIds(batchIdsWithStaged);
+      setStep(5);
+      showToast("Tours saved. Duplicate tours need review.", "success");
+    } else {
+      showToast(`Tours saved to database successfully`, "success");
+    }
   }
 
   const totalReady   = fileStates.reduce((n, f) => n + (f.parseResult?.ready_count ?? 0), 0);
@@ -1027,7 +1329,13 @@ function TourContentTab() {
                   <span style={{ fontSize: 13, flex: 1, color: A.body }}>{fs.file.name}</span>
                   <span style={{ fontSize: 12, fontWeight: 600, color: fileStatusColor[fs.status] }}>
                     {fs.status === "done"
-                      ? `${fs.commitResult?.tour_count ?? 0} tours saved`
+                      ? (() => {
+                          const written = fs.commitResult?.tours_written ?? fs.commitResult?.tour_count ?? 0;
+                          const staged  = fs.commitResult?.tours_staged ?? 0;
+                          return staged > 0
+                            ? `${written} saved · ${staged} need review`
+                            : `${written} tours saved`;
+                        })()
                       : fileStatusLabel[fs.status]}
                   </span>
                   {fs.commitError && (
@@ -1037,7 +1345,7 @@ function TourContentTab() {
               ))}
             </div>
 
-            {allDone && (
+            {allDone && dupBatchIds.length === 0 && (
               <div style={{ marginTop: 20 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8,
                   color: "#15803D", fontSize: 14, fontWeight: 600, marginBottom: 16 }}>
@@ -1059,6 +1367,14 @@ function TourContentTab() {
             )}
           </Card>
         </div>
+      )}
+
+      {/* ── Step 5: Duplicate Review ── */}
+      {step === 5 && (
+        <DuplicateReviewStep
+          batchIds={dupBatchIds}
+          onDone={reset}
+        />
       )}
 
       {/* ── Always-visible sections ── */}
