@@ -25,6 +25,8 @@ from pydantic import BaseModel
 
 from acpcore.concurrency import _get_semaphore, _MAX_CONCURRENT
 from acpcore.errors import ACPErrorCode
+from api.services.run_context_db import get_run_context_validated
+from api.schemas.run_context import RunContextValidationError
 
 logger = structlog.get_logger()
 router = APIRouter(tags=["S2 Research"])
@@ -39,12 +41,12 @@ async def _handle_gate1(pool, run_id: str, tenant_id: str) -> dict:
     PRD v1.3 §2.2.
     """
     async with pool.acquire() as conn:
-        ctx = await conn.fetchrow(
-            "SELECT s2_confidence_score FROM acp_shared.acp_run_context WHERE run_id = $1::uuid",
-            run_id,
-        )
-
-    confidence = float(ctx["s2_confidence_score"] or 0) if ctx else 0.0
+        try:
+            ctx = await get_run_context_validated(conn, run_id, require_stages=("s2",))
+            confidence = ctx.s2_confidence_score or 0.0
+        except RunContextValidationError as exc:
+            logger.error("gate1_context_missing", run_id=run_id, missing=exc.missing_path)
+            confidence = 0.0
     is_aa_internal = (tenant_id == "00000000-0000-0000-0000-000000000001")
     auto_approved = is_aa_internal and confidence >= GATE1_AUTO_APPROVE_THRESHOLD
     status = "approved" if auto_approved else "pending"

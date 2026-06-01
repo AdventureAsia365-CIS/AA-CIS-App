@@ -16,6 +16,8 @@ from fastapi.security import HTTPBearer as _HTTPBearer, HTTPAuthorizationCredent
 from typing import Optional
 
 from api.routers.auth import verify_jwt as _verify_jwt
+from api.services.run_context_db import get_run_context_validated
+from api.schemas.run_context import RunContextValidationError
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/v1/acp", tags=["acp"])
@@ -244,10 +246,10 @@ async def get_run_context(
         if not run_row:
             raise HTTPException(status_code=404, detail=f"run_id {run_id} not found")
 
-        ctx = await conn.fetchrow(
-            "SELECT * FROM acp_shared.acp_run_context WHERE run_id=$1::uuid",
-            run_id,
-        )
+        try:
+            ctx = await get_run_context_validated(conn, run_id)
+        except RunContextValidationError:
+            ctx = None
 
         country = run_row["country"]
 
@@ -286,7 +288,7 @@ async def get_run_context(
         """, run_id)
 
     def _ctx_field(field):
-        return _jparse(ctx[field]) if ctx else None
+        return getattr(ctx, field, None) if ctx else None
 
     cis_tours = [
         {
@@ -342,7 +344,7 @@ async def get_run_context(
             "keyword_clusters":  _ctx_field("s2_keyword_clusters"),
             "market_preference": _ctx_field("s2_market_preference"),
             "aa_tour_matches":   _ctx_field("s2_aa_tour_matches"),
-            "confidence_score":  _dec(ctx["s2_confidence_score"]) if ctx else None,
+            "confidence_score":  _dec(ctx.s2_confidence_score) if ctx else None,
         },
         "s3": {
             "content_calendar": _ctx_field("s3_content_calendar"),
