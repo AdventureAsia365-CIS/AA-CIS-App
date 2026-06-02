@@ -88,6 +88,12 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
         if not row:
             raise HTTPException(status_code=404, detail=f"Tour {req.tour_id} not found")
 
+        if row.get("source_status") and str(row["source_status"]) == "trashed":
+            raise HTTPException(
+                status_code=400,
+                detail="Tour is trashed. Restore before rewriting.",
+            )
+
         tour = {
             "name":        row["src_name"],
             "subtitle":    row["src_subtitle"],
@@ -476,19 +482,29 @@ async def ingest_s3(
             file_bytes = fh.read()
         file_hash = _hashlib.sha256(file_bytes).hexdigest()
 
+        import re as _re
+
+        def _clean_filename(path: str) -> str:
+            """Strip UUID prefix and path prefix from s3 key or filename."""
+            basename = path.split("/")[-1]
+            return _re.sub(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_', '', basename)
+
         pool = request.app.state.pool
         async with pool.acquire() as conn:
             existing_hash = await conn.fetchrow(
                 "SELECT id, filename FROM silver_aa_internal.raw_sources WHERE file_hash = $1",
                 file_hash,
             )
-            if existing_hash:
-                return {
-                    "status":  "blocked",
-                    "reason":  "duplicate_file_hash",
-                    "dry_run": True,
-                    "message": "File hash trùng — nội dung này đã tồn tại trong hệ thống. Vui lòng chọn file khác.",
-                }
+            if existing_hash and existing_hash["filename"]:
+                incoming_name = _clean_filename(req.s3_key)
+                stored_name   = _clean_filename(existing_hash["filename"])
+                if incoming_name == stored_name:
+                    return {
+                        "status":  "blocked",
+                        "reason":  "duplicate_file_hash",
+                        "dry_run": True,
+                        "message": "File đã upload trước đó — nội dung và tên file trùng hoàn toàn.",
+                    }
 
             parser = _ExcelParser(tmp_path, source_file=req.s3_key)
             records = parser.parse()
@@ -926,22 +942,61 @@ async def get_tours_ready(request: Request, x_admin_secret: str = Header(None)):
     async with pool.acquire() as conn:
         tours = await conn.fetch("""
             SELECT t.tour_id::text, t.src_name, t.country, t.ingest_at,
-                   t.source_id::text, t.batch_id::text, rs.filename
+                   t.source_id::text, t.batch_id::text, rs.filename,
+                   t.source_status::text AS source_status
             FROM silver_aa_internal.raw_tours t
             LEFT JOIN silver_aa_internal.raw_sources rs ON rs.id = t.source_id
             WHERE t.pipeline_status = 'ingested'
+              AND (t.source_status IS NULL OR t.source_status::text != 'trashed')
             ORDER BY t.ingest_at DESC
         """)
     return {
         "tours": [
             {
-                "tour_id":   t["tour_id"],
-                "src_name":  t["src_name"],
-                "country":   t["country"],
-                "ingest_at": str(t["ingest_at"]) if t["ingest_at"] else None,
-                "source_id": t["source_id"],
-                "batch_id":  t["batch_id"],
-                "filename":  t["filename"],
+                "tour_id":       t["tour_id"],
+                "src_name":      t["src_name"],
+                "country":       t["country"],
+                "ingest_at":     str(t["ingest_at"]) if t["ingest_at"] else None,
+                "source_id":     t["source_id"],
+                "batch_id":      t["batch_id"],
+                "filename":      t["filename"],
+                "source_status": t["source_status"] or "active",
+            }
+            for t in tours
+        ],
+        "total": len(tours),
+    }
+
+
+# ── GET /admin/tours-trashed ──────────────────────────────────────────────────
+
+
+@router.get("/tours-trashed")
+async def get_tours_trashed(request: Request, x_admin_secret: str = Header(None)):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        tours = await conn.fetch("""
+            SELECT t.tour_id::text, t.src_name, t.country, t.ingest_at,
+                   t.source_id::text, t.batch_id::text, rs.filename,
+                   t.deleted_at, t.source_status::text AS source_status
+            FROM silver_aa_internal.raw_tours t
+            LEFT JOIN silver_aa_internal.raw_sources rs ON rs.id = t.source_id
+            WHERE t.source_status::text = 'trashed'
+            ORDER BY t.deleted_at DESC NULLS LAST
+        """)
+    return {
+        "tours": [
+            {
+                "tour_id":       t["tour_id"],
+                "src_name":      t["src_name"],
+                "country":       t["country"],
+                "ingest_at":     str(t["ingest_at"]) if t["ingest_at"] else None,
+                "source_id":     t["source_id"],
+                "batch_id":      t["batch_id"],
+                "filename":      t["filename"],
+                "source_status": t["source_status"],
+                "deleted_at":    t["deleted_at"].isoformat() if t["deleted_at"] else None,
             }
             for t in tours
         ],
