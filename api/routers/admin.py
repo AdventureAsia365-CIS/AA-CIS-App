@@ -147,49 +147,69 @@ async def list_tenants(
         rows = await conn.fetch("""
             SELECT
                 t.tenant_id, t.name, t.slug, t.plan_tier::text,
-                t.rate_limit_rpm, t.is_active, t.created_at,
-                CASE WHEN t.plan_tier::text = 'internal'
-                     THEN (SELECT COUNT(*) FROM gold_aa_internal.published_tours)
-                     ELSE COALESCE(u.tours_rewritten, 0)
-                END                                 AS tours_rewritten,
-                COALESCE(u.api_calls_used, 0)       AS api_calls_used,
-                COALESCE(u.quota_tours_pct, 0)      AS quota_tours_pct,
-                COALESCE(u.quota_calls_pct, 0)      AS quota_calls_pct,
-                COALESCE(u.tours_overage, 0)        AS tours_overage,
-                COALESCE(u.overage_usd, 0)          AS overage_usd,
-                COALESCE(u.llm_cost_usd, 0)         AS llm_cost_usd,
-                COALESCE(u.tours_quota_monthly, 0)  AS tours_quota_monthly,
+                t.country, t.rate_limit_rpm, t.is_active, t.created_at,
+                COALESCE(u.api_calls_used, 0)          AS api_calls_used,
+                COALESCE(u.quota_tours_pct, 0)         AS quota_tours_pct,
+                COALESCE(u.quota_calls_pct, 0)         AS quota_calls_pct,
+                COALESCE(u.tours_overage, 0)           AS tours_overage,
+                COALESCE(u.overage_usd, 0)             AS overage_usd,
+                COALESCE(u.llm_cost_usd, 0)            AS llm_cost_usd,
+                COALESCE(u.tours_quota_monthly, 0)     AS tours_quota_monthly,
                 COALESCE(u.api_calls_quota_monthly, 0) AS api_calls_quota_monthly,
-                COALESCE(u.price_usd_monthly, 0)    AS price_usd_monthly
+                COALESCE(u.price_usd_monthly, 0)       AS price_usd_monthly,
+                COUNT(rt.tour_id) FILTER (WHERE rt.source_status::text = 'active')     AS source_active,
+                COUNT(rt.tour_id) FILTER (WHERE rt.source_status::text = 'superseded') AS source_superseded,
+                COUNT(rt.tour_id) FILTER (WHERE rt.source_status::text = 'trashed')    AS source_trashed,
+                COUNT(pt.tour_id) FILTER (WHERE pt.master_status::text = 'active')     AS master_active,
+                COUNT(pt.tour_id) FILTER (WHERE pt.master_status::text = 'inactive')   AS master_inactive,
+                COUNT(pt.tour_id) FILTER (WHERE pt.master_status::text = 'trashed')    AS master_trashed
             FROM shared.tenants t
             LEFT JOIN shared.v_tenant_monthly_usage u
                 ON u.tenant_id = t.tenant_id
+            LEFT JOIN silver_aa_internal.raw_tours rt
+                ON rt.tenant_id = t.tenant_id
+            LEFT JOIN gold_aa_internal.published_tours pt
+                ON pt.tenant_id = t.tenant_id
             WHERE t.is_active = true
+            GROUP BY t.tenant_id, t.name, t.slug, t.plan_tier, t.country,
+                     t.rate_limit_rpm, t.is_active, t.created_at,
+                     u.api_calls_used, u.quota_tours_pct, u.quota_calls_pct,
+                     u.tours_overage, u.overage_usd, u.llm_cost_usd,
+                     u.tours_quota_monthly, u.api_calls_quota_monthly, u.price_usd_monthly
             ORDER BY t.created_at
         """)
     return {
         "tenants": [
             {
-                "tenant_id":       str(r["tenant_id"]),
-                "name":            r["name"],
-                "slug":            r["slug"],
-                "plan_tier":       str(r["plan_tier"]),
-                "rate_limit_rpm":  r["rate_limit_rpm"],
-                "is_active":       r["is_active"],
-                "created_at":      r["created_at"].isoformat(),
+                "tenant_id":      str(r["tenant_id"]),
+                "name":           r["name"],
+                "slug":           r["slug"],
+                "plan_tier":      str(r["plan_tier"]),
+                "country":        r["country"],
+                "rate_limit_rpm": r["rate_limit_rpm"],
+                "is_active":      r["is_active"],
+                "created_at":     r["created_at"].isoformat(),
                 "plan": {
-                    "tours_quota_monthly":    r["tours_quota_monthly"],
+                    "tours_quota_monthly":     r["tours_quota_monthly"],
                     "api_calls_quota_monthly": r["api_calls_quota_monthly"],
-                    "price_usd_monthly":      float(r["price_usd_monthly"]),
+                    "price_usd_monthly":       float(r["price_usd_monthly"]),
                 },
                 "this_month": {
-                    "tours_rewritten":   r["tours_rewritten"],
-                    "api_calls_used":    r["api_calls_used"],
-                    "quota_tours_pct":   float(r["quota_tours_pct"]),
-                    "quota_calls_pct":   float(r["quota_calls_pct"]),
-                    "tours_overage":     r["tours_overage"],
-                    "overage_usd":       float(r["overage_usd"]),
-                    "llm_cost_usd":      float(r["llm_cost_usd"]),
+                    "tours_rewritten":  r["source_active"],
+                    "api_calls_used":   r["api_calls_used"],
+                    "quota_tours_pct":  float(r["quota_tours_pct"]),
+                    "quota_calls_pct":  float(r["quota_calls_pct"]),
+                    "tours_overage":    r["tours_overage"],
+                    "overage_usd":      float(r["overage_usd"]),
+                    "llm_cost_usd":     float(r["llm_cost_usd"]),
+                },
+                "lifecycle": {
+                    "source_active":     r["source_active"],
+                    "source_superseded": r["source_superseded"],
+                    "source_trashed":    r["source_trashed"],
+                    "master_active":     r["master_active"],
+                    "master_inactive":   r["master_inactive"],
+                    "master_trashed":    r["master_trashed"],
                 },
             }
             for r in rows
