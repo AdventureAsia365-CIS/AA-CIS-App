@@ -159,6 +159,56 @@ def _create_hitl_gate2(conn, run_id: str) -> None:
         """, (run_id, json.dumps({"gate": 2, "reviewer": "ms.thu"})))
 
 
+def _record_cost(conn, run_id: str, stage: str, cost: float, in_tok: int, out_tok: int) -> None:
+    """Upsert per-stage cost into acp_stage_runs using the existing connection."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO acp_shared.acp_stage_runs
+                    (run_id, stage, llm_cost_usd, tokens_input, tokens_output)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (run_id, stage) DO UPDATE
+                    SET llm_cost_usd  = acp_shared.acp_stage_runs.llm_cost_usd  + EXCLUDED.llm_cost_usd,
+                        tokens_input  = acp_shared.acp_stage_runs.tokens_input  + EXCLUDED.tokens_input,
+                        tokens_output = acp_shared.acp_stage_runs.tokens_output + EXCLUDED.tokens_output,
+                        updated_at    = NOW()
+                """,
+                (run_id, stage, cost, in_tok, out_tok),
+            )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("_record_cost failed run_id=%s: %s", run_id, e)
+
+
+_HAIKU_PRICE = {"input": 0.25, "output": 1.25}
+_SONNET_PRICE = {"input": 3.0, "output": 15.0}
+
+
+def _calc_cost(in_tok: int, out_tok: int, tier: str) -> float:
+    p = _SONNET_PRICE if tier == "sonnet" else _HAIKU_PRICE
+    return round((in_tok * p["input"] + out_tok * p["output"]) / 1_000_000, 6)
+
+
+def _finalize_cost(conn, run_id: str) -> None:
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE acp_shared.acp_runs r
+                SET total_llm_cost_usd = (
+                    SELECT COALESCE(SUM(llm_cost_usd), 0)
+                    FROM acp_shared.acp_stage_runs WHERE run_id = r.run_id
+                )
+                WHERE r.run_id = %s
+                """,
+                (run_id,),
+            )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("_finalize_cost failed run_id=%s: %s", run_id, e)
+
+
 def _emit_eventbridge(run_id: str, tenant_id: str) -> None:
     eb = boto3.client("events", region_name="us-west-1")
     eb.put_events(Entries=[{
@@ -198,16 +248,19 @@ def handler(event, context):
         skeleton, in3, out3 = _planner.skeleton_call(packet)
         total_in += in3
         total_out += out3
+        _record_cost(conn, run_id, "s3", _calc_cost(in3, out3, "sonnet"), in3, out3)
 
         # ── Step 4: Expand ────────────────────────────────────────────────────
         expanded_markdown, in4, out4 = _planner.expand_call(skeleton, tenant_rules, packet)
         total_in += in4
         total_out += out4
+        _record_cost(conn, run_id, "s3", _calc_cost(in4, out4, "sonnet"), in4, out4)
 
         # ── Step 5: Ads ───────────────────────────────────────────────────────
         ads_output, in5, out5 = _ads.generate_ads(packet)
         total_in += in5
         total_out += out5
+        _record_cost(conn, run_id, "s3", _calc_cost(in5, out5, "haiku"), in5, out5)
         ads_s3_key = _ads.upload_ads_pdf(ads_output, tenant_id, country, run_id)
 
         # ── Step 6: Validators (non-blocking) ─────────────────────────────────
@@ -228,6 +281,7 @@ def handler(event, context):
         )
         total_in += in7
         total_out += out7
+        _record_cost(conn, run_id, "s3", _calc_cost(in7, out7, "haiku"), in7, out7)
 
         # ── Step 8: Write lessons ─────────────────────────────────────────────
         _lessons.write_lessons(conn, run_id, tenant_id, country, lesson_output)
@@ -245,6 +299,7 @@ def handler(event, context):
 
         # ── Step 10: Gate 2 HITL + EventBridge ───────────────────────────────
         _create_hitl_gate2(conn, run_id)
+        _finalize_cost(conn, run_id)
         conn.commit()
 
         _emit_eventbridge(run_id, tenant_id)

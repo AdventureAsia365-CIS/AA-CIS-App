@@ -14,25 +14,31 @@ SOCIAL_MODEL_ANTHROPIC = "claude-sonnet-4-5-20251001"
 SOCIAL_MODEL_OPENAI = "gpt-4o"
 
 
-def make_llm_client(provider: str = "bedrock", model_id: str | None = None) -> Callable:
+def make_llm_client(
+    provider: str = "bedrock",
+    model_id: str | None = None,
+    token_log: list | None = None,
+) -> Callable:
     """
     Factory: returns a callable (system, user) → str for the given provider.
 
     Args:
-        provider:  'bedrock' | 'anthropic' | 'openai'
-        model_id:  Override model ID (optional)
+        provider:   'bedrock' | 'anthropic' | 'openai'
+        model_id:   Override model ID (optional)
+        token_log:  Optional list — bedrock client appends (input_tokens, output_tokens)
+                    tuples so callers can sum cost after the run.
     """
     if provider == "bedrock":
-        return _make_bedrock_client(model_id or SOCIAL_MODEL_BEDROCK)
+        return _make_bedrock_client(model_id or SOCIAL_MODEL_BEDROCK, token_log=token_log)
     elif provider == "anthropic":
         return _make_anthropic_client(model_id or SOCIAL_MODEL_ANTHROPIC)
     elif provider == "openai":
         return _make_openai_client(model_id or SOCIAL_MODEL_OPENAI)
     else:
-        return _make_bedrock_client(model_id or SOCIAL_MODEL_BEDROCK)
+        return _make_bedrock_client(model_id or SOCIAL_MODEL_BEDROCK, token_log=token_log)
 
 
-def _make_bedrock_client(model_id: str) -> Callable:
+def _make_bedrock_client(model_id: str, token_log: list | None = None) -> Callable:
     import boto3
     bedrock = boto3.client("bedrock-runtime", region_name=os.environ.get("AWS_REGION", "us-west-1"))
 
@@ -49,6 +55,12 @@ def _make_bedrock_client(model_id: str) -> Callable:
             accept="application/json",
         )
         raw = json.loads(resp["body"].read())
+        if token_log is not None:
+            usage = raw.get("usage", {})
+            token_log.append((
+                usage.get("input_tokens", 0),
+                usage.get("output_tokens", 0),
+            ))
         return raw["content"][0]["text"].strip()
 
     return call
