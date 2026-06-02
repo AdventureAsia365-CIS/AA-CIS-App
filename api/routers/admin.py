@@ -8,6 +8,7 @@ import secrets
 from datetime import datetime, timezone
 from uuid import UUID
 from typing import Optional
+import asyncpg
 import boto3
 from fastapi import APIRouter, File, Header, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel
@@ -380,18 +381,19 @@ async def get_tenant_details(
             # Show published_tours for the internal catalog
             tours = await conn.fetch("""
                 SELECT pt.id, pt.tour_id, pt.aa_name, rt.country,
-                       pt.quality_score,
+                       pt.quality_score, pt.master_status::text AS master_status,
                        (SELECT gc.version_num FROM silver_aa_internal.generated_content gc
                         WHERE gc.tour_id = pt.tour_id ORDER BY gc.created_at DESC LIMIT 1) AS version_number,
                        'published'::text AS status, pt.published_at AS created_at
                 FROM gold_aa_internal.published_tours pt
                 LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
-                ORDER BY pt.published_at DESC LIMIT 50
+                ORDER BY pt.published_at DESC LIMIT 200
             """)
         else:
             tours = await conn.fetch("""
-                SELECT ttv.id, pt.aa_name, rt.country,
-                       ttv.quality_score, ttv.version_number, ttv.status, ttv.created_at
+                SELECT ttv.id, NULL::uuid AS tour_id, pt.aa_name, rt.country,
+                       ttv.quality_score, ttv.version_number, ttv.status,
+                       'active'::text AS master_status, ttv.created_at
                 FROM gold_aa_internal.tenant_tour_versions ttv
                 JOIN gold_aa_internal.published_tours pt ON pt.id = ttv.published_tour_id
                 LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
@@ -478,6 +480,7 @@ async def get_tenant_details(
                 "quality_score":  float(r["quality_score"]) if r["quality_score"] is not None else None,
                 "version_number": r["version_number"],
                 "status":         r["status"],
+                "master_status":  r["master_status"] if r["master_status"] else "active",
                 "created_at":     r["created_at"].isoformat(),
             }
             for r in tours
@@ -788,6 +791,213 @@ async def toggle_master_status(
             )
 
     return {"tour_id": tour_id, "master_status": status}
+
+
+# ── PATCH /admin/tours/{tour_id}/trash — Soft-delete source tour ───────────────
+
+
+@router.patch("/tours/{tour_id}/trash", summary="Soft-delete source tour (source_status=trashed)")
+async def trash_source_tour(
+    tour_id: str,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT src_name, tenant_id FROM silver_aa_internal.raw_tours
+               WHERE tour_id=$1::uuid AND source_status != 'trashed'""",
+            tour_id,
+        )
+        if not row:
+            raise HTTPException(404, "Tour not found or already trashed")
+
+        async with conn.transaction():
+            result = await conn.fetchrow(
+                """
+                UPDATE silver_aa_internal.raw_tours
+                SET source_status = 'trashed'::silver_aa_internal.source_status_enum,
+                    deleted_at = NOW(),
+                    deleted_by = 'admin'
+                WHERE tour_id = $1::uuid AND source_status != 'trashed'
+                RETURNING tour_id, source_status::text, deleted_at
+                """,
+                tour_id,
+            )
+            if not result:
+                raise HTTPException(404, "Tour not found or already trashed")
+
+            await NotificationService(conn).emit(
+                event_type=EventType.SOURCE_TRASHED,
+                entity_type="tour",
+                entity_id=tour_id,
+                tenant_id=str(row["tenant_id"]),
+                payload={"tour_name": row["src_name"], "changed_by": "admin"},
+                actor_type="admin",
+            )
+
+    return {
+        "tour_id": tour_id,
+        "source_status": "trashed",
+        "deleted_at": result["deleted_at"].isoformat(),
+    }
+
+
+# ── PATCH /admin/tours/{tour_id}/restore — Restore trashed source tour ─────────
+
+
+@router.patch("/tours/{tour_id}/restore", summary="Restore trashed source tour (source_status=active)")
+async def restore_source_tour(
+    tour_id: str,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT src_name, tenant_id FROM silver_aa_internal.raw_tours
+               WHERE tour_id=$1::uuid AND source_status='trashed'""",
+            tour_id,
+        )
+        if not row:
+            raise HTTPException(404, "Tour not found or not in trashed state")
+
+        async with conn.transaction():
+            try:
+                result = await conn.fetchrow(
+                    """
+                    UPDATE silver_aa_internal.raw_tours
+                    SET source_status = 'active'::silver_aa_internal.source_status_enum,
+                        deleted_at = NULL,
+                        deleted_by = NULL
+                    WHERE tour_id = $1::uuid AND source_status = 'trashed'
+                    RETURNING tour_id, source_status::text
+                    """,
+                    tour_id,
+                )
+            except asyncpg.UniqueViolationError:
+                raise HTTPException(
+                    409,
+                    "Another active tour exists in the same source group. "
+                    "Set it to superseded first, then restore.",
+                )
+            if not result:
+                raise HTTPException(404, "Tour not found or not in trashed state")
+
+            await NotificationService(conn).emit(
+                event_type=EventType.SOURCE_RESTORED,
+                entity_type="tour",
+                entity_id=tour_id,
+                tenant_id=str(row["tenant_id"]),
+                payload={"tour_name": row["src_name"], "changed_by": "admin"},
+                actor_type="admin",
+            )
+
+    return {"tour_id": tour_id, "source_status": "active"}
+
+
+# ── PATCH /admin/master/{tour_id}/trash — Soft-delete master tour ─────────────
+
+
+@router.patch("/master/{tour_id}/trash", summary="Soft-delete master tour (master_status=trashed)")
+async def trash_master_tour(
+    tour_id: str,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT aa_name FROM gold_aa_internal.published_tours
+               WHERE tour_id=$1::uuid AND master_status != 'trashed'""",
+            tour_id,
+        )
+        if not row:
+            raise HTTPException(404, "Tour not found or already trashed")
+
+        async with conn.transaction():
+            result = await conn.fetchrow(
+                """
+                UPDATE gold_aa_internal.published_tours
+                SET master_status = 'trashed'::gold_aa_internal.master_status_enum,
+                    deleted_at = NOW(),
+                    deleted_by = 'admin'
+                WHERE tour_id = $1::uuid AND master_status != 'trashed'
+                RETURNING tour_id, master_status::text, deleted_at
+                """,
+                tour_id,
+            )
+            if not result:
+                raise HTTPException(404, "Tour not found or already trashed")
+
+            await NotificationService(conn).emit(
+                event_type=EventType.MASTER_TRASHED,
+                entity_type="tour",
+                entity_id=tour_id,
+                tenant_id=AA_INTERNAL_TENANT,
+                payload={"tour_name": row["aa_name"], "changed_by": "admin"},
+                actor_type="admin",
+            )
+
+    return {
+        "tour_id": tour_id,
+        "master_status": "trashed",
+        "deleted_at": result["deleted_at"].isoformat(),
+    }
+
+
+# ── PATCH /admin/master/{tour_id}/restore — Restore trashed master tour ────────
+
+
+@router.patch("/master/{tour_id}/restore", summary="Restore trashed master tour (master_status=inactive)")
+async def restore_master_tour(
+    tour_id: str,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT aa_name FROM gold_aa_internal.published_tours
+               WHERE tour_id=$1::uuid AND master_status='trashed'""",
+            tour_id,
+        )
+        if not row:
+            raise HTTPException(404, "Tour not found or not in trashed state")
+
+        async with conn.transaction():
+            result = await conn.fetchrow(
+                """
+                UPDATE gold_aa_internal.published_tours
+                SET master_status = 'inactive'::gold_aa_internal.master_status_enum,
+                    deleted_at = NULL,
+                    deleted_by = NULL
+                WHERE tour_id = $1::uuid AND master_status = 'trashed'
+                RETURNING tour_id, master_status::text
+                """,
+                tour_id,
+            )
+            if not result:
+                raise HTTPException(404, "Tour not found or not in trashed state")
+
+            await NotificationService(conn).emit(
+                event_type=EventType.MASTER_RESTORED,
+                entity_type="tour",
+                entity_id=tour_id,
+                tenant_id=AA_INTERNAL_TENANT,
+                payload={
+                    "tour_name": row["aa_name"],
+                    "new_status": "inactive",
+                    "changed_by": "admin",
+                },
+                actor_type="admin",
+            )
+
+    return {"tour_id": tour_id, "master_status": "inactive"}
 
 
 # ── GET /admin/notifications/count ────────────────────────────────────────────
