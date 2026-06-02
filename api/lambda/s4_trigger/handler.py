@@ -1,7 +1,7 @@
 """
 EventBridge → Lambda → POST /v1/acp/s4/blog/runs
-Triggered by acp.s3.completed event after Gate 2 approval.
-env: ALB_INTERNAL_URL, INTERNAL_API_KEY
+Triggered by acp.hitl.approved event after Gate 2 approval.
+env: ALB_INTERNAL_URL, INTERNAL_API_KEY, DATABASE_URL (optional — for idempotency)
 """
 import json
 import logging
@@ -15,10 +15,69 @@ logger.setLevel(logging.INFO)
 _ALB_URL = os.environ.get("ALB_INTERNAL_URL", "")
 _API_KEY = os.environ.get("INTERNAL_API_KEY", "")
 
+# Idempotency helpers — inlined to avoid Lambda layer dependency on services/
+_DB_URL = os.environ.get("DATABASE_URL", "")
+
+
+def _is_already_processed(event_id: str, run_id: str) -> bool:
+    """Returns True if this EventBridge event was already forwarded to S4."""
+    if not _DB_URL or not event_id:
+        return False
+    try:
+        from urllib.parse import urlparse
+        import psycopg2
+        parts = urlparse(_DB_URL)
+        with psycopg2.connect(
+            host=parts.hostname, port=parts.port or 5432,
+            user=parts.username, password=parts.password,
+            dbname=parts.path.lstrip("/"), sslmode="require",
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM acp_shared.acp_stage_runs WHERE event_id = %s LIMIT 1",
+                    (event_id,),
+                )
+                return cur.fetchone() is not None
+    except Exception as e:
+        logger.warning("idempotency check failed (allowing): %s", e)
+        return False
+
+
+def _mark_received(event_id: str, run_id: str) -> None:
+    if not _DB_URL:
+        return
+    try:
+        from urllib.parse import urlparse
+        import psycopg2
+        parts = urlparse(_DB_URL)
+        with psycopg2.connect(
+            host=parts.hostname, port=parts.port or 5432,
+            user=parts.username, password=parts.password,
+            dbname=parts.path.lstrip("/"), sslmode="require",
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO acp_shared.acp_stage_runs
+                        (run_id, stage, event_id, event_received_at, status)
+                    VALUES (%s, 's4_trigger', %s, NOW(), 'processing')
+                    ON CONFLICT (run_id, stage) DO UPDATE
+                        SET event_id          = EXCLUDED.event_id,
+                            event_received_at = EXCLUDED.event_received_at,
+                            status            = 'processing',
+                            updated_at        = NOW()
+                    """,
+                    (run_id, event_id),
+                )
+            conn.commit()
+    except Exception as e:
+        logger.warning("mark_event_received failed: %s", e)
+
 
 def handler(event, context):
     logger.info("s4_trigger event: %s", json.dumps(event))
 
+    event_id = event.get("id")  # EventBridge envelope ID
     detail = event.get("detail", {})
     run_id = detail.get("run_id")
     tenant_id = detail.get("tenant_id")
@@ -27,10 +86,16 @@ def handler(event, context):
         logger.error("s4_trigger missing run_id or tenant_id in detail=%s", detail)
         return {"statusCode": 400, "body": "Missing run_id or tenant_id"}
 
+    if _is_already_processed(event_id, run_id):
+        logger.info("s4_trigger duplicate event_id=%s run_id=%s, skipping", event_id, run_id)
+        return {"statusCode": 200, "body": "duplicate_skipped"}
+
+    _mark_received(event_id, run_id)
+
     payload = json.dumps({
         "run_id": run_id,
         "tenant_id": tenant_id,
-        "trigger_source": "eventbridge_s3_completed",
+        "trigger_source": "eventbridge_hitl_approved",
     }).encode()
 
     req = urllib.request.Request(

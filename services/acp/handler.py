@@ -5,6 +5,7 @@ Called by export handler when a batch completes.
 import json
 import os
 import structlog
+from services.acp_shared.event_constants import ACPEventSource, ACPEventDetailType
 from datetime import datetime, timezone
 
 logger = structlog.get_logger()
@@ -69,8 +70,8 @@ def publish_s1_completed(
     }
     resp = eb.put_events(
         Entries=[{
-            "Source": "aa-cis.pipeline",
-            "DetailType": "acp.s1.completed",
+            "Source": ACPEventSource.S1,
+            "DetailType": ACPEventDetailType.S1_COMPLETED,
             "Detail": json.dumps(detail),
             "EventBusName": EVENTBRIDGE_BUS,
         }]

@@ -40,6 +40,7 @@ from pydantic import BaseModel, field_validator
 
 from api.routers.auth import verify_jwt as _verify_jwt
 from services.acp_shared import h3_rule_extractor as _h3
+from services.acp_shared.event_constants import ACPEventSource, ACPEventDetailType
 
 logger = structlog.get_logger()
 router = APIRouter(tags=["S3 Campaign Planner"])
@@ -302,8 +303,8 @@ async def hitl_gate2_approve(
     try:
         eb = _boto3.client("events", region_name=_AWS_REGION)
         eb.put_events(Entries=[{
-            "Source": "acp.s3",
-            "DetailType": "acp.s3.gate2.approved",
+            "Source": ACPEventSource.HITL,
+            "DetailType": ACPEventDetailType.HITL_APPROVED,
             "Detail": json.dumps({"run_id": run_id, "actor": actor}),
             "EventBusName": _EB_BUS,
         }])
