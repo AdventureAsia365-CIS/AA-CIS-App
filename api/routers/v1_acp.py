@@ -6,6 +6,7 @@ GET /v1/acp/runs/{run_id}         — run detail with all gate decisions.
 
 NOTE: /runs/{run_id}/context MUST be declared before /runs/{run_id} — FastAPI greedy match.
 """
+import asyncio
 import json as _json
 import os
 import structlog
@@ -18,6 +19,7 @@ from typing import Optional
 from api.routers.auth import verify_jwt as _verify_jwt
 from api.services.run_context_db import get_run_context_validated
 from api.schemas.run_context import RunContextValidationError
+from services.acp_shared.cost_utils import finalize_run_cost
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/v1/acp", tags=["acp"])
@@ -374,6 +376,7 @@ async def get_acp_run(
             SELECT
                 r.run_id::text, r.tenant_id, r.country, r.status,
                 r.tour_count, r.quality_avg, r.cost_usd,
+                r.total_llm_cost_usd,
                 r.started_at, r.completed_at, r.error_message,
                 r.metadata, r.run_config,
                 r.s1_manifest_key, r.s2_report_key, r.s3_plan_key, r.s4_blog_key
@@ -382,6 +385,10 @@ async def get_acp_run(
         """, run_id)
         if not row:
             raise HTTPException(status_code=404, detail=f"run_id {run_id} not found")
+
+    # Lazy-compute total cost for completed runs that haven't been finalized yet
+    if row["status"] == "completed" and not row["total_llm_cost_usd"]:
+        await asyncio.to_thread(finalize_run_cost, run_id)
 
         gate_rows = await conn.fetch("""
             SELECT
@@ -415,21 +422,22 @@ async def get_acp_run(
     ]
 
     return {
-        "run_id":          row["run_id"],
-        "tenant_id":       row["tenant_id"],
-        "country":         row["country"],
-        "status":          row["status"],
-        "tour_count":      row["tour_count"],
-        "quality_avg":     _dec(row["quality_avg"]),
-        "cost_usd":        _dec(row["cost_usd"]),
-        "started_at":      _iso(row["started_at"]),
-        "completed_at":    _iso(row["completed_at"]),
-        "error_message":   row["error_message"],
-        "metadata":        _jparse(row["metadata"]),
-        "run_config":      _jparse(row["run_config"]),
-        "s1_manifest_key": row["s1_manifest_key"],
-        "s2_report_key":   row["s2_report_key"],
-        "s3_plan_key":     row["s3_plan_key"],
-        "s4_blog_key":     row["s4_blog_key"],
-        "gates":           gates,
+        "run_id":              row["run_id"],
+        "tenant_id":           row["tenant_id"],
+        "country":             row["country"],
+        "status":              row["status"],
+        "tour_count":          row["tour_count"],
+        "quality_avg":         _dec(row["quality_avg"]),
+        "cost_usd":            _dec(row["cost_usd"]),
+        "total_llm_cost_usd":  _dec(row["total_llm_cost_usd"]),
+        "started_at":          _iso(row["started_at"]),
+        "completed_at":        _iso(row["completed_at"]),
+        "error_message":       row["error_message"],
+        "metadata":            _jparse(row["metadata"]),
+        "run_config":          _jparse(row["run_config"]),
+        "s1_manifest_key":     row["s1_manifest_key"],
+        "s2_report_key":       row["s2_report_key"],
+        "s3_plan_key":         row["s3_plan_key"],
+        "s4_blog_key":         row["s4_blog_key"],
+        "gates":               gates,
     }

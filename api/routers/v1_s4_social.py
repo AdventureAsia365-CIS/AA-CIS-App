@@ -7,6 +7,7 @@ Routes:
   POST /v1/acp/s4/social/write    → guided step 2: brief + angle → write → save
   GET  /v1/acp/s4/social/{id}     → fetch social_content row
 """
+import asyncio
 import json
 import os
 from typing import Optional
@@ -21,6 +22,7 @@ from pydantic import BaseModel
 from api.routers.auth import verify_jwt as _verify_jwt
 from services.acp_s4_social.brief import ContentBrief, VALID_CHANNELS
 from services.acp_s4_social.llm_client import make_llm_client
+from services.acp_shared.cost_utils import calc_bedrock_cost, record_stage_cost
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/v1/acp/s4/social", tags=["S4 Social Engine"])
@@ -136,7 +138,8 @@ async def generate_auto(
     brief = _to_brief(body.brief)
     _validate_brief(brief)
 
-    llm_client = make_llm_client(body.llm_provider, body.model_id)
+    token_log: list = []
+    llm_client = make_llm_client(body.llm_provider, body.model_id, token_log=token_log)
     meta = {
         "run_id": body.run_id,
         "tenant_id": body.tenant_id,
@@ -150,6 +153,11 @@ async def generate_auto(
     try:
         async with pool.acquire() as db:
             result = await run_auto(brief, meta, db, llm_client)
+        if body.run_id and token_log:
+            in_tok = sum(t[0] for t in token_log)
+            out_tok = sum(t[1] for t in token_log)
+            cost = calc_bedrock_cost(in_tok, out_tok, "haiku")
+            await asyncio.to_thread(record_stage_cost, body.run_id, "s4_social", cost, in_tok, out_tok)
         logger.info("s4_social_auto_done", social_id=result["social_id"], channel=body.brief.channel)
         return result
     except Exception as e:
@@ -193,7 +201,8 @@ async def write_guided(
     if not body.selected_angle or not body.selected_angle.get("name"):
         raise HTTPException(status_code=422, detail="selected_angle.name is required")
 
-    llm_client = make_llm_client(body.llm_provider, body.model_id)
+    token_log: list = []
+    llm_client = make_llm_client(body.llm_provider, body.model_id, token_log=token_log)
     meta = {
         "run_id": body.run_id,
         "tenant_id": body.tenant_id,
@@ -207,6 +216,11 @@ async def write_guided(
     try:
         async with pool.acquire() as db:
             result = await run_guided_write(brief, body.selected_angle, meta, db, llm_client)
+        if body.run_id and token_log:
+            in_tok = sum(t[0] for t in token_log)
+            out_tok = sum(t[1] for t in token_log)
+            cost = calc_bedrock_cost(in_tok, out_tok, "haiku")
+            await asyncio.to_thread(record_stage_cost, body.run_id, "s4_social", cost, in_tok, out_tok)
         logger.info("s4_social_guided_done", social_id=result["social_id"])
         return result
     except Exception as e:

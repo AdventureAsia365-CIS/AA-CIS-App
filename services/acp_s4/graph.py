@@ -11,6 +11,7 @@ Rewrite loops:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import uuid
@@ -25,6 +26,7 @@ from api.services.acp_post_processor import apply_output_rules, OutputRuleViolat
 from services.acp_s4_blog.validator import ValidatorAgent
 from services.acp_s4.embeddings import check_blog_dedup, find_internal_links, store_blog_embedding
 from services.acp_s4.image_sourcer import source_featured_image
+from services.acp_shared.cost_utils import calc_bedrock_cost, record_stage_cost, finalize_run_cost
 
 logger = structlog.get_logger()
 
@@ -245,6 +247,13 @@ Return ONLY the JSON object — no preamble, no explanation."""
             accept="application/json",
         )
         raw = json.loads(response["body"].read())
+        usage = raw.get("usage", {})
+        inp = usage.get("input_tokens", 0)
+        out = usage.get("output_tokens", 0)
+        await asyncio.to_thread(
+            record_stage_cost, state["run_id"], "s4_blog",
+            calc_bedrock_cost(inp, out, "haiku"), inp, out,
+        )
         content_text = raw["content"][0]["text"].strip()
         # Strip markdown fences
         if content_text.startswith("```"):
@@ -537,6 +546,8 @@ async def save_node(state: S4BlogState) -> S4BlogState:
         # G3: Store content embedding for future dedup (non-fatal)
         await store_blog_embedding(db, draft_id, state.get("title", ""),
                                    state.get("primary_keyword", ""))
+
+        await asyncio.to_thread(finalize_run_cost, state["run_id"])
 
         return {**state, "draft_id": draft_id, "status": "done",
                 "content_md": content_md, "featured_image_url": img_url,
