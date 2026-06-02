@@ -3,7 +3,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell } from "lucide-react";
+import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings } from "lucide-react";
 import { A, serif, sans } from "./adminUi";
 
 interface Notif {
@@ -194,6 +194,13 @@ export default function AdminSidebar() {
           ))}
         </NavGroup>
       </div>
+
+      {/* Settings — admin only */}
+      {isAdmin && (
+        <NavItem active={active("/admin/settings")} accent={A.red}
+          icon={<Settings size={15} />} label="Settings"
+          onClick={() => router.push("/admin/settings")} />
+      )}
 
       {/* Footer */}
       <div style={{ paddingTop: 14, borderTop: "1px solid rgba(255,255,255,0.07)" }}>
