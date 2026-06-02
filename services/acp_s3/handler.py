@@ -31,6 +31,10 @@ import validators as _validators
 from models import S3RunResult
 from run_context import get_run_context_sync, write_s3_stage_sync
 
+# Event constants inlined to avoid import issues in Lambda layer packaging
+_EB_SOURCE_S3 = "acp.s3"
+_EB_DETAIL_S3_COMPLETED = "acp.s3.completed"
+
 
 def _get_db_conn():
     db_url = os.environ["DATABASE_URL"]
@@ -212,8 +216,8 @@ def _finalize_cost(conn, run_id: str) -> None:
 def _emit_eventbridge(run_id: str, tenant_id: str) -> None:
     eb = boto3.client("events", region_name="us-west-1")
     eb.put_events(Entries=[{
-        "Source": "acp.s3",
-        "DetailType": "acp.s3.completed",
+        "Source": _EB_SOURCE_S3,
+        "DetailType": _EB_DETAIL_S3_COMPLETED,
         "Detail": json.dumps({"run_id": run_id, "tenant_id": tenant_id, "gate": 2}),
         "EventBusName": "aa-cis-dev-acp-events",
     }])
