@@ -2,7 +2,7 @@
 // app/admin/master-content/page.tsx
 
 import React, { useState, useEffect, useCallback } from "react";
-import { RefreshCw, ChevronDown, ChevronRight, Download, X } from "lucide-react";
+import { RefreshCw, ChevronDown, ChevronRight, Download, X, Trash2, RotateCcw } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
 import {
   A, serif, sans, mono,
@@ -26,6 +26,7 @@ interface RewrittenTour {
   quality_score: number;
   version_number: number | null;
   status: string;
+  master_status: string;
   created_at: string;
 }
 
@@ -124,6 +125,20 @@ function relDate(iso: string): string {
 function statusBadge(status: string) {
   const color = status === "published" ? "green" : status === "active" ? "blue" : "gray";
   return <Badge color={color}>{status}</Badge>;
+}
+
+function masterStatusBadge(ms: string) {
+  if (ms === "trashed") return (
+    <span style={{ padding: "2px 7px", borderRadius: 10, background: "#FEE2E2", color: "#DC2626", fontSize: 11, fontWeight: 700 }}>
+      TRASHED
+    </span>
+  );
+  if (ms === "inactive") return (
+    <span style={{ padding: "2px 7px", borderRadius: 10, background: "#F3F4F6", color: "#6B7280", fontSize: 11, fontWeight: 600 }}>
+      INACTIVE
+    </span>
+  );
+  return null;
 }
 
 function BrandAuditBadge({ status, fixPassApplied, codes }: { status: string | null; fixPassApplied: boolean; codes?: string[] }) {
@@ -527,6 +542,10 @@ export default function MasterContentPage() {
   const [scoreFilter, setScoreFilter]   = useState("");
   const [versionFilter, setVersionFilter] = useState("");
   const [exporting, setExporting]       = useState(false);
+  const [trashing, setTrashing]         = useState<string | null>(null);
+  const [restoring, setRestoring]       = useState<string | null>(null);
+  const [masterStatusFilter, setMasterStatusFilter] = useState<string>("");
+  const [toast, setToast]               = useState("");
 
   const [compareVersionSel, setCompareVersionSel] = useState<Record<string, Set<number>>>({});
   const [compareVersionOpen, setCompareVersionOpen] = useState<{ tourId: string; tourName: string; vNums: [number, number] } | null>(null);
@@ -566,6 +585,14 @@ export default function MasterContentPage() {
     if (search && !t.tour_name.toLowerCase().includes(search.toLowerCase()) &&
         !(t.country || "").toLowerCase().includes(search.toLowerCase())) return false;
     if (statusFilter && t.status !== statusFilter) return false;
+    if (masterStatusFilter) {
+      if (masterStatusFilter === "active" && t.master_status !== "active") return false;
+      if (masterStatusFilter === "inactive" && t.master_status !== "inactive") return false;
+      if (masterStatusFilter === "trashed" && t.master_status !== "trashed") return false;
+    } else {
+      // default: hide trashed tours
+      if (t.master_status === "trashed") return false;
+    }
     if (countryFilter && t.country !== countryFilter) return false;
     if (scoreFilter) {
       const s = t.quality_score ?? 0;
@@ -683,6 +710,54 @@ export default function MasterContentPage() {
     });
   }
 
+  function showToast(msg: string) {
+    setToast(msg);
+    setTimeout(() => setToast(""), 3000);
+  }
+
+  async function trashMaster(tourId: string, tourName: string) {
+    if (!confirm(`Trash "${tourName}"? It will be hidden from the pipeline and B2B output.`)) return;
+    setTrashing(tourId);
+    try {
+      const r = await fetch(`/api/admin/master/${tourId}/trash`, { method: "PATCH" });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        alert(err.detail || "Failed to trash tour");
+        return;
+      }
+      setData(prev => prev ? {
+        ...prev,
+        rewritten_tours: prev.rewritten_tours.map(t =>
+          t.tour_id === tourId ? { ...t, master_status: "trashed" } : t
+        ),
+      } : prev);
+      showToast(`"${tourName}" moved to trash`);
+    } finally {
+      setTrashing(null);
+    }
+  }
+
+  async function restoreMaster(tourId: string, tourName: string) {
+    setRestoring(tourId);
+    try {
+      const r = await fetch(`/api/admin/master/${tourId}/restore`, { method: "PATCH" });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        alert(err.detail || "Failed to restore tour");
+        return;
+      }
+      setData(prev => prev ? {
+        ...prev,
+        rewritten_tours: prev.rewritten_tours.map(t =>
+          t.tour_id === tourId ? { ...t, master_status: "inactive" } : t
+        ),
+      } : prev);
+      showToast(`"${tourName}" restored (now inactive — activate manually)`);
+    } finally {
+      setRestoring(null);
+    }
+  }
+
   if (loading) {
     return (
       <div style={{ display: "flex", height: "100vh", background: A.bg, fontFamily: sans }}>
@@ -696,6 +771,16 @@ export default function MasterContentPage() {
 
   return (
     <div style={{ display: "flex", height: "100vh", background: A.bg, fontFamily: sans, overflow: "hidden" }}>
+      {toast && (
+        <div style={{
+          position: "fixed", bottom: 24, right: 24, zIndex: 9999,
+          background: "#1C1917", color: "#fff", padding: "10px 20px",
+          borderRadius: 8, fontSize: 13, fontWeight: 500,
+          boxShadow: "0 4px 20px rgba(0,0,0,0.25)",
+        }}>
+          {toast}
+        </div>
+      )}
       <AdminSidebar />
 
       {/* Main area: flex column, fills height */}
@@ -734,6 +819,38 @@ export default function MasterContentPage() {
 
         {/* ── Section 2: Rewritten Tours (flex, scrollable) ───────────────── */}
         <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", borderBottom: `2px solid ${A.line}` }}>
+          {/* Master status tabs */}
+          <div style={{ display: "flex", gap: 0, borderBottom: `1px solid ${A.line}`, background: "#fff", flexShrink: 0 }}>
+            {[
+              { label: "Active", value: "active" },
+              { label: "Inactive", value: "inactive" },
+              { label: "Trashed", value: "trashed" },
+              { label: "All", value: "" },
+            ].map(tab => (
+              <button
+                key={tab.value}
+                onClick={() => { setMasterStatusFilter(tab.value); setPage(1); }}
+                style={{
+                  padding: "8px 18px",
+                  fontSize: 12, fontWeight: masterStatusFilter === tab.value ? 700 : 500,
+                  border: "none", borderBottom: masterStatusFilter === tab.value ? `2px solid ${tab.value === "trashed" ? "#DC2626" : A.gold}` : "2px solid transparent",
+                  background: "none", cursor: "pointer",
+                  color: masterStatusFilter === tab.value
+                    ? (tab.value === "trashed" ? "#DC2626" : A.gold)
+                    : A.muted,
+                  marginBottom: -1,
+                }}
+              >
+                {tab.label}
+                {tab.value === "trashed" && tours.filter(t => t.master_status === "trashed").length > 0 && (
+                  <span style={{ marginLeft: 6, padding: "1px 5px", borderRadius: 8, background: "#FEE2E2", color: "#DC2626", fontSize: 10, fontWeight: 700 }}>
+                    {tours.filter(t => t.master_status === "trashed").length}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+
           {/* Sticky inner header */}
           <div style={{
             position: "sticky", top: 0, zIndex: 5, background: "#fff",
@@ -850,8 +967,11 @@ export default function MasterContentPage() {
                     return (
                       <React.Fragment key={t.version_id}>
                         <tr style={{
-                          background: isExpanded ? `${A.gold}14` : isSelected ? `${A.gold}10` : absIdx % 2 === 0 ? "#fff" : A.bg,
+                          background: t.master_status === "trashed" ? "#FFF5F5"
+                            : isExpanded ? `${A.gold}14` : isSelected ? `${A.gold}10`
+                            : absIdx % 2 === 0 ? "#fff" : A.bg,
                           borderBottom: isExpanded ? "none" : undefined,
+                          opacity: t.master_status === "trashed" ? 0.7 : 1,
                         }}>
                           <td style={{ ...TD, paddingLeft: 16 }} onClick={e => e.stopPropagation()}>
                             {t.tour_id && (
@@ -871,19 +991,44 @@ export default function MasterContentPage() {
                               ? <Badge color="blue">v{t.version_number}</Badge>
                               : <span style={{ color: A.muted2, fontSize: 12 }}>—</span>}
                           </td>
-                          <td style={TD}>{statusBadge(t.status)}</td>
                           <td style={TD}>
-                            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                            {statusBadge(t.status)}
+                            {masterStatusBadge(t.master_status)}
+                          </td>
+                          <td style={TD}>
+                            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
                               <button
                                 onClick={() => { if (t.tour_id) { setDetailTourId(t.tour_id); setDetailTourName(t.tour_name); } }}
                                 style={{ padding: "3px 8px", fontSize: 11, border: `1px solid ${A.line}`, borderRadius: 5, background: "#fff", cursor: "pointer", color: A.body }}
                               >View</button>
-                              {t.tour_id && (
+                              {t.tour_id && t.master_status !== "trashed" && (
                                 <button
                                   onClick={() => toggleExpand(t.tour_id!)}
                                   style={{ padding: "3px 8px", fontSize: 11, border: `1px solid ${A.line}`, borderRadius: 5, background: isExpanded ? `${A.gold}22` : "#fff", cursor: "pointer", color: A.gold, display: "flex", alignItems: "center", gap: 3 }}
                                 >
                                   {isExpanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />} Versions
+                                </button>
+                              )}
+                              {t.tour_id && t.master_status !== "trashed" && (
+                                <button
+                                  onClick={() => trashMaster(t.tour_id!, t.tour_name)}
+                                  disabled={trashing === t.tour_id}
+                                  title="Move to trash"
+                                  style={{ padding: "3px 6px", fontSize: 11, border: `1px solid #FECACA`, borderRadius: 5, background: "#FFF5F5", cursor: "pointer", color: "#DC2626", display: "flex", alignItems: "center", gap: 3 }}
+                                >
+                                  <Trash2 size={11} />
+                                  {trashing === t.tour_id ? "…" : "Trash"}
+                                </button>
+                              )}
+                              {t.tour_id && t.master_status === "trashed" && (
+                                <button
+                                  onClick={() => restoreMaster(t.tour_id!, t.tour_name)}
+                                  disabled={restoring === t.tour_id}
+                                  title="Restore from trash (→ inactive)"
+                                  style={{ padding: "3px 6px", fontSize: 11, border: `1px solid #BBF7D0`, borderRadius: 5, background: "#F0FDF4", cursor: "pointer", color: "#15803D", display: "flex", alignItems: "center", gap: 3 }}
+                                >
+                                  <RotateCcw size={11} />
+                                  {restoring === t.tour_id ? "…" : "Restore"}
                                 </button>
                               )}
                             </div>

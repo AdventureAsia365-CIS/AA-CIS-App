@@ -15,6 +15,8 @@ class EventType(str, Enum):
     BRAND_AUDIT_FIXED = "tour.brand_audit.fixed"
     DEDUP_STAGED = "tour.dedup.staged"
     DEDUP_PROMOTED = "tour.dedup.promoted"
+    SOURCE_TRASHED = "tour.source.trashed"
+    SOURCE_RESTORED = "tour.source.restored"
     MASTER_ACTIVATED = "tour.master.activated"
     MASTER_DEACTIVATED = "tour.master.deactivated"
     MASTER_TRASHED = "tour.master.trashed"
@@ -28,6 +30,8 @@ _DEFAULT_ROLES: dict[EventType, list[str]] = {
     EventType.BRAND_AUDIT_FIXED:   ["admin", "content"],
     EventType.DEDUP_STAGED:        ["admin", "content"],
     EventType.DEDUP_PROMOTED:      ["admin"],
+    EventType.SOURCE_TRASHED:      ["admin", "content"],
+    EventType.SOURCE_RESTORED:     ["admin"],
     EventType.MASTER_ACTIVATED:    ["admin"],
     EventType.MASTER_DEACTIVATED:  ["admin"],
     EventType.MASTER_TRASHED:      ["admin", "content"],
