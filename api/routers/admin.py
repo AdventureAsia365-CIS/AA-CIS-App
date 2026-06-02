@@ -9,8 +9,10 @@ from datetime import datetime, timezone
 from uuid import UUID
 from typing import Optional
 import boto3
-from fastapi import APIRouter, File, Header, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Header, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel
+
+from services.notifications import NotificationService, EventType
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
@@ -731,3 +733,149 @@ async def offboard_tenant(
         "api_key": "REVOKED",
         "note": f"S3 prefix acp-cis-bronze-867490540162/{tenant_id}/ must be deleted after 14 days.",
     }
+
+
+# ── PATCH /admin/master/{tour_id}/status — Toggle master active/inactive ──────
+
+AA_INTERNAL_TENANT = "00000000-0000-0000-0000-000000000001"
+
+
+@router.patch("/master/{tour_id}/status", summary="Toggle master tour active/inactive")
+async def toggle_master_status(
+    tour_id: str,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    body = await request.json()
+    status = body.get("master_status")
+    if status not in ("active", "inactive"):
+        raise HTTPException(400, "master_status must be 'active' or 'inactive'")
+
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT aa_name FROM gold_aa_internal.published_tours WHERE tour_id=$1::uuid",
+            tour_id,
+        )
+        if not row:
+            raise HTTPException(404, "Tour not found")
+
+        event_type = (
+            EventType.MASTER_ACTIVATED if status == "active"
+            else EventType.MASTER_DEACTIVATED
+        )
+
+        async with conn.transaction():
+            result = await conn.execute(
+                """
+                UPDATE gold_aa_internal.published_tours
+                SET master_status = $1::gold_aa_internal.master_status_enum
+                WHERE tour_id = $2::uuid
+                """,
+                status, tour_id,
+            )
+            if result == "UPDATE 0":
+                raise HTTPException(404, "Tour not found or not updated")
+
+            await NotificationService(conn).emit(
+                event_type=event_type,
+                entity_type="tour",
+                entity_id=tour_id,
+                tenant_id=AA_INTERNAL_TENANT,
+                payload={"tour_name": row["aa_name"], "new_status": status, "changed_by": "admin"},
+                actor_type="admin",
+            )
+
+    return {"tour_id": tour_id, "master_status": status}
+
+
+# ── GET /admin/notifications/count ────────────────────────────────────────────
+
+
+@router.get("/notifications/count", summary="Count unread notifications")
+async def notification_count(
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT COUNT(*) AS unread FROM shared.notifications WHERE is_read = FALSE"
+        )
+    return {"unread": int(row["unread"])}
+
+
+# ── PUT /admin/notifications/read-all ────────────────────────────────────────
+
+
+@router.put("/notifications/read-all", summary="Mark all notifications read")
+async def mark_all_read(
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE shared.notifications SET is_read = TRUE WHERE is_read = FALSE"
+        )
+    cleared = int(result.split()[-1])
+    return {"cleared": cleared}
+
+
+# ── GET /admin/notifications ──────────────────────────────────────────────────
+
+
+@router.get("/notifications", summary="List notifications")
+async def list_notifications(
+    request: Request,
+    x_admin_secret: str = Header(None),
+    unread_only: bool = False,
+    limit: int = Query(default=50, le=200),
+    offset: int = 0,
+):
+    verify_admin_secret(x_admin_secret)
+    where = "WHERE is_read = FALSE" if unread_only else ""
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT id, event_type, entity_type, entity_id,
+                   payload, target_roles, is_read, dispatched_at, created_at
+            FROM shared.notifications
+            {where}
+            ORDER BY created_at DESC LIMIT $1 OFFSET $2
+            """,
+            limit, offset,
+        )
+    items = []
+    for r in rows:
+        item = dict(r)
+        item["id"] = int(item["id"])
+        item["payload"] = dict(item["payload"]) if item["payload"] else {}
+        item["target_roles"] = list(item["target_roles"]) if item["target_roles"] else []
+        item["dispatched_at"] = item["dispatched_at"].isoformat()
+        item["created_at"] = item["created_at"].isoformat()
+        items.append(item)
+    return {"items": items, "total": len(items)}
+
+
+# ── PUT /admin/notifications/{notif_id}/read ─────────────────────────────────
+
+
+@router.put("/notifications/{notif_id}/read", summary="Mark one notification read")
+async def mark_read(
+    notif_id: int,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE shared.notifications SET is_read = TRUE WHERE id = $1",
+            notif_id,
+        )
+    return {"id": notif_id, "is_read": True}

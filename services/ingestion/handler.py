@@ -15,13 +15,34 @@ from shared.repository.raw_source_repository import RawSourceRepository
 from shared.secrets import get_database_url
 
 logger = structlog.get_logger()
-s3  = boto3.client("s3")
-sfn = boto3.client("stepfunctions")
+
+_AWS_REGION = os.environ.get("AWS_REGION", "us-west-1")
+_s3_client = None
+_sfn_client = None
+
+
+def _s3():
+    global _s3_client
+    if _s3_client is None:
+        _s3_client = boto3.client("s3", region_name=_AWS_REGION)
+    return _s3_client
+
+
+def _sfn():
+    global _sfn_client
+    if _sfn_client is None:
+        _sfn_client = boto3.client("stepfunctions", region_name=_AWS_REGION)
+    return _sfn_client
 
 
 def compute_file_hash(file_bytes: bytes) -> str:
     """SHA256 hash of raw file — dedup key."""
     return hashlib.sha256(file_bytes).hexdigest()
+
+
+def normalize_group_key(src_name: str, provider: str | None) -> tuple[str, str]:
+    """Return (normalized_name, normalized_provider) for dedup comparison."""
+    return (src_name.lower().strip(), (provider or "").lower().strip())
 
 
 async def process_file(s3_bucket: str, s3_key: str, seo_mode: str = "standard") -> dict:
@@ -30,7 +51,7 @@ async def process_file(s3_bucket: str, s3_key: str, seo_mode: str = "standard") 
     # Download về /tmp
     filename = s3_key.split("/")[-1]
     with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
-        s3.download_fileobj(s3_bucket, s3_key, tmp)
+        _s3().download_fileobj(s3_bucket, s3_key, tmp)
         tmp_path = tmp.name
 
     # Read file bytes for hash computation
@@ -93,7 +114,7 @@ async def process_file(s3_bucket: str, s3_key: str, seo_mode: str = "standard") 
 
         # Get file size from S3 object
         try:
-            s3_meta = s3.head_object(Bucket=s3_bucket, Key=s3_key)
+            s3_meta = _s3().head_object(Bucket=s3_bucket, Key=s3_key)
             file_size_kb = round(s3_meta["ContentLength"] / 1024, 1)
         except Exception:
             file_size_kb = None
@@ -113,14 +134,47 @@ async def process_file(s3_bucket: str, s3_key: str, seo_mode: str = "standard") 
             await source_repo.update_status(source_id, "skipped", row_count=0)
             return {"status": "skipped", "rows": 0, "source_id": str(source_id)}
 
-        # 2. Gán source_id → insert raw_tours
+        # 2. Split records: new vs duplicate (normalized dedup against raw_tours)
+        new_records: list[dict] = []
+        staged_ids: list[str]  = []
+
         for r in records:
             r["source_id"] = source_id
             r["batch_id"] = batch_id_new
+            nname, nprov = normalize_group_key(r.get("src_name", ""), r.get("provider"))
+            existing = await conn.fetchrow("""
+                SELECT tour_id, source_group_id
+                FROM silver_aa_internal.raw_tours
+                WHERE tenant_id = $1
+                  AND lower(trim(src_name)) = $2
+                  AND lower(trim(coalesce(provider, ''))) = $3
+                ORDER BY ingest_at DESC LIMIT 1
+            """, tenant_uuid, nname, nprov)
 
-        ids = await tour_repo.insert_batch(records)
-        await source_repo.update_status(source_id, "done", row_count=len(ids))
-        logger.info("inserted", count=len(ids), source_id=source_id)
+            if existing:
+                staging_id = await conn.fetchval("""
+                    INSERT INTO silver_aa_internal.upload_staging
+                        (batch_id, tenant_id, parsed_payload,
+                         matched_tour_id, matched_source_group_id, decision)
+                    VALUES ($1::uuid, $2::uuid, $3::jsonb, $4::uuid, $5, 'pending')
+                    RETURNING id::text
+                """,
+                    batch_id_new,
+                    tenant_uuid,
+                    json.dumps(r, default=str),
+                    str(existing["tour_id"]),
+                    str(existing["source_group_id"]) if existing["source_group_id"] else None,
+                )
+                staged_ids.append(staging_id)
+            else:
+                r["source_group_id"] = str(uuid.uuid4())
+                r["source_version"]  = 1
+                r["source_status"]   = "active"
+                new_records.append(r)
+
+        ids = await tour_repo.insert_batch(new_records)
+        await source_repo.update_status(source_id, "done", row_count=len(ids) + len(staged_ids))
+        logger.info("inserted", count=len(ids), staged=len(staged_ids), source_id=source_id)
 
         # 3. Trigger Step Functions pipeline (S11 Phase 4)
         batch_id = batch_id_new
@@ -139,9 +193,12 @@ async def process_file(s3_bucket: str, s3_key: str, seo_mode: str = "standard") 
             logger.warning("sfn_not_configured", msg="STEP_FUNCTIONS_ARN not set — skipping pipeline trigger")
 
         return {
-            "status":    "done",
-            "rows":      len(ids),
-            "source_id": batch_id,
+            "status":        "done",
+            "rows":          len(ids),
+            "tours_written": len(ids),
+            "tours_staged":  len(staged_ids),
+            "staged_ids":    staged_ids,
+            "source_id":     batch_id,
             "sfn_triggered": bool(sfn_arn),
         }
 
@@ -197,7 +254,7 @@ def _start_pipeline(
         "tours":     tours_input,
     }
 
-    response = sfn.start_execution(
+    response = _sfn().start_execution(
         stateMachineArn=sfn_arn,
         name=execution_name,
         input=json.dumps(payload),
@@ -234,7 +291,7 @@ def lambda_handler(event: dict, context) -> dict:
             # Read seo_mode from S3 object metadata (set by upload-url endpoint)
             seo_mode = "standard"
             try:
-                meta = s3.head_object(Bucket=s3_bucket, Key=s3_key)
+                meta = _s3().head_object(Bucket=s3_bucket, Key=s3_key)
                 seo_mode = meta.get("Metadata", {}).get("seo-mode", "standard")
             except Exception:
                 pass

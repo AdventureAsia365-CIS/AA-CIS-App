@@ -496,18 +496,21 @@ async def ingest_s3(
             all_names = [r["src_name"] for r in records if r.get("src_name")]
             duplicate_names: set = set()
             if all_names:
+                norm_names = [n.lower().strip() for n in all_names]
                 dup_rows = await conn.fetch(
-                    "SELECT DISTINCT src_name FROM silver_aa_internal.raw_tours WHERE src_name = ANY($1::text[])",
-                    all_names,
+                    "SELECT DISTINCT lower(trim(src_name)) AS n "
+                    "FROM silver_aa_internal.raw_tours "
+                    "WHERE lower(trim(src_name)) = ANY($1::text[])",
+                    norm_names,
                 )
-                duplicate_names = {r["src_name"] for r in dup_rows}
+                duplicate_names = {r["n"] for r in dup_rows}
 
             ready_tours = []
             blocked_tours = []
             for r in records[:req.max_tours]:
                 src_name = r.get("src_name") or "(no name)"
                 missing = [f for f in ["src_name", "country", "duration", "price_raw"] if not r.get(f)]
-                if src_name in duplicate_names:
+                if src_name.lower().strip() in duplicate_names:
                     blocked_tours.append({
                         "src_name": src_name, "country": r.get("country"),
                         "reason": "duplicate_tour", "message": "Tour này đã tồn tại trong hệ thống.",
@@ -568,7 +571,10 @@ async def ingest_s3(
     if result.get("status") == "skipped_duplicate":
         return {"status": "duplicate", "batch_id": None, "tour_count": 0}
 
-    batch_id = result.get("source_id")
+    batch_id     = result.get("source_id")
+    tours_staged = result.get("tours_staged", 0)
+    staged_ids   = result.get("staged_ids", [])
+
     pool = request.app.state.pool
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -576,7 +582,294 @@ async def ingest_s3(
             batch_id,
         )
 
-    return {"status": "done", "batch_id": str(batch_id), "tour_count": len(rows)}
+    return {
+        "status":        "done",
+        "batch_id":      str(batch_id),
+        "tour_count":    len(rows),
+        "tours_written": len(rows),
+        "tours_staged":  tours_staged,
+        "staged_ids":    staged_ids,
+    }
+
+
+# ── GET /admin/upload-staging/{batch_id} — list staged duplicates ────────────
+# NOTE: these routes use /upload-staging/ and /raw-tours/ prefixes (not /tours/)
+# so there is no FastAPI greedy-matching conflict with /tours/{tour_id}/...
+
+class DecideRequest(BaseModel):
+    decision: str  # bypass | replace | update | keep_both
+
+
+@router.get("/upload-staging/{batch_id}")
+async def list_upload_staging(
+    batch_id: str,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    """Return staging rows + existing tour fields for side-by-side comparison."""
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT
+                us.id::text         AS staging_id,
+                us.parsed_payload,
+                us.matched_tour_id::text,
+                us.matched_source_group_id::text,
+                us.decision,
+                us.created_at,
+                rt.src_name, rt.src_summary, rt.country, rt.price_raw,
+                rt.provider, rt.ingest_at
+            FROM silver_aa_internal.upload_staging us
+            LEFT JOIN silver_aa_internal.raw_tours rt
+                ON rt.tour_id = us.matched_tour_id
+            WHERE us.batch_id = $1::uuid
+              AND us.decision = 'pending'
+            ORDER BY us.created_at
+        """, batch_id)
+
+    return {
+        "batch_id": batch_id,
+        "items": [
+            {
+                "staging_id":              r["staging_id"],
+                "matched_tour_id":         r["matched_tour_id"],
+                "matched_source_group_id": r["matched_source_group_id"],
+                "decision":                r["decision"],
+                "created_at":              r["created_at"].isoformat() if r["created_at"] else None,
+                "incoming": (
+                    json.loads(r["parsed_payload"])
+                    if isinstance(r["parsed_payload"], str)
+                    else dict(r["parsed_payload"] or {})
+                ),
+                "existing": {
+                    "src_name":  r["src_name"],
+                    "src_summary": r["src_summary"],
+                    "country":   r["country"],
+                    "price_raw": r["price_raw"],
+                    "provider":  r["provider"],
+                    "ingest_at": r["ingest_at"].isoformat() if r["ingest_at"] else None,
+                },
+            }
+            for r in rows
+        ],
+        "total": len(rows),
+    }
+
+
+@router.post("/upload-staging/{staging_id}/decide")
+async def decide_staging(
+    staging_id: str,
+    body: DecideRequest,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    """Apply decision for one staged duplicate row.
+
+    bypass     → discard incoming; delete staging row
+    replace    → incoming INSERT as active; old active → superseded; delete staging
+    update     → same as replace (alias)
+    keep_both  → incoming INSERT as superseded; active unchanged; delete staging
+    """
+    VALID = {"bypass", "replace", "update", "keep_both"}
+    if body.decision not in VALID:
+        raise HTTPException(status_code=400, detail=f"decision must be one of {VALID}")
+
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        staging_row = await conn.fetchrow("""
+            SELECT id, batch_id, tenant_id, parsed_payload,
+                   matched_tour_id, matched_source_group_id
+            FROM silver_aa_internal.upload_staging
+            WHERE id = $1::uuid AND decision = 'pending'
+        """, staging_id)
+
+        if not staging_row:
+            raise HTTPException(status_code=404, detail="Staging row not found or already decided")
+
+        tenant_id = str(staging_row["tenant_id"])
+        matched_tour_id = str(staging_row["matched_tour_id"]) if staging_row["matched_tour_id"] else None
+        _msg = staging_row["matched_source_group_id"]
+        matched_source_group_id = str(_msg) if _msg else None
+        payload = (
+            json.loads(staging_row["parsed_payload"])
+            if isinstance(staging_row["parsed_payload"], str)
+            else dict(staging_row["parsed_payload"] or {})
+        )
+
+        async with conn.transaction():
+            if body.decision == "bypass":
+                await conn.execute(
+                    "DELETE FROM silver_aa_internal.upload_staging WHERE id = $1::uuid",
+                    staging_id,
+                )
+                return {"staging_id": staging_id, "decision": "bypass", "committed": False}
+
+            if body.decision in ("replace", "update"):
+                if matched_tour_id:
+                    await conn.execute("""
+                        UPDATE silver_aa_internal.raw_tours
+                        SET source_status = 'superseded'
+                        WHERE source_group_id = $1::uuid
+                          AND source_status = 'active'
+                    """, matched_source_group_id)
+                next_version = await conn.fetchval("""
+                    SELECT COALESCE(MAX(source_version), 0) + 1
+                    FROM silver_aa_internal.raw_tours
+                    WHERE source_group_id = $1::uuid
+                """, matched_source_group_id) if matched_source_group_id else 1
+                new_group_id = matched_source_group_id or str(__import__("uuid").uuid4())
+                new_status = "active"
+
+            elif body.decision == "keep_both":
+                next_version = await conn.fetchval("""
+                    SELECT COALESCE(MAX(source_version), 0) + 1
+                    FROM silver_aa_internal.raw_tours
+                    WHERE source_group_id = $1::uuid
+                """, matched_source_group_id) if matched_source_group_id else 1
+                new_group_id = matched_source_group_id or str(__import__("uuid").uuid4())
+                new_status = "superseded"
+
+            # Commit parsed_payload → INSERT raw_tours
+            import uuid as _uuid_mod
+            new_tour_id = await conn.fetchval("""
+                INSERT INTO silver_aa_internal.raw_tours (
+                    tenant_id, batch_id, source_id,
+                    tour_id_external, sku, provider,
+                    src_name, src_subtitle, src_summary, src_description,
+                    src_highlights, src_itineraries,
+                    country, duration, group_size, period,
+                    price_raw, inclusions, exclusions, links,
+                    activities, feature, best_time_to_go,
+                    pipeline_status,
+                    source_group_id, source_version, source_status
+                ) VALUES (
+                    $1::uuid, $2::uuid, $3::uuid,
+                    $4, $5, $6,
+                    $7, $8, $9, $10,
+                    $11::jsonb, $12,
+                    $13, $14, $15, $16,
+                    $17, $18, $19, $20::jsonb,
+                    $21::jsonb, $22, $23,
+                    'ingested',
+                    $24::uuid, $25, $26
+                )
+                RETURNING tour_id::text
+            """,
+                tenant_id,
+                str(staging_row["batch_id"]),
+                payload.get("source_id"),
+                payload.get("tour_id_external"),
+                payload.get("sku"),
+                payload.get("provider"),
+                payload.get("src_name"),
+                payload.get("src_subtitle"),
+                payload.get("src_summary"),
+                payload.get("src_description"),
+                json.dumps(payload.get("src_highlights") or []),
+                payload.get("src_itineraries"),
+                payload.get("country"),
+                payload.get("duration"),
+                payload.get("group_size"),
+                payload.get("period"),
+                payload.get("price_raw"),
+                payload.get("inclusions"),
+                payload.get("exclusions"),
+                json.dumps(payload.get("links") or []),
+                json.dumps(payload.get("activities") or []),
+                payload.get("feature"),
+                payload.get("best_time_to_go"),
+                new_group_id,
+                next_version,
+                new_status,
+            )
+
+            await conn.execute(
+                "DELETE FROM silver_aa_internal.upload_staging WHERE id = $1::uuid",
+                staging_id,
+            )
+
+    logger.info("staging_decided", staging_id=staging_id, decision=body.decision,
+                new_tour_id=new_tour_id)
+    return {
+        "staging_id": staging_id,
+        "decision":   body.decision,
+        "committed":  True,
+        "new_tour_id": new_tour_id,
+    }
+
+
+@router.post("/raw-tours/{tour_id}/set-active")
+async def set_tour_active(
+    tour_id: str,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    """Set source_status='active' for this tour; supersede all others in same group."""
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        group_id = await conn.fetchval(
+            "SELECT source_group_id FROM silver_aa_internal.raw_tours WHERE tour_id = $1::uuid",
+            tour_id,
+        )
+        if not group_id:
+            raise HTTPException(status_code=404, detail="Tour not found")
+
+        async with conn.transaction():
+            await conn.execute("""
+                UPDATE silver_aa_internal.raw_tours
+                SET source_status = 'superseded'
+                WHERE source_group_id = $1 AND source_status = 'active'
+                  AND tour_id != $2::uuid
+            """, group_id, tour_id)
+            await conn.execute("""
+                UPDATE silver_aa_internal.raw_tours
+                SET source_status = 'active'
+                WHERE tour_id = $1::uuid
+            """, tour_id)
+
+    logger.info("tour_set_active", tour_id=tour_id, group_id=str(group_id))
+    return {"tour_id": tour_id, "source_status": "active"}
+
+
+@router.delete("/raw-tours/{tour_id}")
+async def soft_delete_raw_tour(
+    tour_id: str,
+    request: Request,
+    x_admin_secret: str = Header(None),
+    x_deleted_by: Optional[str] = Header(None),
+):
+    """Soft-delete raw_tours row (source_status='trashed').
+    Returns 409 if tour has an active generated_content FK in published_tours.
+    """
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        blocked = await conn.fetchval("""
+            SELECT COUNT(*) FROM gold_aa_internal.published_tours
+            WHERE tour_id = $1::uuid
+        """, tour_id)
+        if blocked:
+            raise HTTPException(
+                status_code=409,
+                detail="Tour has published content — cannot delete. Unpublish first.",
+            )
+        updated = await conn.fetchval("""
+            UPDATE silver_aa_internal.raw_tours
+            SET source_status = 'trashed',
+                deleted_at    = NOW(),
+                deleted_by    = $2
+            WHERE tour_id = $1::uuid
+              AND source_status != 'trashed'
+            RETURNING tour_id::text
+        """, tour_id, x_deleted_by or "admin")
+
+    if not updated:
+        raise HTTPException(status_code=404, detail="Tour not found or already trashed")
+
+    logger.info("tour_soft_deleted", tour_id=tour_id, deleted_by=x_deleted_by)
+    return {"tour_id": tour_id, "source_status": "trashed"}
 
 
 # ── GET /admin/upload-history ─────────────────────────────────────────────────
