@@ -1,10 +1,11 @@
 "use client";
-// app/(admin)/tenants/page.tsx
-// All API logic preserved — /api/admin/tenants, generate-key, usage
-// Design: Fraunces + IBM Plex Sans, light theme, red accent
+// app/admin/tenants/page.tsx — AA-159: lifecycle stats + country + count fix
 
 import { useState, useEffect, useCallback } from "react";
-import { Users, Plus, Key, RefreshCw, ChevronDown, ChevronUp, AlertCircle, Loader2, CheckCircle, Eye, EyeOff, Copy, X, Trash2 } from "lucide-react";
+import {
+  Users, Plus, Key, RefreshCw, ChevronDown, ChevronUp,
+  AlertCircle, Loader2, CheckCircle, Eye, EyeOff, Copy, X, Trash2, Globe,
+} from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
 import {
   A, serif, mono, sans,
@@ -12,20 +13,92 @@ import {
 } from "../_components/adminUi";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-interface Tenant {
-  tenant_id: string; name: string; slug: string; plan_tier: string;
-  rate_limit_rpm: number; is_active: boolean; created_at: string;
-  plan: { tours_quota_monthly: number; api_calls_quota_monthly: number; price_usd_monthly: number };
-  this_month: { tours_rewritten: number; api_calls_used: number; quota_tours_pct: number; quota_calls_pct: number; tours_overage: number; overage_usd: number; llm_cost_usd: number };
+
+interface Lifecycle {
+  source_active: number;
+  source_superseded: number;
+  source_trashed: number;
+  master_active: number;
+  master_inactive: number;
+  master_trashed: number;
 }
+
+interface Tenant {
+  tenant_id: string;
+  name: string;
+  slug: string;
+  plan_tier: string;
+  country: string | null;
+  rate_limit_rpm: number;
+  is_active: boolean;
+  created_at: string;
+  plan: { tours_quota_monthly: number; api_calls_quota_monthly: number; price_usd_monthly: number };
+  this_month: {
+    tours_rewritten: number; api_calls_used: number;
+    quota_tours_pct: number; quota_calls_pct: number;
+    tours_overage: number; overage_usd: number; llm_cost_usd: number;
+  };
+  lifecycle: Lifecycle;
+}
+
 interface NewApiKey { tenant_id: string; tenant_name: string; api_key: string; }
 
 const PLAN_OPTIONS = ["starter", "growth", "business"];
-const PLAN_BADGE: Record<string, "blue"|"purple"|"green"|"red"> = {
-  starter: "blue", growth: "purple", business: "green", internal: "red",
+const PLAN_BADGE: Record<string, "blue" | "purple" | "green" | "red" | "gold"> = {
+  starter: "blue", growth: "purple", business: "green", internal: "gold",
 };
 
+// ─── Lifecycle Bar ────────────────────────────────────────────────────────────
+
+function LifecycleBar({ lc }: { lc: Lifecycle }) {
+  const sourceTotal = lc.source_active + lc.source_superseded + lc.source_trashed;
+  const masterTotal = lc.master_active + lc.master_inactive + lc.master_trashed;
+
+  function StatPill({ n, label, color }: { n: number; label: string; color: string }) {
+    return (
+      <span title={label} style={{
+        display: "inline-flex", alignItems: "center", gap: 3,
+        fontSize: 11, fontWeight: n > 0 ? 600 : 400,
+        color: n > 0 ? color : A.muted2,
+      }}>
+        <span style={{ width: 6, height: 6, borderRadius: "50%", background: n > 0 ? color : A.line, flexShrink: 0 }} />
+        {n}
+      </span>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+      {/* Source row */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span style={{ fontSize: 10, color: A.muted2, width: 42, flexShrink: 0 }}>Source</span>
+        <div style={{ display: "flex", gap: 8 }}>
+          <StatPill n={lc.source_active}     label="active"     color="#22C55E" />
+          <StatPill n={lc.source_superseded} label="superseded" color={A.gold} />
+          <StatPill n={lc.source_trashed}    label="trashed"    color={A.red} />
+        </div>
+        {sourceTotal > 0 && (
+          <span style={{ fontSize: 10, color: A.muted2, marginLeft: "auto" }}>{sourceTotal} total</span>
+        )}
+      </div>
+      {/* Master row */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span style={{ fontSize: 10, color: A.muted2, width: 42, flexShrink: 0 }}>Master</span>
+        <div style={{ display: "flex", gap: 8 }}>
+          <StatPill n={lc.master_active}   label="active"   color="#22C55E" />
+          <StatPill n={lc.master_inactive} label="inactive" color={A.muted} />
+          <StatPill n={lc.master_trashed}  label="trashed"  color={A.red} />
+        </div>
+        {masterTotal > 0 && (
+          <span style={{ fontSize: 10, color: A.muted2, marginLeft: "auto" }}>{masterTotal} total</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Create Tenant Modal ──────────────────────────────────────────────────────
+
 function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (k: NewApiKey) => void }) {
   const [name, setName]   = useState("");
   const [slug, setSlug]   = useState("");
@@ -97,13 +170,14 @@ function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
 }
 
 // ─── API Key Modal ────────────────────────────────────────────────────────────
+
 function ApiKeyModal({ keyData, onClose }: { keyData: NewApiKey; onClose: () => void }) {
-  const [show, setShow]   = useState(false);
+  const [show, setShow]     = useState(false);
   const [copied, setCopied] = useState(false);
   const copy = () => { navigator.clipboard.writeText(keyData.api_key); setCopied(true); setTimeout(() => setCopied(false), 2000); };
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200 }}>
-      <div style={{ background: A.card, border: `1px solid #86EFAC`, borderRadius: 16, padding: 32, width: 460 }}>
+      <div style={{ background: A.card, border: "1px solid #86EFAC", borderRadius: 16, padding: 32, width: 460 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
           <CheckCircle size={20} color="#22C55E" />
           <div style={{ fontFamily: serif, fontSize: 20, fontWeight: 500, color: "#22C55E" }}>Tenant Created</div>
@@ -137,7 +211,8 @@ function ApiKeyModal({ keyData, onClose }: { keyData: NewApiKey; onClose: () => 
   );
 }
 
-// ─── Detail types ─────────────────────────────────────────────────────────────
+// ─── Detail types (unchanged from previous) ───────────────────────────────────
+
 interface RewrittenTour {
   version_id: string; tour_name: string; country: string | null;
   quality_score: number | null; version_number: number;
@@ -161,7 +236,6 @@ interface TenantDetails {
   brand_rules: { system_prompt: string | null; style_guide: string | null; forbidden_words: string[]; version_count: number; last_updated: string | null };
 }
 
-// ─── Shared helpers ───────────────────────────────────────────────────────────
 const SCORE_COLOR = (s: number | null) =>
   s == null ? A.muted2 : s >= 9 ? "#22C55E" : s >= 7 ? A.gold : A.red;
 
@@ -185,13 +259,11 @@ function EmptyRow({ cols, msg }: { cols: number; msg: string }) {
 function fmtD(s: string) { return new Date(s).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }); }
 function fmtDT(s: string) { return new Date(s).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }); }
 
-// ─── Tab content components ───────────────────────────────────────────────────
 function ToursTabContent({ tours, toursView }: { tours: RewrittenTour[]; toursView?: string }) {
   const isPublished = toursView === "published";
   const headers = isPublished
     ? ["Name", "Country", "Score", "Status", "Published At"]
     : ["Name", "Country", "Score", "Status", "Version", "Date"];
-  const emptyMsg = isPublished ? "No published tours yet" : "No rewrites yet";
   return (
     <>
       {isPublished && (
@@ -204,22 +276,25 @@ function ToursTabContent({ tours, toursView }: { tours: RewrittenTour[]; toursVi
           <th key={h} style={{ ...TH, fontSize: 10, textAlign: i >= 2 ? "right" : "left" }}>{h}</th>
         ))}</tr></thead>
         <tbody>
-          {tours.length === 0 ? <EmptyRow cols={headers.length} msg={emptyMsg} /> : tours.map(t => (
-            <tr key={t.version_id}>
-              <td style={{ ...TD, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.tour_name}</td>
-              <td style={{ ...TD, color: A.muted }}>{t.country ?? "—"}</td>
-              <td style={{ ...TD, textAlign: "right", fontWeight: 700, color: SCORE_COLOR(t.quality_score) }}>
-                {t.quality_score != null ? t.quality_score.toFixed(1) : "—"}
-              </td>
-              <td style={{ ...TD, textAlign: "right" }}><StatusChip status={t.status} /></td>
-              {!isPublished && (
-                <td style={{ ...TD, textAlign: "right", fontFamily: mono, color: A.muted2 }}>
-                  {t.version_number != null ? `v${t.version_number}` : "—"}
+          {tours.length === 0
+            ? <EmptyRow cols={headers.length} msg={isPublished ? "No published tours yet" : "No rewrites yet"} />
+            : tours.map(t => (
+              <tr key={t.version_id}>
+                <td style={{ ...TD, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.tour_name}</td>
+                <td style={{ ...TD, color: A.muted }}>{t.country ?? "—"}</td>
+                <td style={{ ...TD, textAlign: "right", fontWeight: 700, color: SCORE_COLOR(t.quality_score) }}>
+                  {t.quality_score != null ? t.quality_score.toFixed(1) : "—"}
                 </td>
-              )}
-              <td style={{ ...TD, textAlign: "right", fontFamily: mono, color: A.muted2 }}>{fmtD(t.created_at)}</td>
-            </tr>
-          ))}
+                <td style={{ ...TD, textAlign: "right" }}><StatusChip status={t.status} /></td>
+                {!isPublished && (
+                  <td style={{ ...TD, textAlign: "right", fontFamily: mono, color: A.muted2 }}>
+                    {t.version_number != null ? `v${t.version_number}` : "—"}
+                  </td>
+                )}
+                <td style={{ ...TD, textAlign: "right", fontFamily: mono, color: A.muted2 }}>{fmtD(t.created_at)}</td>
+              </tr>
+            ))
+          }
         </tbody>
       </table>
     </>
@@ -229,12 +304,10 @@ function PipelineTabContent({ runs, pipelineNote }: { runs: PipelineRun[]; pipel
   return (
     <>
       {pipelineNote && (
-        <div style={{ fontSize: 11, color: A.muted, marginBottom: 10, fontStyle: "italic" }}>
-          {pipelineNote}
-        </div>
+        <div style={{ fontSize: 11, color: A.muted, marginBottom: 10, fontStyle: "italic" }}>{pipelineNote}</div>
       )}
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-        <thead><tr>{["Started","Tours","Passed","Model","Cost","Status"].map((h, i) => (
+        <thead><tr>{["Started", "Tours", "Passed", "Model", "Cost", "Status"].map((h, i) => (
           <th key={h} style={{ ...TH, fontSize: 10, textAlign: i >= 1 ? "right" : "left" }}>{h}</th>
         ))}</tr></thead>
         <tbody>
@@ -244,7 +317,7 @@ function PipelineTabContent({ runs, pipelineNote }: { runs: PipelineRun[]; pipel
               <td style={{ ...TD, textAlign: "right" }}>{r.tours_processed}</td>
               <td style={{ ...TD, textAlign: "right", color: "#22C55E" }}>{r.tours_passed}</td>
               <td style={{ ...TD, textAlign: "right", fontFamily: mono, fontSize: 10, color: A.muted2 }}>
-                {r.llm_model ? r.llm_model.replace(/us\.anthropic\./,"").replace(/-v1:0$/,"") : "—"}
+                {r.llm_model ? r.llm_model.replace(/us\.anthropic\./, "").replace(/-v1:0$/, "") : "—"}
               </td>
               <td style={{ ...TD, textAlign: "right", color: A.gold }}>${r.llm_cost_usd.toFixed(4)}</td>
               <td style={{ ...TD, textAlign: "right" }}><StatusChip status={r.status} /></td>
@@ -298,14 +371,6 @@ function BrandTabContent({ rules }: { rules: TenantDetails["brand_rules"] }) {
           </div>
         </div>
       )}
-      {rules.style_guide && (
-        <div>
-          <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: A.muted, marginBottom: 6 }}>Style Guide</div>
-          <div style={{ padding: "10px 12px", background: "#fff", border: `1px solid ${A.line}`, borderRadius: 8, fontSize: 12, color: A.body, lineHeight: 1.6 }}>
-            {rules.style_guide.slice(0, 200)}{rules.style_guide.length > 200 ? "…" : ""}
-          </div>
-        </div>
-      )}
       {rules.forbidden_words.length > 0 && (
         <div>
           <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: A.muted, marginBottom: 6 }}>Forbidden Words ({rules.forbidden_words.length})</div>
@@ -320,7 +385,8 @@ function BrandTabContent({ rules }: { rules: TenantDetails["brand_rules"] }) {
   );
 }
 
-// ─── Activity tab type ────────────────────────────────────────────────────────
+// ─── Activity tab ─────────────────────────────────────────────────────────────
+
 interface RewriteActivityItem {
   version_id: string; tour_name: string; country: string | null;
   version_number: number; status: string; quality_score: number | null;
@@ -331,7 +397,7 @@ function ActivityTabContent({ items }: { items: RewriteActivityItem[] }) {
     <div>
       <div style={{ fontSize: 11, color: A.muted2, marginBottom: 10 }}>Rewrite activity for this tenant</div>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-        <thead><tr>{["Tour Name","Country","Version","Status","Score","Date"].map((h, i) => (
+        <thead><tr>{["Tour Name", "Country", "Version", "Status", "Score", "Date"].map((h, i) => (
           <th key={h} style={{ ...TH, fontSize: 10, textAlign: i >= 2 ? "right" : "left" }}>{h}</th>
         ))}</tr></thead>
         <tbody>
@@ -356,20 +422,21 @@ function ActivityTabContent({ items }: { items: RewriteActivityItem[] }) {
   );
 }
 
-// ─── Tenant Detail (4 tabs — replaces UsageDetail) ───────────────────────────
+// ─── Tenant Detail Panel ──────────────────────────────────────────────────────
+
 type DTab = "tours" | "pipeline" | "activity" | "api" | "brand";
 
 function TenantDetail({ tenantId, planTier }: { tenantId: string; planTier: string }) {
   const isInternal = planTier === "internal";
-  const [data, setData]     = useState<TenantDetails | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [tab, setTab]       = useState<DTab>("tours");
+  const [data, setData]         = useState<TenantDetails | null>(null);
+  const [loading, setLoading]   = useState(true);
+  const [tab, setTab]           = useState<DTab>("tours");
   const [activity, setActivity] = useState<RewriteActivityItem[]>([]);
 
   useEffect(() => {
     setLoading(true);
     const p1 = fetch(`/api/admin/tenants/${tenantId}/details`)
-      .then(r => r.ok ? r.json() : Promise.reject(new Error(r.statusText)))
+      .then(r => r.ok ? r.json() : Promise.reject())
       .then((d: TenantDetails) => {
         const fw = d.brand_rules?.forbidden_words;
         if (fw && typeof fw === "string") {
@@ -391,30 +458,29 @@ function TenantDetail({ tenantId, planTier }: { tenantId: string; planTier: stri
   }, [tenantId, isInternal]);
 
   if (loading) return <div style={{ padding: "12px 0", fontSize: 12, color: A.muted }}>Loading…</div>;
-  if (!data)   return <div style={{ padding: "12px 0", fontSize: 12, color: A.red }}>Failed to load tenant details</div>;
+  if (!data)   return <div style={{ padding: "12px 0", fontSize: 12, color: A.red }}>Failed to load details</div>;
 
   const s = data.summary;
   const TABS: { key: DTab; label: string }[] = [
-    { key: "tours",    label: `Tours (${data.rewritten_tours.length})` },
+    { key: "tours",   label: `Tours (${data.rewritten_tours.length})` },
     ...(isInternal
       ? [{ key: "pipeline" as DTab, label: `Pipeline (${data.pipeline_runs.length})` }]
       : [{ key: "activity" as DTab, label: `Activity (${activity.length})` }]
     ),
-    { key: "api",      label: "API Usage" },
-    { key: "brand",    label: "Brand" },
+    { key: "api",   label: "API Usage" },
+    { key: "brand", label: "Brand" },
   ];
 
   return (
     <div style={{ background: A.bg, borderRadius: 10, padding: 16, border: `1px solid ${A.line}`, marginTop: 4 }}>
-      {/* Summary bar */}
       <div style={{ display: "flex", gap: 20, marginBottom: 14, flexWrap: "wrap" }}>
         {([
-          ["Total Rewrites",    String(s.total_rewrites),                       A.gold  ],
-          ["LLM Cost",          `$${s.total_llm_cost_usd.toFixed(3)}`,          A.body  ],
-          ["API Calls (Mo)",    s.api_calls_this_month.toLocaleString(),        A.body  ],
-          ["Quota",             `${s.quota_pct}%`,                              s.quota_pct > 80 ? A.red : A.body],
-          ["Plan",              s.plan_name,                                    A.body  ],
-          ["Member Since",      s.member_since,                                 A.muted ],
+          ["Total Rewrites", String(s.total_rewrites),              A.gold],
+          ["LLM Cost",       `$${s.total_llm_cost_usd.toFixed(3)}`, A.body],
+          ["API Calls (Mo)", s.api_calls_this_month.toLocaleString(), A.body],
+          ["Quota",          `${s.quota_pct}%`,                     s.quota_pct > 80 ? A.red : A.body],
+          ["Plan",           s.plan_name,                           A.body],
+          ["Member Since",   s.member_since,                        A.muted],
         ] as [string, string, string][]).map(([l, v, c]) => (
           <div key={l} style={{ minWidth: 80 }}>
             <div style={{ fontSize: 10, color: A.muted2, marginBottom: 2 }}>{l}</div>
@@ -422,30 +488,32 @@ function TenantDetail({ tenantId, planTier }: { tenantId: string; planTier: stri
           </div>
         ))}
       </div>
-
-      {/* Tab bar */}
       <div style={{ display: "flex", borderBottom: `1px solid ${A.line}`, marginBottom: 14 }}>
         {TABS.map(t => (
           <button key={t.key} onClick={() => setTab(t.key)} style={{
             padding: "7px 14px", fontSize: 12, fontWeight: tab === t.key ? 700 : 400,
             color: tab === t.key ? A.red : A.muted,
             border: "none", borderBottom: `2px solid ${tab === t.key ? A.red : "transparent"}`,
-            background: "none", cursor: "pointer", fontFamily: sans, transition: "color .15s",
+            background: "none", cursor: "pointer", fontFamily: sans,
           }}>{t.label}</button>
         ))}
       </div>
-
       {tab === "tours"    && <ToursTabContent    tours={data.rewritten_tours} toursView={data.summary.tours_view} />}
-      {tab === "pipeline" && <PipelineTabContent runs={data.pipeline_runs}   pipelineNote={data.summary.pipeline_note} />}
-      {tab === "activity" && <ActivityTabContent items={activity}                         />}
-      {tab === "api"      && <ApiTabContent      usage={data.api_usage}                  />}
-      {tab === "brand"    && <BrandTabContent    rules={data.brand_rules}                />}
+      {tab === "pipeline" && <PipelineTabContent runs={data.pipeline_runs}    pipelineNote={data.summary.pipeline_note} />}
+      {tab === "activity" && <ActivityTabContent items={activity} />}
+      {tab === "api"      && <ApiTabContent      usage={data.api_usage} />}
+      {tab === "brand"    && <BrandTabContent    rules={data.brand_rules} />}
     </div>
   );
 }
 
 // ─── Tenant Row ───────────────────────────────────────────────────────────────
-function TenantRow({ tenant, onRotateKey, onDeleted }: { tenant: Tenant; onRotateKey: (t: Tenant) => void; onDeleted: (id: string) => void }) {
+
+function TenantRow({ tenant, onRotateKey, onDeleted }: {
+  tenant: Tenant;
+  onRotateKey: (t: Tenant) => void;
+  onDeleted: (id: string) => void;
+}) {
   const [expanded, setExpanded] = useState(false);
   const [toggling, setToggling] = useState(false);
   const [isActive, setIsActive] = useState(tenant.is_active);
@@ -471,42 +539,78 @@ function TenantRow({ tenant, onRotateKey, onDeleted }: { tenant: Tenant; onRotat
     } finally { setDeleting(false); }
   }
 
+  const lc = tenant.lifecycle ?? {
+    source_active: 0, source_superseded: 0, source_trashed: 0,
+    master_active: 0, master_inactive: 0, master_trashed: 0,
+  };
+
   return (
     <>
       <tr style={{ borderBottom: `1px solid ${A.line2}` }}>
+        {/* Tenant name + slug + country */}
         <td style={TD}>
           <div style={{ fontWeight: 600, color: A.ink, fontSize: 13 }}>{tenant.name}</div>
-          <div style={{ fontSize: 10.5, color: A.muted, fontFamily: mono, marginTop: 2 }}>{tenant.slug}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 3 }}>
+            <code style={{ fontSize: 10.5, color: A.muted, fontFamily: mono }}>{tenant.slug}</code>
+            {tenant.country && (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 10.5, color: A.muted2 }}>
+                <Globe size={10} />
+                {tenant.country}
+              </span>
+            )}
+          </div>
         </td>
+
+        {/* Plan */}
         <td style={TD}>
           <Badge color={PLAN_BADGE[tenant.plan_tier] ?? "gray"}>{tenant.plan_tier}</Badge>
         </td>
-        <td style={{ ...TD, textAlign: "right", fontFamily: mono, fontSize: 12 }}>{tenant.rate_limit_rpm}/min</td>
+
+        {/* Lifecycle stats */}
+        <td style={{ ...TD, minWidth: 200 }}>
+          <LifecycleBar lc={lc} />
+        </td>
+
+        {/* API usage */}
         <td style={{ ...TD, textAlign: "right" }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: A.ink }}>{tenant.this_month.tours_rewritten} tours</div>
-          <div style={{ fontSize: 11, color: "#22C55E" }}>{tenant.this_month.api_calls_used.toLocaleString()} calls</div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: A.ink }}>
+            {lc.source_active} active
+          </div>
+          <div style={{ fontSize: 11, color: "#22C55E" }}>
+            {tenant.this_month.api_calls_used.toLocaleString()} calls
+          </div>
         </td>
+
+        {/* Quota */}
         <td style={{ ...TD, textAlign: "right", fontSize: 12, color: A.muted }}>
-          {tenant.this_month.quota_tours_pct}% quota used
+          {tenant.this_month.quota_tours_pct}% quota
         </td>
+
+        {/* Status toggle */}
         <td style={TD}>
           <button onClick={toggle} disabled={toggling} style={{
-            padding: "4px 12px", borderRadius: 20, border: "none", cursor: "pointer", fontSize: 11, fontWeight: 700,
+            padding: "4px 12px", borderRadius: 20, border: "none", cursor: "pointer",
+            fontSize: 11, fontWeight: 700,
             background: isActive ? "#D1FAE5" : A.redSoft,
             color: isActive ? "#22C55E" : A.red,
           }}>
             {toggling ? "…" : isActive ? "Active" : "Inactive"}
           </button>
         </td>
+
+        {/* Actions */}
         <td style={TD}>
           <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
-            <button onClick={() => onRotateKey(tenant)} style={{ padding: "5px 10px", background: A.bg, border: `1px solid ${A.line}`, borderRadius: 6, cursor: "pointer", color: A.muted, display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
+            <button onClick={() => onRotateKey(tenant)} title="Rotate API key"
+              style={{ padding: "5px 10px", background: A.bg, border: `1px solid ${A.line}`, borderRadius: 6, cursor: "pointer", color: A.muted, display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
               <Key size={12} /> Key
             </button>
-            <button onClick={deleteTenant} disabled={deleting} title="Delete tenant" style={{ padding: "5px 10px", background: A.bg, border: `1px solid ${A.line}`, borderRadius: 6, cursor: "pointer", color: A.red, display: "flex", alignItems: "center" }}>
+            <button onClick={deleteTenant} disabled={deleting} title="Delete tenant"
+              style={{ padding: "5px 10px", background: A.bg, border: `1px solid ${A.line}`, borderRadius: 6, cursor: "pointer", color: A.red, display: "flex", alignItems: "center" }}>
               {deleting ? <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} /> : <Trash2 size={12} />}
             </button>
-            <button onClick={() => setExpanded(!expanded)} style={{ padding: "5px 10px", background: A.bg, border: `1px solid ${A.line}`, borderRadius: 6, cursor: "pointer", color: A.muted, display: "flex", alignItems: "center" }}>
+            <button onClick={() => setExpanded(!expanded)}
+              style={{ padding: "5px 10px", background: A.bg, border: `1px solid ${A.line}`, borderRadius: 6, cursor: "pointer", color: A.muted, display: "flex", alignItems: "center" }}>
               {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
             </button>
           </div>
@@ -524,12 +628,13 @@ function TenantRow({ tenant, onRotateKey, onDeleted }: { tenant: Tenant; onRotat
 }
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
+
 export default function TenantsPage() {
-  const [tenants, setTenants]     = useState<Tenant[]>([]);
-  const [loading, setLoading]     = useState(true);
+  const [tenants, setTenants]       = useState<Tenant[]>([]);
+  const [loading, setLoading]       = useState(true);
   const [showCreate, setShowCreate] = useState(false);
-  const [newKey, setNewKey]       = useState<NewApiKey | null>(null);
-  const [error, setError]         = useState("");
+  const [newKey, setNewKey]         = useState<NewApiKey | null>(null);
+  const [error, setError]           = useState("");
 
   const load = useCallback(async () => {
     setLoading(true); setError("");
@@ -556,8 +661,9 @@ export default function TenantsPage() {
     setTenants(prev => prev.filter(t => t.tenant_id !== tenantId));
   }
 
-  const totalActive = tenants.filter(t => t.is_active).length;
-  const totalCalls  = tenants.reduce((s, t) => s + t.this_month.api_calls_used, 0);
+  const totalActive     = tenants.filter(t => t.is_active).length;
+  const totalSrcActive  = tenants.reduce((s, t) => s + (t.lifecycle?.source_active ?? 0), 0);
+  const totalMstrActive = tenants.reduce((s, t) => s + (t.lifecycle?.master_active ?? 0), 0);
 
   return (
     <div style={{ display: "flex", minHeight: "100vh", fontFamily: sans, background: A.bg }}>
@@ -567,6 +673,7 @@ export default function TenantsPage() {
           <span style={{ fontSize: 12, color: A.muted2 }}>Admin /</span>
           <span style={{ fontSize: 12, fontWeight: 500, color: A.body }}>Tenants</span>
         </header>
+
         <main style={{ flex: 1, overflowY: "auto", padding: "28px 36px 56px" }}>
           <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 24 }}>
             <div>
@@ -574,16 +681,12 @@ export default function TenantsPage() {
                 Tenants
               </h1>
               <p style={{ fontSize: 13, color: A.muted, margin: 0 }}>
-                {totalActive} active · {totalCalls.toLocaleString()} API calls this month
+                {totalActive} active · {totalSrcActive.toLocaleString()} source tours · {totalMstrActive.toLocaleString()} published
               </p>
             </div>
             <div style={{ display: "flex", gap: 10 }}>
-              <Btn variant="secondary" onClick={load}>
-                <RefreshCw size={13} /> Refresh
-              </Btn>
-              <Btn variant="primary" onClick={() => setShowCreate(true)}>
-                <Plus size={14} /> New Tenant
-              </Btn>
+              <Btn variant="secondary" onClick={load}><RefreshCw size={13} /> Refresh</Btn>
+              <Btn variant="primary" onClick={() => setShowCreate(true)}><Plus size={14} /> New Tenant</Btn>
             </div>
           </div>
 
@@ -594,11 +697,12 @@ export default function TenantsPage() {
           )}
 
           {/* Summary cards */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 14, marginBottom: 20 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14, marginBottom: 20 }}>
             {[
-              { label: "Total Tenants",    value: String(tenants.length),     color: A.red },
-              { label: "Active",           value: String(totalActive),         color: "#22C55E" },
-              { label: "API Calls (Mo)",   value: totalCalls.toLocaleString(), color: A.gold },
+              { label: "Total Tenants",    value: String(tenants.length),            color: A.red },
+              { label: "Active",           value: String(totalActive),               color: "#22C55E" },
+              { label: "Source (active)",  value: totalSrcActive.toLocaleString(),   color: A.gold },
+              { label: "Master (active)",  value: totalMstrActive.toLocaleString(),  color: A.ink },
             ].map(c => (
               <Card key={c.label}>
                 <SLabel>{c.label}</SLabel>
@@ -613,8 +717,8 @@ export default function TenantsPage() {
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead>
                   <tr>
-                    {["Tenant","Plan","Rate Limit","This Month","Quota","Status",""].map((h,i) => (
-                      <th key={i} style={{ ...TH, textAlign: i >= 2 && i <= 4 ? "right" : "left" }}>{h}</th>
+                    {["Tenant", "Plan", "Lifecycle", "Source Active", "Quota", "Status", ""].map((h, i) => (
+                      <th key={i} style={{ ...TH, textAlign: i >= 3 && i <= 4 ? "right" : "left" }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
