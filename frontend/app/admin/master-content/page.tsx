@@ -544,6 +544,7 @@ export default function MasterContentPage() {
   const [exporting, setExporting]       = useState(false);
   const [trashing, setTrashing]         = useState<string | null>(null);
   const [restoring, setRestoring]       = useState<string | null>(null);
+  const [toggling, setToggling]         = useState<string | null>(null);
   const [masterStatusFilter, setMasterStatusFilter] = useState<string>("");
   const [toast, setToast]               = useState("");
 
@@ -713,6 +714,28 @@ export default function MasterContentPage() {
   function showToast(msg: string) {
     setToast(msg);
     setTimeout(() => setToast(""), 3000);
+  }
+
+  async function toggleMasterStatus(tourId: string, tourName: string, newStatus: "active" | "inactive") {
+    setToggling(tourId);
+    try {
+      const endpoint = newStatus === "active" ? "activate" : "deactivate";
+      const r = await fetch(`/api/admin/master/${tourId}/${endpoint}`, { method: "PATCH" });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        alert(err.detail || `Failed to set ${newStatus}`);
+        return;
+      }
+      setData(prev => prev ? {
+        ...prev,
+        rewritten_tours: prev.rewritten_tours.map(t =>
+          t.tour_id === tourId ? { ...t, master_status: newStatus } : t
+        ),
+      } : prev);
+      showToast(`"${tourName}" set to ${newStatus}`);
+    } finally {
+      setToggling(null);
+    }
   }
 
   async function trashMaster(tourId: string, tourName: string) {
@@ -1007,6 +1030,26 @@ export default function MasterContentPage() {
                                   style={{ padding: "3px 8px", fontSize: 11, border: `1px solid ${A.line}`, borderRadius: 5, background: isExpanded ? `${A.gold}22` : "#fff", cursor: "pointer", color: A.gold, display: "flex", alignItems: "center", gap: 3 }}
                                 >
                                   {isExpanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />} Versions
+                                </button>
+                              )}
+                              {t.tour_id && t.master_status === "active" && (
+                                <button
+                                  onClick={() => toggleMasterStatus(t.tour_id!, t.tour_name, "inactive")}
+                                  disabled={toggling === t.tour_id}
+                                  title="Set to inactive"
+                                  style={{ padding: "3px 8px", fontSize: 11, border: "1px solid #FDE68A", borderRadius: 5, background: "#FFFBEB", cursor: "pointer", color: "#D97706", fontWeight: 600 }}
+                                >
+                                  {toggling === t.tour_id ? "…" : "Set Inactive"}
+                                </button>
+                              )}
+                              {t.tour_id && t.master_status === "inactive" && (
+                                <button
+                                  onClick={() => toggleMasterStatus(t.tour_id!, t.tour_name, "active")}
+                                  disabled={toggling === t.tour_id}
+                                  title="Set to active"
+                                  style={{ padding: "3px 8px", fontSize: 11, border: "1px solid #BBF7D0", borderRadius: 5, background: "#F0FDF4", cursor: "pointer", color: "#15803D", fontWeight: 600 }}
+                                >
+                                  {toggling === t.tour_id ? "…" : "Set Active"}
                                 </button>
                               )}
                               {t.tour_id && t.master_status !== "trashed" && (

@@ -4,6 +4,7 @@ import React, { useState, useRef, useCallback, useEffect } from "react";
 import {
   Upload, CheckCircle, XCircle, ArrowRight, Loader2,
   ChevronDown, ChevronUp, FileText, Copy, RefreshCw, Search,
+  Trash2, RotateCcw,
 } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
 import {
@@ -131,6 +132,8 @@ interface TourReadyItem {
   source_id: string | null;
   batch_id: string | null;
   filename: string | null;
+  source_status?: string;
+  deleted_at?: string | null;
 }
 
 // ─── StepIndicator ────────────────────────────────────────────────────────────
@@ -287,15 +290,23 @@ function ToursReadySection({ tours, loading, onRefresh }: {
   const [page, setPage]               = useState(1);
   const [filterCountry, setFilterCountry] = useState("");
   const [filterFile, setFilterFile]   = useState("");
+  const [showTrashed, setShowTrashed] = useState(false);
+  const [trashing, setTrashing]       = useState<string | null>(null);
+  const [restoring, setRestoring]     = useState<string | null>(null);
+  const [trashedTours, setTrashedTours] = useState<TourReadyItem[]>([]);
+  const [trashedLoading, setTrashedLoading] = useState(false);
+  const [localTours, setLocalTours]   = useState<TourReadyItem[]>(tours);
+
+  useEffect(() => { setLocalTours(tours); }, [tours]);
 
   const uniqueCountries = Array.from(new Set(
-    tours.map(t => t.country).filter((c): c is string => Boolean(c))
+    localTours.map(t => t.country).filter((c): c is string => Boolean(c))
   )).sort();
   const uniqueFiles = Array.from(new Set(
-    tours.map(t => t.filename).filter((f): f is string => Boolean(f))
+    localTours.map(t => t.filename).filter((f): f is string => Boolean(f))
   )).sort();
 
-  const filtered = tours.filter(t => {
+  const filtered = localTours.filter(t => {
     if (filterCountry && t.country !== filterCountry) return false;
     if (filterFile && t.filename !== filterFile) return false;
     return true;
@@ -304,6 +315,55 @@ function ToursReadySection({ tours, loading, onRefresh }: {
 
   function handleCountry(v: string) { setFilterCountry(v); setPage(1); }
   function handleFile(v: string)    { setFilterFile(v);    setPage(1); }
+
+  async function loadTrashed() {
+    setTrashedLoading(true);
+    try {
+      const res = await fetch("/api/admin/tours-trashed");
+      if (res.ok) {
+        const d = await res.json();
+        setTrashedTours(d.tours || []);
+      }
+    } finally { setTrashedLoading(false); }
+  }
+
+  function toggleShowTrashed() {
+    const next = !showTrashed;
+    setShowTrashed(next);
+    if (next) loadTrashed();
+  }
+
+  async function trashTour(tourId: string, tourName: string) {
+    if (!confirm(`Trash "${tourName}"? It will be hidden from the rewrite queue.`)) return;
+    setTrashing(tourId);
+    try {
+      const r = await fetch(`/api/admin/tours/${tourId}/trash`, { method: "PATCH" });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        alert(err.detail || "Failed to trash tour");
+        return;
+      }
+      setLocalTours(prev => prev.filter(t => t.tour_id !== tourId));
+      if (showTrashed) {
+        const trashed = localTours.find(t => t.tour_id === tourId);
+        if (trashed) setTrashedTours(prev => [{ ...trashed, source_status: "trashed" }, ...prev]);
+      }
+    } finally { setTrashing(null); }
+  }
+
+  async function restoreTour(tourId: string, tourName: string) {
+    setRestoring(tourId);
+    try {
+      const r = await fetch(`/api/admin/tours/${tourId}/restore`, { method: "PATCH" });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        alert(err.detail || "Failed to restore tour");
+        return;
+      }
+      setTrashedTours(prev => prev.filter(t => t.tour_id !== tourId));
+      onRefresh();
+    } finally { setRestoring(null); }
+  }
 
   return (
     <Card style={{ padding: 0, marginTop: 32 }}>
@@ -323,6 +383,10 @@ function ToursReadySection({ tours, loading, onRefresh }: {
           )}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <button onClick={toggleShowTrashed}
+            style={{ fontSize: 11, fontWeight: 600, background: "none", border: `1px solid ${A.line}`, borderRadius: 5, padding: "3px 8px", cursor: "pointer", color: showTrashed ? "#DC2626" : A.muted }}>
+            {showTrashed ? "Hide Trashed" : "Show Trashed"}
+          </button>
           <button onClick={onRefresh} title="Refresh"
             style={{ background: "none", border: "none", cursor: "pointer", color: A.muted2, padding: 4 }}>
             <RefreshCw size={14} />
@@ -337,7 +401,7 @@ function ToursReadySection({ tours, loading, onRefresh }: {
       </div>
 
       {/* Filters */}
-      {!loading && tours.length > 0 && (
+      {!loading && localTours.length > 0 && (
         <div style={{ padding: "10px 16px", borderBottom: `1px solid ${A.line}`, display: "flex", gap: 10 }}>
           <select value={filterCountry} onChange={e => handleCountry(e.target.value)}
             style={{ padding: "5px 8px", borderRadius: 6, border: `1px solid ${A.line}`, fontSize: 12, fontFamily: sans, background: "#fff" }}>
@@ -357,7 +421,7 @@ function ToursReadySection({ tours, loading, onRefresh }: {
           <Loader2 size={16} style={{ animation: "spin 1s linear infinite", marginRight: 8 }} />
           Loading…
         </div>
-      ) : tours.length === 0 ? (
+      ) : localTours.length === 0 ? (
         <div style={{ padding: 28, textAlign: "center", color: A.muted, fontSize: 13 }}>
           No tours ready. Upload an Excel file above to get started.
         </div>
@@ -371,7 +435,7 @@ function ToursReadySection({ tours, loading, onRefresh }: {
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead>
                 <tr>
-                  {["Tour Name", "Country", "Source File", "Ingested At", "Action"].map(h => (
+                  {["Tour Name", "Country", "Source File", "Ingested At", "Action", ""].map(h => (
                     <th key={h} style={{ ...TH, textAlign: "left" }}>{h}</th>
                   ))}
                 </tr>
@@ -393,6 +457,17 @@ function ToursReadySection({ tours, loading, onRefresh }: {
                         Rewrite <ArrowRight size={11} />
                       </a>
                     </td>
+                    <td style={TD}>
+                      <button
+                        onClick={() => trashTour(t.tour_id, t.src_name || "this tour")}
+                        disabled={trashing === t.tour_id}
+                        title="Trash this source tour"
+                        style={{ display: "flex", alignItems: "center", gap: 4, padding: "3px 7px", fontSize: 11, border: "1px solid #FECACA", borderRadius: 5, background: "#FFF5F5", cursor: "pointer", color: "#DC2626" }}
+                      >
+                        <Trash2 size={11} />
+                        {trashing === t.tour_id ? "…" : "Trash"}
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -404,6 +479,57 @@ function ToursReadySection({ tours, loading, onRefresh }: {
             </div>
           )}
         </>
+      )}
+
+      {/* Trashed tours section */}
+      {showTrashed && (
+        <div style={{ borderTop: `2px dashed #FECACA`, marginTop: 0 }}>
+          <div style={{ padding: "10px 20px", background: "#FFF5F5", display: "flex", alignItems: "center", gap: 8 }}>
+            <Trash2 size={13} style={{ color: "#DC2626" }} />
+            <span style={{ fontSize: 12, fontWeight: 600, color: "#DC2626" }}>
+              Trashed Source Tours {!trashedLoading && `(${trashedTours.length})`}
+            </span>
+          </div>
+          {trashedLoading ? (
+            <div style={{ padding: 20, textAlign: "center", color: A.muted, fontSize: 13 }}>
+              <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> Loading…
+            </div>
+          ) : trashedTours.length === 0 ? (
+            <div style={{ padding: 20, textAlign: "center", color: A.muted, fontSize: 13 }}>No trashed source tours.</div>
+          ) : (
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead>
+                <tr>
+                  {["Tour Name", "Country", "Trashed At", ""].map(h => (
+                    <th key={h} style={{ ...TH, textAlign: "left", background: "#FFF5F5" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {trashedTours.map((t, i) => (
+                  <tr key={t.tour_id} style={{ background: i % 2 === 1 ? "#FFF5F5" : "#FFFCFC", opacity: 0.85 }}>
+                    <td style={{ ...TD, color: "#DC2626", fontWeight: 500 }}>{t.src_name || "—"}</td>
+                    <td style={TD}>{t.country || "—"}</td>
+                    <td style={{ ...TD, color: A.muted }}>
+                      {t.deleted_at ? relativeTime(t.deleted_at) : "—"}
+                    </td>
+                    <td style={TD}>
+                      <button
+                        onClick={() => restoreTour(t.tour_id, t.src_name || "this tour")}
+                        disabled={restoring === t.tour_id}
+                        title="Restore source tour"
+                        style={{ display: "flex", alignItems: "center", gap: 4, padding: "3px 7px", fontSize: 11, border: "1px solid #BBF7D0", borderRadius: 5, background: "#F0FDF4", cursor: "pointer", color: "#15803D" }}
+                      >
+                        <RotateCcw size={11} />
+                        {restoring === t.tour_id ? "…" : "Restore"}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
       )}
     </Card>
   );

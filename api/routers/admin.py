@@ -1020,6 +1020,96 @@ async def restore_master_tour(
     return {"tour_id": tour_id, "master_status": "inactive"}
 
 
+# ── PATCH /admin/master/{tour_id}/activate ────────────────────────────────────
+
+
+@router.patch("/master/{tour_id}/activate", summary="Set master tour to active")
+async def activate_master_tour(
+    tour_id: str,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT aa_name FROM gold_aa_internal.published_tours WHERE tour_id=$1::uuid",
+            tour_id,
+        )
+        if not row:
+            raise HTTPException(404, "Tour not found")
+
+        async with conn.transaction():
+            result = await conn.execute(
+                """
+                UPDATE gold_aa_internal.published_tours
+                SET master_status = 'active'::gold_aa_internal.master_status_enum
+                WHERE tour_id = $1::uuid
+                """,
+                tour_id,
+            )
+            if result == "UPDATE 0":
+                raise HTTPException(404, "Tour not found or not updated")
+
+            await NotificationService(conn).emit(
+                event_type=EventType.MASTER_ACTIVATED,
+                entity_type="tour",
+                entity_id=tour_id,
+                tenant_id=AA_INTERNAL_TENANT,
+                payload={
+                    "tour_name": row["aa_name"], "new_status": "active", "changed_by": "admin",
+                },
+                actor_type="admin",
+            )
+
+    return {"tour_id": tour_id, "master_status": "active"}
+
+
+# ── PATCH /admin/master/{tour_id}/deactivate ──────────────────────────────────
+
+
+@router.patch("/master/{tour_id}/deactivate", summary="Set master tour to inactive")
+async def deactivate_master_tour(
+    tour_id: str,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT aa_name FROM gold_aa_internal.published_tours WHERE tour_id=$1::uuid",
+            tour_id,
+        )
+        if not row:
+            raise HTTPException(404, "Tour not found")
+
+        async with conn.transaction():
+            result = await conn.execute(
+                """
+                UPDATE gold_aa_internal.published_tours
+                SET master_status = 'inactive'::gold_aa_internal.master_status_enum
+                WHERE tour_id = $1::uuid
+                """,
+                tour_id,
+            )
+            if result == "UPDATE 0":
+                raise HTTPException(404, "Tour not found or not updated")
+
+            await NotificationService(conn).emit(
+                event_type=EventType.MASTER_DEACTIVATED,
+                entity_type="tour",
+                entity_id=tour_id,
+                tenant_id=AA_INTERNAL_TENANT,
+                payload={
+                    "tour_name": row["aa_name"], "new_status": "inactive", "changed_by": "admin",
+                },
+                actor_type="admin",
+            )
+
+    return {"tour_id": tour_id, "master_status": "inactive"}
+
+
 # ── GET /admin/notifications/count ────────────────────────────────────────────
 
 
@@ -1080,14 +1170,32 @@ async def list_notifications(
             """,
             limit, offset,
         )
+    _event_labels = {
+        "tour.pipeline.completed":  "Pipeline completed",
+        "tour.pipeline.failed":     "Pipeline failed",
+        "tour.brand_audit.flagged": "Brand audit flagged",
+        "tour.brand_audit.fixed":   "Brand audit fixed",
+        "tour.dedup.staged":        "Duplicate staged for review",
+        "tour.dedup.promoted":      "Duplicate promoted",
+        "tour.source.trashed":      "Source tour trashed",
+        "tour.source.restored":     "Source tour restored",
+        "tour.master.activated":    "Master tour activated",
+        "tour.master.deactivated":  "Master tour deactivated",
+        "tour.master.trashed":      "Master tour trashed",
+        "tour.master.restored":     "Master tour restored",
+    }
+
     items = []
     for r in rows:
         item = dict(r)
         item["id"] = int(item["id"])
-        item["payload"] = dict(item["payload"]) if item["payload"] else {}
+        payload = dict(item["payload"]) if item["payload"] else {}
+        item["payload"] = payload
         item["target_roles"] = list(item["target_roles"]) if item["target_roles"] else []
         item["dispatched_at"] = item["dispatched_at"].isoformat()
         item["created_at"] = item["created_at"].isoformat()
+        item["title"] = _event_labels.get(item["event_type"], item["event_type"])
+        item["message"] = payload.get("tour_name") or payload.get("message") or ""
         items.append(item)
     return {"items": items, "total": len(items)}
 

@@ -9,6 +9,8 @@ import { A, serif, sans } from "./adminUi";
 interface Notif {
   id: number;
   event_type: string;
+  title: string;
+  message: string;
   entity_type: string;
   entity_id: string;
   payload: Record<string, unknown>;
@@ -153,10 +155,10 @@ export default function AdminSidebar() {
                 borderBottom: "1px solid rgba(255,255,255,0.04)",
               }}>
                 <div style={{ fontSize: 11, color: "#C9CFD8", fontWeight: n.is_read ? 400 : 600 }}>
-                  {n.event_type}
+                  {n.title || n.event_type}
                 </div>
-                {n.payload && typeof n.payload.tour_name === "string" && (
-                  <div style={{ fontSize: 10, color: "#6E7681", marginTop: 2 }}>{n.payload.tour_name}</div>
+                {n.message && (
+                  <div style={{ fontSize: 10, color: "#6E7681", marginTop: 2 }}>{n.message}</div>
                 )}
                 <div style={{ fontSize: 9.5, color: "#6E7681", marginTop: 2 }}>
                   {new Date(n.created_at).toLocaleString()}
