@@ -10,6 +10,7 @@ Writes:
 
 System prompt built from Ms. Thư's stage-2 prompt files in ../prompts/.
 """
+import asyncio
 import json
 import os
 import sys
@@ -23,6 +24,10 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 from api.services.run_context_db import write_run_context_stage  # noqa: E402
+from services.acp_shared.cost_utils import (  # noqa: E402
+    calc_bedrock_cost, extract_usage_from_response,
+    record_stage_cost, finalize_run_cost,
+)
 
 logger = structlog.get_logger()
 
@@ -109,6 +114,9 @@ def make_synthesize_node(pool, s3_client):
             raw = json.loads(response["body"].read())
             llm_output = json.loads(raw["content"][0]["text"])
             confidence_score = float(llm_output.get("confidence_score", 70.0))
+            inp, out = extract_usage_from_response(raw)
+            cost = calc_bedrock_cost(inp, out, "haiku")
+            await asyncio.to_thread(record_stage_cost, run_id, "s2", cost, inp, out)
         except Exception as exc:
             logger.error("synthesize_bedrock_error", run_id=run_id, error=str(exc))
             llm_output = {
@@ -183,6 +191,8 @@ def make_synthesize_node(pool, s3_client):
                 """,
                 run_id,
             )
+
+        await asyncio.to_thread(finalize_run_cost, run_id)
 
         completed_tools.append("synthesize")
         logger.info("synthesize_complete", run_id=run_id, confidence_score=confidence_score)
