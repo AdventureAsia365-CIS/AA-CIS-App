@@ -63,7 +63,7 @@ class NotificationService:
             INSERT INTO shared.notifications
                 (tenant_id, actor_type, event_type,
                  entity_type, entity_id, payload, target_roles)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+            VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7)
             """,
             tenant_id, actor_type, event_type.value,
             entity_type, str(entity_id), json.dumps(payload), roles,
