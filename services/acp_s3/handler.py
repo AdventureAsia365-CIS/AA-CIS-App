@@ -31,9 +31,11 @@ import validators as _validators
 from models import S3RunResult
 from run_context import get_run_context_sync, write_s3_stage_sync
 
-# Event constants inlined to avoid import issues in Lambda layer packaging
 _EB_SOURCE_S3 = "acp.s3"
 _EB_DETAIL_S3_COMPLETED = "acp.s3.completed"
+
+S3_THRESHOLD_BYTES = 512_000  # 500 KB — above this, load large fields from S3
+_S3_SILVER_BUCKET = os.environ.get("S3_SILVER_BUCKET", "acp-silver-867490540162")
 
 
 def _get_db_conn():
@@ -58,6 +60,9 @@ def _read_run_inputs(conn, run_id: str, tenant_id: str) -> tuple[dict, dict, str
         "s2_visibility_report": ctx.s2_visibility_report or {},
         "s1_keywords_used": ctx.s1_keywords_used or [],
         "brand_brief": ctx.brand_brief or {},
+        # S3 offload keys — may be None for runs before migration 060
+        "s2_keywords_s3_key": ctx.s2_keywords_s3_key,
+        "s2_report_s3_key": ctx.s2_report_s3_key,
     }
 
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -185,6 +190,24 @@ def _record_cost(conn, run_id: str, stage: str, cost: float, in_tok: int, out_to
         logging.getLogger(__name__).warning("_record_cost failed run_id=%s: %s", run_id, e)
 
 
+def load_context_field(
+    run_context: dict,
+    field_key: str,
+    s3_key_field: str,
+    s3_client,
+    bucket: str,
+):
+    """Return field value from S3 when an offload key is present, else return inline value.
+
+    Graceful: if s3_key_field is absent or None, falls back to run_context[field_key].
+    """
+    s3_key = run_context.get(s3_key_field)
+    if s3_key:
+        obj = s3_client.get_object(Bucket=bucket, Key=s3_key)
+        return json.loads(obj["Body"].read())
+    return run_context.get(field_key)
+
+
 _HAIKU_PRICE = {"input": 0.25, "output": 1.25}
 _SONNET_PRICE = {"input": 3.0, "output": 15.0}
 
@@ -238,6 +261,20 @@ def handler(event, context):
 
         # ── Step 1: Read inputs ───────────────────────────────────────────────
         run_context, tenant_rules, country = _read_run_inputs(conn, run_id, tenant_id)
+
+        # ── Step 1a: S3 offload — resolve large fields before building packet ─
+        context_bytes = len(json.dumps(run_context, default=str).encode("utf-8"))
+        if context_bytes > S3_THRESHOLD_BYTES:
+            s3_client = boto3.client("s3", region_name="us-west-1")
+            run_context["s2_keyword_research"] = load_context_field(
+                run_context, "s2_keyword_research", "s2_keywords_s3_key",
+                s3_client, _S3_SILVER_BUCKET,
+            )
+            run_context["s2_visibility_report"] = load_context_field(
+                run_context, "s2_visibility_report", "s2_report_s3_key",
+                s3_client, _S3_SILVER_BUCKET,
+            )
+
         s1_keywords_used = run_context.get("s1_keywords_used") or []
         if isinstance(s1_keywords_used, str):
             s1_keywords_used = json.loads(s1_keywords_used)

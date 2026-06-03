@@ -26,6 +26,8 @@ _STAGE_COLUMNS = {
         "s2_market_preference",
         "s2_aa_tour_matches",
         "s2_confidence_score",
+        "s2_keywords_s3_key",
+        "s2_report_s3_key",
     ),
     "s3": ("s3_content_calendar", "s3_ads_plan", "s3_funnel_mix"),
 }
@@ -83,6 +85,8 @@ async def get_run_context_validated(
         s2_market_preference=_parse_jsonb(row.get("s2_market_preference")),
         s2_aa_tour_matches=_parse_jsonb(row.get("s2_aa_tour_matches")),
         s2_confidence_score=_to_float(row.get("s2_confidence_score")),
+        s2_keywords_s3_key=row.get("s2_keywords_s3_key"),
+        s2_report_s3_key=row.get("s2_report_s3_key"),
         s3_content_calendar=_parse_jsonb(row.get("s3_content_calendar")),
         s3_ads_plan=_parse_jsonb(row.get("s3_ads_plan")),
         s3_funnel_mix=_parse_jsonb(row.get("s3_funnel_mix")),
