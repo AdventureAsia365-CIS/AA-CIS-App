@@ -27,6 +27,7 @@ from acpcore.concurrency import _get_semaphore, _MAX_CONCURRENT
 from acpcore.errors import ACPErrorCode
 from api.services.run_context_db import get_run_context_validated
 from api.schemas.run_context import RunContextValidationError
+from services.acp_shared.errors import S1ContextNotReadyError
 
 logger = structlog.get_logger()
 router = APIRouter(tags=["S2 Research"])
@@ -122,6 +123,16 @@ def _safe_uuid(value: str, field: str) -> str:
 class RunS2Request(BaseModel):
     country: str
     idempotency_key: Optional[str] = None
+    s1_run_id: Optional[str] = None  # S1 batch run_id; required at runtime for guard
+
+
+def _guard_s1_context(context: dict, run_id: str) -> None:
+    """Raise S1ContextNotReadyError if s1_keywords_used is absent or empty."""
+    kws = context.get("s1_keywords_used")
+    if not kws or len(kws) == 0:
+        raise S1ContextNotReadyError(
+            f"S1_CONTEXT_NOT_READY: s1_keywords_used is empty or missing for run_id={run_id}"
+        )
 
 
 # ── POST /run ─────────────────────────────────────────────────────────────────
@@ -133,6 +144,12 @@ async def run_s2(
     tenant=Depends(_get_tenant),
 ):
     """Trigger a S2 visibility research run. Returns immediately; graph runs in background."""
+    if not body.s1_run_id:
+        raise HTTPException(
+            status_code=422,
+            detail="s1_run_id is required: S2 requires S1 context for anti-cannibalization",
+        )
+
     pool = request.app.state.pool
     tenant_id = str(tenant.get("sub", ""))
 
@@ -160,8 +177,10 @@ async def run_s2(
         """, idem_key)
 
     if existing:
-        logger.info("s2_idempotent_duplicate", idem_key=idem_key, run_id=str(existing["run_id"]))
-        return {"run_id": str(existing["run_id"]), "status": "existing", "idempotency_key": idem_key}
+        logger.info("s2_idempotent_duplicate", idem_key=idem_key,
+                    run_id=str(existing["run_id"]))
+        return {"run_id": str(existing["run_id"]), "status": "existing",
+                "idempotency_key": idem_key}
 
     # Create acp_runs row
     async with pool.acquire() as conn:
@@ -197,12 +216,39 @@ async def run_s2(
         "existing_content_risk": False,
     }
     config = {"configurable": {"thread_id": run_id}}
+    s1_run_id = body.s1_run_id
 
     async def _background():
         async with sem:
             try:
+                # Guard: verify S1 wrote s1_keywords_used before S2 proceeds.
+                # s1_run_id is validated non-null before _background() is created.
+                async with pool.acquire() as conn:
+                    ctx_row = await conn.fetchrow(
+                        "SELECT s1_keywords_used "
+                        "FROM acp_shared.acp_run_context "
+                        "WHERE run_id=$1::uuid",
+                        s1_run_id,
+                    )
+                raw_kws = ctx_row["s1_keywords_used"] if ctx_row else None
+                if isinstance(raw_kws, str):
+                    raw_kws = json.loads(raw_kws)
+                ctx_dict = {"s1_keywords_used": raw_kws}
+                logger.info("s2_s1_context_check", run_id=run_id, s1_run_id=s1_run_id,
+                            keyword_count=len(raw_kws) if raw_kws else 0)
+                _guard_s1_context(ctx_dict, s1_run_id)
+
                 await graph.ainvoke(initial_state, config=config)
                 await _handle_gate1(pool, run_id, tenant_id)
+            except S1ContextNotReadyError as exc:
+                logger.error("s2_s1_context_not_ready", run_id=run_id,
+                             s1_run_id=s1_run_id, error=str(exc))
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE acp_shared.acp_runs SET status='failed', "
+                        "error_message=$1 WHERE run_id=$2::uuid",
+                        str(exc), run_id,
+                    )
             except Exception as exc:
                 logger.error("s2_graph_error", run_id=run_id, error=str(exc))
                 async with pool.acquire() as conn:
@@ -325,6 +371,8 @@ async def get_s2_report(
         "google_trends":     row["google_trends"],
         "reddit_insights":   row["reddit_insights"],
         "gsc_data":          row["gsc_data"],
-        "confidence_score":  float(row["confidence_score"]) if row["confidence_score"] is not None else None,
+        "confidence_score":  (
+            float(row["confidence_score"]) if row["confidence_score"] is not None else None
+        ),
         "fetched_at":        row["fetched_at"].isoformat() if row["fetched_at"] else None,
     }

@@ -31,7 +31,7 @@ async def process_export(version_id: str) -> dict:
 
         row = dict(row)
         batch_id = row["batch_id"]
-        tour_id  = row["tour_id"]
+        tour_id = row["tour_id"]
 
         # 2. Insert into published catalog (gold)
         repo = PublishedCatalogRepository(conn, tenant_slug)
@@ -48,10 +48,12 @@ async def process_export(version_id: str) -> dict:
             "mobile_card_text":     row.get("mobile_card_text"),
             "seo_title":            row.get("seo_title"),
             "seo_meta":             row.get("seo_meta"),
-            "seo_keywords_used":    json.dumps(row.get("seo_keywords_used") or []),
+            "seo_keywords_used": json.dumps(row.get("seo_keywords_used") or []),
             "og_tags":              json.dumps(row.get("og_tags") or {}),
             "quality_score":        row.get("quality_score"),
-            "quality_score_id":     str(row["quality_score_id"]) if row.get("quality_score_id") else None,
+            "quality_score_id": (
+                str(row["quality_score_id"]) if row.get("quality_score_id") else None
+            ),
             "s3_gold_path":         None,
             "approved_by":          "pipeline",
         })
@@ -92,10 +94,12 @@ async def process_export(version_id: str) -> dict:
                 # ACP-S1: manifest.json + EventBridge on batch completion
                 try:
                     from services.acp.handler import upload_manifest, publish_s1_completed
+                    from api.services.run_context_db import write_run_context_stage
                     from collections import Counter
 
                     tour_rows = await conn.fetch("""
-                        SELECT pt.tour_id, pt.aa_name, pt.quality_score, rt.country
+                        SELECT pt.tour_id, pt.aa_name, pt.quality_score, rt.country,
+                               pt.seo_keywords_used
                         FROM gold_aa_internal.published_tours pt
                         JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
                         WHERE rt.batch_id = $1::uuid
@@ -126,20 +130,46 @@ async def process_export(version_id: str) -> dict:
                     )
                     run_id = str(batch_id)
 
-                    manifest_key = upload_manifest(run_id, country, tenant_id_str, tour_list, qs_avg)
+                    manifest_key = upload_manifest(
+                        run_id, country, tenant_id_str, tour_list, qs_avg
+                    )
 
-                    await conn.execute("""
-                        INSERT INTO shared.acp_runs
-                            (batch_id, country, tenant_id, manifest_s3_key,
-                             tour_count, quality_score_avg, status, completed_at)
-                        VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, 's1_done', NOW())
-                        ON CONFLICT (batch_id) DO UPDATE SET
-                            status            = 's1_done',
-                            manifest_s3_key   = EXCLUDED.manifest_s3_key,
-                            tour_count        = EXCLUDED.tour_count,
-                            quality_score_avg = EXCLUDED.quality_score_avg,
-                            completed_at      = NOW()
-                    """, batch_id, country, tenant_id_str, manifest_key, tc, round(qs_avg, 2))
+                    # Deduplicate keywords used across all tours in this batch.
+                    # Elements may be plain strings or dicts with "keyword" key.
+                    all_kws: list = []
+                    seen_kws: set = set()
+                    for r in tour_rows:
+                        raw = r["seo_keywords_used"]
+                        if isinstance(raw, str):
+                            try:
+                                raw = json.loads(raw)
+                            except (ValueError, TypeError):
+                                raw = []
+                        for item in (raw or []):
+                            kw = item.get("keyword") if isinstance(item, dict) else str(item)
+                            if kw and kw not in seen_kws:
+                                seen_kws.add(kw)
+                                all_kws.append(kw)
+
+                    # Write acp_runs + acp_run_context atomically.
+                    # publish_s1_completed is called ONLY after successful commit.
+                    async with conn.transaction():
+                        await conn.execute("""
+                            INSERT INTO shared.acp_runs
+                                (batch_id, country, tenant_id, manifest_s3_key,
+                                 tour_count, quality_score_avg, status, completed_at)
+                            VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, 's1_done', NOW())
+                            ON CONFLICT (batch_id) DO UPDATE SET
+                                status            = 's1_done',
+                                manifest_s3_key   = EXCLUDED.manifest_s3_key,
+                                tour_count        = EXCLUDED.tour_count,
+                                quality_score_avg = EXCLUDED.quality_score_avg,
+                                completed_at      = NOW()
+                        """, batch_id, country, tenant_id_str, manifest_key, tc, round(qs_avg, 2))
+
+                        await write_run_context_stage(conn, run_id, "s1", {
+                            "s1_keywords_used": all_kws,
+                        })
 
                     publish_s1_completed(run_id, country, tenant_id_str, manifest_key, tc, qs_avg)
 
@@ -159,7 +189,7 @@ async def process_export(version_id: str) -> dict:
 def lambda_handler(event: dict, context) -> dict:
     # Pattern 1: SF direct invoke — version_id inside validation_result.Payload
     if "validation_result" in event:
-        payload    = event["validation_result"].get("Payload", {})
+        payload = event["validation_result"].get("Payload", {})
         version_id = payload.get("version_id")
         if not version_id:
             logger.warning("no_version_id_in_validation_result", keys=str(event.keys()))
@@ -176,7 +206,7 @@ def lambda_handler(event: dict, context) -> dict:
         results = []
         for record in event["Records"]:
             try:
-                body       = json.loads(record["body"])
+                body = json.loads(record["body"])
                 version_id = body.get("version_id")
                 if not version_id:
                     logger.warning("missing_version_id")
