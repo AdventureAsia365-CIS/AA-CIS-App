@@ -243,14 +243,15 @@ async def run_s2(
                             INSERT INTO acp_shared.acp_stage_runs (run_id, stage, metadata)
                             VALUES ($1::uuid, 's2', $2::jsonb)
                             ON CONFLICT (run_id, stage) DO UPDATE
-                            SET metadata = COALESCE(metadata, '{}') || EXCLUDED.metadata
+                            SET metadata = COALESCE(acp_stage_runs.metadata, '{}') || EXCLUDED.metadata
                             """,
                             run_id,
                             json.dumps({"resume_from_iteration": 0,
                                         "checkpointer": "AsyncPostgresSaver"}),
                         )
-                    except Exception:
-                        pass  # metadata column not yet present (migration 059 pending)
+                    except Exception as e:
+                        logger.error("acp_stage_runs_upsert_failed", error=str(e), run_id=run_id)
+                        raise
 
                 # Guard: verify S1 wrote s1_keywords_used before S2 proceeds.
                 # s1_run_id is validated non-null before _background() is created.
@@ -362,14 +363,15 @@ async def resume_s2(
                             INSERT INTO acp_shared.acp_stage_runs (run_id, stage, metadata)
                             VALUES ($1::uuid, 's2', $2::jsonb)
                             ON CONFLICT (run_id, stage) DO UPDATE
-                            SET metadata = COALESCE(metadata, '{}') || EXCLUDED.metadata
+                            SET metadata = COALESCE(acp_stage_runs.metadata, '{}') || EXCLUDED.metadata
                             """,
                             run_id,
                             json.dumps({"resume_from_iteration": iteration,
                                         "checkpointer": "AsyncPostgresSaver"}),
                         )
-                    except Exception:
-                        pass  # metadata column not yet present (migration 059 pending)
+                    except Exception as e:
+                        logger.error("acp_stage_runs_upsert_failed", error=str(e), run_id=run_id)
+                        raise
                 await graph.ainvoke(None, config=config)
             except Exception as exc:
                 logger.error("s2_resume_error", run_id=run_id, error=str(exc))

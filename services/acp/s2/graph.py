@@ -61,7 +61,7 @@ async def get_compiled_s2_graph(pool, s3_client, api_keys: dict, database_url: s
     import psycopg
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-    conn = await psycopg.AsyncConnection.connect(database_url)
+    conn = await psycopg.AsyncConnection.connect(database_url, autocommit=True)
     checkpointer = AsyncPostgresSaver(conn)
     await checkpointer.setup()
     builder = build_s2_graph(pool, s3_client, api_keys)
