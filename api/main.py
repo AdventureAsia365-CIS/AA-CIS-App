@@ -28,6 +28,7 @@ from api.routers.v1_s4_social import router as v1_s4_social_router
 from api.routers.admin import router as admin_router
 from api.routers.admin_pipeline import router as admin_pipeline_router
 from api.routers.admin_settings import router as admin_settings_router
+from api.routers.acp_health import router as acp_health_router
 from api.middleware.rate_limit import rate_limit_middleware
 from services.acp.s2.router import router as v1_s2_router
 
@@ -110,6 +111,7 @@ app.include_router(v1_s4_social_router)
 app.include_router(admin_router)
 app.include_router(admin_pipeline_router)
 app.include_router(admin_settings_router)
+app.include_router(acp_health_router)
 
 app.middleware("http")(rate_limit_middleware)
 
