@@ -32,6 +32,9 @@ pytest-asyncio==0.23.6
 pytest-cov==5.0.0
 moto[s3,dynamodb,sqs,lambda]==5.0.3
 
+# Observability
+sentry-sdk[fastapi]>=1.40.0
+
 # Utils
 python-dotenv==1.0.1
 structlog==24.1.0
