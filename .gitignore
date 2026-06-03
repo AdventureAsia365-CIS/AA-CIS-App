@@ -30,7 +30,9 @@ package-lock.json
 test-results/
 playwright-report/
 data/
-scripts/
+scripts/*
+!scripts/benchmark/
+!scripts/benchmark/**
 .vercel
 .env*.local
 SESSION_START_*.md
