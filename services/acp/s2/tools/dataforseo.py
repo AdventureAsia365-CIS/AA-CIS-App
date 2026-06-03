@@ -49,6 +49,7 @@ def make_dataforseo_node(pool, s3_client, api_keys: dict):
             return {
                 "keywords_s3_key": cached["keywords_s3_key"],
                 "keyword_count": cached["keyword_count"] or 0,
+                "dataforseo_cache_hit": True,
                 "completed_tools": completed,
             }
 
@@ -67,7 +68,12 @@ def make_dataforseo_node(pool, s3_client, api_keys: dict):
             logger.error("dataforseo_api_error", run_id=run_id, error=str(exc))
             completed = list(state.get("completed_tools", []))
             completed.append("dataforseo")
-            return {"error": f"dataforseo_failed: {exc}", "keyword_count": 0, "completed_tools": completed}
+            return {
+                "error": f"dataforseo_failed: {exc}",
+                "keyword_count": 0,
+                "dataforseo_cache_hit": False,
+                "completed_tools": completed,
+            }
 
         # Extract and cap results
         raw_items = []
@@ -139,6 +145,7 @@ def make_dataforseo_node(pool, s3_client, api_keys: dict):
             "keyword_count": kw_count,
             "informational_intent_pct": informational_intent_pct,
             "existing_content_risk": existing_content_risk,
+            "dataforseo_cache_hit": False,
             "completed_tools": completed,
         }
 

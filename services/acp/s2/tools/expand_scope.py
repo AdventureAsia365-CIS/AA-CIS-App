@@ -2,6 +2,13 @@
 Scope expander. Conditional: runs only if keyword_count < 20 after dataforseo.
 Calls DataForSEO with broader travel seed terms. Updates keyword_count and
 keywords_s3_key to point to the expanded file.
+
+Circuit breaker (AA-113): if expand_attempts >= 1 when called (i.e. this node
+already fired once but keyword_count is still < threshold), return immediately
+with gate1_override='manual_required' to force HITL regardless of score.
+
+On first expand attempt: if keyword_count is still < threshold after the API
+call, set gate1_override='manual_required' for the same reason.
 """
 import json
 import os
@@ -25,11 +32,23 @@ def make_expand_scope_node(s3_client, api_keys: dict):
         run_id = state["run_id"]
         country = state["country"]
         kw_count = state.get("keyword_count", 0)
+        expand_attempts = state.get("expand_attempts", 0)
+        completed = list(state.get("completed_tools", []))
 
         if kw_count >= _EXPAND_THRESHOLD:
-            completed = list(state.get("completed_tools", []))
             completed.append("expand_scope")
             return {"completed_tools": completed}
+
+        # Circuit breaker: already expanded once, still below threshold — force manual review
+        if expand_attempts >= 1:
+            logger.warning("expand_scope_circuit_breaker_fired",
+                           run_id=run_id, expand_attempts=expand_attempts, keyword_count=kw_count)
+            completed.append("expand_scope")
+            return {
+                "completed_tools": completed,
+                "data_quality": "low",
+                "gate1_override": "manual_required",
+            }
 
         seeds = [
             f"{country} travel",
@@ -71,14 +90,24 @@ def make_expand_scope_node(s3_client, api_keys: dict):
             ContentType="application/json",
         )
 
-        completed = list(state.get("completed_tools", []))
         completed.append("expand_scope")
-        logger.info("expand_scope_complete", run_id=run_id, original=kw_count, expanded=new_count)
-        return {
+        result: dict = {
             "keyword_count": new_count,
             "keywords_s3_key": s3_key,
+            "expand_attempts": expand_attempts + 1,
             "iteration": state.get("iteration", 0) + 1,
             "completed_tools": completed,
         }
+
+        if new_count < _EXPAND_THRESHOLD:
+            logger.warning("expand_scope_exhausted",
+                           run_id=run_id, original=kw_count, expanded=new_count)
+            result["gate1_override"] = "manual_required"
+            result["data_quality"] = "low"
+        else:
+            logger.info("expand_scope_complete",
+                        run_id=run_id, original=kw_count, expanded=new_count)
+
+        return result
 
     return expand_scope
