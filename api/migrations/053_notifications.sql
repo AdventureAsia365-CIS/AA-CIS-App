@@ -7,7 +7,7 @@
 
 CREATE TABLE IF NOT EXISTS shared.notifications (
     id            BIGSERIAL PRIMARY KEY,
-    tenant_id     VARCHAR(100) REFERENCES shared.tenants(tenant_id) ON DELETE CASCADE,
+    tenant_id     UUID         NOT null,
     actor_type    VARCHAR(50)  NOT NULL DEFAULT 'system',
     event_type    VARCHAR(100) NOT NULL,
     entity_type   VARCHAR(50),
