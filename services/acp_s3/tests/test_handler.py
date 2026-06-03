@@ -98,10 +98,10 @@ class TestHandler:
                 "### Week 1\nPrimary Keyword: vietnam adventure tours\nLead Magnet CTA: Download",
                 50, 100,
             )
-            mock_plan._SONNET = "us.anthropic.claude-sonnet-4-5"
+            mock_plan.SONNET_MODEL_ID = "us.anthropic.claude-sonnet-4-5-20251001-v1:0"
             mock_ads.generate_ads.return_value = (ads_out, 80, 120)
             mock_ads.upload_ads_pdf.return_value = "acp/s3/ads-plans/atlas/run1/ads_plan.pdf"
-            mock_ads._HAIKU = "us.anthropic.claude-haiku-4-5"
+            mock_ads.HAIKU_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
             mock_val.run_all.return_value = []
             mock_les.lesson_update_call.return_value = (lesson_out, 30, 60)
             mock_write.return_value = ("cal-uuid-1", "ads-uuid-1")
@@ -139,10 +139,10 @@ class TestHandler:
             )
             mock_plan.skeleton_call.return_value = (skeleton, 0, 0)
             mock_plan.expand_call.return_value = ("no structure", 0, 0)
-            mock_plan._SONNET = "us.anthropic.claude-sonnet-4-5"
+            mock_plan.SONNET_MODEL_ID = "us.anthropic.claude-sonnet-4-5-20251001-v1:0"
             mock_ads.generate_ads.return_value = (ads_out, 0, 0)
             mock_ads.upload_ads_pdf.return_value = "key"
-            mock_ads._HAIKU = "us.anthropic.claude-haiku-4-5"
+            mock_ads.HAIKU_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
             mock_val.run_all.return_value = ["week_structure: missing", "lead_magnet_cta: missing"]
             mock_les.lesson_update_call.return_value = (lesson_out, 0, 0)
             mock_write.return_value = ("cal-1", "ads-1")

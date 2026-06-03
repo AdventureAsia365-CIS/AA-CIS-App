@@ -10,7 +10,9 @@ Review the run metadata and existing lessons, then generate new lessons at three
 {
   "job_lessons": ["string"],
   "root_lessons_append": ["string"],
-  "system_promotions": ["string"]
+  "system_promotions": [
+    {"content": "string", "confidence": 0.0}
+  ]
 }
 ```
 
@@ -22,6 +24,6 @@ Review the run metadata and existing lessons, then generate new lessons at three
 ## Rules
 - `job_lessons`: 1-5 items, factual, grounded in this specific run
 - `root_lessons_append`: 0-3 items, only if new — do not duplicate existing lessons
-- `system_promotions`: 0-2 items, very high bar — omit if uncertain
+- `system_promotions`: 0-2 items, very high bar — omit if uncertain. Each item is `{"content": "...", "confidence": 0.0–1.0}` where confidence is your estimate that this is a genuine universal pattern worth enforcing cross-tenant. Only include items where confidence >= 0.80.
 - All lessons must be actionable statements, not vague observations
 - Return valid JSON only — no markdown fences, no explanation text

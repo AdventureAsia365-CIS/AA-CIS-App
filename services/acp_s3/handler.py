@@ -334,7 +334,7 @@ def handler(event, context):
             skeleton, expanded_markdown,
             ads_output, ads_s3_key,
             validation_errors, funnel_mix,
-            _planner._SONNET, _ads._HAIKU,
+            _planner.SONNET_MODEL_ID, _ads.HAIKU_MODEL_ID,
             total_in, total_out,
         )
 

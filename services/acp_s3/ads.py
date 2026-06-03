@@ -11,7 +11,7 @@ from fpdf import FPDF
 
 from models import AdsOutput, CompactPacket
 
-_HAIKU = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+HAIKU_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 _BEDROCK_REGION = "us-west-1"
 _S3_BUCKET = os.environ.get("S3_BRONZE_BUCKET", "aa-cis-bronze-867490540162")
 
@@ -52,7 +52,7 @@ def generate_ads(packet: CompactPacket) -> tuple[AdsOutput, int, int]:
     prompt = f"{ads_prompt}\n\n## Compact Packet\n```json\n{json.dumps(packet.model_dump(), indent=2)}\n```"
 
     client = _bedrock_client()
-    text, in_tok, out_tok = _invoke(client, _HAIKU, prompt)
+    text, in_tok, out_tok = _invoke(client, HAIKU_MODEL_ID, prompt)
 
     text = text.strip()
     if text.startswith("```"):
