@@ -17,13 +17,13 @@ interface StageRecord {
   slo_breached: boolean;
 }
 
-interface GateStatus {
+type GateStatus = {
   status: string;
   elapsed_hours: number | null;
   sla_hours: number;
   breached: boolean;
   auto_approved: boolean;
-} | null
+} | null;
 
 interface RunHealth {
   run_id: string;
