@@ -1,46 +1,45 @@
-# AA-CIS-App Handoff — Session 49
+# AA-CIS-App Handoff — Session 50
 Updated: 2026-06-03
 
 ## Status
-- Branch: feature/aa-112-s2-async-postgres-saver | Last commit: 63b8853
+- Branch: feature/aa-122-s3-context-guardrail | Last commit: d664e6b
 - ECS: api:246 (⚠️ STOP if still running)
 - RDS: aa-cis-dev-db (⚠️ STOP if still running)
-- Migration 055 NOT YET APPLIED — needs ECS running
-- Migration 056 NOT YET APPLIED — needs ECS running (requires 055 first)
-- Migration 057 NOT YET APPLIED — needs 055+056 first
-- Migration 058 NOT YET APPLIED — canary tenant flags (is_canary, skip_hitl)
-- Migration 059 NOT YET APPLIED — acp_stage_runs.metadata JSONB [AA-112]
+- Migrations 052–059: NOT YET APPLIED (from session 49)
+- Migration 060: NOT YET APPLIED (AA-122, requires migration 059 applied first)
 
 ## Completed This Session
 
-### AA-112 — S2 AsyncPostgresSaver + Migration + Cache Tables (commit 63b8853)
+### AA-122 — S3 Lambda Context Size Guardrail (commits 2936947, d664e6b)
 
-**Branch**: feature/aa-112-s2-async-postgres-saver (pushed, DO NOT merge to develop — awaiting review)
+**Branch**: feature/aa-122-s3-context-guardrail (pushed — awaiting CI green → merge to develop)
 
-**Changed files:**
-- `services/acp/s2/graph.py` — replaced MemorySaver with AsyncPostgresSaver; returns `(graph, conn)` tuple
-- `api/main.py` — lifespan unpacks `(graph, conn)`, stores `app.state.s2_pg_conn`, closes on shutdown
-- `services/acp/s2/router.py` — metadata logging: fresh run logs `resume_from_iteration=0`; resume reads iteration from `graph.aget_state()` and logs actual value
-- `api/migrations/059_s2_checkpoint_metadata.sql` — adds `metadata JSONB NOT NULL DEFAULT '{}'` to `acp_shared.acp_stage_runs`
-- `tests/acp_s2/test_checkpointer.py` — 4 unit tests, all green
+**What changed:**
+- `api/migrations/060_acp_run_context_s3_keys.sql` — ADD COLUMN s2_keywords_s3_key TEXT + s2_report_s3_key TEXT
+- `api/schemas/run_context.py` — s2_keywords_s3_key + s2_report_s3_key on RunContext + S2StagePayload
+- `api/services/run_context_db.py` — s2 stage columns + get_run_context_validated reads new fields
+- `services/acp/s2/tools/synthesize.py` — writes s2_keywords_s3_key (from dataforseo state) to run_context
+- `services/acp_s3/run_context.py` — reads s2_keywords_s3_key + s2_report_s3_key from DB row
+- `services/acp_s3/handler.py` — load_context_field helper + S3_THRESHOLD_BYTES=512000 + size check
+- `services/acp_s3/tests/test_aa122.py` — 6 tests (all green)
 
-**Key design decisions:**
-- Cache tables (raw_keyword_cache, raw_html_cache) NOT created — S2 tools already cache via `acp_silver_s2.visibility_reports` + S3
-- Single psycopg3 connection for checkpointer (not a pool) — adequate given semaphore-guarded concurrency
-- `psycopg.AsyncConnection.connect(database_url)` — no URL format conversion; `postgresql+psycopg://` is SQLAlchemy-only
-- LangGraph creates its own checkpoint tables (`checkpoints`, `checkpoint_writes`, `checkpoint_blobs`) via `setup()` — separate from `acp_shared.pipeline_checkpoints`
-- Metadata logging wrapped in try/except so graph never fails if migration 059 is pending
+**Key design:**
+- If `context_bytes > 512_000` → resolve s2_keyword_research from S3 using s2_keywords_s3_key
+- Graceful fallback: if s2_keywords_s3_key is None (pre-migration runs), use inline value
+- S3 bucket: acp-silver-867490540162 (env: S3_SILVER_BUCKET)
 
-**Test results:**
-```
-4 passed, 2 warnings in 1.74s
-tests/acp_s2/test_checkpointer.py::TestCheckpointerType::test_checkpointer_type PASSED
-tests/acp_s2/test_checkpointer.py::TestMetadataLoggedFreshRun::test_metadata_logged_fresh_run PASSED
-tests/acp_s2/test_checkpointer.py::TestMetadataLoggedResume::test_metadata_logged_resume PASSED
-tests/acp_s2/test_checkpointer.py::TestMetadataLoggedResume::test_metadata_resume_defaults_zero_when_no_state PASSED
-```
+**Tests:** 50/50 acp_s3 tests pass (6 new + 44 existing)
+
+**Critical bugs found during audit (NOT fixed — separate tickets needed):**
+1. `s2_keyword_research.keywords` key never populated by S2 → planner always gets empty top_18 keywords (keywords live in S3 only)
+2. planner.py `_SONNET` variable = Haiku model ID (naming bug → 7.5x cost overcount)
+3. DataForSEO format mismatch: S3 has `search_volume` but planner reads `vol_m1`/`vol_m2`
+4. H-3 lesson confidence threshold (≥0.80) not enforced programmatically
 
 ## Prior Sessions — Open Issues (carried forward)
+
+### AA-112 — S2 AsyncPostgresSaver + Migration + Cache Tables (commit 63b8853)
+**Branch**: feature/aa-112-s2-async-postgres-saver (pushed, DO NOT merge — awaiting review)
 
 ### AA-143 — Synthetic Canary S0→S1 Skeleton Wave 0 (commit 1cd64e0)
 **Branch**: feature/aa-143-canary (pushed, DO NOT merge)
@@ -59,14 +58,19 @@ tests/acp_s2/test_checkpointer.py::TestMetadataLoggedResume::test_metadata_resum
 - Migration 057 not yet applied → lifecycle columns for stuck-run detection (requires 055+056 first)
 - Migration 058 not yet applied → canary tenant flags
 - Migration 059 not yet applied → acp_stage_runs.metadata [AA-112]
+- Migration 060 not yet applied → acp_run_context s3 offload keys [AA-122]
 - OPENAI_API_KEY needs rotation (exposed in session 39)
 - API Gateway 29s timeout on long tour rewrites
 - EventBridge rule for S4 trigger needs update in AA-CIS-Infra Terraform (source: acp.hitl)
+- s2_keyword_research.keywords always empty → planner top_18 always empty (NEW — see AA-122 audit)
+- _SONNET var in planner.py = Haiku model (naming+cost bug)
 
-## Prerequisites for AA-112 to work end-to-end
-1. Apply migrations 052 → 053 → 054 → 055 → 056 → 057 → 058 → 059 in order
-2. ECS deploy new image after CI green
-3. Verify checkpointer tables created: `\dt checkpoints checkpoint_writes checkpoint_blobs`
+## Next Steps for AA-122 to go live
+1. CI green on feature/aa-122-s3-context-guardrail
+2. Merge feature/aa-122-s3-context-guardrail → develop
+3. Apply migrations 052 → 053 → 054 → 055 → 056 → 057 → 058 → 059 → 060 in order
+4. ECS deploy new image after CI green on develop
+5. Linear: AA-122 → Done
 
 ## Cost Checklist (MANUAL — do not auto-run)
 ```

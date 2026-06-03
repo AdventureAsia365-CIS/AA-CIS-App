@@ -202,6 +202,7 @@ def make_synthesize_node(pool, s3_client):
                 "s2_market_preference": market_preference,
                 "s2_aa_tour_matches": aa_tour_matches,
                 "s2_confidence_score": confidence_score,
+                "s2_keywords_s3_key": state.get("keywords_s3_key"),
             })
 
         # 3. Update acp_runs status

@@ -47,6 +47,8 @@ class S2StagePayload(BaseModel):
     s2_market_preference: Optional[dict[str, Any]] = None
     s2_aa_tour_matches: Optional[list[Any]] = None
     s2_confidence_score: float
+    s2_keywords_s3_key: Optional[str] = None
+    s2_report_s3_key: Optional[str] = None
 
     @field_validator("s2_confidence_score")
     @classmethod
@@ -75,6 +77,8 @@ class RunContext(BaseModel):
     s2_market_preference: Optional[dict[str, Any]] = None
     s2_aa_tour_matches: Optional[list[Any]] = None
     s2_confidence_score: Optional[float] = None
+    s2_keywords_s3_key: Optional[str] = None
+    s2_report_s3_key: Optional[str] = None
     s3_content_calendar: Optional[dict[str, Any]] = None
     s3_ads_plan: Optional[dict[str, Any]] = None
     s3_funnel_mix: Optional[dict[str, Any]] = None
