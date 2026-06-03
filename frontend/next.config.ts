@@ -12,7 +12,8 @@ export default withSentryConfig(nextConfig, {
   org: "dk-0ql",
   project: "aa-cis-frontend",
   silent: true,
-  widenClientFileUpload: true,
-  hideSourceMaps: true,
+  sourcemaps: {
+    disable: false,
+  },
   disableLogger: true,
 });
