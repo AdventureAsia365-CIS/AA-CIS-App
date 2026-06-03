@@ -66,8 +66,9 @@ async def lifespan(app: FastAPI):
 
     from services.acp.s2.graph import get_compiled_s2_graph
     s3 = boto3.client("s3", region_name=os.environ.get("AWS_REGION", "us-west-1"))
+    app.state.s2_pg_conn = None
     try:
-        app.state.s2_graph = await get_compiled_s2_graph(
+        app.state.s2_graph, app.state.s2_pg_conn = await get_compiled_s2_graph(
             pool, s3, _get_api_keys(), os.environ["DATABASE_URL"]
         )
     except Exception as e:
@@ -76,6 +77,8 @@ async def lifespan(app: FastAPI):
 
     yield
     await pool.close()
+    if app.state.s2_pg_conn is not None:
+        await app.state.s2_pg_conn.close()
     await redis.aclose()
 
 app = FastAPI(
