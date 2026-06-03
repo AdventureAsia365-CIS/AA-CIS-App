@@ -123,7 +123,7 @@ def _safe_uuid(value: str, field: str) -> str:
 class RunS2Request(BaseModel):
     country: str
     idempotency_key: Optional[str] = None
-    s1_run_id: Optional[str] = None  # S1 batch run_id; passed by EventBridge consumer for guard
+    s1_run_id: Optional[str] = None  # S1 batch run_id; required at runtime for guard
 
 
 def _guard_s1_context(context: dict, run_id: str) -> None:
@@ -144,6 +144,12 @@ async def run_s2(
     tenant=Depends(_get_tenant),
 ):
     """Trigger a S2 visibility research run. Returns immediately; graph runs in background."""
+    if not body.s1_run_id:
+        raise HTTPException(
+            status_code=422,
+            detail="s1_run_id is required: S2 requires S1 context for anti-cannibalization",
+        )
+
     pool = request.app.state.pool
     tenant_id = str(tenant.get("sub", ""))
 
@@ -216,22 +222,21 @@ async def run_s2(
         async with sem:
             try:
                 # Guard: verify S1 wrote s1_keywords_used before S2 proceeds.
-                # Skipped when no s1_run_id (manual trigger without S1 context).
-                if s1_run_id:
-                    async with pool.acquire() as conn:
-                        ctx_row = await conn.fetchrow(
-                            "SELECT s1_keywords_used "
-                            "FROM acp_shared.acp_run_context "
-                            "WHERE run_id=$1::uuid",
-                            s1_run_id,
-                        )
-                    raw_kws = ctx_row["s1_keywords_used"] if ctx_row else None
-                    if isinstance(raw_kws, str):
-                        raw_kws = json.loads(raw_kws)
-                    ctx_dict = {"s1_keywords_used": raw_kws}
-                    logger.info("s2_s1_context_check", run_id=run_id, s1_run_id=s1_run_id,
-                                keyword_count=len(raw_kws) if raw_kws else 0)
-                    _guard_s1_context(ctx_dict, s1_run_id)
+                # s1_run_id is validated non-null before _background() is created.
+                async with pool.acquire() as conn:
+                    ctx_row = await conn.fetchrow(
+                        "SELECT s1_keywords_used "
+                        "FROM acp_shared.acp_run_context "
+                        "WHERE run_id=$1::uuid",
+                        s1_run_id,
+                    )
+                raw_kws = ctx_row["s1_keywords_used"] if ctx_row else None
+                if isinstance(raw_kws, str):
+                    raw_kws = json.loads(raw_kws)
+                ctx_dict = {"s1_keywords_used": raw_kws}
+                logger.info("s2_s1_context_check", run_id=run_id, s1_run_id=s1_run_id,
+                            keyword_count=len(raw_kws) if raw_kws else 0)
+                _guard_s1_context(ctx_dict, s1_run_id)
 
                 await graph.ainvoke(initial_state, config=config)
                 await _handle_gate1(pool, run_id, tenant_id)

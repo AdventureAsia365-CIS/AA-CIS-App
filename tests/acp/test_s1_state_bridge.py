@@ -164,3 +164,19 @@ class TestS2Guard:
         err = S1ContextNotReadyError("test message")
         assert isinstance(err, Exception)
         assert "test message" in str(err)
+
+    @pytest.mark.asyncio
+    async def test_s2_manual_trigger_requires_s1_run_id(self):
+        """POST /run without s1_run_id → HTTPException 422 before any DB/graph work."""
+        from fastapi import HTTPException
+        from services.acp.s2.router import run_s2, RunS2Request
+
+        body = RunS2Request(country="Vietnam")  # s1_run_id omitted
+        mock_request = MagicMock()
+        mock_tenant = {"sub": "00000000-0000-0000-0000-000000000001", "role": "admin"}
+
+        with pytest.raises(HTTPException) as exc_info:
+            await run_s2(body, mock_request, mock_tenant)
+
+        assert exc_info.value.status_code == 422
+        assert "s1_run_id is required" in str(exc_info.value.detail)
