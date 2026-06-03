@@ -9,7 +9,7 @@ import boto3
 
 from models import CalendarSkeleton, CompactPacket
 
-_SONNET = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+SONNET_MODEL_ID = "us.anthropic.claude-sonnet-4-5-20251001-v1:0"
 _BEDROCK_REGION = "us-west-1"
 
 _PROMPT_DIR = os.path.join(os.path.dirname(__file__), "prompts")
@@ -91,7 +91,7 @@ def skeleton_call(packet: CompactPacket) -> tuple[CalendarSkeleton, int, int]:
     prompt = f"{rules}\n\n## Compact Packet\n```json\n{json.dumps(packet.model_dump(), indent=2)}\n```"
 
     client = _bedrock_client()
-    text, in_tok, out_tok = _invoke(client, _SONNET, prompt, max_tokens=8192)
+    text, in_tok, out_tok = _invoke(client, SONNET_MODEL_ID, prompt, max_tokens=8192)
 
     # Strip accidental markdown fences
     text = text.strip()
@@ -124,4 +124,4 @@ def expand_call(
     )
 
     client = _bedrock_client()
-    return _invoke(client, _SONNET, prompt, max_tokens=16384)
+    return _invoke(client, SONNET_MODEL_ID, prompt, max_tokens=16384)

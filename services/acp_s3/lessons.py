@@ -13,9 +13,14 @@ import boto3
 import psycopg2
 import psycopg2.extras
 
-from models import LessonUpdateOutput
+import logging
 
-_HAIKU = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+from models import LessonUpdateOutput, SystemPromotion  # noqa: F401
+
+logger = logging.getLogger(__name__)
+
+HAIKU_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+H3_PROMOTION_THRESHOLD = 0.80
 _BEDROCK_REGION = "us-west-1"
 
 _PROMPT_DIR = os.path.join(os.path.dirname(__file__), "prompts")
@@ -111,7 +116,7 @@ def lesson_update_call(
     )
 
     client = _bedrock_client()
-    text, in_tok, out_tok = _invoke(client, _HAIKU, prompt)
+    text, in_tok, out_tok = _invoke(client, HAIKU_MODEL_ID, prompt)
 
     text = text.strip()
     if text.startswith("```"):
@@ -138,9 +143,19 @@ def write_lessons(conn, run_id: str, tenant_id: str, country: str, output: Lesso
                 VALUES (%s, %s, %s, 'root', %s)
             """, (run_id, tenant_id, country, content))
 
-        for content in output.system_promotions:
+        for promotion in output.system_promotions:
+            if promotion.confidence < H3_PROMOTION_THRESHOLD:
+                logger.info(
+                    "h3_promotion_below_threshold run_id=%s confidence=%.2f content=%s",
+                    run_id, promotion.confidence, promotion.content[:60],
+                )
+                continue
             cur.execute("""
                 INSERT INTO acp_shared.acp_lessons_shared
                     (content, country, promoted_from_run_id)
                 VALUES (%s, %s, %s)
-            """, (content, country, run_id))
+            """, (promotion.content, country, run_id))
+            logger.info(
+                "h3_promotion_written run_id=%s confidence=%.2f content=%s",
+                run_id, promotion.confidence, promotion.content[:60],
+            )
