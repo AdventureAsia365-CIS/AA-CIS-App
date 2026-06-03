@@ -30,10 +30,14 @@ from api.routers.admin_pipeline import router as admin_pipeline_router
 from api.routers.admin_settings import router as admin_settings_router
 from api.routers.acp_health import router as acp_health_router
 from api.middleware.rate_limit import rate_limit_middleware
+from api.middleware.sentry_context import sentry_context_middleware
+from api.core.sentry import init_sentry
 from services.acp.s2.router import router as v1_s2_router
 
 logger = structlog.get_logger()
 pool: asyncpg.Pool = None
+
+init_sentry()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -114,6 +118,7 @@ app.include_router(admin_settings_router)
 app.include_router(acp_health_router)
 
 app.middleware("http")(rate_limit_middleware)
+app.middleware("http")(sentry_context_middleware)
 
 def get_pool() -> asyncpg.Pool:
     if not pool:
