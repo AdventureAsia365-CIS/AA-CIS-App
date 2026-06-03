@@ -40,10 +40,15 @@ class AdsOutput(BaseModel):
     campaigns: list[Campaign]
 
 
+class SystemPromotion(BaseModel):
+    content: str
+    confidence: float = 0.0
+
+
 class LessonUpdateOutput(BaseModel):
     job_lessons: list[str]
     root_lessons_append: list[str]
-    system_promotions: list[str]
+    system_promotions: list[SystemPromotion] = []
 
 
 class CompactPacket(BaseModel):

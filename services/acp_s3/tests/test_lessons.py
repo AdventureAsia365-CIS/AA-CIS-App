@@ -2,14 +2,16 @@ import json
 from unittest.mock import MagicMock, patch
 
 import lessons
-from models import LessonUpdateOutput
+from models import LessonUpdateOutput, SystemPromotion
 
 
 def _make_lesson_output(job=None, root=None, system=None) -> LessonUpdateOutput:
+    if system is None:
+        system = []
     return LessonUpdateOutput(
         job_lessons=job if job is not None else ["Used long-tail keywords effectively"],
-        root_lessons_append=root if root is not None else ["Vietnam travelers prefer 7-10 day itineraries"],
-        system_promotions=system if system is not None else [],
+        root_lessons_append=root if root is not None else ["Vietnam travelers prefer 7-10 day itineraries"],  # noqa: E501
+        system_promotions=system,
     )
 
 
@@ -63,7 +65,9 @@ class TestReadLessons:
 
 class TestLessonUpdateCall:
     def test_parses_bedrock_response(self):
-        output = _make_lesson_output()
+        output = _make_lesson_output(
+            system=[SystemPromotion(content="cross-tenant rule", confidence=0.85)]
+        )
         mock_response = json.dumps(output.model_dump())
 
         with patch("lessons._bedrock_client") as mock_client_fn:
@@ -99,7 +103,10 @@ class TestWriteLessons:
 
     def test_inserts_system_to_shared(self):
         conn, cur = _make_write_conn()
-        output = _make_lesson_output(job=[], root=[], system=["system lesson"])
+        output = _make_lesson_output(
+            job=[], root=[],
+            system=[SystemPromotion(content="system lesson", confidence=0.90)],
+        )
 
         lessons.write_lessons(conn, "run-1", "atlas", "Vietnam", output)
 
