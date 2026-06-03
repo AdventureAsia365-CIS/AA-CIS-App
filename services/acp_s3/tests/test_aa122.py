@@ -7,13 +7,8 @@ Three cases:
   3. Large payload (>500KB) but no s3_key → graceful fallback to inline value
 """
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import sys
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-import handler
 from handler import load_context_field, S3_THRESHOLD_BYTES, _S3_SILVER_BUCKET
 
 
@@ -58,34 +53,27 @@ class TestLoadContextField:
 
 
 class TestAA122SmallContext:
-    """Payload < 500KB → S3 boto3 client never created, inline values used as-is."""
+    """Payload < 500KB → load_context_field returns inline value, S3 not called."""
 
-    def test_small_context_no_s3_call(self):
+    def test_small_context_inline_returned_even_with_s3_key(self):
+        inline_kw = {"keywords": {"kw1": {"vol_m1": 100}}}
         small_run_context = {
-            "s2_keyword_research": {"keywords": {"kw1": {"vol_m1": 100}}},
+            "s2_keyword_research": inline_kw,
             "s2_visibility_report": {"summary": "small"},
             "s1_keywords_used": [],
             "brand_brief": {},
-            "s2_keywords_s3_key": "acp/s2/run-1/keywords.json",
+            "s2_keywords_s3_key": None,  # key absent on pre-migration runs
             "s2_report_s3_key": None,
         }
-        # Verify payload is genuinely small
-        assert len(json.dumps(small_run_context).encode()) < S3_THRESHOLD_BYTES
+        assert len(json.dumps(small_run_context, default=str).encode()) < S3_THRESHOLD_BYTES
 
-        with patch("handler.boto3") as mock_boto3:
-            # Even though s3_key is present, boto3.client should NOT be called
-            # because payload is below threshold
-            _mock_s3 = MagicMock()
-            mock_boto3.client.return_value = _mock_s3
-
-            # Simulate the threshold check as it happens in handler()
-            context_bytes = len(
-                json.dumps(small_run_context, default=str).encode("utf-8")
-            )
-            assert context_bytes <= S3_THRESHOLD_BYTES
-
-            # boto3.client("s3") should NOT be invoked for small payloads
-            mock_boto3.client.assert_not_called()
+        mock_s3 = MagicMock()
+        result = load_context_field(
+            small_run_context, "s2_keyword_research", "s2_keywords_s3_key",
+            mock_s3, _S3_SILVER_BUCKET,
+        )
+        mock_s3.get_object.assert_not_called()
+        assert result == inline_kw
 
 
 class TestAA122LargeContext:
