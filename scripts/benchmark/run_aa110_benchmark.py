@@ -30,7 +30,7 @@ SKILL_MD_PATH = (
 )
 
 OUTPUT_DIR = Path("/tmp/aa110_benchmark")
-BEDROCK_MODEL_ID = "us.anthropic.claude-sonnet-4-5-20251001-v1:0"
+BEDROCK_MODEL_ID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 GPT4O_MODEL_ID = "gpt-4o"
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 
