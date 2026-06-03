@@ -28,6 +28,7 @@ from services.acp_shared.cost_utils import (  # noqa: E402
     calc_bedrock_cost, extract_usage_from_response,
     record_stage_cost, finalize_run_cost,
 )
+from services.acp_shared.tracer import AcpTracer  # noqa: E402
 
 logger = structlog.get_logger()
 
@@ -102,21 +103,27 @@ def make_synthesize_node(pool, s3_client):
         llm_output = {}
         confidence_score = 0.0
         try:
-            response = _bedrock.invoke_model(
-                modelId=_MODEL_ID,
-                body=json.dumps({
-                    "anthropic_version": "bedrock-2023-05-31",
-                    "max_tokens": 4096,
-                    "system": _SYSTEM_PROMPT,
-                    "messages": [{"role": "user", "content": user_prompt}],
-                }),
-            )
-            raw = json.loads(response["body"].read())
+            import time as _time
+            tracer = AcpTracer(run_id=run_id, tenant_id=tenant_id)
+            _t = _time.time()
+            with tracer.span("s2", "synthesize") as _span:
+                response = _bedrock.invoke_model(
+                    modelId=_MODEL_ID,
+                    body=json.dumps({
+                        "anthropic_version": "bedrock-2023-05-31",
+                        "max_tokens": 4096,
+                        "system": _SYSTEM_PROMPT,
+                        "messages": [{"role": "user", "content": user_prompt}],
+                    }),
+                )
+                raw = json.loads(response["body"].read())
+                inp, out = extract_usage_from_response(raw)
+                tracer.record_llm_call(_span, _MODEL_ID, inp, out, (_time.time() - _t) * 1000)
             llm_output = json.loads(raw["content"][0]["text"])
             confidence_score = float(llm_output.get("confidence_score", 70.0))
-            inp, out = extract_usage_from_response(raw)
             cost = calc_bedrock_cost(inp, out, "haiku")
             await asyncio.to_thread(record_stage_cost, run_id, "s2", cost, inp, out)
+            tracer.flush()
         except Exception as exc:
             logger.error("synthesize_bedrock_error", run_id=run_id, error=str(exc))
             llm_output = {

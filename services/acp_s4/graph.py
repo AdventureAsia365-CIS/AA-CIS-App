@@ -2,12 +2,14 @@
 AA-46 — S4 Blog Engine: LangGraph StateGraph.
 
 Flow:
-  brief_node → draft_node → post_process_node → evaluate_node → validate_node → seo_node → save_node
+  brief_node → draft_node → post_process_node → evaluate_node
+    → validate_node → seo_node → save_node
 
 Rewrite loops:
   post_process_node: violation + rewrite_count < 2 → draft_node
   evaluate_node:     score < 7.5 + rewrite_count < 2 → draft_node
-  validate_node:     always → seo_node (validation failure routes to hitl_gate3_status=flagged_human)
+  validate_node:     always → seo_node
+                     (validation failure → hitl_gate3_status=flagged_human)
 """
 from __future__ import annotations
 
@@ -17,7 +19,6 @@ import re
 import uuid
 from typing import Optional, TypedDict
 
-import asyncpg
 import boto3
 import structlog
 from langgraph.graph import StateGraph, END
@@ -27,6 +28,7 @@ from services.acp_s4_blog.validator import ValidatorAgent
 from services.acp_s4.embeddings import check_blog_dedup, find_internal_links, store_blog_embedding
 from services.acp_s4.image_sourcer import source_featured_image
 from services.acp_shared.cost_utils import calc_bedrock_cost, record_stage_cost, finalize_run_cost
+from services.acp_shared.tracer import AcpTracer
 
 logger = structlog.get_logger()
 
@@ -39,7 +41,8 @@ EVAL_THRESHOLD = 7.5
 MAX_REWRITE = 2
 
 BLOG_SYSTEM_PROMPT = """You are Adventure Asia's expert travel blog writer.
-Adventure Asia is a premium bespoke travel brand for discerning senior professionals (40-60, US/UK/AU).
+Adventure Asia is a premium bespoke travel brand for discerning senior professionals
+(40-60, US/UK/AU).
 
 Voice: calm, assured, credible, specific, well-travelled, operator-led, quietly premium.
 Must NOT feel like: AI filler, SEO sludge, checklist tourism copy, internal project notes.
@@ -49,8 +52,10 @@ Writing rules:
 - Prove one central thesis with route-level specificity and concrete proof points
 - Opening: scene / contrast / surprising grounded claim — then explicit thesis
 - Include an honest caveat naturally (humidity, harder day, transfer friction)
-- FAQ answers must each have one specific qualifier (place, km, season, transport, fitness, trade-off)
-- No scaffolding language: no "calendar brief", "operational note", "verify provider", "this section follows"
+- FAQ answers must each have one specific qualifier
+  (place, km, season, transport, fitness, trade-off)
+- No scaffolding language: no "calendar brief", "operational note",
+  "verify provider", "this section follows"
 - No hype: no "breathtaking", "stunning", "iconic", "unforgettable", "trip of a lifetime"
 
 Return ONLY valid JSON matching this schema exactly:
@@ -235,21 +240,27 @@ Outline:
 Return ONLY the JSON object — no preamble, no explanation."""
 
     try:
-        response = _BEDROCK.invoke_model(
-            modelId=DRAFT_MODEL,
-            body=json.dumps({
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 8192,
-                "system": BLOG_SYSTEM_PROMPT,
-                "messages": [{"role": "user", "content": user_prompt}],
-            }),
-            contentType="application/json",
-            accept="application/json",
-        )
-        raw = json.loads(response["body"].read())
-        usage = raw.get("usage", {})
-        inp = usage.get("input_tokens", 0)
-        out = usage.get("output_tokens", 0)
+        import time as _time
+        _tracer = AcpTracer(run_id=state["run_id"], tenant_id=state["tenant_id"])
+        _t = _time.time()
+        with _tracer.span("s4_blog", "draft") as _span:
+            response = _BEDROCK.invoke_model(
+                modelId=DRAFT_MODEL,
+                body=json.dumps({
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": 8192,
+                    "system": BLOG_SYSTEM_PROMPT,
+                    "messages": [{"role": "user", "content": user_prompt}],
+                }),
+                contentType="application/json",
+                accept="application/json",
+            )
+            raw = json.loads(response["body"].read())
+            usage = raw.get("usage", {})
+            inp = usage.get("input_tokens", 0)
+            out = usage.get("output_tokens", 0)
+            _tracer.record_llm_call(_span, DRAFT_MODEL, inp, out, (_time.time() - _t) * 1000)
+        _tracer.flush()
         await asyncio.to_thread(
             record_stage_cost, state["run_id"], "s4_blog",
             calc_bedrock_cost(inp, out, "haiku"), inp, out,
@@ -263,7 +274,8 @@ Return ONLY the JSON object — no preamble, no explanation."""
                 content_text = content_text[4:]
             content_text = content_text.strip()
         draft = json.loads(content_text)
-        logger.info("s4_draft_generated", slug=draft.get("slug", ""), chars=len(draft.get("content_md", "")))
+        logger.info("s4_draft_generated", slug=draft.get("slug", ""),
+                    chars=len(draft.get("content_md", "")))
         return {
             **state,
             "content_md": draft.get("content_md", ""),
@@ -349,7 +361,9 @@ async def evaluate_node(state: S4BlogState) -> S4BlogState:
                 "evaluator_score": score,
                 "evaluator_input_hash": hash_val,
                 "rewrite_count": count,
-                "rewrite_feedback": f"Evaluator score {score:.1f} < {EVAL_THRESHOLD}. Issues: {issues}",
+                "rewrite_feedback": (
+                    f"Evaluator score {score:.1f} < {EVAL_THRESHOLD}. Issues: {issues}"
+                ),
                 "status": "rewriting" if count < MAX_REWRITE else "validating",
             }
         return {
@@ -360,7 +374,8 @@ async def evaluate_node(state: S4BlogState) -> S4BlogState:
         }
     except Exception as e:
         logger.error("s4_evaluate_failed", error=str(e))
-        return {**state, "evaluator_score": None, "evaluator_input_hash": None, "status": "validating"}
+        return {**state, "evaluator_score": None,
+                "evaluator_input_hash": None, "status": "validating"}
 
 
 # ── Node 5: validate_node ─────────────────────────────────────────────────────
@@ -488,10 +503,12 @@ async def save_node(state: S4BlogState) -> S4BlogState:
     if db:
         links = await find_internal_links(
             db, state["tenant_id"],
-            section_text=f"{state.get('title','')} {state.get('primary_keyword','')}",
+            section_text=f"{state.get('title', '')} {state.get('primary_keyword', '')}",
         )
         if links:
-            link_lines = "\n".join(f"- [{lnk['aa_name']}](/tours/{lnk['slug']})" for lnk in links[:3])
+            link_lines = "\n".join(
+                f"- [{lnk['aa_name']}](/tours/{lnk['slug']})" for lnk in links[:3]
+            )
             content_md = content_md + f"\n\n**Explore Related Adventures:**\n{link_lines}"
             logger.info("s4_internal_links_added count=%d", len(links))
         elif not links:
