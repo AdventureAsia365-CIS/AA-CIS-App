@@ -10,12 +10,14 @@ Design:
 - rejection_note_structured always written for audit, even when rule not created
 - actor_type omitted from audit_log — enum has no 'system' value
 """
-import asyncio
 import json
 import logging
+import time
 from typing import Optional
 
 import boto3
+
+from services.acp_shared.tracer import AcpTracer
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +68,8 @@ Rules:
 """
 
 
-def _call_haiku(rejection_note: str, gate_number: int) -> dict:
+def _call_haiku(rejection_note: str, gate_number: int) -> tuple[dict, int, int]:
+    """Returns (extracted_data, input_tokens, output_tokens)."""
     client = boto3.client("bedrock-runtime", region_name=_BEDROCK_REGION)
     stage_label = _STAGE_LABELS.get(gate_number, f"Gate {gate_number}")
     prompt = _H3_PROMPT.format(
@@ -85,10 +88,13 @@ def _call_haiku(rejection_note: str, gate_number: int) -> dict:
         accept="application/json",
     )
     body = json.loads(response["body"].read())
+    usage = body.get("usage", {})
+    in_tok = usage.get("input_tokens", 0)
+    out_tok = usage.get("output_tokens", 0)
     text = body["content"][0]["text"].strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-    return json.loads(text)
+    return json.loads(text), in_tok, out_tok
 
 
 async def extract_and_save_rule(
@@ -108,7 +114,12 @@ async def extract_and_save_rule(
         return None
 
     try:
-        extracted = _call_haiku(reviewer_notes, gate_number)
+        tracer = AcpTracer(run_id=run_id, tenant_id="")
+        _t = time.time()
+        with tracer.span("h3", "rule_extractor") as _span:
+            extracted, in_tok, out_tok = _call_haiku(reviewer_notes, gate_number)
+            tracer.record_llm_call(_span, _MODEL_ID, in_tok, out_tok, (time.time() - _t) * 1000)
+        tracer.flush()
     except Exception as exc:
         logger.warning("h3_haiku_failed run_id=%s error=%s", run_id, exc)
         return None
@@ -123,7 +134,8 @@ async def extract_and_save_rule(
 
         # Always write structured extraction for audit, regardless of confidence
         await conn.execute(
-            "UPDATE acp_shared.acp_hitl_requests SET rejection_note_structured = $2::jsonb WHERE hitl_id = $1",
+            "UPDATE acp_shared.acp_hitl_requests "
+            "SET rejection_note_structured = $2::jsonb WHERE hitl_id = $1",
             hitl_id,
             json.dumps(extracted),
         )
