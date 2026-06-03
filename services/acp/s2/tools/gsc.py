@@ -14,6 +14,6 @@ def make_gsc_node(pool):
         logger.info("gsc_stub_skipped", run_id=state.get("run_id"))
         completed = list(state.get("completed_tools", []))
         completed.append("gsc")
-        return {"gsc_s3_key": None, "completed_tools": completed}
+        return {"gsc_s3_key": None, "gsc_data_present": False, "completed_tools": completed}
 
     return gsc

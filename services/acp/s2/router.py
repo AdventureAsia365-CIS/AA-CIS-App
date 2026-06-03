@@ -39,17 +39,23 @@ async def _handle_gate1(pool, run_id: str, tenant_id: str) -> dict:
     """
     Gate 1 post-S2: auto-approve for aa_internal if confidence >= 0.85.
     B2B tenants always get a pending HITL request (self-approve via portal).
+    gate1_override='manual_required' blocks auto-approve even when score >= threshold (AA-113).
     PRD v1.3 §2.2.
     """
     async with pool.acquire() as conn:
         try:
             ctx = await get_run_context_validated(conn, run_id, require_stages=("s2",))
             confidence = ctx.s2_confidence_score or 0.0
+            gate1_override = None
+            if ctx.s2_visibility_report:
+                gate1_override = ctx.s2_visibility_report.get("gate1_override")
         except RunContextValidationError as exc:
             logger.error("gate1_context_missing", run_id=run_id, missing=exc.missing_path)
             confidence = 0.0
+            gate1_override = None
     is_aa_internal = (tenant_id == "00000000-0000-0000-0000-000000000001")
-    auto_approved = is_aa_internal and confidence >= GATE1_AUTO_APPROVE_THRESHOLD
+    override_blocks = (gate1_override == "manual_required")
+    auto_approved = is_aa_internal and confidence >= GATE1_AUTO_APPROVE_THRESHOLD and not override_blocks
     status = "approved" if auto_approved else "pending"
     reviewer_type = "aa_internal" if is_aa_internal else "tenant_admin"
 
@@ -63,7 +69,8 @@ async def _handle_gate1(pool, run_id: str, tenant_id: str) -> dict:
             ON CONFLICT DO NOTHING
             """,
             run_id,
-            json.dumps({"confidence": confidence, "threshold": GATE1_AUTO_APPROVE_THRESHOLD}),
+            json.dumps({"confidence": confidence, "threshold": GATE1_AUTO_APPROVE_THRESHOLD,
+                        "gate1_override": gate1_override}),
             status, auto_approved, confidence, reviewer_type,
         )
         await conn.execute(
@@ -75,13 +82,15 @@ async def _handle_gate1(pool, run_id: str, tenant_id: str) -> dict:
             """,
             tenant_id, run_id,
             json.dumps({"auto_approved": auto_approved, "confidence": confidence,
-                        "threshold": GATE1_AUTO_APPROVE_THRESHOLD}),
+                        "threshold": GATE1_AUTO_APPROVE_THRESHOLD,
+                        "gate1_override": gate1_override}),
         )
 
     logger.info("gate1_evaluated", run_id=run_id, auto_approved=auto_approved,
-                confidence=confidence, tenant_id=tenant_id)
+                confidence=confidence, gate1_override=gate1_override, tenant_id=tenant_id)
     return {"auto_approved": auto_approved, "confidence_score": confidence,
             "threshold": GATE1_AUTO_APPROVE_THRESHOLD,
+            "gate1_override": gate1_override,
             "next": "trigger_s3" if auto_approved else "await_manual_approval"}
 
 
@@ -208,8 +217,14 @@ async def run_s2(
         "reddit_s3_key": None,
         "gsc_s3_key": None,
         "keyword_count": 0,
+        "competitor_count": 0,
         "informational_intent_pct": None,
         "confidence_score": None,
+        "dataforseo_cache_hit": False,
+        "gsc_data_present": False,
+        "expand_attempts": 0,
+        "gate1_override": None,
+        "data_quality": None,
         "iteration": 0,
         "completed_tools": [],
         "error": None,

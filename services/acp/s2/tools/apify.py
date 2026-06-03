@@ -38,23 +38,30 @@ def make_apify_node(pool, s3_client, api_keys: dict):
                 LIMIT 1
             """, tenant_id, country)
 
-            if cached:
-                logger.info("apify_cache_hit", run_id=run_id)
-                completed = list(state.get("completed_tools", []))
-                completed.append("apify")
-                return {"competitors_s3_key": cached["competitors_s3_key"], "completed_tools": completed}
-
+            # Always fetch competitor count for confidence scoring regardless of cache
             urls = await conn.fetch("""
                 SELECT url, label
                 FROM acp_silver_s2.competitor_inputs
                 WHERE tenant_id = $1 AND country = $2 AND is_active = TRUE
             """, tenant_id, country)
 
+        competitor_count = len(urls)
+
+        if cached:
+            logger.info("apify_cache_hit", run_id=run_id, competitor_count=competitor_count)
+            completed = list(state.get("completed_tools", []))
+            completed.append("apify")
+            return {
+                "competitors_s3_key": cached["competitors_s3_key"],
+                "competitor_count": competitor_count,
+                "completed_tools": completed,
+            }
+
         if not urls:
             logger.info("apify_no_competitors", run_id=run_id, tenant_id=tenant_id)
             completed = list(state.get("completed_tools", []))
             completed.append("apify")
-            return {"competitors_s3_key": None, "completed_tools": completed}
+            return {"competitors_s3_key": None, "competitor_count": 0, "completed_tools": completed}
 
         start_urls = [{"url": row["url"]} for row in urls]
         apify_run_id = None
@@ -71,7 +78,12 @@ def make_apify_node(pool, s3_client, api_keys: dict):
             logger.error("apify_api_error", run_id=run_id, error=str(exc))
             completed = list(state.get("completed_tools", []))
             completed.append("apify")
-            return {"competitors_s3_key": None, "error": f"apify_failed: {exc}", "completed_tools": completed}
+            return {
+                "competitors_s3_key": None,
+                "competitor_count": competitor_count,
+                "error": f"apify_failed: {exc}",
+                "completed_tools": completed,
+            }
 
         s3_key = f"acp/s2/{run_id}/competitors.json"
         payload = {
@@ -90,7 +102,7 @@ def make_apify_node(pool, s3_client, api_keys: dict):
 
         completed = list(state.get("completed_tools", []))
         completed.append("apify")
-        logger.info("apify_complete", run_id=run_id, competitor_count=len(urls))
-        return {"competitors_s3_key": s3_key, "completed_tools": completed}
+        logger.info("apify_complete", run_id=run_id, competitor_count=competitor_count)
+        return {"competitors_s3_key": s3_key, "competitor_count": competitor_count, "completed_tools": completed}
 
     return apify
