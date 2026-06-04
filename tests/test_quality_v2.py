@@ -35,7 +35,7 @@ def test_quality_pass_extracts_warnings():
     )
     llm_client = MagicMock(return_value=payload)
     result = quality_pass("Draft with claim.", _brief(), llm_client)
-    assert "Unverified claim" in result["warnings"]
+    assert any("Unverified claim" in w for w in result["warnings"])
 
 
 def test_quality_pass_passed_flag_true():

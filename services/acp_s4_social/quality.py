@@ -17,7 +17,7 @@ Run the quality checklist below as an internal editor.
 Revise fixable issues directly. Do NOT show the checklist.
 Return ONLY valid JSON with this exact shape:
 {"revised_content": "the revised final content",
- "warnings": "unresolved proof or safety issues only; empty string if none",
+ "warnings": ["warning1", "warning2"] or [] if none,
  "passed": true}
 
 Quality checklist (apply internally):
@@ -56,12 +56,16 @@ Draft content to review and revise:
         data = json.loads(json_match.group())
         return {
             "revised_content": str(data.get("revised_content", content)).strip(),
-            "warnings": str(data.get("warnings", "")).strip(),
+            "warnings": (
+                data.get("warnings")
+                if isinstance(data.get("warnings"), list)
+                else ([str(data["warnings"])] if data.get("warnings") else [])
+            ),
             "passed": bool(data.get("passed", True)),
         }
     except Exception as e:
         structlog.get_logger().warning("quality_pass_failed", error=str(e))
-        return {"revised_content": content, "warnings": str(e), "passed": False}
+        return {"revised_content": content, "warnings": [str(e)], "passed": False}
 
 # Backward compat export — used by existing tests (test_s4_social.py)
 FORBIDDEN_PHRASES = [
