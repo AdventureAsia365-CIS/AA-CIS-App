@@ -32,6 +32,38 @@ from services.acp_shared.errors import S1ContextNotReadyError
 logger = structlog.get_logger()
 router = APIRouter(tags=["S2 Research"])
 
+
+async def _do_resume_run(run_id: str, tenant_id: str, pool, graph) -> None:
+    """Core S2 resume logic — reused by HTTP handler and startup crash-recovery."""
+    config = {"configurable": {"thread_id": run_id}}
+    sem = _get_semaphore(tenant_id)
+    async with sem:
+        try:
+            state = await graph.aget_state(config)
+            iteration = (
+                state.values.get("iteration", 0)
+                if state and state.values else 0
+            )
+            async with pool.acquire() as conn:
+                try:
+                    await conn.execute(
+                        """
+                        INSERT INTO acp_shared.acp_stage_runs (run_id, stage, metadata)
+                        VALUES ($1::uuid, 's2', $2::jsonb)
+                        ON CONFLICT (run_id, stage) DO UPDATE
+                        SET metadata = COALESCE(acp_stage_runs.metadata, '{}') || EXCLUDED.metadata
+                        """,
+                        run_id,
+                        json.dumps({"resume_from_iteration": iteration,
+                                    "checkpointer": "AsyncPostgresSaver"}),
+                    )
+                except Exception as e:
+                    logger.error("acp_stage_runs_upsert_failed", error=str(e), run_id=run_id)
+                    raise
+            await graph.ainvoke(None, config=config)
+        except Exception as exc:
+            logger.error("s2_resume_error", run_id=run_id, error=str(exc))
+
 GATE1_AUTO_APPROVE_THRESHOLD = 0.85  # PRD v1.3 §2.2: aa_internal + confidence >= 0.85
 
 
@@ -221,6 +253,7 @@ async def run_s2(
         "informational_intent_pct": None,
         "confidence_score": None,
         "dataforseo_cache_hit": False,
+        "apify_cache_hit": False,
         "gsc_data_present": False,
         "expand_attempts": 0,
         "gate1_override": None,
@@ -270,7 +303,26 @@ async def run_s2(
                             keyword_count=len(raw_kws) if raw_kws else 0)
                 _guard_s1_context(ctx_dict, s1_run_id)
 
-                await graph.ainvoke(initial_state, config=config)
+                result = await graph.ainvoke(initial_state, config=config)
+                # Write cache savings ratio to monitoring metadata
+                dfs_hit = bool((result or {}).get("dataforseo_cache_hit", False))
+                apify_hit = bool((result or {}).get("apify_cache_hit", False))
+                cache_hits = int(dfs_hit) + int(apify_hit)
+                compute_saved_pct = round((cache_hits / 2) * 100)
+                async with pool.acquire() as conn:
+                    try:
+                        await conn.execute(
+                            """
+                            UPDATE acp_shared.acp_stage_runs
+                            SET metadata = COALESCE(acp_stage_runs.metadata, '{}') ||
+                                           jsonb_build_object('compute_saved_pct', $1::text),
+                                updated_at = NOW()
+                            WHERE run_id = $2::uuid AND stage = 's2'
+                            """,
+                            str(compute_saved_pct), run_id,
+                        )
+                    except Exception as e:
+                        logger.warning("compute_saved_pct_write_failed", error=str(e), run_id=run_id)
                 await _handle_gate1(pool, run_id, tenant_id)
             except S1ContextNotReadyError as exc:
                 logger.error("s2_s1_context_not_ready", run_id=run_id,

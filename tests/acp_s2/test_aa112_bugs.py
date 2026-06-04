@@ -83,9 +83,9 @@ class TestBug2BackgroundUpsert:
         src = open(
             "services/acp/s2/router.py", encoding="utf-8"
         ).read()
-        # Both occurrences must use the qualified form
-        assert src.count("COALESCE(acp_stage_runs.metadata, '{}')") == 2, (
-            "Expected exactly 2 occurrences of "
+        # All occurrences must use the qualified form (count grows as new metadata writes are added)
+        assert src.count("COALESCE(acp_stage_runs.metadata, '{}')") >= 2, (
+            "Expected at least 2 occurrences of "
             "COALESCE(acp_stage_runs.metadata, '{}') in router.py; "
             "bare 'metadata' is ambiguous to PostgreSQL and causes silent upsert failures"
         )

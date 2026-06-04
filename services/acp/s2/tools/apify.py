@@ -54,6 +54,7 @@ def make_apify_node(pool, s3_client, api_keys: dict):
             return {
                 "competitors_s3_key": cached["competitors_s3_key"],
                 "competitor_count": competitor_count,
+                "apify_cache_hit": True,
                 "completed_tools": completed,
             }
 

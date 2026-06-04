@@ -24,19 +24,48 @@ from services.acp.s2.tools import (
 logger = structlog.get_logger()
 
 
+def _with_iteration_update(node_fn, node_index: int, pool):
+    """Wrap a graph node to write current_iteration to acp_stage_runs.metadata after it runs."""
+    async def _wrapped(state: dict) -> dict:
+        result = await node_fn(state)
+        run_id = state.get("run_id")
+        if run_id:
+            try:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE acp_shared.acp_stage_runs
+                        SET metadata = COALESCE(acp_stage_runs.metadata, '{}') ||
+                                       jsonb_build_object('current_iteration', $1::text),
+                            updated_at = NOW()
+                        WHERE run_id = $2::uuid AND stage = 's2'
+                        """,
+                        str(node_index), run_id,
+                    )
+            except Exception as exc:
+                logger.warning("iteration_update_failed", run_id=run_id,
+                               node_index=node_index, error=str(exc))
+        return result
+    return _wrapped
+
+
 def build_s2_graph(pool, s3_client, api_keys: dict) -> StateGraph:
     """Build the S2 state graph with nodes wired to runtime dependencies.
     Returns an uncompiled StateGraph — caller must compile with a checkpointer.
     """
     builder = StateGraph(S2AgentState)
 
-    builder.add_node("dataforseo",    make_dataforseo_node(pool, s3_client, api_keys))
-    builder.add_node("apify",         make_apify_node(pool, s3_client, api_keys))
-    builder.add_node("google_trends", make_google_trends_node(pool, s3_client))
-    builder.add_node("reddit",        make_reddit_node(pool, s3_client))
-    builder.add_node("gsc",           make_gsc_node(pool))
-    builder.add_node("expand_scope",  make_expand_scope_node(s3_client, api_keys))
-    builder.add_node("synthesize",    make_synthesize_node(pool, s3_client))
+    _nodes = [
+        ("dataforseo",    make_dataforseo_node(pool, s3_client, api_keys)),
+        ("apify",         make_apify_node(pool, s3_client, api_keys)),
+        ("google_trends", make_google_trends_node(pool, s3_client)),
+        ("reddit",        make_reddit_node(pool, s3_client)),
+        ("gsc",           make_gsc_node(pool)),
+        ("expand_scope",  make_expand_scope_node(s3_client, api_keys)),
+        ("synthesize",    make_synthesize_node(pool, s3_client)),
+    ]
+    for i, (name, fn) in enumerate(_nodes, start=1):
+        builder.add_node(name, _with_iteration_update(fn, i, pool))
 
     builder.add_edge(START,           "dataforseo")
     builder.add_edge("dataforseo",    "apify")
