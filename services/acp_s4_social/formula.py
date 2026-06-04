@@ -66,3 +66,89 @@ def load_context() -> str:
     """Load CONTEXT.md glossary."""
     path = REFERENCES_DIR / "CONTEXT.md"
     return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+# v2: 9-goal system with formula mapping and selective references
+GOALS: dict[str, dict] = {
+    "1": {
+        "name": "Promotion",
+        "formulas": ["aida"],
+        "references": ["aida.md"],
+    },
+    "2": {
+        "name": "Lead generation",
+        "formulas": ["aida", "pas"],
+        "references": ["aida.md", "pas.md"],
+    },
+    "3": {
+        "name": "Conversion",
+        "formulas": ["aida", "slap"],
+        "references": ["aida.md", "slap.md"],
+    },
+    "4": {
+        "name": "Introduction / Awareness",
+        "formulas": ["hook-value-cta", "5w1h"],
+        "references": ["hook-value-cta.md", "5w1h.md"],
+    },
+    "5": {
+        "name": "Trust-building",
+        "formulas": ["fab", "5w1h"],
+        "references": ["fab.md", "5w1h.md"],
+    },
+    "6": {
+        "name": "Engagement / Conversation",
+        "formulas": ["hook-value-cta", "bab"],
+        "references": ["hook-value-cta.md", "bab.md"],
+    },
+    "7": {
+        "name": "Event announcement",
+        "formulas": ["5w1h", "aida"],
+        "references": ["5w1h.md", "aida.md"],
+    },
+    "8": {
+        "name": "Product or service explanation",
+        "formulas": ["fab"],
+        "references": ["fab.md"],
+    },
+    "9": {
+        "name": "Partner / supplier communication",
+        "formulas": ["fab", "5w1h"],
+        "references": ["fab.md", "5w1h.md"],
+    },
+}
+
+GOAL_NAME_TO_KEY: dict[str, str] = {
+    "promotion": "1", "promo": "1",
+    "lead generation": "2", "lead": "2",
+    "conversion": "3", "convert": "3",
+    "introduction": "4", "awareness": "4", "intro": "4",
+    "trust-building": "5", "trust": "5",
+    "engagement": "6", "conversation": "6",
+    "event announcement": "7", "event": "7",
+    "product or service explanation": "8", "product": "8", "service": "8",
+    "partner / supplier communication": "9", "partner": "9", "supplier": "9",
+}
+
+
+def normalize_goal_key(value: str) -> str | None:
+    """Return canonical goal key ("1"-"9") from a numeric key or name alias. None if unknown."""
+    v = value.strip().lower()
+    if v in GOALS:
+        return v
+    return GOAL_NAME_TO_KEY.get(v)
+
+
+def get_goal_primary_formula(goal_key: str) -> str:
+    """Return primary formula name for a goal key. Falls back to 'aida'."""
+    return GOALS.get(goal_key, {}).get("formulas", ["aida"])[0]
+
+
+def load_goal_references(goal_key: str) -> str:
+    """Load and concatenate all reference files for a goal key."""
+    refs = GOALS.get(goal_key, {}).get("references", ["aida.md"])
+    texts = []
+    for ref in refs:
+        path = REFERENCES_DIR / ref
+        if path.exists():
+            texts.append(path.read_text(encoding="utf-8"))
+    return "\n\n---\n\n".join(texts)
