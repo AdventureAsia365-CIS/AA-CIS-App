@@ -2,18 +2,20 @@
 /v1/social — Social content read API (AA-83).
 
 Routes (specific before parameterized):
-  GET /v1/social              → list rows (filter by tenant_id, tour_id)
-  GET /v1/social/{social_id}  → get single row
+  GET  /v1/social                  → list rows (filter by tenant_id, tour_id)
+  POST /v1/social/batch-review     → bulk HITL decisions [AA-111]
+  GET  /v1/social/{social_id}      → get single row
 """
 import json
 import os
-from typing import Optional
+from typing import List, Optional
 from uuid import UUID
 
 import asyncpg
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.security import HTTPBearer as _HTTPBearer, HTTPAuthorizationCredentials as _Creds
+from pydantic import BaseModel, field_validator
 
 from api.routers.auth import verify_jwt as _verify_jwt
 
@@ -95,6 +97,101 @@ async def list_social_content(
         rows = await conn.fetch(query, *params)
 
     return [_row_to_dict(r) for r in rows]
+
+
+# ── Batch review models ───────────────────────────────────────────────────────
+
+class BatchDecision(BaseModel):
+    social_id: str
+    status: str
+    notes: Optional[str] = None
+
+    @field_validator("status")
+    @classmethod
+    def _valid_status(cls, v: str) -> str:
+        if v not in ("approved", "rejected"):
+            raise ValueError("status must be 'approved' or 'rejected'")
+        return v
+
+    @field_validator("social_id")
+    @classmethod
+    def _valid_uuid(cls, v: str) -> str:
+        try:
+            UUID(v)
+        except ValueError:
+            raise ValueError(f"Invalid social_id UUID: {v!r}")
+        return v
+
+
+class BatchReviewRequest(BaseModel):
+    decisions: List[BatchDecision]
+    reviewer_id: str
+
+    @field_validator("decisions")
+    @classmethod
+    def _non_empty(cls, v: list) -> list:
+        if not v:
+            raise ValueError("decisions must not be empty")
+        if len(v) > 200:
+            raise ValueError("decisions must contain at most 200 items")
+        return v
+
+
+@router.post("/batch-review")
+async def batch_review_social(
+    body: BatchReviewRequest,
+    request: Request,
+    _auth=Depends(_get_admin),
+):
+    """Gate 3-social bulk HITL decisions — single transaction."""
+    pool = _get_pool(request)
+    approved = sum(1 for d in body.decisions if d.status == "approved")
+    rejected = len(body.decisions) - approved
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            updated: list[tuple] = []
+            for dec in body.decisions:
+                row = await conn.fetchrow(
+                    """
+                    UPDATE acp_silver_s4.social_content
+                       SET hitl_gate_3_social_status = $1,
+                           hitl_reviewer_id          = $2,
+                           hitl_decided_at           = NOW()
+                     WHERE social_id = $3::uuid
+                    RETURNING social_id::text, tenant_id
+                    """,
+                    dec.status, body.reviewer_id, dec.social_id,
+                )
+                if not row:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"social_id not found: {dec.social_id}",
+                    )
+                updated.append((dec, str(row["tenant_id"])))
+
+            audit_rows = [
+                (
+                    tenant_id,
+                    body.reviewer_id,
+                    f"hitl.gate3_social.{dec.status}",
+                    dec.social_id,
+                    json.dumps({"notes": dec.notes, "reviewer_id": body.reviewer_id}),
+                )
+                for dec, tenant_id in updated
+            ]
+            await conn.executemany(
+                """
+                INSERT INTO acp_shared.audit_log
+                    (tenant_id, actor, action, resource_type, resource_id, details)
+                VALUES ($1, $2, $3, 'social_content', $4, $5::jsonb)
+                """,
+                audit_rows,
+            )
+
+    logger.info("batch_review_done processed=%d approved=%d rejected=%d",
+                len(body.decisions), approved, rejected)
+    return {"processed": len(body.decisions), "approved": approved, "rejected": rejected, "errors": []}
 
 
 @router.get("/{social_id}")
