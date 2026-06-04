@@ -28,7 +28,7 @@ class OutputRuleViolation(Exception):
         self.rule_type = rule_type
         self.field_name = field_name
         self.matched_text = matched_text
-        super().__init__(message, rule_id, rule_type)
+        super().__init__(message, rule_id, rule_type, field_name, matched_text)
 
 
 def _normalize(text: str) -> str:
