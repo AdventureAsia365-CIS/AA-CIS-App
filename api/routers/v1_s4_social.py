@@ -287,6 +287,120 @@ async def get_social(
 
 # ── PATCH /{social_id}/hitl — Gate 3-social approve/reject ───────────────────
 
+class RetryAngleRequest(BaseModel):
+    angle_index: int
+    reviewer_id: str
+
+
+@router.post("/{social_id}/retry-angle")
+async def retry_angle(
+    social_id: str,
+    body: RetryAngleRequest,
+    request: Request,
+    _auth=Depends(_get_admin),
+):
+    """Retry content with a different stored angle for a rejected guided-mode post."""
+    try:
+        UUID(social_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid social_id UUID")
+
+    if body.angle_index not in (1, 2, 3):
+        raise HTTPException(status_code=422, detail="angle_index must be 1, 2, or 3")
+
+    pool = _get_pool(request)
+    async with pool.acquire() as db:
+        row = await db.fetchrow(
+            "SELECT social_id, channel, content_brief, angles_json, rewrite_attempt, "
+            "tenant_id, run_id, tour_id, tour_name, llm_provider, model_id "
+            "FROM acp_silver_s4.social_content WHERE social_id=$1::uuid",
+            social_id,
+        )
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Social content not found")
+
+    if row["angles_json"] is None:
+        raise HTTPException(
+            status_code=422,
+            detail="No stored angles — auto mode or pre-AA-126 row",
+        )
+
+    angle_key = f"angle_{body.angle_index}"
+    angles_json = dict(row["angles_json"])
+    selected_angle = angles_json.get(angle_key)
+    if selected_angle is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{angle_key} not found in stored angles_json",
+        )
+
+    brief_dict = dict(row["content_brief"])
+    brief = _to_brief(BriefIn(**brief_dict))
+
+    from services.acp_s4_social.formula import get_formula_name, load_formula_file
+    from services.acp_s4_social.output import _build_jsonb_columns
+    from services.acp_s4_social.quality import quality_pass
+    from services.acp_s4_social.writer import write_content
+
+    llm_client = make_llm_client(row["llm_provider"] or "bedrock", row["model_id"])
+    formula_name = get_formula_name(brief.channel, brief.goal)
+    formula_text = load_formula_file(formula_name)
+    content = write_content(brief, selected_angle, formula_text, llm_client)
+    quality = quality_pass(content, brief, llm_client)
+    final_content = quality.get("revised_content", content)
+    jsonb_cols = _build_jsonb_columns(brief.channel, final_content)
+
+    async with pool.acquire() as db:
+        await db.execute(
+            """
+            UPDATE acp_silver_s4.social_content SET
+                tiktok                    = $2::jsonb,
+                facebook_post             = $3::jsonb,
+                facebook_ad               = $4::jsonb,
+                strategy_notes            = $5::jsonb,
+                selected_angle            = $6,
+                hitl_gate_3_social_status = NULL,
+                hitl_reviewer_id          = NULL,
+                hitl_decided_at           = NULL,
+                rewrite_attempt           = COALESCE(rewrite_attempt, 0) + 1
+            WHERE social_id = $1::uuid
+            """,
+            social_id,
+            jsonb_cols["tiktok"],
+            jsonb_cols["facebook_post"],
+            jsonb_cols["facebook_ad"],
+            jsonb_cols["strategy_notes"],
+            json.dumps(selected_angle),
+        )
+
+        await db.execute(
+            """
+            INSERT INTO acp_shared.audit_log
+                (tenant_id, actor, action, resource_type, resource_id, details)
+            VALUES ($1, $2, $3, 'social_content', $4, $5::jsonb)
+            """,
+            str(row["tenant_id"]),
+            body.reviewer_id,
+            "angle_retry",
+            social_id,
+            json.dumps({"angle_index": body.angle_index, "reviewer_id": body.reviewer_id}),
+        )
+
+    new_attempt = (row["rewrite_attempt"] or 0) + 1
+    logger.info("angle_retry_done social_id=%s angle=%d reviewer=%s",
+                social_id, body.angle_index, body.reviewer_id)
+    return {
+        "social_id": social_id,
+        "channel": row["channel"],
+        "angle_index": body.angle_index,
+        "rewrite_attempt": new_attempt,
+        "status": "retried",
+    }
+
+
+# ── PATCH /{social_id}/hitl — Gate 3-social approve/reject ───────────────────
+
 class SocialHitlRequest(BaseModel):
     status: str
     reviewer_id: str
