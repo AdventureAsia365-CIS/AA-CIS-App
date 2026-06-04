@@ -191,7 +191,39 @@ async def batch_review_social(
 
     logger.info("batch_review_done processed=%d approved=%d rejected=%d",
                 len(body.decisions), approved, rejected)
-    return {"processed": len(body.decisions), "approved": approved, "rejected": rejected, "errors": []}
+    return {
+        "processed": len(body.decisions), "approved": approved,
+        "rejected": rejected, "errors": [],
+    }
+
+
+@router.get("/{social_id}/context")
+async def get_social_context(
+    social_id: str,
+    request: Request,
+    _auth=Depends(_get_admin),
+):
+    """Gate 3-social context panel data — quality score, validation, formula [AA-127]."""
+    try:
+        UUID(social_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid social_id UUID")
+
+    pool = _get_pool(request)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT social_id::text, quality_score, rewrite_attempt, "
+            "validation_status, validation_issues, "
+            "strategy_notes->>'formula_used' AS formula_used, "
+            "strategy_notes->>'mode' AS mode, "
+            "strategy_notes->>'selected_angle' AS selected_angle, "
+            "hitl_gate_3_social_status, created_at "
+            "FROM acp_silver_s4.social_content WHERE social_id = $1::uuid",
+            social_id,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Social content not found")
+    return _row_to_dict(row)
 
 
 @router.get("/{social_id}")
