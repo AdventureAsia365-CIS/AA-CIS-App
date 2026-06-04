@@ -1,5 +1,6 @@
 """ContentBrief dataclass for S4.2 Social Media Content Engine (AA-93)."""
 from dataclasses import dataclass, field
+from typing import Optional
 
 VALID_CHANNELS = [
     "facebook", "linkedin", "tiktok", "instagram",
@@ -38,6 +39,11 @@ class ContentBrief:
     must_avoid: list[str] = field(default_factory=list)
     destination: str = ""
     tour_name: str = ""
+    goal_key: Optional[str] = None
+    goal_name: str = ""
+
+    def get_goal_display(self) -> str:
+        return self.goal_name or self.goal or "engagement"
 
     def validate_anchors(self) -> list[str]:
         """Return list of missing/invalid anchor fields."""
@@ -71,4 +77,6 @@ class ContentBrief:
             "must_avoid": self.must_avoid,
             "destination": self.destination,
             "tour_name": self.tour_name,
+            "goal_key": self.goal_key,
+            "goal_name": self.goal_name,
         }
