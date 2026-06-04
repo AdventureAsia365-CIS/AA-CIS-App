@@ -128,9 +128,9 @@ async def _run_pipeline(run_id: str, pool: asyncpg.Pool, initial_state: dict) ->
             error_msg = final.get("error", "")
 
             await db.execute(
-                "UPDATE acp_shared.acp_runs SET status=$1, s4_blog_key=$2, "
+                "UPDATE acp_shared.acp_runs SET s4_blog_status=$1, s4_blog_key=$2, "
                 "completed_at=$3, error_message=$4 WHERE run_id=$5::uuid",
-                "completed" if outcome == "done" else "failed",
+                "complete" if outcome == "done" else "failed",
                 draft_id,
                 datetime.now(timezone.utc),
                 error_msg or None,
@@ -141,10 +141,24 @@ async def _run_pipeline(run_id: str, pool: asyncpg.Pool, initial_state: dict) ->
         logger.error("s4_pipeline_error", run_id=run_id, error=str(e))
         async with pool.acquire() as db:
             await db.execute(
-                "UPDATE acp_shared.acp_runs SET status='failed', completed_at=$1, error_message=$2 "
+                "UPDATE acp_shared.acp_runs SET s4_blog_status='failed', completed_at=$1, error_message=$2 "
                 "WHERE run_id=$3::uuid",
                 datetime.now(timezone.utc), str(e), run_id,
             )
+
+
+def _derive_run_status(s4_blog_status: str, s4_social_status: str) -> str:
+    """Derive composite acp_runs.status from independent S4 statuses."""
+    statuses = {s4_blog_status, s4_social_status}
+    if "running" in statuses:
+        return "s4_running"
+    if "failed" in statuses:
+        return "s4_partial_failed"
+    if statuses == {"complete"}:
+        return "s4_complete"
+    if "hitl_wait" in statuses:
+        return "s4_hitl_wait"
+    return "s4_running"  # default fallback
 
 
 async def _rerun_blog_after_hitl_rejection(run_id: str, pool: asyncpg.Pool) -> None:
@@ -230,13 +244,16 @@ async def get_run(
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT run_id::text, tenant_id, status, s4_blog_key, "
+            "s4_blog_status, s4_social_status, "
             "started_at, completed_at, error_message "
             "FROM acp_shared.acp_runs WHERE run_id=$1::uuid",
             run_id,
         )
     if not row:
         raise HTTPException(status_code=404, detail="Run not found")
-    return _row_to_dict(row)
+    d = _row_to_dict(row)
+    d["status"] = _derive_run_status(d.get("s4_blog_status", "pending"), d.get("s4_social_status", "pending"))
+    return d
 
 
 @router.get("/drafts")
