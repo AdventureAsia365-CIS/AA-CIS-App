@@ -15,6 +15,7 @@ ALTER TABLE acp_silver_s4.blog_drafts
 ALTER TABLE acp_silver_s4.blog_drafts
     ADD CONSTRAINT blog_drafts_hitl_gate3_status_check
     CHECK (hitl_gate3_status IN (
+        'pending',
         'pending_trang',
         'trang_approved',
         'trang_rejected',
