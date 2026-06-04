@@ -108,9 +108,36 @@ class S4BlogState(TypedDict):
     error: str
     status: str
     draft_id: Optional[str]
+    # AA-116: retry context (circuit breaker history)
+    score_history: list  # [{attempt, score, issues}] per evaluate_node call
+    gate3_context: Optional[dict]  # None on first-pass; built by save_node after retries
     # DB connection (injected at runtime, not serialized)
     db: Optional[object]
     db_rules: list
+
+
+# ── Gate 3 retry context helper (AA-116) ─────────────────────────────────────
+
+def _build_gate3_context(score_history: list, threshold: float) -> Optional[dict]:
+    """
+    Build gate3_context from per-attempt evaluator records.
+    Returns None when only one attempt passed (no retries).
+    Called by save_node; also used directly in unit tests.
+    """
+    if not score_history:
+        return None
+    if len(score_history) == 1 and score_history[0]["score"] >= threshold:
+        return None
+    best = max(score_history, key=lambda x: x["score"])
+    last = score_history[-1]
+    return {
+        "attempts": len(score_history),
+        "best_score": best["score"],
+        "best_attempt": best["attempt"],
+        "failing_dimensions": last.get("issues", []),
+        "retry_history": score_history,
+        "threshold": threshold,
+    }
 
 
 # ── Tour facts helpers ────────────────────────────────────────────────────────
@@ -351,25 +378,33 @@ async def evaluate_node(state: S4BlogState) -> S4BlogState:
         result = json.loads(body["body"])
         score = float(result.get("evaluator_score", 0))
         hash_val = result.get("evaluator_input_hash", "")
+        issues = result.get("issues", [])
         logger.info("s4_evaluated", score=score, hash=hash_val[:12])
+
+        # AA-116: record this attempt in score_history
+        score_history = list(state.get("score_history") or [])
+        attempt_num = len(score_history) + 1
+        score_history.append({"attempt": attempt_num, "score": score, "issues": issues[:5]})
 
         if score < EVAL_THRESHOLD:
             count = state.get("rewrite_count", 0) + 1
-            issues = "; ".join(result.get("issues", [])[:3])
+            issues_str = "; ".join(str(i) for i in issues[:3])
             return {
                 **state,
                 "evaluator_score": score,
                 "evaluator_input_hash": hash_val,
                 "rewrite_count": count,
                 "rewrite_feedback": (
-                    f"Evaluator score {score:.1f} < {EVAL_THRESHOLD}. Issues: {issues}"
+                    f"Evaluator score {score:.1f} < {EVAL_THRESHOLD}. Issues: {issues_str}"
                 ),
+                "score_history": score_history,
                 "status": "rewriting" if count < MAX_REWRITE else "validating",
             }
         return {
             **state,
             "evaluator_score": score,
             "evaluator_input_hash": hash_val,
+            "score_history": score_history,
             "status": "validating",
         }
     except Exception as e:
@@ -514,6 +549,11 @@ async def save_node(state: S4BlogState) -> S4BlogState:
         elif not links:
             logger.warning("s4_no_internal_links keyword=%s", state.get("primary_keyword"))
 
+    # AA-116: build gate3_context from score history when retries occurred
+    gate3_context = _build_gate3_context(
+        state.get("score_history") or [], EVAL_THRESHOLD
+    )
+
     try:
         row = await db.fetchrow(
             """INSERT INTO acp_silver_s4.blog_drafts
@@ -522,13 +562,13 @@ async def save_node(state: S4BlogState) -> S4BlogState:
                 evaluator_score, evaluator_input_hash, review_flags, rules_applied,
                 validation_passed, validation_score, failing_checks, repair_targets,
                 seo_score, seo_issues, hitl_gate3_status, rewrite_count, pipeline_version,
-                featured_image_url, image_credit, image_source)
+                featured_image_url, image_credit, image_source, gate3_context)
              VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6,
                      $7, $8, $9, $10::jsonb, 'draft',
                      $11, $12, $13::jsonb, $14::jsonb,
                      $15, $16, $17::jsonb, $18::jsonb,
                      $19, $20::jsonb, $21, $22, 'v2',
-                     $23, $24, $25)
+                     $23, $24, $25, $26::jsonb)
              RETURNING draft_id::text""",
             state["run_id"],
             state["tenant_id"],
@@ -555,6 +595,7 @@ async def save_node(state: S4BlogState) -> S4BlogState:
             img_url,
             img_credit,
             img_source,
+            json.dumps(gate3_context) if gate3_context is not None else None,
         )
         draft_id = row["draft_id"]
         logger.info("s4_draft_saved draft_id=%s hitl_status=%s image_source=%s",

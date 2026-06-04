@@ -117,6 +117,8 @@ async def _run_pipeline(run_id: str, pool: asyncpg.Pool, initial_state: dict) ->
                 "error": "",
                 "status": "briefing",
                 "draft_id": None,
+                "score_history": [],
+                "gate3_context": None,
             }
 
             graph = build_s4_graph()
@@ -250,7 +252,7 @@ async def get_draft(
             "status, evaluator_score, evaluator_input_hash, review_flags, rules_applied, "
             "validation_passed, validation_score, failing_checks, repair_targets, "
             "seo_score, seo_issues, hitl_gate3_status, hitl_reviewer_id, hitl_decided_at, "
-            "rewrite_count, pipeline_version, created_at, updated_at "
+            "rewrite_count, pipeline_version, gate3_context, created_at, updated_at "
             "FROM acp_silver_s4.blog_drafts WHERE draft_id=$1::uuid",
             draft_id,
         )
