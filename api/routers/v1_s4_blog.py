@@ -112,7 +112,7 @@ async def _run_pipeline(run_id: str, pool: asyncpg.Pool, initial_state: dict) ->
                 "repair_targets": [],
                 "seo_score": None,
                 "seo_issues": [],
-                "rewrite_count": 0,
+                "rewrite_count": initial_state.get("rewrite_count", 0),
                 "rewrite_feedback": "",
                 "error": "",
                 "status": "briefing",
@@ -147,6 +147,40 @@ async def _run_pipeline(run_id: str, pool: asyncpg.Pool, initial_state: dict) ->
             )
 
 
+async def _rerun_blog_after_hitl_rejection(run_id: str, pool: asyncpg.Pool) -> None:
+    """Re-run S4 pipeline for a blog after Trang's HITL rejection.
+
+    Fetches the original brief from acp_shared.acp_runs.run_config, then calls
+    _run_pipeline with rewrite_count=1 so the new draft cannot be requeued again.
+    """
+    try:
+        async with pool.acquire() as db:
+            row = await db.fetchrow(
+                "SELECT tenant_id, run_config FROM acp_shared.acp_runs WHERE run_id=$1::uuid",
+                run_id,
+            )
+        if not row:
+            logger.error("hitl_rerun_no_run", run_id=run_id)
+            return
+        run_config = row["run_config"] or {}
+        if isinstance(run_config, str):
+            run_config = json.loads(run_config)
+        initial_state = {
+            "run_id": run_id,
+            "tenant_id": str(row["tenant_id"]),
+            "calendar_item_id": run_config.get("calendar_item_id", str(uuid4())),
+            "primary_keyword": run_config.get("primary_keyword", ""),
+            "outline": run_config.get("outline", []),
+            "target_keywords": run_config.get("target_keywords", []),
+            "title": run_config.get("title", ""),
+            "rewrite_count": 1,  # Guard: prevents a second HITL requeue on the new draft
+        }
+        logger.info("hitl_rerun_start", run_id=run_id, keyword=initial_state["primary_keyword"])
+        await _run_pipeline(run_id, pool, initial_state)
+    except Exception as exc:
+        logger.error("hitl_rerun_failed", run_id=run_id, error=str(exc))
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.post("/runs", status_code=202)
@@ -159,13 +193,6 @@ async def create_run(
     run_id = str(uuid4())
     calendar_item_id = body.calendar_item_id or str(uuid4())
 
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO acp_shared.acp_runs (run_id, tenant_id, country, status, started_at) "
-            "VALUES ($1::uuid, $2, 'S4', 'running', NOW())",
-            run_id, body.tenant_id,
-        )
-
     initial_state = {
         "run_id": run_id,
         "tenant_id": body.tenant_id,
@@ -175,6 +202,14 @@ async def create_run(
         "target_keywords": body.target_keywords,
         "title": body.title,
     }
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO acp_shared.acp_runs "
+            "(run_id, tenant_id, country, status, started_at, run_config) "
+            "VALUES ($1::uuid, $2, 'S4', 'running', NOW(), $3::jsonb)",
+            run_id, body.tenant_id, json.dumps(initial_state),
+        )
     asyncio.create_task(_run_pipeline(run_id, pool, initial_state))
     logger.info("s4_run_queued", run_id=run_id, keyword=body.primary_keyword)
     return {"run_id": run_id, "status": "queued"}
@@ -288,6 +323,58 @@ async def hitl_decision(
 
     pool = _get_pool(request)
     async with pool.acquire() as conn:
+        # ── Trang rejection: requeue or escalate ──────────────────────────────
+        if new_hitl_status == "trang_rejected":
+            draft_row = await conn.fetchrow(
+                "SELECT rewrite_count, run_id::text, tenant_id "
+                "FROM acp_silver_s4.blog_drafts WHERE draft_id=$1::uuid",
+                draft_id,
+            )
+            if not draft_row:
+                raise HTTPException(status_code=404, detail="Draft not found")
+
+            rewrite_count = draft_row["rewrite_count"]
+            run_id = str(draft_row["run_id"])
+            tenant_id = str(draft_row["tenant_id"])
+
+            await conn.execute(
+                "INSERT INTO acp_shared.audit_log "
+                "(tenant_id, actor, action, resource_type, resource_id, details) "
+                "VALUES ($1, $2, $3, 'blog_draft', $4, $5::jsonb)",
+                tenant_id, body.reviewer_id, "hitl.gate3.rejected",
+                draft_id, json.dumps({"notes": body.notes, "reviewer_id": body.reviewer_id}),
+            )
+
+            if rewrite_count < 1:
+                await conn.execute(
+                    "UPDATE acp_silver_s4.blog_drafts "
+                    "SET hitl_gate3_status='pending_trang', rewrite_count=rewrite_count+1, "
+                    "hitl_reviewer_id=$1, hitl_decided_at=NULL "
+                    "WHERE draft_id=$2::uuid",
+                    body.reviewer_id, draft_id,
+                )
+                asyncio.create_task(_rerun_blog_after_hitl_rejection(run_id, pool))
+                logger.info("s4_hitl_requeued", draft_id=draft_id, reviewer=body.reviewer_id)
+                return {
+                    "status": "requeued",
+                    "rewrite_count": rewrite_count + 1,
+                    "message": "Blog queued for rewrite. 0 retries remaining after this.",
+                }
+            else:
+                await conn.execute(
+                    "UPDATE acp_silver_s4.blog_drafts "
+                    "SET hitl_gate3_status='escalated_msthy', "
+                    "hitl_reviewer_id=$1, hitl_decided_at=NOW() "
+                    "WHERE draft_id=$2::uuid",
+                    body.reviewer_id, draft_id,
+                )
+                logger.info("s4_hitl_escalated", draft_id=draft_id, reviewer=body.reviewer_id)
+                return {
+                    "status": "escalated",
+                    "message": "Maximum retries reached. Escalated to Ms. Thu for final decision.",
+                }
+
+        # ── All other decisions (trang_approved, msthy_approved, msthy_rejected) ──
         row = await conn.fetchrow(
             "UPDATE acp_silver_s4.blog_drafts "
             "SET hitl_gate3_status=$1, hitl_reviewer_id=$2, hitl_decided_at=NOW() "
@@ -302,18 +389,12 @@ async def hitl_decision(
         run_id = str(row["run_id"])
         tenant_id = str(row["tenant_id"])
 
-        # Audit log — mandatory on every decision
         await conn.execute(
-            """
-            INSERT INTO acp_shared.audit_log
-                (tenant_id, actor, action, resource_type, resource_id, details)
-            VALUES ($1, $2, $3, 'blog_draft', $4, $5::jsonb)
-            """,
-            tenant_id,
-            body.reviewer_id,
-            f"hitl.gate3.{body.status}",
-            draft_id,
-            json.dumps({"notes": body.notes, "reviewer_id": body.reviewer_id}),
+            "INSERT INTO acp_shared.audit_log "
+            "(tenant_id, actor, action, resource_type, resource_id, details) "
+            "VALUES ($1, $2, $3, 'blog_draft', $4, $5::jsonb)",
+            tenant_id, body.reviewer_id, f"hitl.gate3.{body.status}",
+            draft_id, json.dumps({"notes": body.notes, "reviewer_id": body.reviewer_id}),
         )
 
         if new_hitl_status == "msthy_approved":
