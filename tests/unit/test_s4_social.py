@@ -145,7 +145,7 @@ def test_quality_pass_flags_forbidden_phrase():
         "warnings": ["Forbidden phrase: game-changing"],
         "passed": False,
     })
-    llm = _mock_llm(quality_response=quality_response)
+    llm = _mock_llm(angles_response=quality_response)
     result = quality_pass(content_with_phrase, brief, llm)
     assert result["warnings"]
     assert any("game-changing" in w for w in result["warnings"])

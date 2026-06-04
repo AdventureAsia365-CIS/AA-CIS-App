@@ -5,10 +5,8 @@ Applies channel-specific rules from SKILL.md.
 """
 from __future__ import annotations
 
-import json
-
 from services.acp_s4_social.brief import ContentBrief
-from services.acp_s4_social.formula import load_skill, load_context
+from services.acp_s4_social.formula import load_goal_references, load_skill
 
 # Channel-specific word count + style rules (from SKILL.md)
 _CHANNEL_RULES: dict[str, str] = {
@@ -61,10 +59,17 @@ _CHANNEL_RULES: dict[str, str] = {
 }
 
 
+SKILL_V2_SYSTEM = """You are a strategy-led English content writer for premium travel brands.
+Write using the selected goal's internal writing method. Do not label formulas.
+Follow channel rules. Use concrete details, not generic language.
+Return only the final content — no explanation, no checklist, no formula labels."""
+
+
 def _writer_system() -> str:
     skill = load_skill()
     skill_excerpt = skill[:2000] if skill else (
-        "Write calm, credible, experience-led content for discerning travellers (40-60, US/UK/AU professionals)."
+        "Write calm, credible, experience-led content "
+        "for discerning travellers (40-60, US/UK/AU professionals)."
     )
     return f"""You are Adventure Asia's senior content writer specialising in travel marketing.
 
@@ -95,37 +100,40 @@ def write_content(
     Returns:
         str: Final written content
     """
-    channel_rules = _CHANNEL_RULES.get(brief.channel, "Follow platform best practices.")
     include_text = "\n- ".join(brief.must_include) if brief.must_include else "None"
     avoid_text = "\n- ".join(brief.must_avoid) if brief.must_avoid else "None"
 
-    prompt = f"""Write {brief.channel} content using these specifications:
+    brief_section = (
+        f"Brand: {brief.brand}\n"
+        f"Audience: {brief.audience}\n"
+        f"Channel: {brief.channel}\n"
+        f"Goal: {brief.goal_name or brief.goal}\n"
+        f"Topic: {brief.topic}\n"
+        f"Tone: {brief.tone}\n"
+        f"CTA: {brief.cta}\n"
+        f"Destination: {brief.destination or 'N/A'}\n"
+        f"Tour: {brief.tour_name or 'N/A'}\n"
+        f"Must include:\n- {include_text}\n"
+        f"Must avoid:\n- {avoid_text}"
+    )
+    angle_section = f"{angle.get('name', 'Direct')}\n{angle.get('why_it_works', '')}"
 
-BRIEF:
-Brand: {brief.brand}
-Audience: {brief.audience}
-Goal: {brief.goal}
-Topic: {brief.topic}
-Tone: {brief.tone}
-CTA: {brief.cta}
-Destination: {brief.destination or 'N/A'}
-Tour: {brief.tour_name or 'N/A'}
-Must include:
-- {include_text}
-Must avoid:
-- {avoid_text}
+    if brief.goal_key:
+        system = SKILL_V2_SYSTEM
+        context = load_goal_references(brief.goal_key)
+    else:
+        channel_rules = _CHANNEL_RULES.get(brief.channel, "Follow platform best practices.")
+        system = _writer_system()
+        formula_fallback = "Use AIDA structure: Attention → Interest → Desire → Action"
+        formula_content = formula_text[:1500] if formula_text else formula_fallback
+        context = (
+            f"CHANNEL RULES FOR {brief.channel.upper()}:\n{channel_rules}\n\n"
+            f"COPYWRITING FORMULA:\n{formula_content}"
+        )
 
-SELECTED ANGLE: {angle.get('name', 'Direct')}
-Why it works: {angle.get('why_it_works', '')}
-Target length: {angle.get('length_signal', '200 words')}
-Style: {angle.get('style_signal', 'conversational')}
-
-CHANNEL RULES FOR {brief.channel.upper()}:
-{channel_rules}
-
-COPYWRITING FORMULA:
-{formula_text[:1500] if formula_text else "Use AIDA structure: Attention → Interest → Desire → Action"}
-
-Write the final content now. Output ONLY the content itself."""
-
-    return llm_client(_writer_system(), prompt)
+    user_prompt = (
+        f"{brief_section}\n\n"
+        f"## References\n\n{context}\n\n"
+        f"## Selected angle\n\n{angle_section}"
+    )
+    return llm_client(system, user_prompt)
