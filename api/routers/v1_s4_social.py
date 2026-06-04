@@ -153,15 +153,30 @@ async def generate_auto(
     try:
         async with pool.acquire() as db:
             result = await run_auto(brief, meta, db, llm_client)
-        if body.run_id and token_log:
-            in_tok = sum(t[0] for t in token_log)
-            out_tok = sum(t[1] for t in token_log)
-            cost = calc_bedrock_cost(in_tok, out_tok, "haiku")
-            await asyncio.to_thread(record_stage_cost, body.run_id, "s4_social", cost, in_tok, out_tok)
+        if body.run_id:
+            if token_log:
+                in_tok = sum(t[0] for t in token_log)
+                out_tok = sum(t[1] for t in token_log)
+                cost = calc_bedrock_cost(in_tok, out_tok, "haiku")
+                await asyncio.to_thread(record_stage_cost, body.run_id, "s4_social", cost, in_tok, out_tok)
+            async with pool.acquire() as db:
+                await db.execute(
+                    "UPDATE acp_shared.acp_runs SET s4_social_status='complete' WHERE run_id=$1::uuid",
+                    body.run_id,
+                )
         logger.info("s4_social_auto_done", social_id=result["social_id"], channel=body.brief.channel)
         return result
     except Exception as e:
         logger.error("s4_social_auto_failed", error=str(e))
+        if body.run_id:
+            try:
+                async with pool.acquire() as db:
+                    await db.execute(
+                        "UPDATE acp_shared.acp_runs SET s4_social_status='failed' WHERE run_id=$1::uuid",
+                        body.run_id,
+                    )
+            except Exception:
+                pass
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -216,15 +231,30 @@ async def write_guided(
     try:
         async with pool.acquire() as db:
             result = await run_guided_write(brief, body.selected_angle, meta, db, llm_client)
-        if body.run_id and token_log:
-            in_tok = sum(t[0] for t in token_log)
-            out_tok = sum(t[1] for t in token_log)
-            cost = calc_bedrock_cost(in_tok, out_tok, "haiku")
-            await asyncio.to_thread(record_stage_cost, body.run_id, "s4_social", cost, in_tok, out_tok)
+        if body.run_id:
+            if token_log:
+                in_tok = sum(t[0] for t in token_log)
+                out_tok = sum(t[1] for t in token_log)
+                cost = calc_bedrock_cost(in_tok, out_tok, "haiku")
+                await asyncio.to_thread(record_stage_cost, body.run_id, "s4_social", cost, in_tok, out_tok)
+            async with pool.acquire() as db:
+                await db.execute(
+                    "UPDATE acp_shared.acp_runs SET s4_social_status='complete' WHERE run_id=$1::uuid",
+                    body.run_id,
+                )
         logger.info("s4_social_guided_done", social_id=result["social_id"])
         return result
     except Exception as e:
         logger.error("s4_social_guided_failed", error=str(e))
+        if body.run_id:
+            try:
+                async with pool.acquire() as db:
+                    await db.execute(
+                        "UPDATE acp_shared.acp_runs SET s4_social_status='failed' WHERE run_id=$1::uuid",
+                        body.run_id,
+                    )
+            except Exception:
+                pass
         raise HTTPException(status_code=500, detail=str(e))
 
 
