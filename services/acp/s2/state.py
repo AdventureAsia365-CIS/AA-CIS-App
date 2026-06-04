@@ -18,6 +18,7 @@ class S2AgentState(TypedDict):
     confidence_score: Optional[float]
     # Tracking fields for confidence scorer (AA-105)
     dataforseo_cache_hit: bool
+    apify_cache_hit: bool
     gsc_data_present: bool
     # Circuit breaker tracking (AA-113)
     expand_attempts: int

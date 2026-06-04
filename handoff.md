@@ -1,28 +1,52 @@
-# AA-CIS-App Handoff — Session 52
-Updated: 2026-06-03
+# AA-CIS-App Handoff — Session 54
+Updated: 2026-06-04
 
 ## Status
-- Branch: develop (AA-122 + AA-167/168 merged) | Last main push: 0360a7f
-- ECS: api running (desiredCount=1) — STOP after session
-- RDS: aa-cis-dev-db — STOP after session
-- Migration 060: APPLIED on dev DB (s2_keywords_s3_key + s2_report_s3_key columns exist)
-- Migrations 052-059: NOT YET APPLIED
+- Branch: feature/aa-169-s2-auto-crash-recovery | Last commit: 4f04017
+- ECS: UNKNOWN — verify before starting
+- RDS: aa-cis-dev-db — UNKNOWN — verify before starting
+- Migrations 052-060: NOT YET APPLIED (dev DB)
+- Migration 061: created, not yet applied
 
 ## Completed This Session
 
-### AA-122 — S3 Lambda context size guardrail
-- Migration 060 applied on dev DB
-- Merged feature/aa-122-s3-context-guardrail to develop then main
-- Deploy Prod triggered
+### AA-169 — S2 Auto Crash-Recovery + Monitoring Fields + schema_versions fix
 
-### AA-167/168 — Sonnet model ID + H-3 threshold
-- Merged fix/aa-167-168-s3-model-confidence to develop
-- Deploy Dev triggered — merge to main pending Deploy Dev green
+**DELIVERABLE 1 — ECS startup hook (api/main.py)**
+- `_recover_stuck_s2_runs(pool, graph)` added as module-level function
+- Queries acp_stage_runs JOIN acp_runs WHERE status='running', metadata?'checkpointer', updated_at < NOW()-2min
+- Called in lifespan after graph init (skipped if graph init failed)
+- `_do_resume_run` imported from router.py (already existed as module-level fn from AA-112)
+
+**DELIVERABLE 2 — Monitoring fields (already implemented from prior session)**
+- `current_iteration`: written by `_with_iteration_update()` in graph.py after each of 7 nodes
+- `compute_saved_pct`: written in `_background()` after ainvoke (dataforseo + apify hits / 2)
+- `apify_cache_hit`: returned True on cache-hit path in apify.py
+
+**DELIVERABLE 3 — Migration 061**
+- `api/migrations/061_fix_schema_versions_058.sql` created
+- Backfills schema_versions row for 058 (ON CONFLICT DO NOTHING — safe, idempotent)
+
+**Tests: tests/acp_s2/test_aa169.py — 12/12 green**
+**tests/acp_s2/ — 23/23 green**
+**Full suite: 383 passed, 24 failed (pre-existing baseline unchanged)**
+
+### Branch
+- feature/aa-169-s2-auto-crash-recovery pushed to origin
+- NOT YET merged to develop — awaiting CI green
+
+## Next Steps
+1. Wait for CI to go green on feature/aa-169-s2-auto-crash-recovery
+2. Merge → develop → trigger Deploy Dev
+3. Apply migrations 052-061 on dev DB (start ECS + RDS first)
+4. Verify: grep "startup_recovery" in ECS logs on restart
+5. PR develop → main → Deploy Prod
 
 ## Open Issues
-- Migrations 052-059 not applied
-- AA-167/168 pending Deploy Dev then main merge
+- Migrations 052-061 not yet applied to dev DB
 - OPENAI_API_KEY needs rotation
+- 24 pre-existing test failures (test_s2_idempotency, test_s2_semaphore,
+  test_h3_rule_extractor, test_007_rls_isolation) — pre-existing
 - feature/aa-112-s2-async-postgres-saver: DO NOT merge
 - feature/aa-143-canary: DO NOT merge
 - feature/aa-141-run-health-dashboard: DO NOT merge

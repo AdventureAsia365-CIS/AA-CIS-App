@@ -32,12 +32,46 @@ from api.routers.acp_health import router as acp_health_router
 from api.middleware.rate_limit import rate_limit_middleware
 from api.middleware.sentry_context import sentry_context_middleware
 from api.core.sentry import init_sentry
-from services.acp.s2.router import router as v1_s2_router
+from services.acp.s2.router import router as v1_s2_router, _do_resume_run
 
 logger = structlog.get_logger()
 pool: asyncpg.Pool = None
 
 init_sentry()
+
+
+async def _recover_stuck_s2_runs(pool, graph) -> None:
+    """Auto-resume S2 runs stuck at status='running' on ECS restart.
+
+    Grace period: only recovers runs not updated in the last 2 minutes —
+    prevents racing with a run that legitimately started just before restart.
+    """
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT sr.run_id::text AS run_id, r.tenant_id::text AS tenant_id
+                FROM acp_shared.acp_stage_runs sr
+                JOIN acp_shared.acp_runs r ON r.run_id = sr.run_id
+                WHERE sr.stage = 's2'
+                  AND r.status = 'running'
+                  AND sr.metadata ? 'checkpointer'
+                  AND sr.updated_at < NOW() - INTERVAL '2 minutes'
+            """)
+        if not rows:
+            logger.info("startup_recovery_none")
+            return
+        logger.warning("startup_recovery_found", count=len(rows))
+        for row in rows:
+            run_id = row["run_id"]
+            tenant_id = row["tenant_id"]
+            try:
+                await _do_resume_run(run_id, tenant_id, pool, graph)
+                logger.info("startup_recovery_resumed", run_id=run_id)
+            except Exception as exc:
+                logger.error("startup_recovery_failed", run_id=run_id, error=str(exc))
+    except Exception as exc:
+        logger.error("startup_recovery_error", error=str(exc))
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -74,6 +108,9 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("s2_graph_init_failed", error=str(e))
         app.state.s2_graph = None
+
+    if app.state.s2_graph is not None:
+        await _recover_stuck_s2_runs(pool, app.state.s2_graph)
 
     yield
     await pool.close()
