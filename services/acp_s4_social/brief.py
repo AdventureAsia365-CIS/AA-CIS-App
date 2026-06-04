@@ -6,6 +6,24 @@ VALID_CHANNELS = [
     "email", "newsletter", "landing_page", "ads",
 ]
 
+ALLOWED_TOUR_FIELDS = frozenset({
+    'aa_name', 'aa_subtitle', 'aa_summary',
+    'aa_highlights', 'aa_itineraries', 'duration',
+    'activities', 'links'
+})
+
+
+def extract_tour_fields(tour: dict) -> dict:
+    """Whitelist-filter a published_tours row before building ContentBrief.
+
+    Only ALLOWED_TOUR_FIELDS pass through — unknown/sensitive fields are silently dropped.
+    Args:
+        tour: raw dict from published_tours DB row
+    Returns:
+        filtered dict containing only allowed keys that exist in tour
+    """
+    return {k: v for k, v in tour.items() if k in ALLOWED_TOUR_FIELDS}
+
 
 @dataclass
 class ContentBrief:
