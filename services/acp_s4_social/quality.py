@@ -62,3 +62,11 @@ Draft content to review and revise:
     except Exception as e:
         structlog.get_logger().warning("quality_pass_failed", error=str(e))
         return {"revised_content": content, "warnings": str(e), "passed": False}
+
+# Backward compat export — used by existing tests (test_s4_social.py)
+FORBIDDEN_PHRASES = [
+    "In today's fast-paced world", "game-changing", "revolutionary",
+    "unlock your potential", "take your X to the next level",
+    "leverage", "synergize", "fake urgency",
+    "save time boost productivity drive growth",
+]
