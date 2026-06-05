@@ -3,7 +3,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity } from "lucide-react";
+import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Search, CalendarDays, FileText, Share2 } from "lucide-react";
 import { A, serif, sans } from "./adminUi";
 
 interface Notif {
@@ -24,6 +24,13 @@ const CONTENT_NAV = [
   { href: "/admin/review",         icon: <ClipboardList size={15} />, label: "Review Queue" },
   { href: "/admin/brand",          icon: <Palette size={15} />,       label: "Brand Identity" },
   { href: "/admin/master-content", icon: <Library size={15} />,       label: "Master Content" },
+];
+
+const PIPELINE_NAV = [
+  { href: "/admin/pipeline/s2",       icon: <Search size={15} />,       label: "S2 Research" },
+  { href: "/admin/pipeline/s3",       icon: <CalendarDays size={15} />, label: "S3 Calendar" },
+  { href: "/admin/pipeline/s4-blog",  icon: <FileText size={15} />,     label: "S4 Blog" },
+  { href: "/admin/pipeline/s4-social",icon: <Share2 size={15} />,       label: "S4 Social" },
 ];
 
 export default function AdminSidebar() {
@@ -194,7 +201,15 @@ export default function AdminSidebar() {
               onClick={() => router.push("/admin/dashboard")} />
           )}
           {CONTENT_NAV.map(n => (
-            <NavItem key={n.href} active={active(n.href)} accent={isAdmin ? A.gold : A.gold}
+            <NavItem key={n.href} active={active(n.href)} accent={A.gold}
+              icon={n.icon} label={n.label} onClick={() => router.push(n.href)} />
+          ))}
+        </NavGroup>
+
+        {/* ACP Pipeline stages */}
+        <NavGroup label="ACP Pipeline">
+          {PIPELINE_NAV.map(n => (
+            <NavItem key={n.href} active={active(n.href)} accent={A.gold}
               icon={n.icon} label={n.label} onClick={() => router.push(n.href)} />
           ))}
         </NavGroup>
