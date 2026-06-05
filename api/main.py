@@ -132,6 +132,7 @@ app.add_middleware(
         "http://localhost:3001",
         "https://api-cis.lumiguides.it.com",
         "https://aa-cis.lumiguides.it.com",
+        "https://acp.lumiguides.it.com",
     ],
     allow_credentials=True,
     allow_methods=["*"],
