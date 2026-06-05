@@ -1,8 +1,8 @@
 "use client";
 // app/admin/pipeline/s4-social/page.tsx — S4 Social Batch Review
-// GET  /v1/acp/runs                           → runs list
-// GET  /acp/social/batch-review?run_id={id}   → social_content rows
-// POST /acp/social/batch-review               → {run_id, approved_ids, rejected_ids}
+// GET  /api/admin/acp/runs                        → runs list
+// GET  /api/admin/acp/s4/social?run_id={id}       → social_content rows
+// POST /api/admin/acp/s4/social/batch-review      → {run_id, approved_ids, rejected_ids}
 
 import React, { useState, useEffect, useCallback } from "react";
 import { RefreshCw, CheckSquare, Square, CheckCircle, XCircle, Share2 } from "lucide-react";
@@ -251,7 +251,7 @@ export default function S4SocialPage() {
   const [error, setError]                   = useState<string | null>(null);
 
   useEffect(() => {
-    fetch(`${API_URL}/v1/acp/runs`, { headers: authHeaders() })
+    fetch(`/api/admin/acp/runs`)
       .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
       .then(d => setRuns(Array.isArray(d) ? d : (d.data || d.runs || [])))
       .catch(e => setError(String(e)))
@@ -266,7 +266,7 @@ export default function S4SocialPage() {
     setChannelFilter("All");
     setSubmitResult(null);
     setError(null);
-    fetch(`${API_URL}/acp/social/batch-review?run_id=${runId}`, { headers: authHeaders() })
+    fetch(`/api/admin/acp/s4/social?run_id=${runId}`)
       .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
       .then(d => setPosts(Array.isArray(d) ? d : (d.data || d.posts || [])))
       .catch(e => setError(String(e)))
@@ -310,8 +310,8 @@ export default function S4SocialPage() {
       : { run_id: selectedRunId, approved_ids: [], rejected_ids: ids };
 
     try {
-      const res = await fetch(`${API_URL}/acp/social/batch-review`, {
-        method: "POST", headers: authHeaders(), body: JSON.stringify(body),
+      const res = await fetch(`/api/admin/acp/s4/social/batch-review`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const newStatus = action === "approve" ? "approved" : "rejected";

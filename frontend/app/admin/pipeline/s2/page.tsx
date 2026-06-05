@@ -1,9 +1,9 @@
 "use client";
 // app/admin/pipeline/s2/page.tsx — S2 Market Research
-// GET /v1/acp/runs                  → runs list
-// GET /v1/acp/runs/{run_id}/context → s2_keyword_clusters, s2_visibility_report, confidence_score, gate1_status
-// POST /v1/acp/gate/gate1/approve   → {run_id}
-// POST /v1/acp/gate/gate1/reject    → {run_id, reason}
+// GET /api/admin/acp/runs                  → runs list
+// GET /api/admin/acp/runs/{run_id}/context → s2_keyword_clusters, s2_visibility_report, confidence_score, gate_summary
+// POST /api/admin/acp/gate/s2/approve      → {run_id}
+// POST /api/admin/acp/gate/s2/reject       → {run_id, reason}
 
 import React, { useState, useEffect, useCallback } from "react";
 import { RefreshCw, CheckCircle, XCircle, ChevronDown } from "lucide-react";
@@ -271,8 +271,8 @@ function Gate1Panel({ runId, onAction }: { runId: string; onAction: () => void }
   async function approve() {
     setBusy(true); setErr(null);
     try {
-      const res = await fetch(`${API_URL}/v1/acp/gate/gate1/approve`, {
-        method: "POST", headers: authHeaders(),
+      const res = await fetch(`/api/admin/acp/gate/s2/approve`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ run_id: runId }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -285,8 +285,8 @@ function Gate1Panel({ runId, onAction }: { runId: string; onAction: () => void }
     if (!rejectReason.trim()) return;
     setBusy(true); setErr(null);
     try {
-      const res = await fetch(`${API_URL}/v1/acp/gate/gate1/reject`, {
-        method: "POST", headers: authHeaders(),
+      const res = await fetch(`/api/admin/acp/gate/s2/reject`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ run_id: runId, reason: rejectReason.trim() }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -364,7 +364,7 @@ export default function S2Page() {
   const [error, setError]                   = useState<string | null>(null);
 
   useEffect(() => {
-    fetch(`${API_URL}/v1/acp/runs`, { headers: authHeaders() })
+    fetch(`/api/admin/acp/runs`)
       .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
       .then(d => setRuns(Array.isArray(d) ? d : (d.data || d.runs || [])))
       .catch(e => setError(String(e)))
@@ -376,7 +376,7 @@ export default function S2Page() {
     setLoadingCtx(true);
     setContext(null);
     setError(null);
-    fetch(`${API_URL}/v1/acp/runs/${runId}/context`, { headers: authHeaders() })
+    fetch(`/api/admin/acp/runs/${runId}/context`)
       .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
       .then(d => setContext(d))
       .catch(e => setError(String(e)))
