@@ -1,9 +1,9 @@
 "use client";
 // app/admin/pipeline/s3/page.tsx — S3 Calendar + Ads + Gate 2
-// GET /v1/acp/runs                   → runs list
-// GET /v1/acp/runs/{run_id}/context  → s3_content_calendar, s3_ads_plan, s3_funnel_mix
-// POST /v1/acp/gate/s3/approve       → {run_id}
-// POST /v1/acp/gate/s3/reject        → {run_id, reason}
+// GET /api/admin/acp/runs                  → runs list
+// GET /api/admin/acp/runs/{run_id}/context → s3_content_calendar, s3_ads_plan, s3_funnel_mix
+// POST /api/admin/acp/gate/s3/approve      → {run_id}
+// POST /api/admin/acp/gate/s3/reject       → {run_id, reason}
 
 import React, { useState, useEffect, useCallback } from "react";
 import { RefreshCw, CheckCircle, XCircle, ChevronDown, ChevronUp, Copy } from "lucide-react";
@@ -443,8 +443,8 @@ function Gate2Tab({ runId, status, onAction }: {
   async function approve() {
     setBusy(true); setErr(null);
     try {
-      const res = await fetch(`${API_URL}/v1/acp/gate/s3/approve`, {
-        method: "POST", headers: authHeaders(),
+      const res = await fetch(`/api/admin/acp/gate/s3/approve`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ run_id: runId }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -457,8 +457,8 @@ function Gate2Tab({ runId, status, onAction }: {
     if (!reason.trim()) return;
     setBusy(true); setErr(null);
     try {
-      const res = await fetch(`${API_URL}/v1/acp/gate/s3/reject`, {
-        method: "POST", headers: authHeaders(),
+      const res = await fetch(`/api/admin/acp/gate/s3/reject`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ run_id: runId, reason: reason.trim() }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -566,7 +566,7 @@ export default function S3Page() {
   const [activeTab, setActiveTab]         = useState("calendar");
 
   useEffect(() => {
-    fetch(`${API_URL}/v1/acp/runs`, { headers: authHeaders() })
+    fetch(`/api/admin/acp/runs`)
       .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
       .then(d => setRuns(Array.isArray(d) ? d : (d.data || d.runs || [])))
       .catch(e => setError(String(e)))
@@ -578,7 +578,7 @@ export default function S3Page() {
     setLoadingData(true);
     setContext(null);
     setError(null);
-    fetch(`${API_URL}/v1/acp/runs/${runId}/context`, { headers: authHeaders() })
+    fetch(`/api/admin/acp/runs/${runId}/context`)
       .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
       .then(d => setContext(d))
       .catch(e => setError(String(e)))
