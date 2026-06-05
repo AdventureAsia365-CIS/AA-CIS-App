@@ -17,6 +17,7 @@ Steps:
 """
 import json
 import os
+import time
 import traceback
 from urllib.parse import urlparse
 
@@ -30,6 +31,11 @@ import planner as _planner
 import validators as _validators
 from models import S3RunResult
 from run_context import get_run_context_sync, write_s3_stage_sync
+
+try:
+    from acp_shared.tracer import AcpTracer as _AcpTracer
+except ImportError:
+    _AcpTracer = None
 
 _EB_SOURCE_S3 = "acp.s3"
 _EB_DETAIL_S3_COMPLETED = "acp.s3.completed"
@@ -253,6 +259,13 @@ def handler(event, context):
     if not run_id or not tenant_id:
         return {"status": "error", "error": "run_id and tenant_id are required"}
 
+    tracer = None
+    if _AcpTracer is not None:
+        try:
+            tracer = _AcpTracer(run_id=run_id, tenant_id=tenant_id)
+        except Exception:
+            pass
+
     conn = None
     total_in = 0
     total_out = 0
@@ -286,19 +299,31 @@ def handler(event, context):
         packet = _planner.build_compact_packet(run_context, tenant_rules, country, lesson_summary)
 
         # ── Step 3: Skeleton ──────────────────────────────────────────────────
+        _t = time.time()
         skeleton, in3, out3 = _planner.skeleton_call(packet)
+        if tracer:
+            with tracer.span("s3", "skeleton") as span:
+                tracer.record_llm_call(span, _planner.SONNET_MODEL_ID, in3, out3, (time.time() - _t) * 1000)
         total_in += in3
         total_out += out3
         _record_cost(conn, run_id, "s3", _calc_cost(in3, out3, "sonnet"), in3, out3)
 
         # ── Step 4: Expand ────────────────────────────────────────────────────
+        _t = time.time()
         expanded_markdown, in4, out4 = _planner.expand_call(skeleton, tenant_rules, packet)
+        if tracer:
+            with tracer.span("s3", "expand") as span:
+                tracer.record_llm_call(span, _planner.SONNET_MODEL_ID, in4, out4, (time.time() - _t) * 1000)
         total_in += in4
         total_out += out4
         _record_cost(conn, run_id, "s3", _calc_cost(in4, out4, "sonnet"), in4, out4)
 
         # ── Step 5: Ads ───────────────────────────────────────────────────────
+        _t = time.time()
         ads_output, in5, out5 = _ads.generate_ads(packet)
+        if tracer:
+            with tracer.span("s3", "ads") as span:
+                tracer.record_llm_call(span, _ads.HAIKU_MODEL_ID, in5, out5, (time.time() - _t) * 1000)
         total_in += in5
         total_out += out5
         _record_cost(conn, run_id, "s3", _calc_cost(in5, out5, "haiku"), in5, out5)
@@ -317,9 +342,13 @@ def handler(event, context):
         # ── Step 7: Lesson update ─────────────────────────────────────────────
         n_posts = sum(len(w.posts) for w in skeleton.weeks)
         skeleton_summary = f"{skeleton.document_title} — {len(skeleton.weeks)} weeks, {n_posts} posts"
+        _t = time.time()
         lesson_output, in7, out7 = _lessons.lesson_update_call(
             run_id, tenant_id, country, lesson_summary, skeleton_summary
         )
+        if tracer:
+            with tracer.span("s3", "lesson_update") as span:
+                tracer.record_llm_call(span, _lessons.HAIKU_MODEL_ID, in7, out7, (time.time() - _t) * 1000)
         total_in += in7
         total_out += out7
         _record_cost(conn, run_id, "s3", _calc_cost(in7, out7, "haiku"), in7, out7)
@@ -343,6 +372,8 @@ def handler(event, context):
         _finalize_cost(conn, run_id)
         conn.commit()
 
+        if tracer:
+            tracer.flush()
         _emit_eventbridge(run_id, tenant_id)
 
         return S3RunResult(
