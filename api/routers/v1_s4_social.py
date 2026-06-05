@@ -24,6 +24,11 @@ from services.acp_s4_social.brief import ContentBrief, VALID_CHANNELS
 from services.acp_s4_social.llm_client import make_llm_client
 from services.acp_shared.cost_utils import calc_bedrock_cost, record_stage_cost
 
+try:
+    from services.acp_shared.tracer import AcpTracer as _AcpTracer
+except ImportError:
+    _AcpTracer = None
+
 logger = structlog.get_logger()
 router = APIRouter(prefix="/v1/acp/s4/social", tags=["S4 Social Engine"])
 
@@ -138,8 +143,15 @@ async def generate_auto(
     brief = _to_brief(body.brief)
     _validate_brief(brief)
 
+    tracer = None
+    if _AcpTracer is not None and body.run_id:
+        try:
+            tracer = _AcpTracer(run_id=body.run_id, tenant_id=body.tenant_id)
+        except Exception:
+            pass
+
     token_log: list = []
-    llm_client = make_llm_client(body.llm_provider, body.model_id, token_log=token_log)
+    llm_client = make_llm_client(body.llm_provider, body.model_id, token_log=token_log, tracer=tracer)
     meta = {
         "run_id": body.run_id,
         "tenant_id": body.tenant_id,
@@ -164,6 +176,8 @@ async def generate_auto(
                     "UPDATE acp_shared.acp_runs SET s4_social_status='complete' WHERE run_id=$1::uuid",
                     body.run_id,
                 )
+        if tracer:
+            tracer.flush()
         logger.info("s4_social_auto_done", social_id=result["social_id"], channel=body.brief.channel)
         return result
     except Exception as e:
@@ -216,8 +230,15 @@ async def write_guided(
     if not body.selected_angle or not body.selected_angle.get("name"):
         raise HTTPException(status_code=422, detail="selected_angle.name is required")
 
+    tracer = None
+    if _AcpTracer is not None and body.run_id:
+        try:
+            tracer = _AcpTracer(run_id=body.run_id, tenant_id=body.tenant_id)
+        except Exception:
+            pass
+
     token_log: list = []
-    llm_client = make_llm_client(body.llm_provider, body.model_id, token_log=token_log)
+    llm_client = make_llm_client(body.llm_provider, body.model_id, token_log=token_log, tracer=tracer)
     meta = {
         "run_id": body.run_id,
         "tenant_id": body.tenant_id,
@@ -242,6 +263,8 @@ async def write_guided(
                     "UPDATE acp_shared.acp_runs SET s4_social_status='complete' WHERE run_id=$1::uuid",
                     body.run_id,
                 )
+        if tracer:
+            tracer.flush()
         logger.info("s4_social_guided_done", social_id=result["social_id"])
         return result
     except Exception as e:
@@ -343,12 +366,21 @@ async def retry_angle(
     from services.acp_s4_social.quality import quality_pass
     from services.acp_s4_social.writer import write_content
 
-    llm_client = make_llm_client(row["llm_provider"] or "bedrock", row["model_id"])
+    _retry_tracer = None
+    if _AcpTracer is not None and row["run_id"]:
+        try:
+            _retry_tracer = _AcpTracer(run_id=str(row["run_id"]), tenant_id=str(row["tenant_id"]))
+        except Exception:
+            pass
+
+    llm_client = make_llm_client(row["llm_provider"] or "bedrock", row["model_id"], tracer=_retry_tracer)
     formula_name = get_formula_name(brief.channel, brief.goal)
     formula_text = load_formula_file(formula_name)
     content = write_content(brief, selected_angle, formula_text, llm_client)
     quality = quality_pass(content, brief, llm_client)
     final_content = quality.get("revised_content", content)
+    if _retry_tracer:
+        _retry_tracer.flush()
     jsonb_cols = _build_jsonb_columns(brief.channel, final_content)
 
     async with pool.acquire() as db:

@@ -4,8 +4,8 @@ Pydantic schema for acp_shared.acp_run_context.
 One model per stage — each maps to the column(s) that stage owns.
 RunContext is the aggregate (full row); stage models are the write units.
 """
-from typing import Any, Optional
-from pydantic import BaseModel, field_validator
+from typing import Any, List, Optional
+from pydantic import BaseModel, Field, field_validator
 
 
 class RunContextValidationError(Exception):
@@ -38,6 +38,7 @@ class S0StagePayload(BaseModel):
 
 class S1StagePayload(BaseModel):
     s1_keywords_used: list[str]
+    s1_tour_ids: List[str] = Field(default_factory=list)
 
 
 class S2StagePayload(BaseModel):
@@ -71,6 +72,7 @@ class RunContext(BaseModel):
     tenant_id: str
     brand_brief: Optional[dict[str, Any]] = None
     s1_keywords_used: Optional[list[Any]] = None
+    s1_tour_ids: List[str] = Field(default_factory=list)
     s2_keyword_research: Optional[dict[str, Any]] = None
     s2_visibility_report: Optional[dict[str, Any]] = None
     s2_keyword_clusters: Optional[list[Any]] = None

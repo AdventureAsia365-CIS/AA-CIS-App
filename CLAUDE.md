@@ -1,26 +1,71 @@
+# CLAUDE.md — AA-CIS-App
 
----
+## Project Context
+AA-CIS (Content Intelligence System) — AI-powered B2B tour content automation platform.
+Part of AA_Ecosys program. Internal admin tool for Adventure Asia content team.
 
-## Session 39 — 29/05/2026
+## Stack
+- **Backend**: FastAPI (Python 3.12), PostgreSQL 15, LangGraph, AWS Bedrock
+- **Frontend**: Next.js 14 (TypeScript), Tailwind CSS, Vercel
+- **Infra**: AWS ECS Fargate Spot, RDS, ElastiCache Redis, Step Functions
+- **Account**: 867490540162 | Region: us-west-1 | Profile: pqnghiep-admin
 
-### Shipped
-- AA-135: brand_standards.py (AA_BRAND_IDENTITY_PROMPT + AA_COWORK_STRUCTURE_PROMPT)
-- AA-133: brand_audit_node.py — GPT-4.1 LLM-as-Judge, 8 pre-checks, wired into graph
-- AA-134: flag_fix_node.py — targeted fix, fix_pass columns, /admin/export-audit
-- AA-132: write_lessons_log() — auto write-back vào shared.pipeline_lessons
-- B0 bugs: SEO schema mismatch (B1), seo_data normalize (B2), seo_mode propagation (B3)
-- UI: BrandAuditBadge, Audit column, Version Compare brand panel, Export Audit CSV button
-- Migration 050: brand_audit_* columns on quality_scores + fix_pass_* on generated_content
+## Git Workflow (NON-NEGOTIABLE)
+```
+feature/aa-XX-desc → develop → CI green → Deploy Dev green → main → Deploy Prod
+```
+- NEVER merge directly to main
+- Always create feature branch from develop
+- Branch naming: feature/aa-XX-short-desc | fix/aa-XX-desc | chore/desc
 
-### Graph flow (updated)
-generate → validate → brand_audit (GPT-4.1) → flag_fix → END
-brand_audit chỉ chạy trên "done" path (score ≥ 7.0)
+## Code Patterns
 
-### Known issue
-- API Gateway 29s timeout → run-tour 504 via HTTPS. Use ECS Exec trực tiếp. Fix P4-S6.
-- OPENAI_API_KEY cần rotate (lộ trong session 39)
+### Python
+- Type hints everywhere, async-first (FastAPI patterns)
+- Schema-qualify all DB queries: `silver_aa_internal.raw_tours` not `raw_tours`
+- Bedrock for LLM calls (not Anthropic SDK directly)
+- structlog for logging
 
-### State
-- ECS task def: api:246 | Deploy Prod #53 | commit 388bf56
-- AWS: STOPPED (ECS desired=0, RDS stopped)
-- .flake8: max-line-length=99 added
+### Database
+- RDS PostgreSQL 15 in private subnet — access via ECS Exec + python3
+- S3-mediated ECS Exec pattern for DB queries (see aa-cis-schema skill)
+- Always verify column existence before querying (schema changes frequently)
+- Migration files: `api/migrations/NNN_description.sql`
+- Current latest migration: 067 (social_content.angles_json)
+
+### Testing
+- pytest + AsyncMock for all new code
+- Tests in `tests/` (unit) and `tests/unit/` (existing)
+- Minimum: 4 tests per new module
+- Mock all external calls (DB, LLM, S3)
+
+### AWS CLI (WSL2-safe)
+- NEVER multi-line with backslash — hangs WSL2
+- Always single-line commands
+- Always include --profile and --region
+
+## AWS Resources
+- ECS: aa-cis-dev-cluster / aa-cis-dev-api
+- RDS: aa-cis-dev-db (PostgreSQL 15)
+- NAT Instance: i-04ebd090e97184f45 (t4g.nano) — start/stop per session
+- S3 Scripts: aa-cis-bronze-867490540162/scripts/
+
+## Session Aliases (~/.zshrc)
+```bash
+cis-start  # start NAT Instance + RDS + ECS
+cis-stop   # stop ECS + RDS + NAT Instance
+cis-status # check NAT instance state
+```
+
+## Current State (05/06/2026)
+- Branch: develop (main = production)
+- ECS task def: api:286
+- Latest migrations: 065 (acp_stage_checkpoints), 066 (quality_score), 067 (angles_json)
+- Wave 4 complete: AA-145 S4.2 v2 shipped
+
+## Do NOT
+- Hardcode secrets (use Secrets Manager)
+- SSH into instances (use SSM)
+- Use eth0 interface name (AL2023 ARM64 uses ens5)
+- Merge to main without CI green
+- Leave AWS resources running after session

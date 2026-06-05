@@ -167,8 +167,10 @@ async def process_export(version_id: str) -> dict:
                                 completed_at      = NOW()
                         """, batch_id, country, tenant_id_str, manifest_key, tc, round(qs_avg, 2))
 
+                        tour_ids = [str(r["tour_id"]) for r in tour_rows]
                         await write_run_context_stage(conn, run_id, "s1", {
                             "s1_keywords_used": all_kws,
+                            "s1_tour_ids": tour_ids,
                         })
 
                     publish_s1_completed(run_id, country, tenant_id_str, manifest_key, tc, qs_avg)
