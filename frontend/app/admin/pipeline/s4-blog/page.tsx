@@ -1,8 +1,8 @@
 "use client";
 // app/admin/pipeline/s4-blog/page.tsx — S4 Blog Drafts HITL
-// GET  /v1/acp/runs                         → runs list
-// GET  /v1/acp/s4/blog/drafts?run_id={id}   → [{draft_id, title, word_count, evaluator_score, hitl_gate3_status, seo_score, seo_title, seo_meta, target_keywords, review_flags}]
-// PATCH /v1/acp/s4/blog/drafts/{id}/hitl    → {action, feedback?}
+// GET  /api/admin/acp/runs                              → runs list
+// GET  /api/admin/acp/s4/blog/drafts?run_id={id}       → [{draft_id, title, word_count, evaluator_score, hitl_gate3_status, seo_score, review_flags}]
+// PATCH /api/admin/acp/s4/blog/drafts/{id}/hitl        → {action, feedback?}
 
 import React, { useState, useEffect, useCallback } from "react";
 import { RefreshCw, CheckCircle, XCircle, RotateCcw, ChevronDown, ChevronUp, Share2 } from "lucide-react";
@@ -336,7 +336,7 @@ export default function S4BlogPage() {
   const [error, setError]                 = useState<string | null>(null);
 
   useEffect(() => {
-    fetch(`${API_URL}/v1/acp/runs`, { headers: authHeaders() })
+    fetch(`/api/admin/acp/runs`)
       .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
       .then(d => setRuns(Array.isArray(d) ? d : (d.data || d.runs || [])))
       .catch(e => setError(String(e)))
@@ -348,7 +348,7 @@ export default function S4BlogPage() {
     setLoadingDrafts(true);
     setDrafts([]);
     setError(null);
-    fetch(`${API_URL}/v1/acp/s4/blog/drafts?run_id=${runId}`, { headers: authHeaders() })
+    fetch(`/api/admin/acp/s4/blog/drafts?run_id=${runId}`)
       .then(r => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
       .then(d => setDrafts(Array.isArray(d) ? d : (d.data || d.drafts || [])))
       .catch(e => setError(String(e)))
@@ -361,8 +361,8 @@ export default function S4BlogPage() {
   }
 
   async function handleAction(id: string, action: HitlAction, feedback?: string) {
-    const res = await fetch(`${API_URL}/v1/acp/s4/blog/drafts/${id}/hitl`, {
-      method: "PATCH", headers: authHeaders(),
+    const res = await fetch(`/api/admin/acp/s4/blog/drafts/${id}/hitl`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action, ...(feedback ? { feedback } : {}) }),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
