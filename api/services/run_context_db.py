@@ -18,7 +18,7 @@ from api.schemas.run_context import (
 
 _STAGE_COLUMNS = {
     "s0": ("brand_brief",),
-    "s1": ("s1_keywords_used",),
+    "s1": ("s1_keywords_used", "s1_tour_ids"),
     "s2": (
         "s2_keyword_research",
         "s2_visibility_report",
@@ -40,7 +40,7 @@ _STAGE_PAYLOAD_MODELS = {
 }
 
 _JSONB_COLUMNS = {
-    "brand_brief", "s1_keywords_used",
+    "brand_brief", "s1_keywords_used", "s1_tour_ids",
     "s2_keyword_research", "s2_visibility_report",
     "s2_keyword_clusters", "s2_market_preference", "s2_aa_tour_matches",
     "s3_content_calendar", "s3_ads_plan", "s3_funnel_mix",
@@ -79,6 +79,7 @@ async def get_run_context_validated(
         tenant_id=str(row["tenant_id"]),
         brand_brief=_parse_jsonb(row.get("brand_brief")),
         s1_keywords_used=_parse_jsonb(row.get("s1_keywords_used")),
+        s1_tour_ids=_parse_jsonb(row.get("s1_tour_ids")) or [],
         s2_keyword_research=_parse_jsonb(row.get("s2_keyword_research")),
         s2_visibility_report=_parse_jsonb(row.get("s2_visibility_report")),
         s2_keyword_clusters=_parse_jsonb(row.get("s2_keyword_clusters")),

@@ -174,6 +174,10 @@ def _guard_s1_context(context: dict, run_id: str) -> None:
         raise S1ContextNotReadyError(
             f"S1_CONTEXT_NOT_READY: s1_keywords_used is empty or missing for run_id={run_id}"
         )
+    tour_ids = context.get("s1_tour_ids")
+    if not tour_ids:
+        logger.warning("s1_tour_ids_missing", run_id=run_id,
+                       detail="s1_tour_ids empty — run predates AA-162 or write failed")
 
 
 # ── POST /run ─────────────────────────────────────────────────────────────────
@@ -290,7 +294,7 @@ async def run_s2(
                 # s1_run_id is validated non-null before _background() is created.
                 async with pool.acquire() as conn:
                     ctx_row = await conn.fetchrow(
-                        "SELECT s1_keywords_used "
+                        "SELECT s1_keywords_used, s1_tour_ids "
                         "FROM acp_shared.acp_run_context "
                         "WHERE run_id=$1::uuid",
                         s1_run_id,
@@ -298,9 +302,16 @@ async def run_s2(
                 raw_kws = ctx_row["s1_keywords_used"] if ctx_row else None
                 if isinstance(raw_kws, str):
                     raw_kws = json.loads(raw_kws)
-                ctx_dict = {"s1_keywords_used": raw_kws}
+                raw_tour_ids = ctx_row["s1_tour_ids"] if ctx_row else None
+                if isinstance(raw_tour_ids, str):
+                    raw_tour_ids = json.loads(raw_tour_ids)
+                ctx_dict = {
+                    "s1_keywords_used": raw_kws,
+                    "s1_tour_ids": raw_tour_ids,
+                }
                 logger.info("s2_s1_context_check", run_id=run_id, s1_run_id=s1_run_id,
-                            keyword_count=len(raw_kws) if raw_kws else 0)
+                            keyword_count=len(raw_kws) if raw_kws else 0,
+                            tour_id_count=len(raw_tour_ids) if raw_tour_ids else 0)
                 _guard_s1_context(ctx_dict, s1_run_id)
 
                 result = await graph.ainvoke(initial_state, config=config)
