@@ -1,27 +1,14 @@
 "use client";
-// app/admin/pipeline/s2/page.tsx — S2 Market Research
+// app/admin/pipeline/s2/page.tsx — S2 Market Intelligence Dashboard
 // GET /api/admin/acp/runs                  → runs list
 // GET /api/admin/acp/runs/{run_id}/context → s2_keyword_clusters, s2_visibility_report, confidence_score, gate_summary
 // POST /api/admin/acp/gate/s2/approve      → {run_id}
 // POST /api/admin/acp/gate/s2/reject       → {run_id, reason}
 
-import React, { useState, useEffect, useCallback } from "react";
-import { RefreshCw, CheckCircle, XCircle, ChevronDown } from "lucide-react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
+import { RefreshCw, CheckCircle, XCircle, ChevronDown, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
 import AdminSidebar from "../../_components/AdminSidebar";
 import { A, serif, sans, mono, Card, SLabel, Badge, Btn } from "../../_components/adminUi";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
-
-function getToken(): string | null {
-  if (typeof document === "undefined") return null;
-  const m = document.cookie.match(/cis_api_token=([^;]+)/);
-  return m ? decodeURIComponent(m[1]) : null;
-}
-
-function authHeaders(): Record<string, string> {
-  const t = getToken();
-  return t ? { Authorization: `Bearer ${t}`, "Content-Type": "application/json" } : { "Content-Type": "application/json" };
-}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -38,31 +25,43 @@ interface KeywordCluster {
   search_intent?: string;
   volume?: number | null;
   difficulty?: number | null;
+  cluster?: string | null;
 }
 
 interface RunContext {
   run_id: string;
   confidence_score: number | null;
+  confidence_breakdown?: {
+    keyword?: number | null;
+    competitor?: number | null;
+    freshness?: number | null;
+    gsc?: number | null;
+  } | null;
   s2_keyword_clusters: KeywordCluster[] | string | null;
   s2_visibility_report: string | null;
   gate1_status: string | null;
 }
 
+type SortKey = "primary_keyword" | "volume" | "search_intent" | "cluster";
+type SortDir = "asc" | "desc";
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function confidenceColor(s: number): string {
+function ringColor(s: number): string {
   return s >= 85 ? "#16a34a" : s >= 60 ? A.gold : "#dc2626";
 }
 
-function confidenceBg(s: number): string {
+function subScoreColor(s: number | null | undefined): string {
+  if (s == null) return A.muted2;
+  return s >= 85 ? "#16a34a" : s >= 60 ? A.gold : "#dc2626";
+}
+
+function subScoreBg(s: number | null | undefined): string {
+  if (s == null) return A.line2;
   return s >= 85 ? A.greenSoft : s >= 60 ? A.amberSoft : "#FEE2E2";
 }
 
-function confidenceLabel(s: number): string {
-  return s >= 85 ? "High confidence" : s >= 60 ? "Moderate confidence" : "Low confidence";
-}
-
-function gateStatusColor(s: string | null): "green" | "amber" | "red" | "gray" | "blue" {
+function gateStatusColor(s: string | null): "green" | "amber" | "red" | "gray" {
   if (s === "approved" || s === "auto_approved") return "green";
   if (s === "pending") return "amber";
   if (s === "rejected") return "red";
@@ -77,12 +76,12 @@ function gateStatusLabel(s: string | null): string {
   return "—";
 }
 
-function intentColor(intent: string | undefined): { bg: string; color: string } {
+function intentStyle(intent: string | undefined): { bg: string; color: string } {
   switch ((intent || "").toLowerCase()) {
     case "informational": return { bg: "#DBEAFE", color: "#1E40AF" };
-    case "commercial":    return { bg: "#EDE9FE", color: "#5B21B6" };
+    case "commercial":    return { bg: A.amberSoft, color: "#92400E" };
     case "transactional": return { bg: "#D1FAE5", color: "#065F46" };
-    case "navigational":  return { bg: "#FEF3C7", color: "#92400E" };
+    case "navigational":  return { bg: A.line2, color: A.muted };
     default:              return { bg: A.line2, color: A.muted };
   }
 }
@@ -110,121 +109,235 @@ function Skeleton({ height = 20, width = "100%" }: { height?: number; width?: st
   );
 }
 
-// ── Confidence Gauge ──────────────────────────────────────────────────────────
+// ── Donut Chart (SVG, no chart lib) ──────────────────────────────────────────
 
-function ConfidenceGauge({ score, gate1Status }: { score: number; gate1Status: string | null }) {
-  const color = confidenceColor(score);
-  const bg    = confidenceBg(score);
-  const pct   = Math.min(Math.round(score), 100);
+function DonutChart({ score }: { score: number }) {
+  const color = ringColor(score);
+  const r     = 45;
+  const circ  = 2 * Math.PI * r;
+  const fill  = (Math.min(Math.max(score, 0), 100) / 100) * circ;
+  return (
+    <svg width="130" height="130" viewBox="0 0 120 120" style={{ display: "block", flexShrink: 0 }}>
+      <circle cx="60" cy="60" r={r} fill="none" stroke={A.line} strokeWidth="12" />
+      <circle
+        cx="60" cy="60" r={r}
+        fill="none" stroke={color} strokeWidth="12"
+        strokeDasharray={`${fill} ${circ}`}
+        strokeLinecap="round"
+        transform="rotate(-90 60 60)"
+      />
+      <text x="60" y="55" textAnchor="middle" fontSize="24" fontWeight="700" fill={color} fontFamily="Georgia, serif">
+        {Math.round(score)}
+      </text>
+      <text x="60" y="72" textAnchor="middle" fontSize="10.5" fill={A.muted} fontFamily="system-ui, sans-serif">
+        Confidence
+      </text>
+    </svg>
+  );
+}
 
+// ── Sub-Score Pill ────────────────────────────────────────────────────────────
+
+function SubScorePill({ label, value }: { label: string; value: number | null | undefined }) {
+  const color = subScoreColor(value);
+  const bg    = subScoreBg(value);
+  return (
+    <div style={{
+      display: "flex", flexDirection: "column", alignItems: "center",
+      padding: "8px 14px", borderRadius: 8, background: bg, minWidth: 72,
+    }}>
+      <span style={{
+        fontSize: 9.5, fontWeight: 600, color: A.muted,
+        textTransform: "uppercase" as const, letterSpacing: "0.1em", marginBottom: 3,
+      }}>
+        {label}
+      </span>
+      <span style={{ fontFamily: mono, fontSize: 16, fontWeight: 700, color }}>
+        {value != null ? Math.round(value) : "—"}
+      </span>
+    </div>
+  );
+}
+
+// ── Confidence Section ────────────────────────────────────────────────────────
+
+function ConfidenceSection({ score, breakdown, gate1Status }: {
+  score: number;
+  breakdown?: RunContext["confidence_breakdown"];
+  gate1Status: string | null;
+}) {
+  const label = score >= 85 ? "High confidence" : score >= 60 ? "Moderate confidence" : "Low confidence";
   return (
     <Card>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 16 }}>
-        {/* Score block */}
-        <div style={{ display: "flex", alignItems: "center", gap: 20 }}>
-          <div style={{
-            width: 88, height: 88, borderRadius: 20, flexShrink: 0,
-            display: "grid", placeItems: "center",
-            background: bg, border: `2px solid ${color}33`,
-          }}>
-            <span style={{ fontFamily: serif, fontSize: 30, fontWeight: 700, color }}>{pct}%</span>
-          </div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 20 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 24 }}>
+          <DonutChart score={score} />
           <div>
-            <div style={{ fontSize: 16, fontWeight: 700, color: A.ink, marginBottom: 4 }}>
-              {confidenceLabel(score)}
-            </div>
-            <div style={{ fontSize: 12, color: A.muted, marginBottom: 10 }}>
-              Gate 1 SLA: 4h · Reviewer: aa_internal
-            </div>
-            <div style={{ height: 6, width: 240, borderRadius: 999, background: A.line, overflow: "hidden" }}>
-              <div style={{
-                height: "100%", width: `${pct}%`, borderRadius: 999,
-                background: color, transition: "width .6s ease",
-              }} />
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", width: 240, marginTop: 4 }}>
-              <span style={{ fontSize: 10, color: A.muted2 }}>0%</span>
-              <span style={{ fontSize: 10, color: A.amber }}>60%</span>
-              <span style={{ fontSize: 10, color: "#16a34a" }}>85%</span>
-              <span style={{ fontSize: 10, color: A.muted2 }}>100%</span>
+            <div style={{ fontSize: 16, fontWeight: 700, color: A.ink, marginBottom: 6 }}>{label}</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <SubScorePill label="Keyword"    value={breakdown?.keyword} />
+              <SubScorePill label="Competitor" value={breakdown?.competitor} />
+              <SubScorePill label="Freshness"  value={breakdown?.freshness} />
+              <SubScorePill label="GSC"        value={breakdown?.gsc} />
             </div>
           </div>
         </div>
-
-        {/* Gate status */}
         <div style={{ textAlign: "right" as const }}>
           <SLabel style={{ marginBottom: 8 }}>Gate 1 Status</SLabel>
-          <Badge color={gateStatusColor(gate1Status)}>
-            {gateStatusLabel(gate1Status)}
-          </Badge>
+          <Badge color={gateStatusColor(gate1Status)}>{gateStatusLabel(gate1Status)}</Badge>
+          <div style={{ fontSize: 11, color: A.muted2, marginTop: 6 }}>SLA: 4h · Reviewer: aa_internal</div>
         </div>
       </div>
     </Card>
   );
 }
 
-// ── Keyword Clusters ──────────────────────────────────────────────────────────
+// ── Keyword Table (sortable) ──────────────────────────────────────────────────
 
-function KeywordClusters({ clusters }: { clusters: KeywordCluster[] }) {
-  if (!clusters.length) {
-    return (
-      <div style={{ textAlign: "center", padding: "40px 20px", color: A.muted2 }}>
-        <div style={{ fontSize: 24, marginBottom: 8 }}>⟳</div>
-        <div style={{ fontSize: 13 }}>No keyword data — S2 may still be running</div>
-      </div>
-    );
+function KeywordTable({ clusters }: { clusters: KeywordCluster[] }) {
+  const [sortKey, setSortKey] = useState<SortKey>("volume");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+
+  const maxVol = useMemo(
+    () => Math.max(...clusters.map(c => c.volume || 0), 1),
+    [clusters],
+  );
+
+  const sorted = useMemo(() => {
+    return [...clusters].sort((a, b) => {
+      if (sortKey === "primary_keyword") {
+        const av = a.primary_keyword || "";
+        const bv = b.primary_keyword || "";
+        return sortDir === "asc" ? av.localeCompare(bv) : bv.localeCompare(av);
+      }
+      if (sortKey === "volume") {
+        const av = a.volume ?? -1;
+        const bv = b.volume ?? -1;
+        return sortDir === "asc" ? av - bv : bv - av;
+      }
+      if (sortKey === "search_intent") {
+        const av = a.search_intent || "";
+        const bv = b.search_intent || "";
+        return sortDir === "asc" ? av.localeCompare(bv) : bv.localeCompare(av);
+      }
+      const av = a.cluster || "";
+      const bv = b.cluster || "";
+      return sortDir === "asc" ? av.localeCompare(bv) : bv.localeCompare(av);
+    });
+  }, [clusters, sortKey, sortDir]);
+
+  function toggleSort(key: SortKey) {
+    if (sortKey === key) setSortDir(d => d === "asc" ? "desc" : "asc");
+    else { setSortKey(key); setSortDir("desc"); }
+  }
+
+  function SortIcon({ k }: { k: SortKey }) {
+    if (sortKey !== k) return <ArrowUpDown size={11} color={A.muted2} />;
+    return sortDir === "asc"
+      ? <ArrowUp size={11} color={A.gold} />
+      : <ArrowDown size={11} color={A.gold} />;
+  }
+
+  function thStyle(k: SortKey): React.CSSProperties {
+    return {
+      padding: "10px 14px", textAlign: "left" as const, fontSize: 10.5, fontWeight: 600,
+      letterSpacing: "0.1em", textTransform: "uppercase" as const,
+      color: sortKey === k ? A.gold : A.muted,
+      borderBottom: `1px solid ${A.line}`, background: A.bg,
+      cursor: "pointer", whiteSpace: "nowrap" as const, userSelect: "none" as const,
+    };
   }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      {clusters.map((cluster, i) => {
-        const ic = intentColor(cluster.search_intent);
-        return (
-          <div key={i} style={{
-            padding: "14px 16px", borderRadius: 10,
-            border: `1px solid ${A.line}`, background: "#fff",
-            display: "flex", flexDirection: "column", gap: 8,
-          }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-              <span style={{ fontWeight: 700, fontSize: 14, color: A.ink, flex: 1 }}>
-                {cluster.primary_keyword}
+    <div style={{ overflowX: "auto" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+        <thead>
+          <tr>
+            <th style={thStyle("primary_keyword")} onClick={() => toggleSort("primary_keyword")}>
+              <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                Primary Keyword <SortIcon k="primary_keyword" />
               </span>
-              {cluster.search_intent && (
-                <span style={{
-                  padding: "3px 9px", borderRadius: 999, fontSize: 10.5, fontWeight: 600,
-                  background: ic.bg, color: ic.color, textTransform: "capitalize" as const,
-                }}>
-                  {cluster.search_intent}
-                </span>
-              )}
-              {cluster.volume != null && (
-                <span style={{ fontSize: 11, color: A.muted2, fontFamily: mono }}>
-                  vol {cluster.volume.toLocaleString()}
-                </span>
-              )}
-              {cluster.difficulty != null && (
-                <span style={{
-                  fontSize: 11, fontFamily: mono, padding: "2px 7px", borderRadius: 4, fontWeight: 600,
-                  background: cluster.difficulty <= 30 ? A.greenSoft : cluster.difficulty <= 60 ? A.amberSoft : "#FEE2E2",
-                  color: cluster.difficulty <= 30 ? "#16a34a" : cluster.difficulty <= 60 ? A.amber : "#dc2626",
-                }}>
-                  KD {cluster.difficulty}
-                </span>
-              )}
-            </div>
-            {cluster.secondary_keywords && cluster.secondary_keywords.length > 0 && (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-                {cluster.secondary_keywords.map((kw, j) => (
-                  <span key={j} style={{
-                    padding: "2px 8px", borderRadius: 4, fontSize: 11,
-                    background: A.bg, color: A.muted, border: `1px solid ${A.line}`,
-                  }}>{kw}</span>
-                ))}
-              </div>
-            )}
-          </div>
-        );
-      })}
+            </th>
+            <th style={thStyle("volume")} onClick={() => toggleSort("volume")}>
+              <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                Volume <SortIcon k="volume" />
+              </span>
+            </th>
+            <th style={thStyle("search_intent")} onClick={() => toggleSort("search_intent")}>
+              <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                Intent <SortIcon k="search_intent" />
+              </span>
+            </th>
+            <th style={{ ...thStyle("cluster"), cursor: "default" }}>Secondary Keywords</th>
+            <th style={thStyle("cluster")} onClick={() => toggleSort("cluster")}>
+              <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                Cluster <SortIcon k="cluster" />
+              </span>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((c, i) => {
+            const is     = intentStyle(c.search_intent);
+            const volPct = c.volume != null ? Math.round((c.volume / maxVol) * 100) : 0;
+            const sec    = c.secondary_keywords || [];
+            return (
+              <tr key={i} style={{ background: i % 2 === 0 ? "#fff" : A.bg }}>
+                <td style={{ padding: "10px 14px", borderBottom: `1px solid ${A.line2}`, fontWeight: 600, color: A.ink, maxWidth: 220 }}>
+                  {c.primary_keyword}
+                </td>
+                <td style={{ padding: "10px 14px", borderBottom: `1px solid ${A.line2}`, minWidth: 130 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={{ width: 80, height: 6, borderRadius: 999, background: A.line, overflow: "hidden", flexShrink: 0 }}>
+                      <div style={{
+                        height: "100%", borderRadius: 999, background: A.gold,
+                        width: `${volPct}%`, transition: "width .3s",
+                      }} />
+                    </div>
+                    <span style={{ fontFamily: mono, fontSize: 11, color: A.muted, whiteSpace: "nowrap" as const }}>
+                      {c.volume != null ? c.volume.toLocaleString() : "—"}
+                    </span>
+                  </div>
+                </td>
+                <td style={{ padding: "10px 14px", borderBottom: `1px solid ${A.line2}`, whiteSpace: "nowrap" as const }}>
+                  {c.search_intent ? (
+                    <span style={{
+                      padding: "3px 9px", borderRadius: 999, fontSize: 11, fontWeight: 600,
+                      background: is.bg, color: is.color, textTransform: "capitalize" as const,
+                    }}>
+                      {c.search_intent}
+                    </span>
+                  ) : "—"}
+                </td>
+                <td style={{ padding: "10px 14px", borderBottom: `1px solid ${A.line2}`, maxWidth: 220 }}>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                    {sec.slice(0, 3).map((kw, j) => (
+                      <span key={j} style={{
+                        padding: "2px 7px", borderRadius: 4, fontSize: 11,
+                        background: A.line2, color: A.muted, border: `1px solid ${A.line}`,
+                      }}>{kw}</span>
+                    ))}
+                    {sec.length > 3 && (
+                      <span
+                        title={sec.slice(3).join(", ")}
+                        style={{
+                          padding: "2px 7px", borderRadius: 4, fontSize: 11,
+                          background: A.line2, color: A.muted2, cursor: "help",
+                        }}
+                      >
+                        +{sec.length - 3} more
+                      </span>
+                    )}
+                  </div>
+                </td>
+                <td style={{ padding: "10px 14px", borderBottom: `1px solid ${A.line2}`, fontSize: 12, color: A.muted }}>
+                  {c.cluster || "—"}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -232,17 +345,16 @@ function KeywordClusters({ clusters }: { clusters: KeywordCluster[] }) {
 // ── Visibility Report ─────────────────────────────────────────────────────────
 
 function VisibilityReport({ text }: { text: string }) {
-  const [collapsed, setCollapsed] = useState(text.length > 900);
-  const display = collapsed ? text.slice(0, 900) + "…" : text;
-
+  const [collapsed, setCollapsed] = useState(text.length > 500);
+  const display = collapsed ? text.slice(0, 500) + "…" : text;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <div style={{
-        fontSize: 13, color: A.body, lineHeight: 1.85,
+      <pre style={{
+        fontSize: 13, color: A.body, lineHeight: 1.85, margin: 0,
         whiteSpace: "pre-wrap", wordBreak: "break-word",
-        maxHeight: collapsed ? "auto" : 420, overflowY: collapsed ? "auto" : "auto",
-      }}>{display}</div>
-      {text.length > 900 && (
+        fontFamily: sans,
+      }}>{display}</pre>
+      {text.length > 500 && (
         <button onClick={() => setCollapsed(c => !c)} style={{
           fontSize: 12, color: A.gold, fontWeight: 600,
           background: "none", border: "none", cursor: "pointer", padding: 0,
@@ -296,16 +408,19 @@ function Gate1Panel({ runId, onAction }: { runId: string; onAction: () => void }
   }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+    <Card style={{ border: "2px solid #FDE68A", background: "#FFFBEB" }}>
+      <SLabel style={{ color: "#92400E" }}>Gate 1 — Manual Review Required</SLabel>
       <div style={{
-        padding: "12px 16px", borderRadius: 8, background: "#FFFBEB",
-        border: "1px solid #FDE68A", fontSize: 13, color: "#92400E",
-        display: "flex", alignItems: "center", gap: 8,
+        fontSize: 13, color: "#92400E", marginBottom: 14,
+        display: "flex", alignItems: "flex-start", gap: 8,
       }}>
-        ⚠️ Manual review required — confidence score below 85% threshold
+        ⚠️ Confidence score below 85% threshold — manual review required before S3 can proceed.
       </div>
-      <div>
-        <label style={{ fontSize: 11, fontWeight: 600, color: A.muted, textTransform: "uppercase" as const, letterSpacing: "0.1em", display: "block", marginBottom: 6 }}>
+      <div style={{ marginBottom: 12 }}>
+        <label style={{
+          fontSize: 11, fontWeight: 600, color: A.muted, display: "block",
+          textTransform: "uppercase" as const, letterSpacing: "0.1em", marginBottom: 6,
+        }}>
           Reviewer notes (optional)
         </label>
         <textarea
@@ -331,7 +446,7 @@ function Gate1Panel({ runId, onAction }: { runId: string; onAction: () => void }
         </Btn>
       </div>
       {showReject && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
           <textarea
             placeholder="Rejection reason (required)…"
             value={rejectReason}
@@ -339,7 +454,7 @@ function Gate1Panel({ runId, onAction }: { runId: string; onAction: () => void }
             rows={3}
             style={{
               width: "100%", padding: "9px 12px", borderRadius: 8,
-              border: `1px solid ${A.line}`, fontSize: 13, fontFamily: sans,
+              border: "1px solid #FCA5A5", fontSize: 13, fontFamily: sans,
               resize: "vertical", outline: "none", boxSizing: "border-box",
             }}
           />
@@ -348,20 +463,20 @@ function Gate1Panel({ runId, onAction }: { runId: string; onAction: () => void }
           </Btn>
         </div>
       )}
-      {err && <div style={{ color: "#dc2626", fontSize: 12 }}>{err}</div>}
-    </div>
+      {err && <div style={{ color: "#dc2626", fontSize: 12, marginTop: 8 }}>{err}</div>}
+    </Card>
   );
 }
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
 export default function S2Page() {
-  const [runs, setRuns]                     = useState<AcpRun[]>([]);
-  const [selectedRunId, setSelectedRunId]   = useState("");
-  const [context, setContext]               = useState<RunContext | null>(null);
-  const [loadingRuns, setLoadingRuns]       = useState(true);
-  const [loadingCtx, setLoadingCtx]         = useState(false);
-  const [error, setError]                   = useState<string | null>(null);
+  const [runs, setRuns]                   = useState<AcpRun[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState("");
+  const [context, setContext]             = useState<RunContext | null>(null);
+  const [loadingRuns, setLoadingRuns]     = useState(true);
+  const [loadingCtx, setLoadingCtx]       = useState(false);
+  const [error, setError]                 = useState<string | null>(null);
 
   useEffect(() => {
     fetch(`/api/admin/acp/runs`)
@@ -397,10 +512,10 @@ export default function S2Page() {
       <main style={{ flex: 1, padding: "32px 36px", overflowY: "auto" }}>
 
         {/* Header + run selector */}
-        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 24, flexWrap: "wrap", gap: 16 }}>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 28, flexWrap: "wrap", gap: 16 }}>
           <div>
-            <h1 style={{ fontFamily: serif, fontSize: 26, fontWeight: 500, color: A.ink, margin: 0, letterSpacing: "-0.02em" }}>
-              S2 — Market Research
+            <h1 style={{ fontFamily: serif, fontSize: 28, fontWeight: 500, color: A.ink, margin: 0, letterSpacing: "-0.02em" }}>
+              S2 — Market Intelligence
             </h1>
             <div style={{ fontSize: 13, color: A.muted, marginTop: 4 }}>
               Keyword intelligence · market visibility · Gate 1 HITL
@@ -432,20 +547,28 @@ export default function S2Page() {
           </div>
         </div>
 
-        {error && <div style={{ marginBottom: 16, padding: "10px 14px", borderRadius: 8, background: "#FEE2E2", color: "#dc2626", fontSize: 13 }}>{error}</div>}
+        {error && (
+          <div style={{ marginBottom: 16, padding: "10px 14px", borderRadius: 8, background: "#FEE2E2", color: "#dc2626", fontSize: 13 }}>
+            {error}
+          </div>
+        )}
 
         {!selectedRunId && !loadingRuns && (
-          <div style={{ textAlign: "center", padding: "80px 0", color: A.muted2, fontSize: 14 }}>
-            Select a run above to view its S2 research data.
+          <div style={{ textAlign: "center", padding: "80px 0" }}>
+            <div style={{ fontSize: 44, marginBottom: 12 }}>📊</div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: A.ink, marginBottom: 6 }}>Select a run to view research data</div>
+            <div style={{ fontSize: 13, color: A.muted2 }}>
+              Choose a run above to see S2 keyword intelligence and market visibility.
+            </div>
           </div>
         )}
 
         {loadingCtx && (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            <Card><Skeleton height={80} /></Card>
+            <Card><Skeleton height={110} /></Card>
             <div style={{ display: "grid", gridTemplateColumns: "3fr 2fr", gap: 16 }}>
-              <Card><Skeleton height={200} /></Card>
-              <Card><Skeleton height={200} /></Card>
+              <Card><Skeleton height={260} /></Card>
+              <Card><Skeleton height={260} /></Card>
             </div>
           </div>
         )}
@@ -453,13 +576,19 @@ export default function S2Page() {
         {context && !loadingCtx && (
           <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
 
-            {/* Section A — Confidence Score */}
+            {/* Section A — Confidence Score (donut + sub-scores) */}
             {score != null ? (
-              <ConfidenceGauge score={score} gate1Status={context.gate1_status} />
+              <ConfidenceSection
+                score={score}
+                breakdown={context.confidence_breakdown}
+                gate1Status={context.gate1_status}
+              />
             ) : (
               <Card>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                  <div style={{ fontSize: 13, color: A.muted2 }}>No confidence score available for this run.</div>
+                  <div style={{ fontSize: 13, color: A.muted2 }}>
+                    No research data — select a run with completed S2.
+                  </div>
                   <Badge color={gateStatusColor(context.gate1_status)}>
                     {gateStatusLabel(context.gate1_status)}
                   </Badge>
@@ -470,29 +599,43 @@ export default function S2Page() {
             {/* Sections B + C side-by-side */}
             <div style={{ display: "grid", gridTemplateColumns: "3fr 2fr", gap: 20, alignItems: "start" }}>
 
-              {/* Section B — Keyword Clusters */}
-              <Card>
-                <SLabel>Keyword Intelligence</SLabel>
-                <KeywordClusters clusters={clusters} />
+              {/* Section B — Keyword Intelligence (sortable table) */}
+              <Card style={{ padding: 0, overflow: "hidden" }}>
+                <div style={{ padding: "16px 20px 12px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <SLabel style={{ marginBottom: 0 }}>Keyword Intelligence</SLabel>
+                  {clusters.length > 0 && (
+                    <span style={{ fontSize: 11, color: A.muted2, fontFamily: mono }}>
+                      {clusters.length} clusters
+                    </span>
+                  )}
+                </div>
+                {clusters.length === 0 ? (
+                  <div style={{ padding: "48px 20px", textAlign: "center" }}>
+                    <div style={{ fontSize: 32, marginBottom: 10 }}>🔍</div>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: A.ink, marginBottom: 4 }}>No keyword clusters yet</div>
+                    <div style={{ fontSize: 13, color: A.muted2 }}>Run S2 to populate keyword intelligence.</div>
+                  </div>
+                ) : (
+                  <KeywordTable clusters={clusters} />
+                )}
               </Card>
 
-              {/* Section C — Visibility Report */}
-              <Card style={{ maxHeight: 520, overflowY: "auto" }}>
+              {/* Section C — Market Visibility Report (collapsible) */}
+              <Card>
                 <SLabel>Market Visibility Report</SLabel>
                 {context.s2_visibility_report ? (
                   <VisibilityReport text={context.s2_visibility_report} />
                 ) : (
-                  <div style={{ fontSize: 13, color: A.muted2 }}>No visibility report available.</div>
+                  <div style={{ fontSize: 13, color: A.muted2, padding: "24px 0", textAlign: "center" }}>
+                    No visibility report available for this run.
+                  </div>
                 )}
               </Card>
             </div>
 
-            {/* Section D — Gate 1 HITL (only when pending) */}
+            {/* Gate 1 Panel — only when pending */}
             {context.gate1_status === "pending" && (
-              <Card>
-                <SLabel>Gate 1 Review</SLabel>
-                <Gate1Panel runId={context.run_id} onAction={() => loadContext(context.run_id)} />
-              </Card>
+              <Gate1Panel runId={context.run_id} onAction={() => loadContext(context.run_id)} />
             )}
 
             {(context.gate1_status === "approved" || context.gate1_status === "auto_approved") && (
@@ -509,7 +652,7 @@ export default function S2Page() {
             {context.gate1_status === "rejected" && (
               <Card style={{ background: "#FEE2E2", border: "1px solid #FECACA" }}>
                 <div style={{ fontSize: 13, color: "#991B1B", fontWeight: 600 }}>
-                  ❌ Gate 1 rejected — run cannot proceed.
+                  ❌ Gate 1 rejected — run cannot proceed to S3.
                 </div>
               </Card>
             )}

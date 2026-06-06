@@ -1,26 +1,13 @@
 "use client";
-// app/admin/pipeline/s4-blog/page.tsx — S4 Blog Drafts HITL
+// app/admin/pipeline/s4-blog/page.tsx — S4 HITL Editorial Workspace
 // GET  /api/admin/acp/runs                              → runs list
 // GET  /api/admin/acp/s4/blog/drafts?run_id={id}       → [{draft_id, title, word_count, evaluator_score, hitl_gate3_status, seo_score, review_flags}]
 // PATCH /api/admin/acp/s4/blog/drafts/{id}/hitl        → {action, feedback?}
 
 import React, { useState, useEffect, useCallback } from "react";
-import { RefreshCw, CheckCircle, XCircle, RotateCcw, ChevronDown, ChevronUp, Share2 } from "lucide-react";
+import { RefreshCw, CheckCircle, XCircle, RotateCcw, ChevronDown, ChevronUp, FileText } from "lucide-react";
 import AdminSidebar from "../../_components/AdminSidebar";
 import { A, serif, sans, mono, Card, SLabel, Badge, Btn } from "../../_components/adminUi";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
-
-function getToken(): string | null {
-  if (typeof document === "undefined") return null;
-  const m = document.cookie.match(/cis_api_token=([^;]+)/);
-  return m ? decodeURIComponent(m[1]) : null;
-}
-
-function authHeaders(): Record<string, string> {
-  const t = getToken();
-  return t ? { Authorization: `Bearer ${t}`, "Content-Type": "application/json" } : { "Content-Type": "application/json" };
-}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -63,37 +50,45 @@ function fmtRunLabel(r: AcpRun): string {
 
 function evalScoreColor(s: number | null): string {
   if (s == null) return A.muted2;
-  if (s >= 8.5) return "#16a34a";
-  if (s >= 7)   return A.amber;
+  if (s >= 8)   return "#16a34a";
+  if (s >= 6)   return A.amber;
   return "#dc2626";
 }
 
 function evalScoreBg(s: number | null): string {
   if (s == null) return A.line2;
-  if (s >= 8.5) return A.greenSoft;
-  if (s >= 7)   return A.amberSoft;
+  if (s >= 8)   return A.greenSoft;
+  if (s >= 6)   return A.amberSoft;
   return "#FEE2E2";
 }
 
-function seoScoreColor(s: number | null): string {
-  if (s == null) return A.muted2;
-  if (s >= 8) return "#16a34a";
-  if (s >= 6) return A.amber;
-  return "#dc2626";
-}
-
-function statusConfig(status: string | null): { icon: string; label: string; color: "green" | "amber" | "gray" | "red" | "blue" } {
+function statusConfig(status: string | null): {
+  icon: string; label: string; color: "green" | "amber" | "gray" | "red" | "blue";
+} {
   switch (status) {
-    case "msthy_approved":  return { icon: "✅", label: "Approved",          color: "green" };
-    case "flagged_human":   return { icon: "⚠️", label: "Flagged for Review", color: "amber" };
-    case "rejected":        return { icon: "❌", label: "Rejected",           color: "red"   };
-    case "pending":
-    default:                return { icon: "⏳", label: "Pending Review",     color: "gray"  };
+    case "msthy_approved":                   return { icon: "✅", label: "Approved",          color: "green" };
+    case "flagged_human":
+    case "escalated_msthy":                  return { icon: "⚠️", label: "Flagged for Review", color: "amber" };
+    case "rejected":                         return { icon: "❌", label: "Rejected",           color: "red"   };
+    case "pending": default:                 return { icon: "⏳", label: "Pending Review",     color: "gray"  };
   }
 }
 
 function isActionable(status: string | null): boolean {
-  return status === "pending" || status === null || status === "flagged_human";
+  return status === "pending" || status === null || status === "flagged_human" || status === "escalated_msthy";
+}
+
+function flagLabel(f: ReviewFlag): string {
+  return f.message || f.pattern || f.rule_id || "Flag";
+}
+
+function exportApprovedJSON(drafts: BlogDraft[]) {
+  const approved = drafts.filter(d => d.hitl_gate3_status === "msthy_approved");
+  const blob = new Blob([JSON.stringify(approved, null, 2)], { type: "application/json" });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href = url; a.download = "approved-drafts.json"; a.click();
+  URL.revokeObjectURL(url);
 }
 
 // ── Skeleton ──────────────────────────────────────────────────────────────────
@@ -114,15 +109,16 @@ function DraftCard({ draft, onAction }: {
   draft: BlogDraft;
   onAction: (id: string, action: HitlAction, feedback?: string) => Promise<void>;
 }) {
-  const [expanded, setExpanded]       = useState(false);
-  const [pendingAction, setPending]   = useState<HitlAction | null>(null);
-  const [feedback, setFeedback]       = useState("");
-  const [busy, setBusy]               = useState(false);
-  const [err, setErr]                 = useState<string | null>(null);
+  const [expanded, setExpanded]     = useState(false);
+  const [pendingAction, setPending] = useState<HitlAction | null>(null);
+  const [feedback, setFeedback]     = useState("");
+  const [busy, setBusy]             = useState(false);
+  const [err, setErr]               = useState<string | null>(null);
 
   const sc     = statusConfig(draft.hitl_gate3_status);
   const flags  = draft.review_flags || [];
   const canAct = isActionable(draft.hitl_gate3_status);
+  const isApproved = draft.hitl_gate3_status === "msthy_approved";
 
   async function submit(action: HitlAction) {
     if ((action === "reject" || action === "rewrite") && !feedback.trim()) return;
@@ -141,18 +137,22 @@ function DraftCard({ draft, onAction }: {
       <div style={{ padding: "16px 20px", display: "flex", alignItems: "flex-start", gap: 14 }}>
 
         {/* Status icon */}
-        <div style={{ fontSize: 22, lineHeight: 1, paddingTop: 2, flexShrink: 0 }}>{sc.icon}</div>
+        <div style={{ fontSize: 20, lineHeight: 1, paddingTop: 3, flexShrink: 0 }}>
+          {sc.icon}
+        </div>
 
         {/* Content */}
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontWeight: 700, fontSize: 14, color: A.ink, marginBottom: 4 }}>
+          <div style={{ fontWeight: 700, fontSize: 14, color: A.ink, marginBottom: 6 }}>
             {draft.title || "(Untitled)"}
           </div>
 
-          {/* Meta row */}
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: flags.length ? 8 : 0 }}>
+          {/* Score row */}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: flags.length ? 10 : 0 }}>
             {draft.word_count != null && (
-              <span style={{ fontSize: 11, color: A.muted2 }}>{draft.word_count.toLocaleString()} words</span>
+              <span style={{ fontSize: 11, color: A.muted2 }}>
+                {draft.word_count.toLocaleString()} words
+              </span>
             )}
             {draft.evaluator_score != null && (
               <span style={{
@@ -165,8 +165,7 @@ function DraftCard({ draft, onAction }: {
             {draft.seo_score != null && (
               <span style={{
                 fontFamily: mono, fontSize: 11, fontWeight: 700, padding: "2px 7px", borderRadius: 4,
-                background: seoScoreColor(draft.seo_score) === "#16a34a" ? A.greenSoft : seoScoreColor(draft.seo_score) === A.amber ? A.amberSoft : "#FEE2E2",
-                color: seoScoreColor(draft.seo_score),
+                background: evalScoreBg(draft.seo_score), color: evalScoreColor(draft.seo_score),
               }}>
                 SEO {draft.seo_score.toFixed(1)}/10
               </span>
@@ -174,18 +173,29 @@ function DraftCard({ draft, onAction }: {
             <Badge color={sc.color}>{sc.label}</Badge>
           </div>
 
-          {/* Review flags */}
+          {/* Review flags — chips, max 3 visible */}
           {flags.length > 0 && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              {flags.map((f, i) => (
-                <div key={i} style={{ fontSize: 11, color: "#92400E", display: "flex", alignItems: "flex-start", gap: 5 }}>
-                  <span style={{ flexShrink: 0, marginTop: 1 }}>⚠️</span>
-                  <span>
-                    {f.rule_type && <strong>{f.rule_type}: </strong>}
-                    {f.message || f.pattern || f.rule_id}
-                  </span>
-                </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+              {flags.slice(0, 3).map((f, i) => (
+                <span key={i} style={{
+                  padding: "2px 8px", borderRadius: 4, fontSize: 11, fontWeight: 500,
+                  background: "#FEF3C7", color: "#92400E", border: "1px solid #FDE68A",
+                  display: "flex", alignItems: "center", gap: 4,
+                }}>
+                  ⚠️ {flagLabel(f)}
+                </span>
               ))}
+              {flags.length > 3 && (
+                <span
+                  title={flags.slice(3).map(f => flagLabel(f)).join(", ")}
+                  style={{
+                    padding: "2px 8px", borderRadius: 4, fontSize: 11,
+                    background: A.line2, color: A.muted2, cursor: "help",
+                  }}
+                >
+                  +{flags.length - 3} more
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -210,9 +220,19 @@ function DraftCard({ draft, onAction }: {
               </Btn>
             </>
           )}
+          {isApproved && (
+            <Btn size="sm" variant="ghost" disabled={busy}
+              onClick={() => submit("reject")}
+              style={{ fontSize: 11 }}>
+              Revoke
+            </Btn>
+          )}
           <button
             onClick={() => setExpanded(e => !e)}
-            style={{ padding: 7, border: `1px solid ${A.line}`, borderRadius: 8, background: "none", cursor: "pointer", color: A.muted, display: "flex" }}
+            style={{
+              padding: 7, border: `1px solid ${A.line}`, borderRadius: 8,
+              background: "none", cursor: "pointer", color: A.muted, display: "flex",
+            }}
           >
             {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
           </button>
@@ -221,7 +241,7 @@ function DraftCard({ draft, onAction }: {
 
       {/* Feedback textarea */}
       {pendingAction && (
-        <div style={{ padding: "0 20px 14px", borderTop: `1px solid ${A.line}`, paddingTop: 12 }}>
+        <div style={{ padding: "12px 20px 16px", borderTop: `1px solid ${A.line}` }}>
           <textarea
             placeholder={pendingAction === "reject" ? "Rejection reason (required)…" : "Rewrite instructions (required)…"}
             value={feedback}
@@ -241,13 +261,15 @@ function DraftCard({ draft, onAction }: {
               style={pendingAction === "rewrite" ? { color: "#1D4ED8", borderColor: "#BFDBFE" } : {}}>
               {pendingAction === "reject" ? "Confirm Reject" : "Send Rewrite Request"}
             </Btn>
-            <Btn size="sm" variant="ghost" onClick={() => { setPending(null); setFeedback(""); }}>Cancel</Btn>
+            <Btn size="sm" variant="ghost" onClick={() => { setPending(null); setFeedback(""); }}>
+              Cancel
+            </Btn>
           </div>
           {err && <div style={{ color: "#dc2626", fontSize: 12, marginTop: 6 }}>{err}</div>}
         </div>
       )}
 
-      {/* Expanded preview */}
+      {/* Expanded detail */}
       {expanded && (
         <div style={{ borderTop: `1px solid ${A.line}`, padding: "14px 20px", background: A.bg }}>
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -260,7 +282,9 @@ function DraftCard({ draft, onAction }: {
             {draft.seo_meta && (
               <div>
                 <SLabel style={{ marginBottom: 4 }}>SEO Meta</SLabel>
-                <div style={{ fontSize: 12, color: A.body, lineHeight: 1.6 }}>{draft.seo_meta}</div>
+                <div style={{ fontSize: 12, color: A.body, lineHeight: 1.6, fontStyle: "italic" }}>
+                  {draft.seo_meta}
+                </div>
               </div>
             )}
             {draft.target_keywords && draft.target_keywords.length > 0 && (
@@ -283,25 +307,30 @@ function DraftCard({ draft, onAction }: {
   );
 }
 
-// ── Stats Bar ─────────────────────────────────────────────────────────────────
+// ── Aggregate Stats Bar (sticky) ──────────────────────────────────────────────
 
-function StatsBar({ drafts }: { drafts: BlogDraft[] }) {
+function AggregateBar({ drafts }: { drafts: BlogDraft[] }) {
   const total    = drafts.length;
   const approved = drafts.filter(d => d.hitl_gate3_status === "msthy_approved").length;
   const pending  = drafts.filter(d => !d.hitl_gate3_status || d.hitl_gate3_status === "pending").length;
-  const flagged  = drafts.filter(d => d.hitl_gate3_status === "flagged_human").length;
+  const flagged  = drafts.filter(d => d.hitl_gate3_status === "flagged_human" || d.hitl_gate3_status === "escalated_msthy").length;
   const rejected = drafts.filter(d => d.hitl_gate3_status === "rejected").length;
+  const pct      = total > 0 ? (approved / total) * 100 : 0;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 20 }}>
-      <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+    <div style={{
+      position: "sticky", top: 0, zIndex: 20,
+      background: A.card, border: `1px solid ${A.line}`, borderRadius: 12,
+      padding: "14px 20px", marginBottom: 16,
+      boxShadow: "0 2px 8px rgba(0,0,0,0.06)",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12, marginBottom: 10 }}>
         <div style={{ fontSize: 14, color: A.body }}>
-          <span style={{ fontWeight: 700, color: A.green }}>{approved}</span>
-          <span style={{ color: A.muted }}> / {total} approved</span>
+          <span style={{ fontWeight: 700, color: "#16a34a", fontSize: 18 }}>{approved}</span>
+          <span style={{ color: A.muted }}> / {total} drafts approved</span>
         </div>
-        <div style={{ display: "flex", gap: 6 }}>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {[
-            { label: "Approved", count: approved, color: "#16a34a" },
             { label: "Pending",  count: pending,  color: A.amber },
             { label: "Flagged",  count: flagged,  color: A.gold },
             { label: "Rejected", count: rejected, color: "#dc2626" },
@@ -309,16 +338,16 @@ function StatsBar({ drafts }: { drafts: BlogDraft[] }) {
             <span key={s.label} style={{
               padding: "3px 10px", borderRadius: 999, fontSize: 11, fontWeight: 600,
               background: `${s.color}18`, color: s.color,
-            }}>{s.count} {s.label}</span>
+            }}>
+              {s.label}: {s.count}
+            </span>
           ))}
         </div>
       </div>
-      {/* Progress bar */}
-      <div style={{ height: 6, borderRadius: 999, background: A.line, overflow: "hidden", maxWidth: 400 }}>
+      <div style={{ height: 6, borderRadius: 999, background: A.line, overflow: "hidden" }}>
         <div style={{
           height: "100%", borderRadius: 999, background: "#16a34a",
-          width: total > 0 ? `${(approved / total) * 100}%` : "0%",
-          transition: "width .5s ease",
+          width: `${pct}%`, transition: "width .5s ease",
         }} />
       </div>
     </div>
@@ -370,6 +399,8 @@ export default function S4BlogPage() {
     setDrafts(prev => prev.map(d => d.draft_id === id ? { ...d, hitl_gate3_status: newStatus } : d));
   }
 
+  const approvedCount = drafts.filter(d => d.hitl_gate3_status === "msthy_approved").length;
+
   return (
     <div style={{ display: "flex", minHeight: "100vh", background: A.bg, fontFamily: sans }}>
       <AdminSidebar />
@@ -378,8 +409,8 @@ export default function S4BlogPage() {
         {/* Header + run selector */}
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 24, flexWrap: "wrap", gap: 16 }}>
           <div>
-            <h1 style={{ fontFamily: serif, fontSize: 26, fontWeight: 500, color: A.ink, margin: 0, letterSpacing: "-0.02em" }}>
-              S4 — Blog Drafts
+            <h1 style={{ fontFamily: serif, fontSize: 28, fontWeight: 500, color: A.ink, margin: 0, letterSpacing: "-0.02em" }}>
+              S4 — Editorial Workspace
             </h1>
             <div style={{ fontSize: 13, color: A.muted, marginTop: 4 }}>
               Human-in-the-loop review · approve, reject, or request rewrite
@@ -406,32 +437,41 @@ export default function S4BlogPage() {
                 <RefreshCw size={13} />
               </Btn>
             )}
+            {drafts.length > 0 && (
+              <Btn variant="ghost" size="sm" onClick={() => exportApprovedJSON(drafts)}>
+                <FileText size={13} /> Export ({approvedCount})
+              </Btn>
+            )}
           </div>
         </div>
 
         {error && (
-          <div style={{ marginBottom: 16, padding: "10px 14px", borderRadius: 8, background: "#FEE2E2", color: "#dc2626", fontSize: 13 }}>{error}</div>
+          <div style={{ marginBottom: 16, padding: "10px 14px", borderRadius: 8, background: "#FEE2E2", color: "#dc2626", fontSize: 13 }}>
+            {error}
+          </div>
         )}
 
         {!selectedRunId && !loadingRuns && (
-          <div style={{ textAlign: "center", padding: "80px 0", color: A.muted2, fontSize: 14 }}>
-            Select a run above to review its blog drafts.
+          <div style={{ textAlign: "center", padding: "80px 0" }}>
+            <div style={{ fontSize: 44, marginBottom: 12 }}>✍️</div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: A.ink, marginBottom: 6 }}>Select a run to review blog drafts</div>
+            <div style={{ fontSize: 13, color: A.muted2 }}>Blog drafts appear after Gate 2 approval triggers S4.1.</div>
           </div>
         )}
 
         {loadingDrafts && (
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            {[1, 2, 3].map(i => <Card key={i}><Skeleton height={60} /></Card>)}
+            {[1, 2, 3].map(i => <Card key={i}><Skeleton height={70} /></Card>)}
           </div>
         )}
 
         {!loadingDrafts && selectedRunId && drafts.length === 0 && !error && (
           <div style={{ textAlign: "center", padding: "80px 0" }}>
-            <Share2 size={36} style={{ color: A.muted2, display: "block", margin: "0 auto 12px" }} />
-            <div style={{ fontFamily: serif, fontSize: 18, fontWeight: 500, color: A.ink, marginBottom: 6 }}>
+            <div style={{ fontSize: 44, marginBottom: 12 }}>📝</div>
+            <div style={{ fontFamily: serif, fontSize: 20, fontWeight: 500, color: A.ink, marginBottom: 8 }}>
               No blog drafts for this run
             </div>
-            <div style={{ fontSize: 13, color: A.muted, maxWidth: 400, margin: "0 auto" }}>
+            <div style={{ fontSize: 13, color: A.muted, maxWidth: 440, margin: "0 auto", lineHeight: 1.7 }}>
               S4.1 Blog Engine may not have run yet. Blog drafts appear here after Gate 2 approval triggers S4.
             </div>
           </div>
@@ -439,7 +479,7 @@ export default function S4BlogPage() {
 
         {!loadingDrafts && drafts.length > 0 && (
           <>
-            <StatsBar drafts={drafts} />
+            <AggregateBar drafts={drafts} />
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               {drafts.map(draft => (
                 <DraftCard key={draft.draft_id} draft={draft} onAction={handleAction} />
