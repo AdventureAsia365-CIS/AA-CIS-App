@@ -457,8 +457,7 @@ export default function S4SocialPage() {
               </Btn>
             )}
             {posts.length > 0 && (
-              <Btn variant="ghost" size="sm" onClick={() => exportApprovedCSV(posts)}
-                title={`Export ${approvedCount} approved posts as CSV`}>
+              <Btn variant="ghost" size="sm" onClick={() => exportApprovedCSV(posts)}>
                 <Download size={13} /> CSV ({approvedCount})
               </Btn>
             )}

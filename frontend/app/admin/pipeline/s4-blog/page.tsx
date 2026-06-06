@@ -438,8 +438,7 @@ export default function S4BlogPage() {
               </Btn>
             )}
             {drafts.length > 0 && (
-              <Btn variant="ghost" size="sm" onClick={() => exportApprovedJSON(drafts)}
-                title={approvedCount === 0 ? "No approved drafts to export" : `Export ${approvedCount} approved drafts`}>
+              <Btn variant="ghost" size="sm" onClick={() => exportApprovedJSON(drafts)}>
                 <FileText size={13} /> Export ({approvedCount})
               </Btn>
             )}
