@@ -491,7 +491,7 @@ async def list_social_content(
                 SELECT social_id::text AS id, run_id::text, tour_name, channel,
                        hitl_gate_3_social_status AS status,
                        formula_used AS formula, mode,
-                       validation_status, content_text AS content, quality_score,
+                       validation_status, COALESCE(tiktok, facebook_post, facebook_ad) AS content, quality_score,
                        created_at
                 FROM acp_silver_s4.social_content
                 WHERE run_id = $1::uuid
@@ -502,7 +502,7 @@ async def list_social_content(
                 SELECT social_id::text AS id, run_id::text, tour_name, channel,
                        hitl_gate_3_social_status AS status,
                        formula_used AS formula, mode,
-                       validation_status, content_text AS content, quality_score,
+                       validation_status, COALESCE(tiktok, facebook_post, facebook_ad) AS content, quality_score,
                        created_at
                 FROM acp_silver_s4.social_content
                 ORDER BY created_at DESC LIMIT 50
