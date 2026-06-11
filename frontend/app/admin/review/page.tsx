@@ -20,7 +20,7 @@ function mapApiToReview(r: any) {
     name:    r.aa_name || r.src_name || "Unknown",
     country: r.country || "Unknown",
     score:   parseFloat(r.score_overall || "0"),
-    date:    r.created_at ? new Date(r.created_at).toLocaleDateString() : "",
+    date:    r.ingest_at ? new Date(r.ingest_at).toLocaleDateString() : "",
     issues:  (() => { try { return JSON.parse(r.failure_summary || "[]"); } catch { return []; } })(),
     original:  { name: r.src_name || "", summary: r.src_summary || "", seo_title: "", seo_meta: "" },
     generated: { name: r.aa_name || "", subtitle: r.aa_subtitle || "", summary: r.aa_summary || "", seo_title: r.seo_title || "", seo_meta: r.seo_meta || "" },
