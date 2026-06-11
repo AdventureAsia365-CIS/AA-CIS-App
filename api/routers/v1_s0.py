@@ -117,12 +117,12 @@ async def list_review(
         idx += 1
 
     if date_from:
-        conditions.append(f"created_at >= ${idx}")
+        conditions.append(f"ingest_at >= ${idx}")
         params.append(date_from)
         idx += 1
 
     if date_to:
-        conditions.append(f"created_at < ${idx} + INTERVAL '1 day'")
+        conditions.append(f"ingest_at < ${idx} + INTERVAL '1 day'")
         params.append(date_to)
         idx += 1
 
@@ -134,10 +134,10 @@ async def list_review(
             SELECT tour_id, src_name, country, provider,
                    src_subtitle, src_summary, src_highlights,
                    src_itineraries, price_raw,
-                   created_at, review_status, review_notes
+                   ingest_at, review_status, review_notes
             FROM silver_aa_internal.raw_tours
             WHERE {where}
-            ORDER BY created_at DESC
+            ORDER BY ingest_at DESC
             LIMIT 500
         """, *params)
 
@@ -155,7 +155,7 @@ async def list_review(
                 "src_name":          r["src_name"],
                 "country":           r["country"],
                 "provider":          r["provider"],
-                "created_at":        r["created_at"].isoformat() if r["created_at"] else None,
+                "ingest_at":        r["ingest_at"].isoformat() if r["ingest_at"] else None,
                 "review_status":     r["review_status"],
                 "review_notes":      r["review_notes"],
                 "field_coverage_pct": _field_coverage_pct(dict(r)),
