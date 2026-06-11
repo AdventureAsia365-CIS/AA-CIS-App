@@ -9,62 +9,31 @@ Routes:
 Stage values: s2 | s3 | s4  (maps to integer 2 | 3 | 4 in DB)
 
 Auth:
-  - Standard tenant JWT (role=tenant) or admin secret
-  - RLS: JWT sub (tenant_id) must match the run's tenant_id — no cross-tenant approval
+  - Single-header tenant auth (AA-181): X-API-Key (tenant) or X-Admin-Secret (AA internal)
+  - RLS: resolved tenant_id must match the run's tenant_id — no cross-tenant approval
 
 Gate rules (NON-NEGOTIABLE):
   - NEVER auto-approve: endpoint only reached by explicit human action in portal
   - audit_log mandatory on every approve or reject — no exceptions
-  - actor_type='tenant_admin' written as typed column on audit_log (per PRD v1.2)
+  - actor_type written as typed column on audit_log (per PRD v1.2):
+    'hitl_reviewer' for AA internal staff, 'tenant_admin' for tenant self-service
   - Double-submit guard: 409 if hitl_request already resolved
 """
 import asyncio
 import json
-import os
-from typing import Optional
 from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.security import HTTPBearer as _HTTPBearer, HTTPAuthorizationCredentials as _Creds
 from pydantic import BaseModel, field_validator
 
-from api.routers.auth import verify_jwt as _verify_jwt
+from api.routers.auth import verify_tenant_api_key as _get_tenant_actor
 from services.acp_shared import h3_rule_extractor as _h3
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/v1/acp/gate", tags=["acp-gate"])
 
 _STAGE_MAP = {"s2": 2, "s3": 3, "s4": 4}
-
-
-# ── Auth ──────────────────────────────────────────────────────────────────────
-
-def _get_tenant_actor(
-    request: Request,
-    credentials: Optional[_Creds] = Depends(_HTTPBearer(auto_error=False)),
-) -> dict:
-    """Accept admin secret OR tenant JWT. Returns payload with tenant_id and actor."""
-    admin_secret = os.environ.get("ADMIN_SECRET", "")
-    x_admin = request.headers.get("X-Admin-Secret", "")
-    if admin_secret and x_admin == admin_secret:
-        return {
-            "sub": "00000000-0000-0000-0000-000000000001",
-            "role": "admin",
-            "actor": "admin",
-        }
-    if credentials:
-        try:
-            payload = _verify_jwt(credentials.credentials)
-            role = payload.get("role", "")
-            if role in ("tenant", "admin"):
-                return {
-                    **payload,
-                    "actor": payload.get("name") or payload.get("sub") or "tenant_admin",
-                }
-        except Exception:
-            pass
-    raise HTTPException(status_code=401, detail="Not authenticated")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -84,6 +53,11 @@ def _safe_uuid(value: str, field: str) -> str:
         return str(UUID(value))
     except (ValueError, AttributeError):
         raise HTTPException(status_code=422, detail=f"Invalid UUID for {field}: {value!r}")
+
+
+def _audit_actor_type(tenant: dict) -> str:
+    """Map verify_tenant_api_key's reviewer_type to the audit_actor_type enum (AA-186)."""
+    return "hitl_reviewer" if tenant.get("reviewer_type") == "aa_internal" else "tenant_admin"
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
@@ -120,11 +94,11 @@ async def gate_approve(
     NON-NEGOTIABLE:
     - NEVER auto-approve: only reached by explicit human action
     - audit_log mandatory: every call writes a record — no exceptions
-    - tenant_id in JWT must match run's tenant_id
+    - caller's resolved tenant_id must match run's tenant_id
     """
     stage_int = _parse_stage(stage)
     run_id = _safe_uuid(body.run_id, "run_id")
-    jwt_tenant_id = tenant.get("sub", "")
+    caller_tenant_id = tenant.get("sub", "")
     actor = tenant.get("actor", "tenant_admin")
     pool = request.app.state.pool
 
@@ -139,7 +113,7 @@ async def gate_approve(
         # RLS: tenant can only approve their own run
         run_tenant = str(run_row["tenant_id"])
         is_admin = tenant.get("role") == "admin"
-        if not is_admin and run_tenant != jwt_tenant_id:
+        if not is_admin and run_tenant != caller_tenant_id:
             raise HTTPException(status_code=403, detail="Not authorised to approve this run")
 
         hitl_row = await conn.fetchrow(
@@ -179,7 +153,7 @@ async def gate_approve(
                 INSERT INTO acp_shared.audit_log
                     (tenant_id, actor, action, resource_type, resource_id, actor_type, details)
                 VALUES ($1, $2, $3, 'acp_hitl_request', $4,
-                        'tenant_admin'::acp_shared.audit_actor_type, $5::jsonb)
+                        $6::acp_shared.audit_actor_type, $5::jsonb)
                 """,
                 run_tenant,
                 actor,
@@ -190,6 +164,7 @@ async def gate_approve(
                     "hitl_id": str(hitl_row["hitl_id"]),
                     "notes": body.notes.strip(),
                 }),
+                _audit_actor_type(tenant),
             )
 
     logger.info("gate_approved", run_id=run_id, stage=stage, actor=actor)
@@ -211,11 +186,11 @@ async def gate_reject(
     NON-NEGOTIABLE:
     - notes required (enforced by GateRejectRequest validator)
     - audit_log mandatory: every call writes a record — no exceptions
-    - tenant_id in JWT must match run's tenant_id
+    - caller's resolved tenant_id must match run's tenant_id
     """
     stage_int = _parse_stage(stage)
     run_id = _safe_uuid(body.run_id, "run_id")
-    jwt_tenant_id = tenant.get("sub", "")
+    caller_tenant_id = tenant.get("sub", "")
     actor = tenant.get("actor", "tenant_admin")
     pool = request.app.state.pool
 
@@ -229,7 +204,7 @@ async def gate_reject(
 
         run_tenant = str(run_row["tenant_id"])
         is_admin = tenant.get("role") == "admin"
-        if not is_admin and run_tenant != jwt_tenant_id:
+        if not is_admin and run_tenant != caller_tenant_id:
             raise HTTPException(status_code=403, detail="Not authorised to reject this run")
 
         hitl_row = await conn.fetchrow(
@@ -271,7 +246,7 @@ async def gate_reject(
                 INSERT INTO acp_shared.audit_log
                     (tenant_id, actor, action, resource_type, resource_id, actor_type, details)
                 VALUES ($1, $2, $3, 'acp_hitl_request', $4,
-                        'tenant_admin'::acp_shared.audit_actor_type, $5::jsonb)
+                        $6::acp_shared.audit_actor_type, $5::jsonb)
                 """,
                 run_tenant,
                 actor,
@@ -282,6 +257,7 @@ async def gate_reject(
                     "hitl_id": str(hitl_row["hitl_id"]),
                     "notes": body.notes,
                 }),
+                _audit_actor_type(tenant),
             )
 
     # H-3: extract rule from rejection note (fire-and-forget, does not block response)
@@ -314,7 +290,7 @@ async def get_gate_run(
     """
     stage_int = _parse_stage(stage)
     run_id = _safe_uuid(run_id, "run_id")
-    jwt_tenant_id = tenant.get("sub", "")
+    caller_tenant_id = tenant.get("sub", "")
     pool = request.app.state.pool
 
     async with pool.acquire() as conn:
@@ -331,7 +307,7 @@ async def get_gate_run(
 
         run_tenant = str(run_row["tenant_id"])
         is_admin = tenant.get("role") == "admin"
-        if not is_admin and run_tenant != jwt_tenant_id:
+        if not is_admin and run_tenant != caller_tenant_id:
             raise HTTPException(status_code=403, detail="Not authorised to view this run")
 
         hitl_row = await conn.fetchrow(

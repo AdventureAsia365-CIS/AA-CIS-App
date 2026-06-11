@@ -6,20 +6,20 @@ Routes:
   POST /v1/acp/s4/social/angles   → guided step 1: brief → 3 angles
   POST /v1/acp/s4/social/write    → guided step 2: brief + angle → write → save
   GET  /v1/acp/s4/social/{id}     → fetch social_content row
+
+Auth: Single-header tenant auth (AA-181) — X-API-Key (tenant) or X-Admin-Secret (AA internal).
 """
 import asyncio
 import json
-import os
 from typing import Optional
 from uuid import UUID
 
 import asyncpg
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.security import HTTPBearer as _HTTPBearer, HTTPAuthorizationCredentials as _Creds
 from pydantic import BaseModel
 
-from api.routers.auth import verify_jwt as _verify_jwt
+from api.routers.auth import verify_tenant_api_key as _get_admin
 from services.acp_s4_social.brief import ContentBrief, VALID_CHANNELS
 from services.acp_s4_social.llm_client import make_llm_client
 from services.acp_shared.cost_utils import calc_bedrock_cost, record_stage_cost
@@ -31,23 +31,6 @@ except ImportError:
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/v1/acp/s4/social", tags=["S4 Social Engine"])
-
-
-# ── Auth ──────────────────────────────────────────────────────────────────────
-
-def _get_admin(
-    request: Request,
-    credentials: Optional[_Creds] = Depends(_HTTPBearer(auto_error=False)),
-):
-    admin_secret = os.environ.get("ADMIN_SECRET", "")
-    if admin_secret and request.headers.get("X-Admin-Secret") == admin_secret:
-        return {"sub": "00000000-0000-0000-0000-000000000001", "role": "admin"}
-    if credentials:
-        try:
-            return _verify_jwt(credentials.credentials)
-        except Exception:
-            pass
-    raise HTTPException(status_code=401, detail="Not authenticated")
 
 
 def _get_pool(request: Request) -> asyncpg.Pool:

@@ -1,38 +1,65 @@
-# AA-CIS-App Handoff — Session 55
-Updated: 2026-06-04
+# AA-CIS-App Handoff — Session 56
+Updated: 2026-06-11
 
 ## Status
-- Branch: develop | Last main commit: 7db3aac
-- ECS: api:271 RUNNING (desiredCount=1) — STOP after session
+- Branch: develop @ 03e6322 | PR #33 (develop -> main) OPEN, awaiting human merge
+- ECS: api (latest dev image deployed via Deploy Dev #27348492360) — RUNNING, STOP after session
 - RDS: aa-cis-dev-db RUNNING — STOP after session
-- Deploy Prod #26925352670: SUCCESS ✅
-- Migrations 058+061 APPLIED on dev DB ✅ (052-057, 059-060 applied previously)
+- Deploy Dev (develop): SUCCESS ✅ | CI on develop: SUCCESS ✅
 
 ## Completed This Session
 
-### AA-169 — S2 Auto Crash-Recovery + Monitoring Fields — SHIPPED TO PROD ✅
+### AA-181 — ACP tenant-auth: collapse to single-header (X-API-Key/X-Admin-Secret) ✅
 
-**feature/aa-169-s2-auto-crash-recovery → develop → main → Deploy Prod**
+**feature/aa-181-single-header-tenant-auth → develop (merged) → PR #33 (develop->main, open)**
 
-- `_recover_stuck_s2_runs(pool, graph)` in api/main.py lifespan — ECS startup hook
-- `_with_iteration_update()` wraps 7 LangGraph nodes → writes current_iteration per step
-- `compute_saved_pct` written after ainvoke (dataforseo + apify cache ratio)
-- Migration 061 applied: schema_versions row for 058 backfilled ✅
-- ECS log confirmed: `startup_recovery_none` on api:271 restart ✅
+- New shared dependency `verify_tenant_api_key` in `api/routers/auth.py`:
+  multi-credential — `X-API-Key` (raw `cis_...`, sha256 vs `shared.tenants.api_key_hash`)
+  OR `X-Admin-Secret` (AA internal sentinel). 401 if neither valid.
+  Returns `reviewer_type` (`aa_internal`|`tenant_self`) for gate audit (AA-186 prep).
+- 6 routers migrated off JWT/HTTPBearer + old admin-secret-only deps via aliased imports
+  (zero call-site changes): `v1_acp.py`, `v1_s1.py`, `services/acp/s2/router.py`,
+  `v1_acp_gate.py`, `v1_s4_blog.py`, `v1_s4_social.py`.
+- `/auth/tenant-login` kept, marked `deprecated=True`.
+- `v1_acp_gate.py`: new `_audit_actor_type()` maps `reviewer_type` → existing
+  `acp_shared.audit_actor_type` enum values for `audit_log` writes.
+- Added OpenAPI security schemes `TenantApiKey`/`AdminSecret` (Swagger now documents both
+  headers on all 6 routers).
+- Out of scope (untouched, confirmed): `v1_s3.py`, `/v1/hitl/gate2`, `acp_health.py`.
+- Full details: `docs/implementation-notes/AA-181.md`
 
-**Tests: 12/12 green (test_aa169.py) | 23/23 green (acp_s2/) | 383 passed total**
+**Tests: tests/unit/test_auth_tenant_api_key.py 5/5 green | flake8 (CI config) clean**
 
 ### CI/CD chain
-- CI #26925124216 ✅ | Deploy Dev #26925124227 ✅ | Deploy Prod #26925352670 ✅
-- ECS task def: api:271
+- feature CI (9343df3): all green (Lint, Security Audit, Unit, Integration, Docker Build,
+  Vercel Preview)
+- develop CI (fedc078): all green | Deploy Dev (27348492360): SUCCESS ✅
 
-## Open Issues
+### E2E verify (production ECS, https://api-cis.lumiguides.it.com)
+- `GET /v1/acp/runs?limit=1` + `X-API-Key: cis_u1k...` → `200` (real run data) ✅
+- No header → `401` | invalid key → `403` (APIGW authorizer)
+- `POST /acp/s1/run` + valid `X-API-Key` → `422` (validation layer reached — auth passed)
+
+## Unplanned: develop branch recreated
+- `develop` was auto-deleted by GitHub after PR #32 (AA-174, develop->main) merged earlier
+  today. Recreated `develop` from `origin/main` (superset of old develop) before merging
+  AA-181 in — confirmed with user first. PR #33 opened develop->main.
+
+## Open Issues (carried over)
+- PR #33 (develop -> main) needs human merge -> triggers Deploy Prod
 - OPENAI_API_KEY needs rotation
-- 24 pre-existing test failures (test_s2_idempotency, test_s2_semaphore,
-  test_h3_rule_extractor, test_007_rls_isolation) — pre-existing
+- 8 pre-existing test failures (test_s2_idempotency, test_s2_semaphore,
+  test_h3_rule_extractor) — pre-existing, reconfirmed unrelated to AA-181 via git stash
 - feature/aa-112-s2-async-postgres-saver: DO NOT merge
 - feature/aa-143-canary: DO NOT merge
 - feature/aa-141-run-health-dashboard: DO NOT merge
+- Frontend `/acp/s1/*` calls (admin pipeline S1 page) use Bearer token against APIGW base
+  URL with no `/acp` resource — looks pre-existing broken/dead, unrelated to AA-181, not
+  investigated further
+
+## Next
+- Human: review + merge PR #33 (develop -> main) -> Deploy Prod
+- AA-186: full reviewer_type audit work (builds on `_audit_actor_type()` mapping added here)
 
 ## Cost Checklist (MANUAL — do not auto-run)
 aws ecs update-service --cluster aa-cis-dev-cluster --service aa-cis-dev-api --desired-count 0 --profile pqnghiep-admin --region us-west-1

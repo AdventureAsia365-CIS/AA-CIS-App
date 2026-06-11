@@ -11,6 +11,8 @@ Route order (specific before parameterized):
 
 Table: acp_shared.acp_runs  (PK=run_id, acpcore v0.4.0 schema)
 Table: silver_aa_internal.tour_content_versions  (PK=id, FK→run_id + tour_id)
+
+Auth: Single-header tenant auth (AA-181) — X-API-Key (tenant) or X-Admin-Secret (AA internal).
 """
 import asyncio
 import json
@@ -24,10 +26,9 @@ from uuid import UUID
 import boto3 as _boto3
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from fastapi.security import HTTPBearer as _HTTPBearer, HTTPAuthorizationCredentials as _Creds
 from pydantic import BaseModel
 
-from api.routers.auth import verify_jwt as _verify_jwt
+from api.routers.auth import verify_tenant_api_key as _get_tenant
 
 logger = structlog.get_logger()
 router = APIRouter(tags=["S1 Rewrite"])
@@ -36,24 +37,6 @@ _TERMINAL_STATUSES = {"published", "failed", "rejected"}
 _SSE_POLL_INTERVAL = 2    # seconds between DB polls
 _SSE_HEARTBEAT_S = 15     # seconds between SSE heartbeat comments
 _SSE_TIMEOUT_S = 1800     # 30 minutes max stream duration
-
-
-# ── Auth ──────────────────────────────────────────────────────────────────────
-
-def _get_tenant(
-    request: Request,
-    credentials: Optional[_Creds] = Depends(_HTTPBearer(auto_error=False)),
-):
-    admin_secret = os.environ.get("ADMIN_SECRET", "")
-    x_admin = request.headers.get("X-Admin-Secret", "")
-    if admin_secret and x_admin == admin_secret:
-        return {"sub": "00000000-0000-0000-0000-000000000001", "role": "admin"}
-    if credentials:
-        try:
-            return _verify_jwt(credentials.credentials)
-        except Exception:
-            pass
-    raise HTTPException(status_code=401, detail="Not authenticated")
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
