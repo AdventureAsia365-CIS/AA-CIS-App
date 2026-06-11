@@ -5,40 +5,24 @@ GET /v1/acp/runs/{run_id}/context — full stage I/O for one run (S0→S3 + S4 b
 GET /v1/acp/runs/{run_id}         — run detail with all gate decisions.
 
 NOTE: /runs/{run_id}/context MUST be declared before /runs/{run_id} — FastAPI greedy match.
+
+Auth: Single-header tenant auth (AA-181) — X-API-Key (tenant) or X-Admin-Secret (AA internal).
 """
 import asyncio
 import json as _json
-import os
 import structlog
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.security import HTTPBearer as _HTTPBearer, HTTPAuthorizationCredentials as _Creds
 from typing import Optional
 
-from api.routers.auth import verify_jwt as _verify_jwt
+from api.routers.auth import verify_tenant_api_key as _get_tenant
 from api.services.run_context_db import get_run_context_validated
 from api.schemas.run_context import RunContextValidationError
 from services.acp_shared.cost_utils import finalize_run_cost
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/v1/acp", tags=["acp"])
-
-
-def _get_tenant(
-    request: Request,
-    credentials: Optional[_Creds] = Depends(_HTTPBearer(auto_error=False)),
-):
-    admin_secret = os.environ.get("ADMIN_SECRET", "")
-    x_admin = request.headers.get("X-Admin-Secret", "")
-    if admin_secret and x_admin == admin_secret:
-        return {"sub": "00000000-0000-0000-0000-000000000001", "role": "admin"}
-    if credentials:
-        try:
-            return _verify_jwt(credentials.credentials)
-        except Exception:
-            pass
-    raise HTTPException(status_code=401, detail="Not authenticated")
 
 
 @router.get("/s1-keywords")

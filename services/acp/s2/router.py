@@ -11,20 +11,21 @@ Concurrency: max 2 concurrent runs per tenant via acpcore semaphore.
 Pre-check is synchronous (TOCTOU-safe for scaffold); background task holds the slot.
 
 Graph lifecycle: compiled graph is stored on app.state.s2_graph by the lifespan handler.
+
+Auth: Single-header tenant auth (AA-181) — X-API-Key (tenant) or X-Admin-Secret (AA internal).
 """
 import asyncio
 import json
-import os
 import structlog
 from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.security import HTTPBearer as _HTTPBearer, HTTPAuthorizationCredentials as _Creds
 from pydantic import BaseModel
 
 from acpcore.concurrency import _get_semaphore, _MAX_CONCURRENT
 from acpcore.errors import ACPErrorCode
+from api.routers.auth import verify_tenant_api_key as _get_tenant
 from api.services.run_context_db import get_run_context_validated
 from api.schemas.run_context import RunContextValidationError
 from services.acp_shared.errors import S1ContextNotReadyError
@@ -131,25 +132,6 @@ def _get_s2_graph(request: Request):
     if graph is None:
         raise HTTPException(status_code=503, detail="S2 graph not initialized")
     return graph
-
-
-# ── Auth ──────────────────────────────────────────────────────────────────────
-
-def _get_tenant(
-    request: Request,
-    credentials: Optional[_Creds] = Depends(_HTTPBearer(auto_error=False)),
-):
-    admin_secret = os.environ.get("ADMIN_SECRET", "")
-    x_admin = request.headers.get("X-Admin-Secret", "")
-    if admin_secret and x_admin == admin_secret:
-        return {"sub": "00000000-0000-0000-0000-000000000001", "role": "admin"}
-    if credentials:
-        try:
-            from api.routers.auth import verify_jwt as _verify_jwt
-            return _verify_jwt(credentials.credentials)
-        except Exception:
-            pass
-    raise HTTPException(status_code=401, detail="Not authenticated")
 
 
 def _safe_uuid(value: str, field: str) -> str:

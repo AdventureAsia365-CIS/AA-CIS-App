@@ -7,10 +7,11 @@ Routes (specific before parameterized):
   GET   /v1/acp/s4/blog/drafts                    → list drafts
   GET   /v1/acp/s4/blog/drafts/{draft_id}         → get draft
   PATCH /v1/acp/s4/blog/drafts/{draft_id}/hitl    → HITL approve/reject
+
+Auth: Single-header tenant auth (AA-181) — X-API-Key (tenant) or X-Admin-Secret (AA internal).
 """
 import asyncio
 import json
-import os
 from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID, uuid4
@@ -18,31 +19,13 @@ from uuid import UUID, uuid4
 import asyncpg
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.security import HTTPBearer as _HTTPBearer, HTTPAuthorizationCredentials as _Creds
 from pydantic import BaseModel
 
-from api.routers.auth import verify_jwt as _verify_jwt
+from api.routers.auth import verify_tenant_api_key as _get_admin
 from services.acp_s4_blog.cms.publisher import publish_draft_to_cms as _cms_publish
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/v1/acp/s4/blog", tags=["S4 Blog Engine"])
-
-
-# ── Auth ──────────────────────────────────────────────────────────────────────
-
-def _get_admin(
-    request: Request,
-    credentials: Optional[_Creds] = Depends(_HTTPBearer(auto_error=False)),
-):
-    admin_secret = os.environ.get("ADMIN_SECRET", "")
-    if admin_secret and request.headers.get("X-Admin-Secret") == admin_secret:
-        return {"sub": "00000000-0000-0000-0000-000000000001", "role": "admin"}
-    if credentials:
-        try:
-            return _verify_jwt(credentials.credentials)
-        except Exception:
-            pass
-    raise HTTPException(status_code=401, detail="Not authenticated")
 
 
 def _get_pool(request: Request) -> asyncpg.Pool:

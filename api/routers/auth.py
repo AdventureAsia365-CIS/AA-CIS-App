@@ -17,7 +17,8 @@ from datetime import datetime, timedelta, timezone
 
 import asyncpg
 import jwt  # PyJWT
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Security, status
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -71,12 +72,16 @@ def verify_jwt(token: str) -> dict:
 
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
-@router.post("/tenant-login", response_model=TenantLoginResponse)
+@router.post("/tenant-login", response_model=TenantLoginResponse, deprecated=True)
 async def tenant_login(
     body: TenantLoginRequest,
     pool=Depends(lambda: None),  # replaced by app-level pool injection below
 ):
     """
+    DEPRECATED (AA-181): ACP tenant routes now authenticate with a single
+    X-API-Key header (see verify_tenant_api_key) instead of a JWT obtained here.
+    Kept for now for any remaining non-ACP callers; do not add new dependents.
+
     Verify tenant API key against shared.tenants.api_key_hash.
     Returns signed JWT on success.
     """
@@ -139,3 +144,88 @@ async def verify_tenant_token(token: str):
         plan_tier=payload["plan_tier"],
         valid=True,
     )
+
+
+# ── verify_tenant_api_key — AA-181 single-header ACP tenant auth ──────────────
+#
+# Replaces the per-router HTTPBearer(JWT) + X-Admin-Secret combo on all
+# /acp/* tenant routes. Accepts EXACTLY ONE of:
+#   - X-Admin-Secret: <ADMIN_SECRET>  -> AA internal staff (reviewer_type=aa_internal)
+#   - X-API-Key: <raw cis_... key>    -> tenant partner (reviewer_type=tenant_self),
+#     hashed with sha256 and matched against shared.tenants.api_key_hash
+#
+# AA_INTERNAL_ADMIN_SUB matches the long-standing admin sentinel used by the
+# old _get_tenant()/_get_admin() dependencies (see AA-22 tech debt note).
+AA_INTERNAL_ADMIN_SUB = "00000000-0000-0000-0000-000000000001"
+
+# auto_error=False: these only register the headers in the OpenAPI schema
+# (Swagger "Authorize" + per-route docs). The actual lookup/validation reads
+# request.headers directly below, so a request can omit one and still pass
+# via the other.
+_api_key_header_scheme = APIKeyHeader(
+    name="X-API-Key",
+    scheme_name="TenantApiKey",
+    auto_error=False,
+    description="Raw tenant API key (cis_...), hashed and matched against shared.tenants.api_key_hash.",
+)
+_admin_secret_header_scheme = APIKeyHeader(
+    name="X-Admin-Secret",
+    scheme_name="AdminSecret",
+    auto_error=False,
+    description="AA internal admin secret (ADMIN_SECRET env var) — for AA staff/internal callers.",
+)
+
+
+async def verify_tenant_api_key(
+    request: Request,
+    _api_key: str = Security(_api_key_header_scheme),
+    _admin_secret: str = Security(_admin_secret_header_scheme),
+) -> dict:
+    """
+    Single-header ACP tenant auth dependency (AA-181).
+
+    Send EXACTLY ONE of:
+      - X-API-Key: <raw cis_... key>   (tenant partner)
+      - X-Admin-Secret: <ADMIN_SECRET> (AA internal staff)
+
+    Returns a dict with: sub, tenant_id, role, actor, reviewer_type, name, plan_tier.
+    Raises 401 if neither X-Admin-Secret nor a valid X-API-Key is present.
+    """
+    admin_secret = os.environ.get("ADMIN_SECRET", "")
+    x_admin = request.headers.get("X-Admin-Secret", "")
+    if admin_secret and x_admin == admin_secret:
+        return {
+            "sub": AA_INTERNAL_ADMIN_SUB,
+            "tenant_id": AA_INTERNAL_ADMIN_SUB,
+            "role": "admin",
+            "actor": "aa_internal_admin",
+            "reviewer_type": "aa_internal",
+            "name": "AA Internal",
+            "plan_tier": "internal",
+        }
+
+    raw_key = request.headers.get("X-API-Key", "")
+    if raw_key:
+        pool: asyncpg.Pool = request.app.state.pool
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT tenant_id::text, name, plan_tier
+                FROM shared.tenants
+                WHERE api_key_hash = $1
+                  AND is_active = true
+                """,
+                _hash_api_key(raw_key),
+            )
+        if row:
+            return {
+                "sub": row["tenant_id"],
+                "tenant_id": row["tenant_id"],
+                "role": "tenant",
+                "actor": row["name"] or row["tenant_id"],
+                "reviewer_type": "tenant_self",
+                "name": row["name"],
+                "plan_tier": row["plan_tier"],
+            }
+
+    raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
