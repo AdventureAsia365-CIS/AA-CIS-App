@@ -172,6 +172,13 @@ def _create_hitl_gate2(conn, run_id: str) -> None:
             VALUES (%s, 3, 'content_calendar', 'ms.thu',
                     'pending', false, NULL, 'tenant_admin', %s::jsonb)
         """, (run_id, json.dumps({"gate": 2, "reviewer": "ms.thu"})))
+        # AA-186: gate is now an event boundary — mark the stage as awaiting
+        # human review until acp.hitl.approved/rejected resolves it.
+        cur.execute("""
+            UPDATE acp_shared.acp_stage_runs
+            SET status = 'awaiting_gate', updated_at = NOW()
+            WHERE run_id = %s AND stage = 's3'
+        """, (run_id,))
 
 
 def _record_cost(conn, run_id: str, stage: str, cost: float, in_tok: int, out_tok: int) -> None:
