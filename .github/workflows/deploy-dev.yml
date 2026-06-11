@@ -27,7 +27,7 @@ jobs:
     outputs:
       image: ${{ steps.build.outputs.image }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -55,7 +55,7 @@ jobs:
     environment: dev
     needs: build-and-push
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -115,7 +115,7 @@ jobs:
     environment: dev
     needs: build-and-push
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
