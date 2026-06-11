@@ -29,6 +29,8 @@ from api.routers.auth import verify_tenant_api_key as _get_tenant
 from api.services.run_context_db import get_run_context_validated
 from api.schemas.run_context import RunContextValidationError
 from services.acp_shared.errors import S1ContextNotReadyError
+from services.acp_shared.event_constants import ACPEventDetailType
+from services.acp_shared.hitl_events import build_hitl_event_payload, publish_hitl_event
 
 logger = structlog.get_logger()
 router = APIRouter(tags=["S2 Research"])
@@ -93,13 +95,14 @@ async def _handle_gate1(pool, run_id: str, tenant_id: str) -> dict:
     reviewer_type = "aa_internal" if is_aa_internal else "tenant_admin"
 
     async with pool.acquire() as conn:
-        await conn.execute(
+        hitl_row = await conn.fetchrow(
             """
             INSERT INTO acp_shared.acp_hitl_requests
                 (run_id, stage, gate_type, payload, status,
                  auto_approved, confidence_score, reviewer_type)
             VALUES ($1::uuid, 2, 'gate1', $2::jsonb, $3, $4, $5, $6)
             ON CONFLICT DO NOTHING
+            RETURNING hitl_id
             """,
             run_id,
             json.dumps({"confidence": confidence, "threshold": GATE1_AUTO_APPROVE_THRESHOLD,
@@ -118,6 +121,34 @@ async def _handle_gate1(pool, run_id: str, tenant_id: str) -> dict:
                         "threshold": GATE1_AUTO_APPROVE_THRESHOLD,
                         "gate1_override": gate1_override}),
         )
+
+        if hitl_row and auto_approved:
+            # AA-186: gate-as-event-boundary — auto-approve emits
+            # acp.hitl.approved immediately, no pending row left behind.
+            # reviewer_type="aa_internal" matches verify_tenant_api_key()'s
+            # actor-dict namespace ("aa_internal"|"tenant_self"); auto_approved
+            # is only ever True when is_aa_internal is True.
+            published = publish_hitl_event(
+                ACPEventDetailType.HITL_APPROVED,
+                build_hitl_event_payload(
+                    run_id=run_id, stage=2, gate=1,
+                    decision="approved", reviewer_type="aa_internal",
+                ),
+            )
+            if not published:
+                logger.error("hitl_gate1_autoapprove_publish_failed", run_id=run_id,
+                             stage=2, hitl_id=str(hitl_row["hitl_id"]))
+        elif hitl_row:
+            # Gate is now an event boundary — mark the stage as awaiting
+            # human review until acp.hitl.approved/rejected resolves it.
+            await conn.execute(
+                """
+                UPDATE acp_shared.acp_stage_runs
+                SET status = 'awaiting_gate', updated_at = NOW()
+                WHERE run_id = $1::uuid AND stage = 's2'
+                """,
+                run_id,
+            )
 
     logger.info("gate1_evaluated", run_id=run_id, auto_approved=auto_approved,
                 confidence=confidence, gate1_override=gate1_override, tenant_id=tenant_id)
