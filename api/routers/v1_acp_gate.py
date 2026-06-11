@@ -29,6 +29,8 @@ from pydantic import BaseModel, field_validator
 
 from api.routers.auth import verify_tenant_api_key as _get_tenant_actor
 from services.acp_shared import h3_rule_extractor as _h3
+from services.acp_shared.event_constants import ACPEventDetailType
+from services.acp_shared.hitl_events import build_hitl_event_payload, publish_hitl_event
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/v1/acp/gate", tags=["acp-gate"])
@@ -167,6 +169,21 @@ async def gate_approve(
                 _audit_actor_type(tenant),
             )
 
+    # AA-186: gate-as-event-boundary — publish acp.hitl.approved so the
+    # next-stage trigger (AA-187) can start. reviewer_type is from
+    # verify_tenant_api_key()'s actor dict ("aa_internal"|"tenant_self") —
+    # NOT acp_hitl_requests.reviewer_type or _audit_actor_type()'s audit_log enum.
+    published = publish_hitl_event(
+        ACPEventDetailType.HITL_APPROVED,
+        build_hitl_event_payload(
+            run_id=run_id, stage=stage_int, gate=stage_int - 1,
+            decision="approved", reviewer_type=tenant.get("reviewer_type", ""),
+        ),
+    )
+    if not published:
+        logger.error("hitl_approved_publish_failed_post_commit", run_id=run_id,
+                     stage=stage_int, hitl_id=str(hitl_row["hitl_id"]))
+
     logger.info("gate_approved", run_id=run_id, stage=stage, actor=actor)
     return {"run_id": run_id, "stage": stage, "status": "approved"}
 
@@ -259,6 +276,22 @@ async def gate_reject(
                 }),
                 _audit_actor_type(tenant),
             )
+
+    # AA-186: gate-as-event-boundary — publish acp.hitl.rejected. No
+    # next_stage chain on reject (decision="rejected" -> next_stage=None).
+    # reviewer_type is from verify_tenant_api_key()'s actor dict
+    # ("aa_internal"|"tenant_self") — NOT acp_hitl_requests.reviewer_type or
+    # _audit_actor_type()'s audit_log enum.
+    published = publish_hitl_event(
+        ACPEventDetailType.HITL_REJECTED,
+        build_hitl_event_payload(
+            run_id=run_id, stage=stage_int, gate=stage_int - 1,
+            decision="rejected", reviewer_type=tenant.get("reviewer_type", ""),
+        ),
+    )
+    if not published:
+        logger.error("hitl_rejected_publish_failed_post_commit", run_id=run_id,
+                     stage=stage_int, hitl_id=str(hitl_row["hitl_id"]))
 
     # H-3: extract rule from rejection note (fire-and-forget, does not block response)
     asyncio.create_task(
