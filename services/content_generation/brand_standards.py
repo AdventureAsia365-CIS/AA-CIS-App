@@ -51,6 +51,10 @@ AA_HIGHLIGHTS:
 AA_ITINERARIES:
 - Chronological, readable, calm, structured, realistic pacing
 - Must be present and substantive if source has itinerary data
+- Format: "Day N -- [title]" string; each day title MUST name the place
+  and/or primary activity (e.g. "Day 2 -- Trekking to Sapa Valley Villages").
+  Generic titles ("Exploration", "Free Day", "Arrival", "Departure",
+  "Transfer") name no place/activity — ITINERARY_DAY_TITLE_GENERIC
 - NEVER invent meal names (breakfast, lunch, dinner) or clock-times
   (e.g. "7:00 AM departure") unless explicit in the source — fabricated
   meals/times are PRODUCT_TRUTH_RISK; describe activities by sequence
@@ -88,7 +92,7 @@ SUBTITLE_WAYPOINT_FORMAT, SUMMARY_OFF_BRAND, SUMMARY_HONEYMOON_LANGUAGE,
 SUMMARY_SELF_REFERENTIAL, GENERIC_AI_WORDING, HIGHLIGHTS_TOO_GENERIC,
 HIGHLIGHTS_ORDERING_WRONG, HIGHLIGHTS_OPTIONAL_LANGUAGE,
 HIGHLIGHTS_WILDLIFE_UNVERIFIED, ITINERARY_STRUCTURE_WEAK,
-ITINERARY_MEAL_TIME_INVENTED,
+ITINERARY_MEAL_TIME_INVENTED, ITINERARY_DAY_TITLE_GENERIC,
 SEO_TITLE_WEAK, SEO_TITLE_WRONG_ACTIVITY, META_INCOMPLETE_SENTENCE,
 META_OPENER_ROBOTIC, META_PACKAGE_WORD, META_DFS_VERBATIM,
 DFS_INTENT_UNDERUSED, KEYWORD_STUFFING_RISK, GENERIC_AI_WORDING,

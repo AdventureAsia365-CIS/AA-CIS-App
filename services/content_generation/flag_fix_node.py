@@ -28,6 +28,7 @@ STAGE2_FIX_MAPPING = {
     "HIGHLIGHTS_OPTIONAL_LANGUAGE": "highlights",
     "ITINERARY_STRUCTURE_WEAK":     "itineraries",
     "ITINERARY_MEAL_TIME_INVENTED": "itineraries",
+    "ITINERARY_DAY_TITLE_GENERIC":  "itineraries",
     "SEO_TITLE_WEAK":               "seo_title",
     "SEO_TITLE_WRONG_ACTIVITY":     "seo_title",
     "META_INCOMPLETE_SENTENCE":     "seo_meta",
