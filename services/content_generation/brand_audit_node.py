@@ -27,6 +27,9 @@ ELEPHANT_RIDING = re.compile(
 )
 NAME_ALL_CAPS_RE = re.compile(r'^[A-Z\s\d&\-]+$')
 NAME_SUPERLATIVES = ['the best of', 'ultimate', 'must-see', 'and fun', 'expenditures']
+# AA-195: fabricated meals / clock-times in itineraries = PRODUCT_TRUTH_RISK
+ITIN_MEAL_INVENTED = re.compile(r'\b(breakfast|lunch|dinner)\b', re.IGNORECASE)
+ITIN_CLOCK_TIME = re.compile(r'\b\d{1,2}(:\d{2})?\s?(am|pm)\b', re.IGNORECASE)
 
 
 def pre_audit_checks(generated: dict) -> list[str]:
@@ -61,6 +64,13 @@ def pre_audit_checks(generated: dict) -> list[str]:
     combined = " ".join(str(h) for h in highlights).lower()
     if ELEPHANT_RIDING.search(combined):
         codes.append("FACT_CHECK_MANUAL_CHECK")
+
+    itineraries = generated.get("itineraries") or ""
+    if isinstance(itineraries, (list, dict)):
+        itineraries = json.dumps(itineraries)
+    itin_text = str(itineraries)
+    if ITIN_MEAL_INVENTED.search(itin_text) or ITIN_CLOCK_TIME.search(itin_text):
+        codes.append("ITINERARY_MEAL_TIME_INVENTED")
 
     return list(set(codes))
 

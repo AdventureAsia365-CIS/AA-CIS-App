@@ -19,6 +19,10 @@ STRICT RULES:
 5. Itineraries: rewrite each day in the client's brand voice using the style guide.
    Preserve all factual details (day numbers, named places, activities).
    Do not invent days or activities not present in the source.
+   NEVER invent meal names (breakfast, lunch, dinner) or clock-times
+   (e.g. "7:00 AM departure") unless they appear explicitly in the source
+   itinerary — fabricating them is a PRODUCT_TRUTH_RISK. Describe activities
+   by their sequence within the day, not by manufactured times or meals.
 6. Do not make factual claims you cannot verify from the source data
 7. seo_meta must NOT contain budget travel language: "hostel", "budget", "public transport",
    "cheap", "backpacker", "dorm". The AA audience is $250k+ — write accordingly.
@@ -80,7 +84,7 @@ OUTPUT JSON FORMAT:
     "Add as many highlights as the source supports — minimum 3, no maximum"
   ],
   "itineraries": "Rewrite in brand voice. Keep facts: day numbers, places, activities. Do not add or remove days.",
-  "seo_title": "SEO title — MUST be under 70 chars",
-  "seo_meta": "SEO meta description — MUST be under 170 chars, opens with a concrete editorial sentence",
+  "seo_title": "SEO title — MUST be under 60 chars",
+  "seo_meta": "SEO meta description — MUST be 140-155 chars, opens with a concrete editorial sentence",
   "trip_type": "cultural|adventure|wellness|culinary|wildlife|trekking|festival|river_journey"
 }}"""

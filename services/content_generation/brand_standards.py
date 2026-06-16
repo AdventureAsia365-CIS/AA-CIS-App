@@ -51,15 +51,18 @@ AA_HIGHLIGHTS:
 AA_ITINERARIES:
 - Chronological, readable, calm, structured, realistic pacing
 - Must be present and substantive if source has itinerary data
+- NEVER invent meal names (breakfast, lunch, dinner) or clock-times
+  (e.g. "7:00 AM departure") unless explicit in the source — fabricated
+  meals/times are PRODUCT_TRUTH_RISK; describe activities by sequence
 
 SEO_TITLE:
-- 60 chars max (note: existing validator uses 70 — audit uses stricter 60)
+- 60 chars max
 - Never ends with conjunction, preposition, or ampersand
 - Never echoes AA_NAME verbatim
 - Activity label must match actual tour content
 
 SEO_META:
-- 140-155 chars ideal (existing validator allows up to 170 — flag if under 140)
+- 140-155 chars ideal (flag if under 140)
 - Must end with a period
 - Must NOT open with: "This is a", "Discover", "Book", "Find"
 - Must NOT contain: "package", "reviews", "authentic reviews", price-comparison queries
@@ -85,6 +88,7 @@ SUBTITLE_WAYPOINT_FORMAT, SUMMARY_OFF_BRAND, SUMMARY_HONEYMOON_LANGUAGE,
 SUMMARY_SELF_REFERENTIAL, GENERIC_AI_WORDING, HIGHLIGHTS_TOO_GENERIC,
 HIGHLIGHTS_ORDERING_WRONG, HIGHLIGHTS_OPTIONAL_LANGUAGE,
 HIGHLIGHTS_WILDLIFE_UNVERIFIED, ITINERARY_STRUCTURE_WEAK,
+ITINERARY_MEAL_TIME_INVENTED,
 SEO_TITLE_WEAK, SEO_TITLE_WRONG_ACTIVITY, META_INCOMPLETE_SENTENCE,
 META_OPENER_ROBOTIC, META_PACKAGE_WORD, META_DFS_VERBATIM,
 DFS_INTENT_UNDERUSED, KEYWORD_STUFFING_RISK, GENERIC_AI_WORDING,
