@@ -1,66 +1,64 @@
-# AA-CIS-App Handoff — Session 56
-Updated: 2026-06-11
+# AA-CIS-App Handoff — Session 58
+Updated: 2026-06-16
 
 ## Status
-- Branch: develop @ 03e6322 | PR #33 (develop -> main) OPEN, awaiting human merge
-- ECS: api (latest dev image deployed via Deploy Dev #27348492360) — RUNNING, STOP after session
-- RDS: aa-cis-dev-db RUNNING — STOP after session
-- Deploy Dev (develop): SUCCESS ✅ | CI on develop: SUCCESS ✅
+- Branch: develop @ c4dacb3 | main @ 883a3cd (both pushed; docs commit on top of each)
+- ECS: aa-cis-dev-api task def **api:304** — digest == ECR :latest (sha256:a65dfcd…230b67) — **RUNNING, STOP after session**
+- RDS: aa-cis-dev-db **RUNNING — STOP after session**
+- CI on PR #38: green ✅ | Deploy Dev: SUCCESS ✅ | Deploy Prod: success but STUB (no-op)
 
-## Completed This Session
+## Completed This Session — AA-193 brand differentiation (F1 + F2)
 
-### AA-181 — ACP tenant-auth: collapse to single-header (X-API-Key/X-Admin-Secret) ✅
+### AA-198 [AA-193·F1] — Brand differentiation resolver ✅ SHIPPED
+**feature/aa-198-brand-resolver → PR #37 → develop (2cba714) → main (3251a51) → ECS api:303**
+- Root cause: `_execute_run_tour` fallback `WHERE is_active ORDER BY version DESC LIMIT 1` picked
+  cross-brand max version → Terra Family v2 won every run. 5 active brands, no intra-brand dupe → no migration.
+- Backend: `_resolve_brand_rule` (id → named-active → explicit 'default'); `TourRunRequest.brand_identity_id`;
+  `GET /admin/brand-rules` (id/name/version/is_active, no prompt content); forbidden_words prompt inject.
+- Frontend: s1-rewrite brand-picker keyed on id, sends `brand_identity_id` (kept brand_name).
+- 5 unit tests `tests/unit/test_aa198_brand_resolver.py`.
 
-**feature/aa-181-single-header-tenant-auth → develop (merged) → PR #33 (develop->main, open)**
+### AA-197 [AA-193·F2] — DataForSEO rebuild ✅ SHIPPED
+**feature/aa-197-dataforseo-rebuild → PR #38 → develop (c4dacb3) → main (883a3cd) → ECS api:304**
+- Root cause: `admin_pipeline` set destination=`"{country} tours"` → DFS client appended "tours" again
+  → `"{country} tours tours"`. US location hardcoded. TenantConfigService existed but was UNWIRED in SEO path.
+- New `services/seo_intelligence/seed_builder.py` (pure): `normalize_country` (COUNTRY_NORMALIZE map
+  SRI-LANDKA/OKINAWA + title-case), `first_activity` (split `[,│\n]+`, U+2502 pipe), `build_seed`
+  ("{activity} in {country}" / "{country} tours" / "", never double-tours), `resolve_buyer_market`
+  (target_market.countries → MARKET_RANK US>UK>AU, empty→US 2840, language passthrough).
+- DFS client rebuilt: methods take pre-built seed + location_code/name/language (US hardcode gone, no
+  more appending). 3 calls/tour: search_volume + ONE serp/advanced (PAA + related) + real
+  keywords_for_keywords ideas. `_parse_keyword_ideas` → full dicts {keyword, search_volume, competition,
+  competition_index, cpc}, dedupe casefold, ≤25. fetch_all return adds related_keywords + keyword_ideas
+  (additive); kept keywords.top_keywords + people_also_ask for prompts.py L61-62.
+- Fallback #4: when search_volume returns no top_keywords AND ideas non-empty → promote
+  `top_keywords = [i.keyword for i in ideas[:10]]` so prompt always has a keyword.
+- Wiring: `process_seo` gains seed + tenant_id; resolves buyer market via TenantConfigService.get_seo_config;
+  cache key now `make_key(seed, location_code)`. admin_pipeline builds seed via build_seed(country, activities).
+- 20 unit tests `tests/unit/test_aa197_dfs.py`.
 
-- New shared dependency `verify_tenant_api_key` in `api/routers/auth.py`:
-  multi-credential — `X-API-Key` (raw `cis_...`, sha256 vs `shared.tenants.api_key_hash`)
-  OR `X-Admin-Secret` (AA internal sentinel). 401 if neither valid.
-  Returns `reviewer_type` (`aa_internal`|`tenant_self`) for gate audit (AA-186 prep).
-- 6 routers migrated off JWT/HTTPBearer + old admin-secret-only deps via aliased imports
-  (zero call-site changes): `v1_acp.py`, `v1_s1.py`, `services/acp/s2/router.py`,
-  `v1_acp_gate.py`, `v1_s4_blog.py`, `v1_s4_social.py`.
-- `/auth/tenant-login` kept, marked `deprecated=True`.
-- `v1_acp_gate.py`: new `_audit_actor_type()` maps `reviewer_type` → existing
-  `acp_shared.audit_actor_type` enum values for `audit_log` writes.
-- Added OpenAPI security schemes `TenantApiKey`/`AdminSecret` (Swagger now documents both
-  headers on all 6 routers).
-- Out of scope (untouched, confirmed): `v1_s3.py`, `/v1/hitl/gate2`, `acp_health.py`.
-- Full details: `docs/implementation-notes/AA-181.md`
+### Live DFS probe (field paths verified, status 20000)
+- search_volume: tasks[0].result[] flat, result[i].search_volume / .keyword.
+- serp advanced result[0].items[]: type="people_also_ask" → .items[].title ; type="related_searches" → .items[]=plain strings.
+- keywords_for_keywords: result[] flat (~105), {keyword, search_volume, competition, competition_index, cpc, monthly_searches}; near-dups by case → dedupe casefold.
+- get_dataforseo_creds() returns a TUPLE (login, password), NOT a dict.
 
-**Tests: tests/unit/test_auth_tenant_api_key.py 5/5 green | flake8 (CI config) clean**
+## Deploy verification
+- AA-198: ECS digest == ECR :latest, task def :303. AA-197: digest == ECR :latest sha256:a65dfcd…230b67, task def :304.
 
-### CI/CD chain
-- feature CI (9343df3): all green (Lint, Security Audit, Unit, Integration, Docker Build,
-  Vercel Preview)
-- develop CI (fedc078): all green | Deploy Dev (27348492360): SUCCESS ✅
+## Gotchas (carry forward)
+- Brand table = `shared.tenant_brand_rules`; SEO config = `shared.tenant_seo_config` (target_market JSONB
+  {language, age_range, countries[]} — no `.primary`). shared.tenants.country is ALL NULL (unused).
+- raw_tours.country is dirty (SRI-LANDKA, OKINAWA); activities jsonb 25% coverage, single-elem array of one delimited string.
+- "Deploy Prod" workflow is a placeholder STUB (no build/deploy). Dev ECS cluster is the live API.
+- S3-mediated ECS exec for scripts importing app pkgs: run with `cd /app && PYTHONPATH=/app` (else ModuleNotFoundError 'shared').
 
-### E2E verify (production ECS, https://api-cis.lumiguides.it.com)
-- `GET /v1/acp/runs?limit=1` + `X-API-Key: cis_u1k...` → `200` (real run data) ✅
-- No header → `401` | invalid key → `403` (APIGW authorizer)
-- `POST /acp/s1/run` + valid `X-API-Key` → `422` (validation layer reached — auth passed)
+## Next / Open
+- AA-193 may have further F-items — check Linear.
+- UAT on prod: s1-rewrite brand-picker lists 5 brands + non-Terra selection persists to generated_content.metadata.brand_name;
+  run a tour and confirm DFS seed has no double-"tours" and buyer market reflects target_market.
 
-## Unplanned: develop branch recreated
-- `develop` was auto-deleted by GitHub after PR #32 (AA-174, develop->main) merged earlier
-  today. Recreated `develop` from `origin/main` (superset of old develop) before merging
-  AA-181 in — confirmed with user first. PR #33 opened develop->main.
-
-## Open Issues (carried over)
-- PR #33 (develop -> main) needs human merge -> triggers Deploy Prod
-- OPENAI_API_KEY needs rotation
-- 8 pre-existing test failures (test_s2_idempotency, test_s2_semaphore,
-  test_h3_rule_extractor) — pre-existing, reconfirmed unrelated to AA-181 via git stash
-- feature/aa-112-s2-async-postgres-saver: DO NOT merge
-- feature/aa-143-canary: DO NOT merge
-- feature/aa-141-run-health-dashboard: DO NOT merge
-- Frontend `/acp/s1/*` calls (admin pipeline S1 page) use Bearer token against APIGW base
-  URL with no `/acp` resource — looks pre-existing broken/dead, unrelated to AA-181, not
-  investigated further
-
-## Next
-- Human: review + merge PR #33 (develop -> main) -> Deploy Prod
-- AA-186: full reviewer_type audit work (builds on `_audit_actor_type()` mapping added here)
-
-## Cost Checklist (MANUAL — do not auto-run)
-aws ecs update-service --cluster aa-cis-dev-cluster --service aa-cis-dev-api --desired-count 0 --profile pqnghiep-admin --region us-west-1
-aws rds stop-db-instance --db-instance-identifier aa-cis-dev-db --profile pqnghiep-admin --region us-west-1
+## ⚠️ Cost — STOP AWS (reminder only, do NOT auto-run)
+- aws ecs update-service --cluster aa-cis-dev-cluster --service aa-cis-dev-api --desired-count 0 --profile pqnghiep-admin --region us-west-1
+- aws rds stop-db-instance --db-instance-identifier aa-cis-dev-db --profile pqnghiep-admin --region us-west-1
+- NAT instance i-04ebd090e97184f45 → cis-stop
