@@ -50,7 +50,7 @@ def test_validate_perfect_content():
         ],
         "itineraries": "Day 1: Board at Tuan Chau, sail to Bai Tu Long. Day 2: Cave visit, kayaking. Day 3: Sunrise, return to port.",
         "seo_title":   "Halong Bay Private Cruise | Adventure Asia",
-        "seo_meta":    "A 3-night private cruise through Halong Bay with kayaking, cave visits, and chef-prepared meals. Departing Tuan Chau.",
+        "seo_meta":    "A 3-night private cruise through Halong Bay with kayaking, cave visits, and chef-prepared seafood meals, departing from the quiet Tuan Chau harbour.",
         "trip_type":   "cultural",
     })
     result = validate_node(state)
@@ -102,7 +102,7 @@ def _good_generated(**overrides):
         "highlights": ["Visit the 3rd Tunnel at the DMZ", "Hike Seoraksan to Ulsanbawi Rock", "Temple stay at Golgulsa"],
         "itineraries": "Day 1: Arrive Seoul, welcome dinner. Day 2: Gyeongbokgung Palace, afternoon free. Day 3: DMZ and 3rd Tunnel, K-pop class. Day 4: Seoraksan National Park.",
         "seo_title": "South Korea Tours: Seoul to Jeju | Adventure Asia",
-        "seo_meta": "Twelve days from Seoul to Jeju via Seoraksan trails, Gyeongju cycling, and the Jeju Olle Trail.",
+        "seo_meta": "Twelve days from Seoul to Jeju covering the DMZ, Seoraksan trails, Gyeongju cycling and the scenic volcanic Jeju Olle coastal walking trails.",
     }
     base.update(overrides)
     return base

@@ -321,7 +321,7 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
                     json.dumps(generated.get("highlights", [])),
                     _itin,
                     _trim_to_word_boundary(generated.get("seo_title"), 60),
-                    _trim_to_word_boundary(generated.get("seo_meta"), 155, sentence=True),
+                    _trim_to_word_boundary(generated.get("seo_meta"), 155),
                     json.dumps(generated.get("seo_keywords_used", [])),
                     result.get("model_used", ""),
                     status,

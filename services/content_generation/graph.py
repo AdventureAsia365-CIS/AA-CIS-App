@@ -15,6 +15,10 @@ logger = structlog.get_logger()
 MAX_RETRIES = 3
 MIN_QUALITY = 7.0
 
+# AA-201: seo_meta length band (port of Cowork v5 repair-to-band)
+SEO_META_MIN = 140
+SEO_META_MAX = 155
+
 class ContentState(TypedDict):
     tour:                   dict
     seo:                    dict
@@ -62,9 +66,35 @@ _FAILURE_MAP: dict[str, tuple[str, float]] = {
     "SEO_TITLE_TOO_LONG":        ("seo",       0.5),
     "SEO_META_TOO_LONG":         ("seo",       0.5),
     "META_INCOMPLETE_SENTENCE":  ("seo",       1.0),
+    "META_TOO_SHORT":            ("seo",       0.5),
     "ITINERARY_STRUCTURE_WEAK":  ("structure", 1.0),
     "DFS_INTENT_UNDERUSED":      ("seo",       1.0),
 }
+
+# AA-201: seo_meta must be a complete sentence (port of v5 repair_seo_fields)
+BAD_META_ENDINGS = {
+    "and", "with", "including", "or", "plus", "to", "for", "from", "in", "on", "at",
+}
+
+
+def _meta_complete_sentence(meta: str) -> bool:
+    """True when seo_meta reads as a complete sentence.
+
+    Catches truncated/cut meta, not editorial style: requires a period ending,
+    at least 8 words, and no trailing preposition/conjunction (BAD_META_ENDINGS).
+    Deliberately no verb-whitelist — that false-fired on valid metas using verbs
+    like "moves"/"runs" outside any fixed list (AA-201 revision).
+    """
+    t = (meta or "").strip()
+    if not t.endswith("."):
+        return False
+    words = t.split()
+    if len(words) < 8:
+        return False
+    last = re.sub(r"[^a-zA-Z]", "", words[-1].lower()) if words else ""
+    if last in BAD_META_ENDINGS:
+        return False
+    return True
 
 def generate_node(state: ContentState) -> ContentState:
     """Node 1: Generate content via LLMClient."""
@@ -258,9 +288,15 @@ def validate_node(state: ContentState) -> ContentState:
         issues.append("seo_title exceeds 60 chars")
         fired.append("SEO_TITLE_TOO_LONG")
         score -= 0.5
-    if len(generated.get("seo_meta", "")) > 155:
+    if len(generated.get("seo_meta", "")) > SEO_META_MAX:
         issues.append("seo_meta exceeds 155 chars")
         fired.append("SEO_META_TOO_LONG")
+        score -= 0.5
+    # AA-201: enforce lower band — no under-length meta
+    _meta_len = generated.get("seo_meta", "").strip()
+    if _meta_len and len(_meta_len) < SEO_META_MIN:
+        issues.append("seo_meta under 140 chars")
+        fired.append("META_TOO_SHORT")
         score -= 0.5
 
     # Summary generic opener check
@@ -277,10 +313,10 @@ def validate_node(state: ContentState) -> ContentState:
             score -= 1.0
             break
 
-    # META_INCOMPLETE_SENTENCE: seo_meta must end with sentence-terminating punctuation
+    # META_INCOMPLETE_SENTENCE: seo_meta must read as a complete sentence (AA-201)
     meta = generated.get("seo_meta", "").strip()
-    if meta and meta[-1] not in (".", "!", "?"):
-        issues.append("seo_meta does not end with sentence-terminating punctuation")
+    if meta and not _meta_complete_sentence(meta):
+        issues.append("seo_meta is not a complete sentence")
         fired.append("META_INCOMPLETE_SENTENCE")
         score -= 1.0
 
