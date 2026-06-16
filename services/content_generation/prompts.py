@@ -92,6 +92,9 @@ OUTPUT JSON FORMAT:
   ],
   "itineraries": "Rewrite in brand voice; each day title names its place/activity, never generic (see rule 5).",
   "seo_title": "SEO title — MUST be under 60 chars",
-  "seo_meta": "SEO meta description — MUST be 140-155 chars, opens with a concrete editorial sentence",
+  "seo_meta": "SEO meta description — MUST be 140-155 characters (NEVER under 140), a complete
+    sentence ending in a period, opening with a concrete editorial clause. GOOD example (148 chars):
+    'This private Sri Lanka journey covers Sigiriya, Kandy and Yala with unhurried pacing, expert
+    local guides and comfortable transfers throughout the route.'",
   "trip_type": "cultural|adventure|wellness|culinary|wildlife|trekking|festival|river_journey"
 }}"""
