@@ -97,6 +97,9 @@ def generate_node(state: ContentState) -> ContentState:
         system += f"\n\nCLIENT BRAND CONTEXT (append only — do not override AA rules):\n{brand_sp}"
     if style_guide:
         prompt += f"\n\nSTYLE GUIDE FOR THIS CLIENT:\n{style_guide}"
+    fw = [w for w in (state.get("brand_forbidden_words") or []) if w]
+    if fw:
+        system += "\n\nFORBIDDEN WORDS (never use): " + ", ".join(fw)
 
     is_branded = bool(brand_sp)
     prompt_len = len(system)
