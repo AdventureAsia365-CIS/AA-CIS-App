@@ -57,11 +57,17 @@ cis-stop   # stop ECS + RDS + NAT Instance
 cis-status # check NAT instance state
 ```
 
-## Current State (05/06/2026)
-- Branch: develop (main = production)
-- ECS task def: api:286
-- Latest migrations: 065 (acp_stage_checkpoints), 066 (quality_score), 067 (angles_json)
+## Current State (16/06/2026)
+- Branch: develop (main = production); develop @ c4dacb3, main @ 883a3cd
+- ECS task def: api:304 (digest verified == ECR :latest sha256:a65dfcd…230b67)
+- Latest migrations: 065 (acp_stage_checkpoints), 066 (quality_score), 067 (angles_json), 068 (s1_tour_ids_run_context)
 - Wave 4 complete: AA-145 S4.2 v2 shipped
+- AA-198 [AA-193·F1] SHIPPED: brand_identity_id resolver (id → named-active → explicit default),
+  GET /admin/brand-rules, forbidden_words prompt inject, s1 brand-picker keyed on id.
+- AA-197 [AA-193·F2] SHIPPED: DataForSEO rebuild — seed_builder (normalize country, no double-tours),
+  buyer-market location from tenant_seo_config.target_market via TenantConfigService (was unwired),
+  3 DFS calls/tour + real keywords_for_keywords ideas (volume/competition/cpc), ideas→top_keywords fallback.
+- NOTE: "Deploy Prod" GitHub workflow is a STUB (placeholder, no-op). Real ECS deploy = "Deploy Dev" on develop merge.
 
 ## Do NOT
 - Hardcode secrets (use Secrets Manager)

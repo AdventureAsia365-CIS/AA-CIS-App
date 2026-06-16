@@ -1,11 +1,14 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 27/05/2026 | ECS api:185 | CI pending | Last commit: 755092b
+# Updated: 16/06/2026 | ECS api:304 | CI green | Last commit: c4dacb3 (develop) / 883a3cd (main)
 
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway owq9as3wjl)
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel — AA-103 production)
-- ECS task def: api:185 | CI #280 green | Deploy Dev #181 ✅
-- AWS: STOPPED (stop ECS/RDS after each session — see cost checklist)
+- ECS task def: api:304 | digest == ECR :latest (sha256:a65dfcd…230b67) | Deploy Dev green (AA-197)
+- AA-198 [F1] SHIPPED: brand_identity_id resolver + /admin/brand-rules + s1 brand-picker
+- AA-197 [F2] SHIPPED: DataForSEO rebuild — buyer-market location, seed builder, real keyword_ideas
+- "Deploy Prod" workflow = STUB/placeholder (no-op) — real ECS deploy runs via "Deploy Dev" on develop merge
+- AWS: RUNNING after AA-197 deploy — STOP ECS/RDS after session (see cost checklist)
 - Lambda aa-cis-dev-acp-s4-evaluate: DEPLOYED ✅ (AA-49 H-1)
 - Lambda aa-cis-dev-acp-s4-trigger: DEPLOYED ✅ | ALB_INTERNAL_URL: FIXED ✅
 - Lambda aa-cis-dev-acp-s3-campaign-planner: DEPLOYED ✅ (AA-45)
