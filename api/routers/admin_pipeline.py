@@ -12,7 +12,7 @@ from uuid import UUID
 import asyncpg
 import boto3 as _boto3
 import structlog
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 from typing import Optional, List
 
@@ -64,6 +64,7 @@ class TourRunRequest(BaseModel):
     subtitle_focus: str = "standard"
     brand_rules_version: Optional[int] = None
     brand_name: Optional[str] = None
+    brand_identity_id: Optional[str] = None
 
 
 class UploadUrlRequest(BaseModel):
@@ -105,6 +106,36 @@ class ForceFailRequest(BaseModel):
 
 # ── POST /admin/run-tour ──────────────────────────────────────────────────────
 
+_BRAND_RULE_COLS = "id, brand_name, system_prompt, style_guide, forbidden_words, version"
+
+
+async def _resolve_brand_rule(conn, tenant_uuid, brand_identity_id, brand_name):
+    """Select exactly one brand rule. Priority: explicit id → named active brand → 'default'.
+
+    AA-198: replaces the old cross-brand `is_active ORDER BY version DESC` fallback that
+    always returned the highest-version brand (Terra Family v2) regardless of intent.
+    """
+    if brand_identity_id:
+        return await conn.fetchrow(
+            f"SELECT {_BRAND_RULE_COLS} FROM shared.tenant_brand_rules"
+            " WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            brand_identity_id, tenant_uuid,
+        )
+    if brand_name:
+        return await conn.fetchrow(
+            f"SELECT {_BRAND_RULE_COLS} FROM shared.tenant_brand_rules"
+            " WHERE tenant_id = $1::uuid AND brand_name = $2 AND is_active = true"
+            " ORDER BY version DESC LIMIT 1",
+            tenant_uuid, brand_name,
+        )
+    return await conn.fetchrow(
+        f"SELECT {_BRAND_RULE_COLS} FROM shared.tenant_brand_rules"
+        " WHERE tenant_id = $1::uuid AND brand_name = 'default' AND is_active = true"
+        " LIMIT 1",
+        tenant_uuid,
+    )
+
+
 async def _execute_run_tour(req: TourRunRequest) -> dict:
     """Core tour rewrite — called by HTTP endpoint and background retry task."""
     conn = await asyncpg.connect(os.environ["DATABASE_URL"])
@@ -143,21 +174,12 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
         brand_name_val: str = ""
         brand_rule_version: Optional[int] = None
         try:
-            _brand_name_filter = getattr(req, "brand_name", None)
-            if _brand_name_filter:
-                br_row = await conn.fetchrow("""
-                    SELECT id, brand_name, system_prompt, style_guide, forbidden_words, version
-                    FROM shared.tenant_brand_rules
-                    WHERE tenant_id = $1::uuid AND brand_name = $2
-                    ORDER BY version DESC LIMIT 1
-                """, tenant_uuid, _brand_name_filter)
-            else:
-                br_row = await conn.fetchrow("""
-                    SELECT id, brand_name, system_prompt, style_guide, forbidden_words, version
-                    FROM shared.tenant_brand_rules
-                    WHERE tenant_id = $1::uuid AND is_active = true
-                    ORDER BY version DESC LIMIT 1
-                """, tenant_uuid)
+            br_row = await _resolve_brand_rule(
+                conn,
+                tenant_uuid,
+                getattr(req, "brand_identity_id", None),
+                getattr(req, "brand_name", None),
+            )
             if br_row:
                 brand_rule_id = str(br_row["id"]) if br_row["id"] else ""
                 brand_name_val = br_row["brand_name"] or ""
@@ -461,6 +483,38 @@ async def _run_tour_safe(tour_req: TourRunRequest) -> None:
 async def run_tour(req: TourRunRequest, x_admin_secret: str = Header(None)):
     verify_admin_secret(x_admin_secret)
     return await _execute_run_tour(req)
+
+
+# ── GET /admin/brand-rules ────────────────────────────────────────────────────
+
+@router.get("/brand-rules")
+async def list_brand_rules(
+    tenant_id: str = Query(...),
+    x_admin_secret: str = Header(None),
+):
+    """List active brand rules for a tenant (id/name/version only — no prompt content)."""
+    verify_admin_secret(x_admin_secret)
+    TENANT_SLUG_MAP = {"aa_internal": "00000000-0000-0000-0000-000000000001"}
+    tenant_uuid = TENANT_SLUG_MAP.get(tenant_id, tenant_id)
+    conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+    try:
+        rows = await conn.fetch("""
+            SELECT id, brand_name, version, is_active
+            FROM shared.tenant_brand_rules
+            WHERE tenant_id = $1::uuid AND is_active = true
+            ORDER BY brand_name
+        """, tenant_uuid)
+    finally:
+        await conn.close()
+    return [
+        {
+            "id": str(r["id"]),
+            "brand_name": r["brand_name"],
+            "version": r["version"],
+            "is_active": r["is_active"],
+        }
+        for r in rows
+    ]
 
 
 # ── POST /admin/upload-url ────────────────────────────────────────────────────

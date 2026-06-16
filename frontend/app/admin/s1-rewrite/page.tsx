@@ -50,6 +50,7 @@ interface Tour {
 }
 
 interface BrandSummary {
+  id: string;
   brand_name: string;
   brand_type: string | null;
   version: number;
@@ -130,6 +131,7 @@ export default function S1RewritePage() {
   const [modelTier, setModelTier]           = useState("haiku");
   const [brandList, setBrandList]           = useState<BrandSummary[]>([]);
   const [brandName, setBrandName]           = useState<string | null>(null);
+  const [brandId, setBrandId]               = useState<string | null>(null);
   const [showConfirm, setShowConfirm]       = useState(false);
   const [running, setRunning]               = useState(false);
   const [tourStatuses, setTourStatuses]     = useState<Record<string, TourRunStatus>>({});
@@ -160,13 +162,13 @@ export default function S1RewritePage() {
 
   const loadBrandList = useCallback(async () => {
     try {
-      const res = await fetch("/api/admin/brands");
+      const res = await fetch(`/api/admin/brand-rules?tenant_id=${TENANT_ID}`);
       if (!res.ok) return;
       const data = await res.json();
-      const list: BrandSummary[] = data.brands || [];
+      const list: BrandSummary[] = Array.isArray(data) ? data : [];
       setBrandList(list);
       const active = list.find(b => b.is_active) ?? list[0];
-      if (active) setBrandName(active.brand_name);
+      if (active) { setBrandId(active.id); setBrandName(active.brand_name); }
     } catch {}
   }, []);
 
@@ -221,6 +223,7 @@ export default function S1RewritePage() {
           tenant_id:            TENANT_ID,
           seo_mode:             seoMode,
           model_tier:           modelTier,
+          brand_identity_id:    brandId || undefined,
           brand_name:           brandName || undefined,
         }),
       });
@@ -305,14 +308,19 @@ export default function S1RewritePage() {
             <div>
               <label style={{ fontSize: 11, color: A.muted, display: "block", marginBottom: 4 }}>Brand Identity</label>
               <select
-                value={brandName ?? ""}
-                onChange={e => setBrandName(e.target.value || null)}
+                value={brandId ?? ""}
+                onChange={e => {
+                  const id = e.target.value || null;
+                  setBrandId(id);
+                  const picked = brandList.find(b => b.id === id);
+                  setBrandName(picked ? picked.brand_name : null);
+                }}
                 disabled={running}
                 style={{ width: "100%", padding: "7px 10px", borderRadius: 6, border: `1px solid ${A.line}`, fontSize: 13, fontFamily: sans, background: "#fff" }}
               >
                 {brandList.length === 0 && <option value="">No brand configured</option>}
                 {brandList.map(b => (
-                  <option key={b.brand_name} value={b.brand_name}>
+                  <option key={b.id} value={b.id}>
                     {b.brand_name} · v{b.version}{b.is_active ? " (active)" : ""}
                   </option>
                 ))}
