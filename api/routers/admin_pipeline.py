@@ -227,12 +227,13 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
         effective_seo_mode = _SEO_MODE_MAP.get(req.seo_mode, req.seo_mode)
         try:
             from services.seo_intelligence.handler import process_seo
-            destination = (
-                f"{row['country']} tours" if row.get("country") else row.get("src_name", "")
-            )
-            if destination:
+            from services.seo_intelligence.seed_builder import build_seed
+            # AA-197: build a complete seed (no double-"tours"); fall back to src_name.
+            seed = build_seed(row.get("country"), row.get("activities")) or row.get("src_name", "")
+            if seed:
                 seo_result = await process_seo(
-                    tour_id=req.tour_id, destination=destination, seo_mode=effective_seo_mode,
+                    tour_id=req.tour_id, destination=seed, seed=seed,
+                    tenant_id=tenant_uuid, seo_mode=effective_seo_mode,
                 )
                 seo_data = seo_result.get("data", {})
                 dataforseo_used = seo_result.get("status") == "fetched"

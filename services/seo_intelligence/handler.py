@@ -4,8 +4,13 @@ import json
 import os
 import structlog
 from datetime import datetime, timedelta
-from .dataforseo_client import DataForSEOClient
+from .dataforseo_client import (
+    DataForSEOClient,
+    DEFAULT_LOCATION_CODE, DEFAULT_LOCATION_NAME, DEFAULT_LANGUAGE_CODE,
+)
+from .seed_builder import resolve_buyer_market
 from shared.secrets import get_database_url
+from shared.services.tenant_config_service import TenantConfigService
 from shared.repository.seo_context_repository import SeoContextRepository
 from shared.cache.redis_cache import RedisCache
 from shared.cache.local_cache import LocalCache
@@ -19,18 +24,39 @@ async def process_seo(
     activity: str = None,
     cache=None,
     seo_mode: str = "dataforseo",
+    seed: str = "",
+    tenant_id: str = None,
 ) -> dict:
     # "disabled" — skip SEO step entirely
     if seo_mode == "disabled":
         logger.info("seo_disabled", tour_id=tour_id)
         return {"status": "disabled", "data": {}}
 
+    # AA-197: caller passes a pre-built seed; fall back to destination for old callers.
+    effective_seed = seed or destination
+
+    # AA-197: resolve buyer market from tenant target_market (UNWIRED before).
+    location_code, location_name, language_code = (
+        DEFAULT_LOCATION_CODE, DEFAULT_LOCATION_NAME, DEFAULT_LANGUAGE_CODE,
+    )
+    if tenant_id:
+        try:
+            mkt_conn = await asyncpg.connect(get_database_url())
+            try:
+                cfg = await TenantConfigService(mkt_conn).get_seo_config(tenant_id)
+                location_code, location_name, language_code = resolve_buyer_market(cfg.target_market)
+            finally:
+                await mkt_conn.close()
+        except Exception as _mkt_err:
+            logger.warning("seo_market_resolve_failed", tenant_id=tenant_id, error=str(_mkt_err))
+
     cache = cache or LocalCache()
-    cache_key = RedisCache.make_key(destination, activity)
+    # Cache per (seed, buyer market) — same tour for a different market is a distinct entry.
+    cache_key = RedisCache.make_key(effective_seed, str(location_code))
 
     cached = await cache.get(cache_key)
     if cached:
-        logger.info("cache_hit", destination=destination, seo_mode=seo_mode)
+        logger.info("cache_hit", destination=effective_seed, seo_mode=seo_mode)
         return {"status": "cache_hit", "data": cached}
 
     # "custom_keywords" — use existing seo_context from DB, skip DataForSEO API call
@@ -60,16 +86,18 @@ async def process_seo(
         return {"status": "custom_keywords_empty", "data": {}}
 
     # "dataforseo" (default) — live keyword fetch
-    logger.info("cache_miss", destination=destination, seo_mode=seo_mode)
+    logger.info("cache_miss", destination=effective_seed, seo_mode=seo_mode, location=location_name)
     client = DataForSEOClient()
-    seo_data = await client.fetch_all(destination, activity)
+    seo_data = await client.fetch_all(
+        effective_seed, location_code, location_name, language_code, activity,
+    )
 
     conn = await asyncpg.connect(get_database_url())
     try:
         repo = SeoContextRepository(conn, tenant_slug="aa_internal")
         seo_id = await repo.insert({
             "tour_id":        tour_id,
-            "keyword_search": destination,
+            "keyword_search": effective_seed,
             "keyword_ideas":  json.dumps(seo_data.get("keywords", {}).get("search_volumes", {})),
             "demographics":   json.dumps(seo_data.get("demographics", {})),
             "trends":         json.dumps(seo_data.get("trends", {})),
