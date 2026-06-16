@@ -32,6 +32,7 @@ STAGE2_FIX_MAPPING = {
     "SEO_TITLE_WEAK":               "seo_title",
     "SEO_TITLE_WRONG_ACTIVITY":     "seo_title",
     "META_INCOMPLETE_SENTENCE":     "seo_meta",
+    "META_TOO_SHORT":               "seo_meta",
     "META_OPENER_ROBOTIC":          "seo_meta",
     "META_PACKAGE_WORD":            "seo_meta",
     "META_DFS_VERBATIM":            "seo_meta",
@@ -83,6 +84,18 @@ def flag_fix_node(state: dict) -> dict:
         )
         tour = state.get("tour", {})
 
+        # AA-201: seo_meta repair-to-band rules (port of v5 repair_seo_fields)
+        meta_rules = ""
+        if "seo_meta" in fix_keys:
+            meta_rules = """
+
+SEO_META RULES:
+- SEO_META MUST be 140-155 characters and a COMPLETE sentence (ends with a period, \
+not ending on a preposition/conjunction, contains a clear verb).
+- Include the DFS primary topic + one intent clue + one practical reassurance when available.
+- Do NOT pad with filler to reach length; rewrite naturally to land in band.
+- NEVER return meta under 140 chars."""
+
         user_prompt = f"""Fix these fields for Adventure Asia brand standards.
 
 FIELDS TO FIX:
@@ -94,7 +107,7 @@ AUDIT ISSUES FOUND:
 TOUR CONTEXT:
 Name: {current_content.get("name")}
 Trip type: {current_content.get("trip_type") or tour.get("trip_type")}
-Duration: {tour.get("duration")}
+Duration: {tour.get("duration")}{meta_rules}
 
 Return JSON with ONLY these keys: {list(fix_keys)}
 Keep all other fields unchanged."""
