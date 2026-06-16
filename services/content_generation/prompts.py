@@ -17,6 +17,13 @@ STRICT RULES:
 3. Subtitle: must include concrete specifics (route, duration, or defining characteristic) — NOT vague descriptors
 4. Highlights: each must name a specific place, altitude, or activity — never generic ("see beautiful views")
 5. Itineraries: rewrite each day in the client's brand voice using the style guide.
+   Keep the "Day N -- [title]" string format (single string, all days joined).
+   Each day title MUST name the place and/or the primary activity of that day.
+   GOOD: "Day 2 -- Trekking to Sapa Valley Villages"
+   GOOD: "Mae Taeng Valley Cycling Day: Waterfalls, Farmland & Temple"
+   FORBIDDEN generic titles: "Day 2 -- Exploration", "Day 3 -- Free Day",
+   "Arrival Day", "Departure", "Transfer" as the whole title — these name no
+   place or activity and trip ITINERARY_DAY_TITLE_GENERIC.
    Preserve all factual details (day numbers, named places, activities).
    Do not invent days or activities not present in the source.
    NEVER invent meal names (breakfast, lunch, dinner) or clock-times
@@ -83,7 +90,7 @@ OUTPUT JSON FORMAT:
     "Specific activity at Named Location",
     "Add as many highlights as the source supports — minimum 3, no maximum"
   ],
-  "itineraries": "Rewrite in brand voice. Keep facts: day numbers, places, activities. Do not add or remove days.",
+  "itineraries": "Rewrite in brand voice; each day title names its place/activity, never generic (see rule 5).",
   "seo_title": "SEO title — MUST be under 60 chars",
   "seo_meta": "SEO meta description — MUST be 140-155 chars, opens with a concrete editorial sentence",
   "trip_type": "cultural|adventure|wellness|culinary|wildlife|trekking|festival|river_journey"

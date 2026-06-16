@@ -30,6 +30,11 @@ NAME_SUPERLATIVES = ['the best of', 'ultimate', 'must-see', 'and fun', 'expendit
 # AA-195: fabricated meals / clock-times in itineraries = PRODUCT_TRUTH_RISK
 ITIN_MEAL_INVENTED = re.compile(r'\b(breakfast|lunch|dinner)\b', re.IGNORECASE)
 ITIN_CLOCK_TIME = re.compile(r'\b\d{1,2}(:\d{2})?\s?(am|pm)\b', re.IGNORECASE)
+# AA-196: generic day titles that name no place/activity = ITINERARY_DAY_TITLE_GENERIC
+ITIN_DAY_TITLE_GENERIC = re.compile(
+    r"Day\s+\d+\s*--\s*(Exploration|Free Day|Arrival Day|Arrival|Departure|Transfer)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 def pre_audit_checks(generated: dict) -> list[str]:
@@ -71,6 +76,8 @@ def pre_audit_checks(generated: dict) -> list[str]:
     itin_text = str(itineraries)
     if ITIN_MEAL_INVENTED.search(itin_text) or ITIN_CLOCK_TIME.search(itin_text):
         codes.append("ITINERARY_MEAL_TIME_INVENTED")
+    if ITIN_DAY_TITLE_GENERIC.search(itin_text):
+        codes.append("ITINERARY_DAY_TITLE_GENERIC")
 
     return list(set(codes))
 
