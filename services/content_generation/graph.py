@@ -251,12 +251,12 @@ def validate_node(state: ContentState) -> ContentState:
             break  # one violation is enough
 
     # SEO field lengths
-    if len(generated.get("seo_title", "")) > 70:
-        issues.append("seo_title exceeds 70 chars")
+    if len(generated.get("seo_title", "")) > 60:
+        issues.append("seo_title exceeds 60 chars")
         fired.append("SEO_TITLE_TOO_LONG")
         score -= 0.5
-    if len(generated.get("seo_meta", "")) > 170:
-        issues.append("seo_meta exceeds 170 chars")
+    if len(generated.get("seo_meta", "")) > 155:
+        issues.append("seo_meta exceeds 155 chars")
         fired.append("SEO_META_TOO_LONG")
         score -= 0.5
 

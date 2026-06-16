@@ -24,6 +24,32 @@ router = APIRouter(prefix="/admin", tags=["admin-pipeline"])
 
 _pipeline_semaphore = asyncio.Semaphore(2)
 
+
+def _trim_to_word_boundary(text, limit, sentence=False):
+    """Trim text to <= limit chars without splitting a word.
+
+    Backs up to the nearest space at or before `limit` so a word is never
+    cut mid-token. When sentence=True, prefers the last sentence-terminating
+    punctuation (. ! ?) within the limit so trimmed meta still ends on a
+    complete sentence (avoids META_INCOMPLETE_SENTENCE).
+    """
+    if not text:
+        return ""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    window = text[:limit]
+    if sentence:
+        cut = max(window.rfind("."), window.rfind("!"), window.rfind("?"))
+        if cut != -1:
+            return window[:cut + 1].rstrip()
+    space = window.rfind(" ")
+    if space != -1:
+        return window[:space].rstrip()
+    # single over-long token with no space — hard cut at limit
+    return window.rstrip()
+
+
 # ── Pydantic models ───────────────────────────────────────────────────────────
 
 class TourRunRequest(BaseModel):
@@ -271,8 +297,8 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
                     generated.get("description", ""),
                     json.dumps(generated.get("highlights", [])),
                     _itin,
-                    (generated.get("seo_title") or "")[:70],
-                    (generated.get("seo_meta") or "")[:170],
+                    _trim_to_word_boundary(generated.get("seo_title"), 60),
+                    _trim_to_word_boundary(generated.get("seo_meta"), 155, sentence=True),
                     json.dumps(generated.get("seo_keywords_used", [])),
                     result.get("model_used", ""),
                     status,
