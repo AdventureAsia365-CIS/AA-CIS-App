@@ -112,6 +112,12 @@ async def _rewrite_tour(
             "brand_style_guide":    _br.get("style_guide", ""),
             "brand_forbidden_words": _br.get("forbidden_words", []),
             "rewrite_language":     _br.get("rewrite_language", "en-US"),
+            # AA-202: brand differentiation fields
+            "brand_core_idea":        _br.get("core_idea", ""),
+            "brand_customer_segment": _br.get("customer_segment", ""),
+            "brand_customer_mindset": _br.get("customer_mindset", ""),
+            "brand_voice_examples":   _br.get("voice_examples", []),
+            "brand_good_examples":    _br.get("good_examples", ""),
             "subtitle_focus":       subtitle_focus,
             "seo_mode":             seo_mode,
             # brand audit defaults
