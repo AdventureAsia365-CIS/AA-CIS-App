@@ -9,6 +9,7 @@ from shared.llm_client.models import LLMRequest
 from .prompts import SYSTEM_PROMPT, build_rewrite_prompt
 from .brand_audit_node import brand_audit_node
 from .flag_fix_node import flag_fix_node
+from .judge_node import judge_node
 
 logger = structlog.get_logger()
 
@@ -58,6 +59,11 @@ class ContentState(TypedDict):
     # flag fix tracking (AA-134)
     fix_pass_applied:       bool
     fix_pass_fields:        list
+    # AA-206: GPT-4.1 two-model judge fields (set by judge_node when a brand profile is present)
+    judge_brand_fit:            float
+    judge_cross_brand_distinct: float
+    judge_mission_present:      bool
+    judge_feedback:             str
 
 # code → (dimension, deduction)
 _FAILURE_MAP: dict[str, tuple[str, float]] = {
@@ -129,10 +135,20 @@ def _build_brand_diff_block(state: ContentState) -> str:
     if good_ex:
         diff_block += f"\n- Example of this brand's voice on a single moment: {good_ex}"
     diff_block += (
-        "\n\nCONTRAST REQUIREMENT: The summary and highlights MUST be written from THIS brand's "
-        "specific angle and mindset above. Do NOT produce generic copy that would fit any travel brand. "
-        "If the same tour were rewritten for a different brand, the wording, emphasis, and framing must be "
-        "clearly distinct — not a synonym swap. Lead with what makes THIS brand's take different."
+        "\n\nCONTRAST REQUIREMENT: The summary, highlights, itineraries (including each day-title), "
+        "and the overall framing MUST be written from THIS brand's specific angle and mindset above. "
+        "Do NOT produce generic copy that would fit any travel brand. If the same tour were rewritten "
+        "for a different brand, the wording, emphasis, and framing must be clearly distinct — not a "
+        "synonym swap. Lead with what makes THIS brand's take different."
+    )
+    # AA-206: negative contrast — show the generic register that MUST be avoided so the model has a
+    # concrete anti-pattern, not just an abstract instruction.
+    diff_block += (
+        "\n\nGENERIC PHRASING TO AVOID (these read identically for any brand — do NOT write like this): "
+        "'connects the country's primary cultural regions', 'moves through layered geography', "
+        "'a journey through diverse landscapes', 'experience the best of' — they describe a route, not "
+        "THIS brand's mission. Instead, lead every field with THIS brand's specific mission angle and "
+        "let it shape what you foreground; do not merely synonym-swap a generic description."
     )
     return diff_block
 
@@ -437,13 +453,17 @@ def build_graph() -> StateGraph:
 
     graph.add_node("generate", generate_node)
     graph.add_node("validate", validate_node)
+    graph.add_node("llm_judge", judge_node)
     graph.add_node("increment_retry", increment_retry)
     graph.add_node("brand_audit", brand_audit_node)
     graph.add_node("flag_fix", flag_fix_node)
 
     graph.set_entry_point("generate")
     graph.add_edge("generate", "validate")
-    graph.add_conditional_edges("validate", should_retry, {
+    # AA-206: GPT-4.1 judge sits between validate and the retry decision so should_retry routes on
+    # the judge-adjusted quality_score (Bedrock fixes against judge feedback via the retry loop).
+    graph.add_edge("validate", "llm_judge")
+    graph.add_conditional_edges("llm_judge", should_retry, {
         "done":  "brand_audit",
         "retry": "increment_retry",
         "hitl":  END,
