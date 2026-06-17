@@ -33,6 +33,7 @@ STAGE2_FIX_MAPPING = {
     "SEO_TITLE_WRONG_ACTIVITY":     "seo_title",
     "META_INCOMPLETE_SENTENCE":     "seo_meta",
     "META_TOO_SHORT":               "seo_meta",
+    "SEO_META_TOO_LONG":            "seo_meta",   # AA-204: over-length now routes to repair
     "META_OPENER_ROBOTIC":          "seo_meta",
     "META_PACKAGE_WORD":            "seo_meta",
     "META_DFS_VERBATIM":            "seo_meta",
@@ -41,6 +42,38 @@ STAGE2_FIX_MAPPING = {
     "NAME_SUPERLATIVE":             "name",
 }
 
+# AA-204: deterministic SEO length/sentence codes raised by validate_node. These must drive a
+# repair pass independently of the (non-deterministic) brand_audit "flagged" status.
+_DETERMINISTIC_SEO_CODES = {"SEO_META_TOO_LONG", "META_TOO_SHORT", "META_INCOMPLETE_SENTENCE"}
+
+
+def _should_fix(state: dict) -> bool:
+    """AA-204: run the fix pass when the brand audit flagged OR when a deterministic SEO
+    length/sentence code fired in validate. A fully-clean pass (neither) still skips."""
+    if state.get("brand_audit_status", "pass") == "flagged":
+        return True
+    return any(c in _DETERMINISTIC_SEO_CODES for c in state.get("failure_codes", []))
+
+
+def _build_fix_keys(state: dict) -> set:
+    """Collect generated-dict keys to repair: brand-audit codes/fields (AA-134) plus AA-204
+    deterministic SEO codes carried from validate's failure_codes."""
+    fix_keys: set[str] = set()
+    for code in state.get("brand_audit_codes", []):
+        mapped = STAGE2_FIX_MAPPING.get(code)
+        if mapped:
+            fix_keys.add(mapped)
+    for f in state.get("brand_audit_fields", []):
+        key = f.lower().replace("aa_", "")
+        if key in STAGE2_FIX_MAPPING.values():
+            fix_keys.add(key)
+    for code in state.get("failure_codes", []):
+        if code in _DETERMINISTIC_SEO_CODES:
+            mapped = STAGE2_FIX_MAPPING.get(code)
+            if mapped:
+                fix_keys.add(mapped)
+    return fix_keys
+
 FIX_SYSTEM = """You are Adventure Asia's editorial fixer.
 Fix ONLY the specified fields. Keep all other fields exactly as-is.
 Preserve all product facts. Return strict JSON only."""
@@ -48,10 +81,9 @@ Preserve all product facts. Return strict JSON only."""
 
 def flag_fix_node(state: dict) -> dict:
     """AA-134: Fix only the flagged fields identified by brand_audit_node."""
-    status = state.get("brand_audit_status", "pass")
-
-    # Only fix "flagged" — pass through "pass" and "manual_check" unchanged
-    if status != "flagged":
+    # AA-204: run if brand-flagged OR a deterministic SEO length/sentence code fired.
+    # Pass-through a fully-clean pass ("pass"/"manual_check" with no det SEO codes) unchanged.
+    if not _should_fix(state):
         return {
             **state,
             "fix_pass_applied": False,
@@ -59,15 +91,7 @@ def flag_fix_node(state: dict) -> dict:
         }
 
     try:
-        fix_keys: set[str] = set()
-        for code in state.get("brand_audit_codes", []):
-            mapped = STAGE2_FIX_MAPPING.get(code)
-            if mapped:
-                fix_keys.add(mapped)
-        for f in state.get("brand_audit_fields", []):
-            key = f.lower().replace("aa_", "")
-            if key in STAGE2_FIX_MAPPING.values():
-                fix_keys.add(key)
+        fix_keys = _build_fix_keys(state)
 
         if not fix_keys:
             return {
@@ -84,17 +108,21 @@ def flag_fix_node(state: dict) -> dict:
         )
         tour = state.get("tour", {})
 
-        # AA-201: seo_meta repair-to-band rules (port of v5 repair_seo_fields)
+        # AA-201/AA-204: seo_meta repair-to-band rules (port of v5 repair_seo_fields)
         meta_rules = ""
         if "seo_meta" in fix_keys:
-            meta_rules = """
+            _cur_meta = current_content.get("seo_meta") or ""
+            meta_rules = f"""
 
 SEO_META RULES:
 - SEO_META MUST be 140-155 characters and a COMPLETE sentence (ends with a period, \
 not ending on a preposition/conjunction, contains a clear verb).
 - Include the DFS primary topic + one intent clue + one practical reassurance when available.
 - Do NOT pad with filler to reach length; rewrite naturally to land in band.
-- NEVER return meta under 140 chars."""
+- NEVER return meta under 140 chars.
+- If the current SEO_META exceeds 155 chars, SHORTEN it to land within 140-155 as a COMPLETE \
+sentence ending in a period — do NOT truncate mid-phrase.
+Current SEO_META ({len(_cur_meta)} chars): {json.dumps(_cur_meta)}"""
 
         user_prompt = f"""Fix these fields for Adventure Asia brand standards.
 
