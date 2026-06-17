@@ -139,8 +139,33 @@ BRAND_AUDIT_SCHEMA = {
 
 # ── Node ──────────────────────────────────────────────────────────────────────
 
+def _audit_from_judge(state: dict, generated: dict) -> dict:
+    """AA-206: build the brand-audit result from the GPT-4.1 judge fields instead of a second LLM
+    call. Deterministic pre-audit codes still fire (they drive flag_fix's field targeting) and the
+    judge's feedback is surfaced as an issue so flag_fix has context for the repair pass."""
+    pre_codes = pre_audit_checks(generated)
+    judge_feedback = (state.get("judge_feedback") or "").strip()
+    issues = [judge_feedback] if judge_feedback else []
+    status = "flagged" if pre_codes else "pass"
+    logger.info("brand_audit_from_judge", status=status, codes=pre_codes,
+                brand_fit=state.get("judge_brand_fit"),
+                mission_present=state.get("judge_mission_present"))
+    return {
+        **state,
+        "brand_audit_status": status,
+        "brand_audit_codes":  pre_codes,
+        "brand_audit_issues": issues,
+        "brand_audit_fields": [],
+        "lessons_extracted":  [],
+    }
+
+
 def brand_audit_node(state: dict) -> dict:
-    """AA-133: LLM-as-Judge brand audit. Runs after validate when score >= 7.0."""
+    """AA-133: LLM-as-Judge brand audit. Runs after validate when score >= 7.0.
+
+    AA-206: when the GPT-4.1 judge ran earlier in the graph (branded tours with a differentiation
+    profile), reuse its result instead of making a second GPT call. Falls through to the standalone
+    OpenAI audit only when the judge did not run (legacy/no-profile brands)."""
     generated = state.get("generated", {})
     if not generated:
         return {
@@ -151,6 +176,11 @@ def brand_audit_node(state: dict) -> dict:
             "brand_audit_fields": [],
             "lessons_extracted":  [],
         }
+
+    # AA-206: prefer the judge's result over a second LLM call (judge_node sets judge_brand_fit only
+    # on a successful score). Keeps deterministic pre-audit codes for flag_fix; no double GPT cost.
+    if "judge_brand_fit" in state:
+        return _audit_from_judge(state, generated)
 
     try:
         pre_codes = pre_audit_checks(generated)
