@@ -34,6 +34,12 @@ class ContentState(TypedDict):
     brand_style_guide:      str
     brand_forbidden_words:  list
     rewrite_language:       str
+    # brand differentiation fields (AA-202)
+    brand_core_idea:        str
+    brand_customer_segment: str
+    brand_customer_mindset: str
+    brand_voice_examples:   list
+    brand_good_examples:    str
     model_tier:             str
     subtitle_focus:         str
     is_tenant_rewrite:      bool
@@ -96,6 +102,40 @@ def _meta_complete_sentence(meta: str) -> bool:
         return False
     return True
 
+def _build_brand_diff_block(state: ContentState) -> str:
+    """AA-202: build the brand-differentiation system block from brand_* state fields.
+
+    Pure string assembly (no I/O) so it can be unit-tested without LLM/DB. Returns "" when
+    none of the differentiating signals are present (old/default brands) → backward-compatible.
+    """
+    core_idea    = state.get("brand_core_idea", "") or ""
+    cust_segment = state.get("brand_customer_segment", "") or ""
+    cust_mindset = state.get("brand_customer_mindset", "") or ""
+    voice_ex     = [v for v in (state.get("brand_voice_examples") or []) if v]
+    good_ex      = state.get("brand_good_examples", "") or ""
+
+    if not (core_idea or cust_mindset or voice_ex):
+        return ""
+
+    diff_block = "\n\nBRAND DIFFERENTIATION PROFILE (this client's distinct angle — the rewrite MUST reflect it):"
+    if core_idea:
+        diff_block += f"\n- Core idea: {core_idea}"
+    if cust_segment:
+        diff_block += f"\n- Who this is for: {cust_segment}"
+    if cust_mindset:
+        diff_block += f"\n- What this traveller wants: {cust_mindset}"
+    if voice_ex:
+        diff_block += f"\n- Voice (tone words): {', '.join(voice_ex)}"
+    if good_ex:
+        diff_block += f"\n- Example of this brand's voice on a single moment: {good_ex}"
+    diff_block += (
+        "\n\nCONTRAST REQUIREMENT: The summary and highlights MUST be written from THIS brand's "
+        "specific angle and mindset above. Do NOT produce generic copy that would fit any travel brand. "
+        "If the same tour were rewritten for a different brand, the wording, emphasis, and framing must be "
+        "clearly distinct — not a synonym swap. Lead with what makes THIS brand's take different."
+    )
+    return diff_block
+
 def generate_node(state: ContentState) -> ContentState:
     """Node 1: Generate content via LLMClient."""
     client = LLMClient()
@@ -125,6 +165,8 @@ def generate_node(state: ContentState) -> ContentState:
         system += "\n\nLANGUAGE: Use American English spelling and conventions."
     if brand_sp:
         system += f"\n\nCLIENT BRAND CONTEXT (append only — do not override AA rules):\n{brand_sp}"
+    # AA-202: inject brand differentiation profile + contrast rule (no-op for old/default brands)
+    system += _build_brand_diff_block(state)
     if style_guide:
         prompt += f"\n\nSTYLE GUIDE FOR THIS CLIENT:\n{style_guide}"
     fw = [w for w in (state.get("brand_forbidden_words") or []) if w]
