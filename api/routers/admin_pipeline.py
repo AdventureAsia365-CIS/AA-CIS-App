@@ -290,6 +290,7 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
                 result = _upgraded
 
         version_id = None
+        _m_final = None
         if result.get("generated") and len(result.get("generated", {})) > 0:
             generated = result["generated"]
             status = "approved" if result.get("quality_score", 0.0) >= 7.0 else "pending"
@@ -308,6 +309,12 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
             _itin = generated.get("itineraries", "")
             if not isinstance(_itin, str):
                 _itin = str(_itin)
+            # AA-204: sentence-aware backstop trim; if a whole-sentence cut would drop the meta
+            # below the 140 floor, fall back to the longer word-boundary cut (repair is the
+            # primary fix; this is only the final DB-write net).
+            _m = generated.get("seo_meta") or ""
+            _m_sent = _trim_to_word_boundary(_m, 155, sentence=True)
+            _m_final = _m_sent if len(_m_sent) >= 140 else _trim_to_word_boundary(_m, 155)
             try:
                 version_id = await conn.fetchval("""
                     INSERT INTO silver_aa_internal.generated_content (
@@ -335,7 +342,7 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
                     json.dumps(generated.get("highlights", [])),
                     _itin,
                     _trim_to_word_boundary(generated.get("seo_title"), 60),
-                    _trim_to_word_boundary(generated.get("seo_meta"), 155),
+                    _m_final,
                     json.dumps(generated.get("seo_keywords_used", [])),
                     result.get("model_used", ""),
                     status,
@@ -455,6 +462,8 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
             "status":             result.get("status"),
             "quality_score":      result.get("quality_score"),
             "generated":          result.get("generated"),
+            "failure_codes":      result.get("failure_codes", []),   # AA-204: surface validate codes
+            "seo_meta_stored":    _m_final,                           # AA-204: actual value written to DB
             "cost_usd":           result.get("cost_usd"),
             "model_used":         result.get("model_used"),
             "brand_audit_status": result.get("brand_audit_status"),
