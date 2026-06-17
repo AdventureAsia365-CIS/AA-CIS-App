@@ -106,7 +106,10 @@ class ForceFailRequest(BaseModel):
 
 # ── POST /admin/run-tour ──────────────────────────────────────────────────────
 
-_BRAND_RULE_COLS = "id, brand_name, system_prompt, style_guide, forbidden_words, version"
+_BRAND_RULE_COLS = (
+    "id, brand_name, system_prompt, style_guide, forbidden_words, version, "
+    "core_idea, customer_segment, customer_mindset, voice_examples, good_examples, brand_type"
+)
 
 
 async def _resolve_brand_rule(conn, tenant_uuid, brand_identity_id, brand_name):
@@ -184,6 +187,7 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
                 brand_rule_id = str(br_row["id"]) if br_row["id"] else ""
                 brand_name_val = br_row["brand_name"] or ""
                 brand_rule_version = int(br_row["version"]) if br_row["version"] is not None else None
+                _voice = br_row["voice_examples"]
                 brand_rules = {
                     "system_prompt":    br_row["system_prompt"] or "",
                     "style_guide":      br_row["style_guide"] or "",
@@ -192,6 +196,16 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
                         else __import__("json").loads(br_row["forbidden_words"] or "[]")
                     ),
                     "rewrite_language": getattr(req, "rewrite_language", "en-US"),
+                    # AA-202: brand differentiation fields (resolver now selects these)
+                    "core_idea":        br_row.get("core_idea") or "",
+                    "customer_segment": br_row.get("customer_segment") or "",
+                    "customer_mindset": br_row.get("customer_mindset") or "",
+                    "voice_examples":   (
+                        list(_voice) if isinstance(_voice, list)
+                        else __import__("json").loads(_voice or "[]")
+                    ),
+                    "good_examples":    br_row.get("good_examples") or "",
+                    "brand_type":       br_row.get("brand_type") or "",
                 }
         except Exception as _br_err:
             logger.warning("brand_rules_fetch_failed", error=str(_br_err))
