@@ -1484,6 +1484,99 @@ async def get_tour_source(
         "exclusions":     row["exclusions"],
     }
 
+@router.get("/tours/{tour_id}/seo-context")
+async def get_tour_seo_context(
+    tour_id: str,
+    request: Request, x_admin_secret: str = Header(None),
+):
+    # AA-203: return the DFS keyword-ideas row for a tour's seed. Decision (A):
+    # match the stored keyword_search by the tour's country — do NOT re-build a seed.
+    # Always 200 (UI gets has_data:false when nothing stored) — never 404.
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        tour = await conn.fetchrow(
+            "SELECT tenant_id, country FROM silver_aa_internal.raw_tours "
+            "WHERE tour_id = $1::uuid",
+            tour_id,
+        )
+        if not tour:
+            raise HTTPException(status_code=404, detail="Tour not found")
+
+        country = tour["country"]
+        if country:
+            row = await conn.fetchrow("""
+                SELECT keyword_search, provider, keyword_ideas, top_keywords,
+                       demographics, trends, fetched_at, expires_at
+                FROM silver_aa_internal.seo_context
+                WHERE tenant_id = $1 AND keyword_search ILIKE '%' || $2 || '%'
+                ORDER BY fetched_at DESC LIMIT 1
+            """, tour["tenant_id"], country)
+        else:
+            # No country on the tour — fall back to this tour's own row.
+            row = await conn.fetchrow("""
+                SELECT keyword_search, provider, keyword_ideas, top_keywords,
+                       demographics, trends, fetched_at, expires_at
+                FROM silver_aa_internal.seo_context
+                WHERE tour_id = $1::uuid
+                ORDER BY fetched_at DESC LIMIT 1
+            """, tour_id)
+
+        if not row:
+            return {
+                "has_data": False,
+                "seed": None,
+                "buyer_market": None,
+                "buyer_market_location_code": None,
+                "keyword_ideas": [],
+                "top_keywords": [],
+                "people_also_ask": [],
+                "related_keywords": [],
+                "fetched_at": None,
+                "notes": "No seo_context row for this tour's seed yet.",
+            }
+
+        # keyword_ideas / top_keywords are stored as json.dumps strings → parse to list.
+        def _as_list(val):
+            if isinstance(val, list):
+                return val
+            try:
+                parsed = json.loads(val) if val else []
+            except Exception:
+                return []
+            return parsed if isinstance(parsed, list) else []
+
+        keyword_ideas = _as_list(row["keyword_ideas"])
+        top_keywords = _as_list(row["top_keywords"])
+
+        # Buyer market: derive from tenant target_market if cheap; else null.
+        buyer_market = None
+        buyer_market_location_code = None
+        try:
+            from shared.services.tenant_config_service import TenantConfigService
+            from services.seo_intelligence.seed_builder import resolve_buyer_market
+            cfg = await TenantConfigService(conn).get_seo_config(str(tour["tenant_id"]))
+            loc_code, loc_name, _lang = resolve_buyer_market(cfg.target_market)
+            buyer_market = loc_name
+            buyer_market_location_code = loc_code
+        except Exception as _bm_err:
+            logger.warning("seo_context_buyer_market_failed", tour_id=tour_id, error=str(_bm_err))
+
+    return {
+        "has_data": True,
+        "seed": row["keyword_search"],
+        "buyer_market": buyer_market,
+        "buyer_market_location_code": buyer_market_location_code,
+        "keyword_ideas": keyword_ideas,
+        "top_keywords": top_keywords,
+        # seo_context schema stores no PAA/related columns — return empty, don't fabricate.
+        "people_also_ask": [],
+        "related_keywords": [],
+        "fetched_at": row["fetched_at"].isoformat() if row["fetched_at"] else None,
+        "notes": "people_also_ask/related_keywords not persisted in seo_context schema.",
+    }
+
+
 @router.get("/tours/{tour_id}/versions/{version_num}")
 async def get_tour_version_detail(
     tour_id: str, version_num: int,
