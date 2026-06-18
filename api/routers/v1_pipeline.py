@@ -163,6 +163,14 @@ async def _rewrite_tour(
             "lessons_extracted":  result.get("lessons_extracted", []),
             "fix_pass_applied":   result.get("fix_pass_applied", False),
             "fix_pass_fields":    result.get("fix_pass_fields", []),
+            # AA-209: propagate judge_* from graph state so _build_generated_metadata can persist
+            # metadata.judge. Without these the guard result.get("judge_brand_fit") is not None never
+            # fires → PART 2/3 were a prod no-op. None when the judge didn't run (guard then skips).
+            "judge_brand_fit":            result.get("judge_brand_fit"),
+            "judge_cross_brand_distinct": result.get("judge_cross_brand_distinct"),
+            "judge_mission_present":      result.get("judge_mission_present"),
+            "judge_feedback":             result.get("judge_feedback"),
+            "judge_score":                result.get("judge_score"),
             "status": "success" if result.get("generated") and len(result.get("generated", {})) > 0 else "failed",
         }
 
