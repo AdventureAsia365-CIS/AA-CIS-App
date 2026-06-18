@@ -22,6 +22,10 @@ _MIN_QUALITY = 7.0
 # A missing mission-hook caps the judge score just below the retry threshold so it forces at least
 # one Bedrock retry instead of failing outright.
 _MISSION_ABSENT_CAP = 6.0
+# AA-209: fixed seed + low temperature make the judge reproducible — same content no longer yields
+# different score_overall across versions (root cause of v4=7.0 vs v5=9.0 on identical sub-scores).
+_JUDGE_TEMPERATURE = 0.1
+_JUDGE_SEED = 42
 
 JUDGE_SYSTEM = """You are a brand-fit judge for Adventure Asia's B2B content pipeline.
 You do NOT rewrite content. You score how well a tour rewrite reflects ONE specific client brand's
@@ -107,7 +111,8 @@ def judge_node(state: dict) -> dict:
             system_prompt=JUDGE_SYSTEM,
             user_prompt=_build_judge_prompt(state),
             model_tier="gpt-4.1",
-            temperature=0.1,
+            temperature=_JUDGE_TEMPERATURE,
+            seed=_JUDGE_SEED,
         )
         client = LLMClient()
         resp = client.generate(request)
@@ -153,6 +158,9 @@ def judge_node(state: dict) -> dict:
             "judge_cross_brand_distinct": distinct,
             "judge_mission_present": mission_present,
             "judge_feedback": judge_feedback,
+            # AA-209: expose the capped judge score (the value min()'d against validate) so the
+            # persist path can record exactly what drove score_overall, not just the inputs.
+            "judge_score": judge_score,
             "cost_usd": state.get("cost_usd", 0) + resp.cost_usd,
         }
 
