@@ -64,6 +64,9 @@ class ContentState(TypedDict):
     judge_cross_brand_distinct: float
     judge_mission_present:      bool
     judge_feedback:             str
+    # AA-209: judge_score must be declared too, else LangGraph strips it from the final state and it
+    # never reaches _rewrite_tour → _build_generated_metadata (metadata.judge.judge_score stayed null).
+    judge_score:                float
 
 # code → (dimension, deduction)
 _FAILURE_MAP: dict[str, tuple[str, float]] = {
