@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { X, ChevronRight } from "lucide-react";
 import { A, serif, sans, mono, Badge } from "./adminUi";
 
@@ -230,6 +230,166 @@ function EditableField({ label, initialValue, onSave, onChange, rows, charLimit,
 
 // ── TourDetailPanelV2 ─────────────────────────────────────────────────────────
 
+// ── SEO Keywords panel (AA-203) ─────────────────────────────────────────────
+
+interface KeywordIdea {
+  keyword: string;
+  search_volume: number | null;
+  competition: string | number | null;
+  competition_index: number | null;
+  cpc: number | null;
+}
+
+interface SeoContextResponse {
+  has_data: boolean;
+  seed: string | null;
+  buyer_market: string | null;
+  buyer_market_location_code: number | null;
+  keyword_ideas: KeywordIdea[];
+  top_keywords: string[];
+  people_also_ask: string[];
+  related_keywords: string[];
+  fetched_at: string | null;
+  notes?: string;
+}
+
+type SeoSortKey = "keyword" | "volume" | "competition" | "cpc";
+
+function compNumeric(k: KeywordIdea): number {
+  if (k.competition_index != null) return k.competition_index;
+  if (typeof k.competition === "number") return k.competition;
+  if (typeof k.competition === "string") {
+    return ({ LOW: 1, MEDIUM: 2, HIGH: 3 } as Record<string, number>)[k.competition.toUpperCase()] ?? -1;
+  }
+  return -1;
+}
+function compDisplay(k: KeywordIdea): string {
+  if (k.competition_index != null) return String(k.competition_index);
+  if (k.competition != null) return String(k.competition);
+  return "—";
+}
+function fmtVolume(v: number | null): string {
+  return v == null ? "—" : v.toLocaleString("en-US");
+}
+function fmtCpc(v: number | null): string {
+  return v == null ? "—" : `$${Number(v).toFixed(2)}`;
+}
+
+function SeoKeywordsPanel({ tourId }: { tourId: string }) {
+  const [data, setData] = useState<SeoContextResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+  const [sortKey, setSortKey] = useState<SeoSortKey>("volume");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    setError(false);
+    fetch(`/api/admin/tours/${tourId}/seo-context`)
+      .then(r => r.json())
+      .then(d => { if (alive) setData(d); })
+      .catch(() => { if (alive) setError(true); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [tourId]);
+
+  function onSort(key: SeoSortKey) {
+    if (key === sortKey) {
+      setSortDir(d => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir(key === "keyword" ? "asc" : "desc");
+    }
+  }
+
+  const sorted = useMemo(() => {
+    const arr = [...(data?.keyword_ideas || [])];
+    const dir = sortDir === "asc" ? 1 : -1;
+    arr.sort((a, b) => {
+      if (sortKey === "keyword") {
+        const av = (a.keyword || "").toLowerCase();
+        const bv = (b.keyword || "").toLowerCase();
+        return av < bv ? -dir : av > bv ? dir : 0;
+      }
+      let av: number; let bv: number;
+      if (sortKey === "volume") { av = a.search_volume ?? -1; bv = b.search_volume ?? -1; }
+      else if (sortKey === "competition") { av = compNumeric(a); bv = compNumeric(b); }
+      else { av = a.cpc ?? -1; bv = b.cpc ?? -1; }
+      return (av - bv) * dir;
+    });
+    return arr;
+  }, [data, sortKey, sortDir]);
+
+  if (loading) {
+    return <div style={{ textAlign: "center", padding: 40, color: A.muted }}>Loading SEO keywords…</div>;
+  }
+  if (error) {
+    return <div style={{ textAlign: "center", padding: 40, color: A.red }}>Failed to load SEO data</div>;
+  }
+  if (!data || !data.has_data) {
+    return (
+      <div style={{ textAlign: "center", padding: 48, color: A.muted, fontSize: 13 }}>
+        No DataForSEO data for this tour yet — run S1 with SEO mode enabled.
+      </div>
+    );
+  }
+
+  const arrow = (key: SeoSortKey) => (sortKey === key ? (sortDir === "asc" ? " ▲" : " ▼") : "");
+  const th = (key: SeoSortKey, label: string, align: "left" | "right"): React.CSSProperties => ({
+    padding: "8px 12px", textAlign: align, cursor: "pointer", userSelect: "none",
+    fontSize: 11, fontWeight: 600, color: sortKey === key ? A.ink : A.muted,
+    textTransform: "uppercase" as const, letterSpacing: "0.1em",
+  });
+
+  return (
+    <div>
+      {/* Header — seed + buyer market + fetched_at */}
+      <div style={{
+        display: "flex", gap: 16, flexWrap: "wrap", padding: "10px 14px",
+        background: A.bg, borderRadius: 8, marginBottom: 18, fontSize: 12, color: A.muted,
+      }}>
+        <span>Seed: <strong style={{ color: A.ink }}>{data.seed || "—"}</strong></span>
+        <span>
+          Buyer market: <strong style={{ color: A.ink }}>{data.buyer_market || "—"}</strong>
+          {data.buyer_market_location_code != null && (
+            <span style={{ color: A.muted2 }}> ({data.buyer_market_location_code})</span>
+          )}
+        </span>
+        <span>Fetched: <strong style={{ color: A.ink }}>{relTime(data.fetched_at)}</strong></span>
+        <span>Ideas: <strong style={{ color: A.ink }}>{data.keyword_ideas.length}</strong></span>
+      </div>
+
+      {sorted.length === 0 ? (
+        <div style={{ textAlign: "center", padding: 40, color: A.muted, fontSize: 13 }}>
+          Row found but no keyword ideas stored.
+        </div>
+      ) : (
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+          <thead>
+            <tr style={{ background: A.line2 }}>
+              <th style={th("keyword", "Keyword", "left")} onClick={() => onSort("keyword")}>Keyword{arrow("keyword")}</th>
+              <th style={th("volume", "Volume", "right")} onClick={() => onSort("volume")}>Volume{arrow("volume")}</th>
+              <th style={th("competition", "Competition", "right")} onClick={() => onSort("competition")}>Competition{arrow("competition")}</th>
+              <th style={th("cpc", "CPC", "right")} onClick={() => onSort("cpc")}>CPC{arrow("cpc")}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((k, i) => (
+              <tr key={`${k.keyword}-${i}`} style={{ borderTop: `1px solid ${A.line}`, background: i % 2 === 0 ? "#fff" : A.bg }}>
+                <td style={{ padding: "8px 12px", color: A.ink }}>{k.keyword}</td>
+                <td style={{ padding: "8px 12px", textAlign: "right", fontFamily: mono, color: A.body }}>{fmtVolume(k.search_volume)}</td>
+                <td style={{ padding: "8px 12px", textAlign: "right", color: A.muted }}>{compDisplay(k)}</td>
+                <td style={{ padding: "8px 12px", textAlign: "right", fontFamily: mono, color: A.gold }}>{fmtCpc(k.cpc)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
 export function TourDetailPanelV2({ tourId, tourName, rewriteCount = 0, onClose }: {
   tourId: string;
   tourName: string;
@@ -238,7 +398,7 @@ export function TourDetailPanelV2({ tourId, tourName, rewriteCount = 0, onClose 
 }) {
   const [detail, setDetail] = useState<TourDetailFull | null>(null);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<"original" | "rewrite" | "history" | "published">("original");
+  const [tab, setTab] = useState<"original" | "rewrite" | "history" | "seo" | "published">("original");
   const [history, setHistory] = useState<HistoryRow[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [toast, setToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
@@ -420,6 +580,7 @@ export function TourDetailPanelV2({ tourId, tourName, rewriteCount = 0, onClose 
             <button style={tabBtn(tab === "original")} onClick={() => setTab("original")}>Original Content</button>
             <button style={tabBtn(tab === "rewrite", !gen)} onClick={() => gen && setTab("rewrite")}>Latest Rewrite</button>
             <button style={tabBtn(tab === "history")} onClick={() => setTab("history")}>Rewrite History</button>
+            <button style={tabBtn(tab === "seo")} onClick={() => setTab("seo")}>SEO Keywords</button>
             <button style={tabBtn(tab === "published", !pub)} onClick={() => pub && setTab("published")}>Published</button>
           </div>
         </div>
@@ -611,6 +772,8 @@ export function TourDetailPanelV2({ tourId, tourName, rewriteCount = 0, onClose 
                 )}
               </div>
             )
+          ) : tab === "seo" ? (
+            <SeoKeywordsPanel tourId={tourId} />
           ) : (
             /* Published tab */
             pub ? (

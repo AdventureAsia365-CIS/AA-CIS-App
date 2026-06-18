@@ -98,7 +98,9 @@ async def process_seo(
         seo_id = await repo.insert({
             "tour_id":        tour_id,
             "keyword_search": effective_seed,
-            "keyword_ideas":  json.dumps(seo_data.get("keywords", {}).get("search_volumes", {})),
+            # AA-203: persist the AA-197 top-level keyword_ideas list (full-metric:
+            # volume/competition/cpc) — NOT keywords.search_volumes (an often-empty dict).
+            "keyword_ideas":  json.dumps(seo_data.get("keyword_ideas", []), default=str),
             "demographics":   json.dumps(seo_data.get("demographics", {})),
             "trends":         json.dumps(seo_data.get("trends", {})),
             "top_keywords":   json.dumps(seo_data.get("keywords", {}).get("top_keywords", [])),
