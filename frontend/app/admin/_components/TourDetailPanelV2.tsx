@@ -6,6 +6,14 @@ import { A, serif, sans, mono, Badge } from "./adminUi";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
+export interface JudgeMeta {
+  brand_fit: number | null;
+  distinct: number | null;
+  mission_present: boolean | null;
+  feedback: string | null;
+  judge_score: number | null;
+}
+
 export interface TourDetailFull {
   raw: {
     tour_id: string;
@@ -46,6 +54,8 @@ export interface TourDetailFull {
     score_seo: number | null;
     score_structure: number | null;
     score_quality: number | null;
+    brand_audit_status: string | null;
+    judge: JudgeMeta | null;
   } | null;
   published: {
     id: string;
@@ -641,6 +651,58 @@ export function TourDetailPanelV2({ tourId, tourName, rewriteCount = 0, onClose 
                   <span>Generated: <strong>{relTime(gen.created_at)}</strong></span>
                   <span>Version: <strong>v{gen.version_num}</strong></span>
                 </div>
+                {/* AA-209: full sub-score breakdown (incl. Quality) + judge-capped flag + brand judge */}
+                {(() => {
+                  const subs = [gen.score_brand, gen.score_seo, gen.score_structure, gen.score_quality];
+                  const vAvg = subs.every(s => s != null)
+                    ? (subs as number[]).reduce((a, s) => a + s, 0) / 4 : null;
+                  const capped = gen.score_overall != null && vAvg != null && gen.score_overall < vAvg - 0.01;
+                  const fmt = (s: number | null) => (s != null ? s.toFixed(1) : "—");
+                  const rows: [string, number | null][] = [
+                    ["Overall", gen.score_overall], ["Brand", gen.score_brand], ["SEO", gen.score_seo],
+                    ["Structure", gen.score_structure], ["Quality", gen.score_quality],
+                  ];
+                  return (
+                    <div style={{ marginBottom: 20 }}>
+                      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: capped ? 8 : 0 }}>
+                        {rows.map(([label, sc]) => (
+                          <span key={label} style={{ fontSize: 12, color: A.muted }}>
+                            {label}: <strong style={{ color: scoreColor(sc) }}>{fmt(sc)}</strong>
+                          </span>
+                        ))}
+                      </div>
+                      {capped && <Badge color="amber">⚠ judge-capped (avg {fmt(vAvg)})</Badge>}
+                      <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${A.line}` }}>
+                        <div style={{ fontSize: 10, letterSpacing: "0.1em", textTransform: "uppercase", color: A.muted2, marginBottom: 6 }}>
+                          Brand Judge
+                        </div>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          {gen.judge ? (
+                            <>
+                              <Badge color="gold">fit {fmt(gen.judge.brand_fit)}</Badge>
+                              <Badge color="gold">distinct {fmt(gen.judge.distinct)}</Badge>
+                              <Badge color={gen.judge.mission_present ? "green" : "red"}>
+                                mission {gen.judge.mission_present ? "✓" : "✗"}
+                              </Badge>
+                            </>
+                          ) : (
+                            <span style={{ fontSize: 12, color: A.muted2 }}>not run</span>
+                          )}
+                          {gen.brand_audit_status && (
+                            <Badge color={gen.brand_audit_status === "pass" ? "green" : "amber"}>
+                              {gen.brand_audit_status}
+                            </Badge>
+                          )}
+                        </div>
+                        {gen.judge?.feedback && (
+                          <div style={{ fontSize: 12, color: A.body, lineHeight: 1.6, marginTop: 8 }}>
+                            {gen.judge.feedback}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
                 <EditableField label="AA Name" initialValue={gen.aa_name || ""} onSave={v => saveGenerated("aa_name", v)} />
                 <EditableField label="Subtitle" initialValue={gen.aa_subtitle || ""} onSave={v => saveGenerated("aa_subtitle", v)} />
                 <EditableField label="Summary" initialValue={gen.aa_summary || ""} onSave={v => saveGenerated("aa_summary", v)} rows={6} />

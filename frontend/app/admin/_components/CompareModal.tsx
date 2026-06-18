@@ -7,6 +7,14 @@ import { scoreColor } from "./TourDetailPanelV2";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
+interface JudgeMeta {
+  brand_fit: number | null;
+  distinct: number | null;
+  mission_present: boolean | null;
+  feedback: string | null;
+  judge_score: number | null;
+}
+
 interface TourDetailCompare {
   raw: {
     src_name: string;
@@ -27,6 +35,9 @@ interface TourDetailCompare {
     score_brand: number | null;
     score_seo: number | null;
     score_structure: number | null;
+    score_quality: number | null;
+    brand_audit_status: string | null;
+    judge: JudgeMeta | null;
   } | null;
 }
 
@@ -37,6 +48,19 @@ type ContentTab = "summary" | "highlights" | "itineraries" | "seo";
 function modelShort(m: string | null | undefined): string {
   if (!m) return "—";
   return m.split(".").pop()?.replace(/-v\d+:\d+$/, "") ?? m;
+}
+
+function fmtScore(s: number | null | undefined): string {
+  return s != null ? s.toFixed(1) : "—";
+}
+
+// AA-209: score_overall is min(validate_avg, judge_score). When the judge pulled it below the mean
+// of the 4 sub-scores, flag it so the displayed Overall doesn't look inconsistent with its bars.
+function validateAvg(g: TourDetailCompare["generated"] | undefined): number | null {
+  if (!g) return null;
+  const subs = [g.score_brand, g.score_seo, g.score_structure, g.score_quality];
+  if (subs.some(s => s == null)) return null;
+  return (subs as number[]).reduce((a, s) => a + s, 0) / 4;
 }
 
 // ── ScoreRow ──────────────────────────────────────────────────────────────────
@@ -160,6 +184,8 @@ export function CompareModal({ tourIds, onClose }: {
             const detail = details[idx];
             const gen = detail?.generated;
             const raw = detail?.raw;
+            const vAvg = validateAvg(gen);
+            const judgeCapped = gen?.score_overall != null && vAvg != null && gen.score_overall < vAvg - 0.01;
 
             return (
               <div key={tourId} style={{
@@ -193,9 +219,45 @@ export function CompareModal({ tourIds, onClose }: {
                   </div>
                   {/* Quality scores */}
                   <ScoreRow label="Overall" score={gen?.score_overall ?? null} />
+                  {judgeCapped && (
+                    <div style={{ marginTop: -3, marginBottom: 7 }}>
+                      <Badge color="amber">⚠ judge-capped (avg {fmtScore(vAvg)})</Badge>
+                    </div>
+                  )}
                   <ScoreRow label="Brand" score={gen?.score_brand ?? null} />
                   <ScoreRow label="SEO" score={gen?.score_seo ?? null} />
                   <ScoreRow label="Structure" score={gen?.score_structure ?? null} />
+                  <ScoreRow label="Quality" score={gen?.score_quality ?? null} />
+
+                  {/* AA-209: brand judge (GPT-4.1) — guarded for older versions with no judge metadata */}
+                  <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${A.line}` }}>
+                    <div style={{ fontSize: 10, letterSpacing: "0.1em", textTransform: "uppercase", color: A.muted2, marginBottom: 6 }}>
+                      Brand Judge
+                    </div>
+                    <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+                      {gen?.judge ? (
+                        <>
+                          <Badge color="gold">fit {fmtScore(gen.judge.brand_fit)}</Badge>
+                          <Badge color="gold">distinct {fmtScore(gen.judge.distinct)}</Badge>
+                          <Badge color={gen.judge.mission_present ? "green" : "red"}>
+                            mission {gen.judge.mission_present ? "✓" : "✗"}
+                          </Badge>
+                        </>
+                      ) : (
+                        <span style={{ fontSize: 11, color: A.muted2 }}>not run</span>
+                      )}
+                      {gen?.brand_audit_status && (
+                        <Badge color={gen.brand_audit_status === "pass" ? "green" : "amber"}>
+                          {gen.brand_audit_status}
+                        </Badge>
+                      )}
+                    </div>
+                    {gen?.judge?.feedback && (
+                      <div style={{ fontSize: 11, color: A.body, lineHeight: 1.5, marginTop: 6 }}>
+                        {gen.judge.feedback}
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 {/* Scrollable content (synced) */}

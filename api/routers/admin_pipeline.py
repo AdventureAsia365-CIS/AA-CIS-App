@@ -50,6 +50,37 @@ def _trim_to_word_boundary(text, limit, sentence=False):
     return window.rstrip()
 
 
+def _build_generated_metadata(result, *, brand_rule_id, brand_name, seo_mode,
+                              model_used, llm_cost_usd, dataforseo_used):
+    """Assemble the generated_content.metadata dict for a new version row.
+
+    AA-209: merge a ``judge`` object (brand_fit / distinct / mission_present / feedback /
+    judge_score) when the GPT-4.1 judge ran. The judge only runs for branded tours with a
+    differentiation profile; for legacy/no-profile brands judge_node returns no ``judge_*`` keys,
+    so ``metadata.judge`` is simply omitted (absent, not null) — no crash, no clobber of the base
+    keys below.
+    """
+    metadata = {
+        "brand_rule_id":   brand_rule_id,
+        "brand_name":      brand_name,
+        "seo_mode":        seo_mode,
+        "model_used":      model_used,
+        "llm_cost_usd":    llm_cost_usd,
+        "dataforseo_used": dataforseo_used,
+        "generated_at":    datetime.datetime.utcnow().isoformat() + "Z",
+        "pipeline_version": "v2",
+    }
+    if result.get("judge_brand_fit") is not None:
+        metadata["judge"] = {
+            "brand_fit":       result.get("judge_brand_fit"),
+            "distinct":        result.get("judge_cross_brand_distinct"),
+            "mission_present": result.get("judge_mission_present"),
+            "feedback":        result.get("judge_feedback"),
+            "judge_score":     result.get("judge_score"),
+        }
+    return metadata
+
+
 # ── Pydantic models ───────────────────────────────────────────────────────────
 
 class TourRunRequest(BaseModel):
@@ -296,16 +327,18 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
             status = "approved" if result.get("quality_score", 0.0) >= 7.0 else "pending"
             is_branded = result.get("is_branded", True)
             og_tags_val = json.dumps({} if is_branded else {"unbranded": True})
-            metadata_val = json.dumps({
-                "brand_rule_id":   brand_rule_id,
-                "brand_name":      brand_name_val,
-                "seo_mode":        req.seo_mode,
-                "model_used":      result.get("model_used", ""),
-                "llm_cost_usd":    float(result.get("cost_usd") or 0.0),
-                "dataforseo_used": dataforseo_used,
-                "generated_at":    datetime.datetime.utcnow().isoformat() + "Z",
-                "pipeline_version": "v2",
-            })
+            metadata_val = json.dumps(
+                _build_generated_metadata(
+                    result,
+                    brand_rule_id=brand_rule_id,
+                    brand_name=brand_name_val,
+                    seo_mode=req.seo_mode,
+                    model_used=result.get("model_used", ""),
+                    llm_cost_usd=float(result.get("cost_usd") or 0.0),
+                    dataforseo_used=dataforseo_used,
+                ),
+                default=str,
+            )
             _itin = generated.get("itineraries", "")
             if not isinstance(_itin, str):
                 _itin = str(_itin)
@@ -1778,9 +1811,9 @@ async def get_tour_detail(tour_id: str, request: Request, x_admin_secret: str = 
             SELECT gc.id::text, gc.version_num, gc.created_at, gc.status::text,
                    gc.aa_name, gc.aa_subtitle, gc.aa_summary, gc.aa_description,
                    gc.aa_highlights, gc.aa_itineraries, gc.seo_title, gc.seo_meta,
-                   gc.seo_keywords_used, gc.model_editorial,
+                   gc.seo_keywords_used, gc.model_editorial, gc.metadata,
                    qs.score_overall, qs.score_brand, qs.score_seo,
-                   qs.score_structure, qs.score_quality
+                   qs.score_structure, qs.score_quality, qs.brand_audit_status
             FROM silver_aa_internal.generated_content gc
             LEFT JOIN silver_aa_internal.quality_scores qs
                 ON qs.generated_content_id = gc.id
@@ -1804,6 +1837,21 @@ async def get_tour_detail(tour_id: str, request: Request, x_admin_secret: str = 
             return __import__("json").loads(v)
         except Exception:
             return []
+
+    # AA-209: surface the persisted judge object (metadata.judge) so the UI can show what actually
+    # drove score_overall. Absent for legacy/no-profile versions → judge stays None (UI renders "—").
+    def _parse_meta(v):
+        if v is None:
+            return {}
+        if isinstance(v, dict):
+            return v
+        try:
+            return __import__("json").loads(v)
+        except Exception:
+            return {}
+
+    _meta = _parse_meta(gen["metadata"]) if gen else {}
+    _judge = _meta.get("judge") if isinstance(_meta, dict) else None
 
     return {
         "raw": {
@@ -1844,6 +1892,11 @@ async def get_tour_detail(tour_id: str, request: Request, x_admin_secret: str = 
             "score_brand":      float(gen["score_brand"])   if gen["score_brand"] is not None else None,
             "score_seo":        float(gen["score_seo"])     if gen["score_seo"] is not None else None,
             "score_structure":  float(gen["score_structure"]) if gen["score_structure"] is not None else None,
+            # AA-209: score_quality was SELECTed but dropped from the response — now returned so the
+            # UI can show all 4 sub-scores; brand_audit_status + judge expose the GPT-4.1 judge.
+            "score_quality":    float(gen["score_quality"]) if gen["score_quality"] is not None else None,
+            "brand_audit_status": gen["brand_audit_status"],
+            "judge":            _judge,
         } if gen else None,
         "published": {
             "id":            pub["id"],
