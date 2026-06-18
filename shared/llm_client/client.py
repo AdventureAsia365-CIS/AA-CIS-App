@@ -136,14 +136,23 @@ class LLMClient:
         )
 
     def _call_openai(self, request: LLMRequest, model: str) -> LLMResponse:
-        resp = self._openai.chat.completions.create(
-            model=model,
-            max_tokens=request.max_tokens,
-            messages=[
+        # AA-209: forward sampling controls only when the caller explicitly set them. This makes the
+        # GPT-4.1 judge reproducible (it passes temperature + seed) without changing behavior of
+        # content/T3-fallback calls that rely on provider defaults (they never set these fields).
+        kwargs = {
+            "model": model,
+            "max_tokens": request.max_tokens,
+            "messages": [
                 {"role": "system", "content": request.system_prompt},
                 {"role": "user",   "content": request.user_prompt},
             ],
-        )
+        }
+        fields_set = request.model_fields_set
+        if "temperature" in fields_set:
+            kwargs["temperature"] = request.temperature
+        if "seed" in fields_set and request.seed is not None:
+            kwargs["seed"] = request.seed
+        resp = self._openai.chat.completions.create(**kwargs)
         content = resp.choices[0].message.content
         in_tok  = resp.usage.prompt_tokens
         out_tok = resp.usage.completion_tokens

@@ -11,6 +11,9 @@ class LLMRequest(BaseModel):
     #   "haiku"  → skip T1, go directly to T2 (Haiku) — fast/cheap
     #   "sonnet" → try T1 (Sonnet) first, fall back to T2 then T3
     model_tier:    str = "haiku"
+    # AA-209: optional sampling seed. Forwarded to OpenAI only when explicitly set, so the judge
+    # can run reproducibly while content calls that omit it keep provider-default behavior.
+    seed:          Optional[int] = None
 
 class LLMResponse(BaseModel):
     content:       str
