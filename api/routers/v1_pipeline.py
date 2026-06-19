@@ -378,30 +378,31 @@ async def approve_review(
     request: Request,
     tenant=Depends(_get_tenant),
 ):
-    """Approve a tour in review queue → send_task_success → SF continues to Export."""
+    """Approve a tour in review queue.
+
+    AA-212: atomic-claim the pending row so a double-click cannot double-export. The claim
+    only succeeds while review_status='pending'; a second call claims nothing → 409, and
+    process_export (which is NOT idempotent against its EventBridge re-fire) runs at most once.
+    Token branch: a legacy Step Functions token → send_task_success; NULL token (admin/direct
+    enqueue path) → forward export via process_export.
+    """
     pool = request.app.state.pool
     tenant_id = tenant.get("sub", "00000000-0000-0000-0000-000000000001")
 
     async with pool.acquire() as conn:
-        # Get task_token + generated_content_id
-        row = await conn.fetchrow("""
-            SELECT step_fn_task_token, generated_content_id
-            FROM silver_aa_internal.review_queue
-            WHERE id = $1::uuid AND tenant_id = $2::uuid
-        """, review_id, tenant_id)
-
-        if not row:
-            raise HTTPException(status_code=404, detail="Review not found")
-
-        task_token = row["step_fn_task_token"]
-        generated_content_id = str(row["generated_content_id"])
-
-        # Update review_queue + generated_content
-        await conn.execute("""
+        # Atomic claim: flip pending→approved in one statement. Only the first caller wins.
+        claimed = await conn.fetchrow("""
             UPDATE silver_aa_internal.review_queue
             SET review_status = 'approved', reviewed_at = NOW()
-            WHERE id = $1::uuid
-        """, review_id)
+            WHERE id = $1::uuid AND tenant_id = $2::uuid AND review_status = 'pending'
+            RETURNING generated_content_id, step_fn_task_token
+        """, review_id, tenant_id)
+
+        if not claimed:
+            raise HTTPException(status_code=409, detail="Review already processed or not found")
+
+        generated_content_id = str(claimed["generated_content_id"])
+        task_token = claimed["step_fn_task_token"]
 
         await conn.execute("""
             UPDATE silver_aa_internal.generated_content
@@ -409,8 +410,12 @@ async def approve_review(
             WHERE id = $1::uuid
         """, generated_content_id)
 
-    # Send task success to Step Functions (outside DB transaction)
-    if task_token:
+    # Side effects outside the DB transaction. Branch on the claimed token.
+    # NULL token (admin/direct enqueue path) → forward export. Use `is not None`, not a falsy
+    # check: an empty-string token is a real SF token and must NOT fall into the export branch.
+    exported = False
+    if task_token is not None:
+        # Legacy Step Functions path — unchanged.
         try:
             sfn = _boto3.client(
                 "stepfunctions",
@@ -427,8 +432,25 @@ async def approve_review(
         except Exception as e:
             import structlog as _sl
             _sl.get_logger().warning("send_task_success_failed", error=str(e))
+    else:
+        # Admin-path forward export (no SF token). Runs once per claim.
+        from services.export.handler import process_export
+        try:
+            await process_export(str(generated_content_id))
+            exported = True
+        except Exception as e:
+            import structlog as _sl
+            _sl.get_logger().error(
+                "approve_export_failed", review_id=review_id,
+                version_id=generated_content_id, error=str(e),
+            )
 
-    return {"status": "approved", "review_id": review_id, "sf_notified": bool(task_token)}
+    return {
+        "status": "approved",
+        "review_id": review_id,
+        "exported": exported,
+        "sf_notified": task_token is not None,
+    }
 
 
 @router.post("/review-queue/{review_id}/reject")
@@ -437,30 +459,29 @@ async def reject_review(
     request: Request,
     tenant=Depends(_get_tenant),
 ):
-    """Reject a tour → send_task_failure → SF goes to TourRejected."""
+    """Reject a tour → send_task_failure → SF goes to TourRejected.
+
+    AA-212: atomic-claim the pending row (pending→rejected in one statement). A second call
+    claims nothing → 409. No export on the reject path.
+    """
     pool = request.app.state.pool
     tenant_id = tenant.get("sub", "00000000-0000-0000-0000-000000000001")
 
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            SELECT step_fn_task_token
-            FROM silver_aa_internal.review_queue
-            WHERE id = $1::uuid AND tenant_id = $2::uuid
-        """, review_id, tenant_id)
-
-        if not row:
-            raise HTTPException(status_code=404, detail="Review not found")
-
-        task_token = row["step_fn_task_token"]
-
-        await conn.execute("""
+        claimed = await conn.fetchrow("""
             UPDATE silver_aa_internal.review_queue
             SET review_status = 'rejected', reviewed_at = NOW()
-            WHERE id = $1::uuid
-        """, review_id)
+            WHERE id = $1::uuid AND tenant_id = $2::uuid AND review_status = 'pending'
+            RETURNING step_fn_task_token
+        """, review_id, tenant_id)
 
-    # Send task failure to Step Functions
-    if task_token:
+        if not claimed:
+            raise HTTPException(status_code=409, detail="Review already processed or not found")
+
+        task_token = claimed["step_fn_task_token"]
+
+    # Send task failure to Step Functions only when a real token exists (is None → no SF, no export).
+    if task_token is not None:
         try:
             sfn = _boto3.client(
                 "stepfunctions",
@@ -475,7 +496,7 @@ async def reject_review(
             import structlog as _sl
             _sl.get_logger().warning("send_task_failure_failed", error=str(e))
 
-    return {"status": "rejected", "review_id": review_id, "sf_notified": bool(task_token)}
+    return {"status": "rejected", "review_id": review_id, "sf_notified": task_token is not None}
 
 
 # =============================================================================
