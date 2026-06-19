@@ -25,6 +25,19 @@ router = APIRouter(prefix="/admin", tags=["admin-pipeline"])
 _pipeline_semaphore = asyncio.Semaphore(2)
 
 
+def _is_uuid(value) -> bool:
+    """True when value is a valid UUID (shared.pipeline_runs.batch_id is uuid-typed).
+
+    AA-210: guards the `WHERE batch_id = $N::uuid` accounting UPDATEs against non-UUID
+    batch_ids (e.g. ad-hoc verification labels) that would otherwise raise asyncpg DataError.
+    """
+    try:
+        UUID(str(value))
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
 def _trim_to_word_boundary(text, limit, sentence=False):
     """Trim text to <= limit chars without splitting a word.
 
@@ -471,7 +484,7 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
         if isinstance(model_name, str) and not model_name:
             model_name = None
         actual_provider = "openai" if model_name and "gpt" in model_name.lower() else "bedrock"
-        if cost_usd > 0 or tokens_in > 0:
+        if (cost_usd > 0 or tokens_in > 0) and _is_uuid(req.batch_id):
             await conn.execute("""
                 UPDATE shared.pipeline_runs
                 SET cost_usd      = COALESCE(cost_usd, 0)      + $1,
@@ -487,6 +500,12 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
                 0 if tour_passed else 1,
                 req.batch_id, model_name, actual_provider,
             )
+        elif (cost_usd > 0 or tokens_in > 0) and not _is_uuid(req.batch_id):
+            # AA-210: non-UUID batch_id (e.g. ad-hoc verification run) — skip accounting
+            # UPDATE so the uuid cast cannot crash the post-export path. No matching
+            # pipeline_runs row exists for such runs anyway.
+            logger.info("pipeline_runs_accounting_skipped",
+                        batch_id=req.batch_id, reason="batch_id is not a valid uuid")
 
         return {
             "tour_id":            req.tour_id,
@@ -524,6 +543,12 @@ async def _run_tour_safe(tour_req: TourRunRequest) -> None:
                                attempt=attempt + 1, error=str(exc))
         logger.error("background_run_tour_failed", tour_id=tour_req.tour_id,
                      batch_id=tour_req.batch_id, error=str(last_exc))
+        if not _is_uuid(tour_req.batch_id):
+            # AA-210: non-UUID batch_id has no pipeline_runs row to mark failed; skip the
+            # uuid-cast UPDATE rather than crash the failure handler.
+            logger.info("pipeline_runs_fail_mark_skipped",
+                        batch_id=tour_req.batch_id, reason="batch_id is not a valid uuid")
+            return
         try:
             conn = await asyncpg.connect(os.environ["DATABASE_URL"])
             await conn.execute(
