@@ -38,6 +38,10 @@ def _is_uuid(value) -> bool:
         return False
 
 
+# AA-211/AA-212: master tenant for the aa_internal pipeline (same constant used inline elsewhere).
+_MASTER_TENANT_ID = "00000000-0000-0000-0000-000000000001"
+
+
 def _is_publishable(result: dict) -> bool:
     """AA-211: audit-aware publish gate (mirror catalog readiness + v5 spec).
 
@@ -50,6 +54,48 @@ def _is_publishable(result: dict) -> bool:
         result.get("quality_score", 0.0) >= 7.0
         and audit != "manual_check"
         and not (audit == "flagged" and not result.get("fix_pass_applied"))
+    )
+
+
+def _build_failure_summary(result: dict) -> str:
+    """AA-212: human-readable reason a tour was routed to the HITL review_queue."""
+    audit = result.get("brand_audit_status")
+    score = float(result.get("quality_score") or 0.0)
+    codes = list(result.get("failure_codes", [])) + list(result.get("brand_audit_codes", []))
+    parts = []
+    if audit:
+        parts.append(f"brand_audit={audit}")
+    if codes:
+        parts.append("codes=" + ",".join(str(c) for c in codes))
+    if score < 7.0:
+        parts.append(f"low_quality(score={score:.1f}<7.0)")
+    return "; ".join(parts) or "blocked: not publishable"
+
+
+async def _enqueue_review(conn, tour_id, generated_content_id, result) -> None:
+    """AA-212: enqueue a blocked / low-quality tour into review_queue for HITL review.
+
+    Idempotent: the NOT EXISTS guard skips re-insert when a pending row already exists for this
+    generated_content_id (guards pipeline re-runs against double-enqueue). SF columns are left
+    NULL — that NULL is what marks the admin/direct-export path picked up by approve_review.
+    """
+    await conn.execute("""
+        INSERT INTO silver_aa_internal.review_queue (
+            tour_id, generated_content_id, tenant_id,
+            failure_summary, score_overall, review_status
+        )
+        SELECT $1::uuid, $2::uuid, $3::uuid, $4, $5, 'pending'
+        WHERE NOT EXISTS (
+            SELECT 1 FROM silver_aa_internal.review_queue
+            WHERE generated_content_id = $2::uuid
+              AND review_status = 'pending'
+        )
+    """,
+        tour_id,
+        generated_content_id,
+        _MASTER_TENANT_ID,
+        _build_failure_summary(result),
+        float(result.get("quality_score") or 0.0),
     )
 
 
@@ -495,6 +541,12 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
                 await process_export(str(version_id))
             except Exception as _exp_err:
                 logger.error("export_failed", tour_id=req.tour_id, error=str(_exp_err))
+        elif version_id and status == "pending":
+            # AA-212: route blocked / low-quality tour to HITL review_queue (idempotent enqueue).
+            try:
+                await _enqueue_review(conn, req.tour_id, version_id, result)
+            except Exception as _rq_err:
+                logger.warning("review_queue_enqueue_failed", tour_id=req.tour_id, error=str(_rq_err))
 
         cost_usd    = float(result.get("cost_usd") or 0.0)
         tokens_in   = int(result.get("input_tokens") or 0)
