@@ -38,6 +38,21 @@ def _is_uuid(value) -> bool:
         return False
 
 
+def _is_publishable(result: dict) -> bool:
+    """AA-211: audit-aware publish gate (mirror catalog readiness + v5 spec).
+
+    quality_score >= 7.0 is the floor; additionally block manual_check, and block brand-flagged
+    tours the fix pass did not repair (flagged + not fix_pass_applied). Everything else — a clean
+    pass, or flagged-but-fixed (Terra case), or no brand profile at all — is publishable.
+    """
+    audit = result.get("brand_audit_status")
+    return (
+        result.get("quality_score", 0.0) >= 7.0
+        and audit != "manual_check"
+        and not (audit == "flagged" and not result.get("fix_pass_applied"))
+    )
+
+
 def _trim_to_word_boundary(text, limit, sentence=False):
     """Trim text to <= limit chars without splitting a word.
 
@@ -337,7 +352,11 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
         _m_final = None
         if result.get("generated") and len(result.get("generated", {})) > 0:
             generated = result["generated"]
-            status = "approved" if result.get("quality_score", 0.0) >= 7.0 else "pending"
+            # AA-211: gc.status MUST use the same audit-aware gate as the export decision below
+            # (line ~533). Otherwise a flagged-unfixed / manual_check tour scoring >=7 is written
+            # status='approved' while being routed to review_queue — and since process_export is
+            # gated on gc.status='approved', that bypasses the HITL gate via any other export path.
+            status = "approved" if _is_publishable(result) else "pending"
             is_branded = result.get("is_branded", True)
             og_tags_val = json.dumps({} if is_branded else {"unbranded": True})
             metadata_val = json.dumps(
@@ -468,7 +487,8 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
             except Exception as _fix_err:
                 logger.warning("fix_pass_persist_failed", error=str(_fix_err))
 
-        status = "approved" if result.get("quality_score", 0.0) >= 7.0 else "pending"
+        # AA-211: audit-aware publish gate (see _is_publishable).
+        status = "approved" if _is_publishable(result) else "pending"
         if version_id and status == "approved":
             from services.export.handler import process_export
             try:
