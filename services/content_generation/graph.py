@@ -1,6 +1,7 @@
 import json
 import re
 import structlog
+from json_repair import repair_json
 from typing import TypedDict, Annotated
 from langgraph.graph import StateGraph, END
 
@@ -186,6 +187,7 @@ def generate_node(state: ContentState) -> ContentState:
         model_tier=state.get("model_tier", "haiku"),
     )
 
+    resp = None
     try:
         resp = client.generate(request)
         # Strip markdown fences nếu LLM wrap JSON trong ```json ... ```
@@ -195,7 +197,29 @@ def generate_node(state: ContentState) -> ContentState:
             if raw.startswith("json"):
                 raw = raw[4:]
             raw = raw.strip()
-        generated = json.loads(raw)
+        # AA-217: deterministic json-repair salvage on malformed output (no LLM re-ask).
+        try:
+            generated = json.loads(raw)
+        except json.JSONDecodeError as e:
+            salvaged = repair_json(raw, return_objects=True)
+            if isinstance(salvaged, dict) and salvaged.get("name"):
+                generated = salvaged
+                logger.info("json_repair_salvaged",
+                            tour_id=state.get("tour_id"),
+                            model_used=resp.model_used,
+                            retry_count=state.get("retry_count"),
+                            raw_len=len(raw))
+            else:
+                logger.warning("json_parse_failed",
+                               error=str(e),
+                               raw_len=len(raw),
+                               char_offset=e.pos,
+                               model_used=resp.model_used if resp else None,
+                               fallback_used=resp.fallback_used if resp else None,
+                               retry_count=state.get("retry_count"))
+                return {**state, "generated": {}, "is_branded": is_branded,
+                        "cost_usd": state.get("cost_usd", 0) + resp.cost_usd,
+                        "error": f"JSON parse error: {e}"}
         logger.info("content_generated", retry=state.get("retry_count", 0),
                     model=resp.model_used, cost=resp.cost_usd)
         return {
@@ -207,12 +231,11 @@ def generate_node(state: ContentState) -> ContentState:
             "error":      "",
             "fallback_used": resp.fallback_used,
         }
-    except json.JSONDecodeError as e:
-        logger.warning("json_parse_failed", error=str(e))
-        return {**state, "generated": {}, "is_branded": is_branded, "error": f"JSON parse error: {e}"}
     except Exception as e:
         logger.error("generation_failed", error=str(e))
-        return {**state, "generated": {}, "is_branded": is_branded, "error": str(e)}
+        return {**state, "generated": {}, "is_branded": is_branded,
+                "cost_usd": state.get("cost_usd", 0) + (resp.cost_usd if resp else 0),
+                "error": str(e)}
 
 def validate_node(state: ContentState) -> ContentState:
     """Node 2: Quality check — structured failure codes, 4 sub-dimensions, score 0-10."""
