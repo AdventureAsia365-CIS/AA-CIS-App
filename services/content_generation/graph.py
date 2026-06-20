@@ -10,15 +10,12 @@ from .prompts import SYSTEM_PROMPT, build_rewrite_prompt
 from .brand_audit_node import brand_audit_node
 from .flag_fix_node import flag_fix_node
 from .judge_node import judge_node
+from .seo_meta_utils import SEO_META_MIN, SEO_META_MAX, meta_complete_sentence
 
 logger = structlog.get_logger()
 
 MAX_RETRIES = 3
 MIN_QUALITY = 7.0
-
-# AA-201: seo_meta length band (port of Cowork v5 repair-to-band)
-SEO_META_MIN = 140
-SEO_META_MAX = 155
 
 class ContentState(TypedDict):
     tour:                   dict
@@ -90,31 +87,6 @@ _FAILURE_MAP: dict[str, tuple[str, float]] = {
     "ITINERARY_STRUCTURE_WEAK":  ("structure", 1.0),
     "DFS_INTENT_UNDERUSED":      ("seo",       1.0),
 }
-
-# AA-201: seo_meta must be a complete sentence (port of v5 repair_seo_fields)
-BAD_META_ENDINGS = {
-    "and", "with", "including", "or", "plus", "to", "for", "from", "in", "on", "at",
-}
-
-
-def _meta_complete_sentence(meta: str) -> bool:
-    """True when seo_meta reads as a complete sentence.
-
-    Catches truncated/cut meta, not editorial style: requires a period ending,
-    at least 8 words, and no trailing preposition/conjunction (BAD_META_ENDINGS).
-    Deliberately no verb-whitelist — that false-fired on valid metas using verbs
-    like "moves"/"runs" outside any fixed list (AA-201 revision).
-    """
-    t = (meta or "").strip()
-    if not t.endswith("."):
-        return False
-    words = t.split()
-    if len(words) < 8:
-        return False
-    last = re.sub(r"[^a-zA-Z]", "", words[-1].lower()) if words else ""
-    if last in BAD_META_ENDINGS:
-        return False
-    return True
 
 def _build_brand_diff_block(state: ContentState) -> str:
     """AA-202: build the brand-differentiation system block from brand_* state fields.
@@ -382,7 +354,7 @@ def validate_node(state: ContentState) -> ContentState:
 
     # META_INCOMPLETE_SENTENCE: seo_meta must read as a complete sentence (AA-201)
     meta = generated.get("seo_meta", "").strip()
-    if meta and not _meta_complete_sentence(meta):
+    if meta and not meta_complete_sentence(meta):
         issues.append("seo_meta is not a complete sentence")
         fired.append("META_INCOMPLETE_SENTENCE")
         score -= 1.0
