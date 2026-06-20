@@ -171,6 +171,13 @@ async def _rewrite_tour(
             "judge_mission_present":      result.get("judge_mission_present"),
             "judge_feedback":             result.get("judge_feedback"),
             "judge_score":                result.get("judge_score"),
+            # AA-213: propagate fallback_used so metadata.fallback_used isn't always-False (graph
+            # declares it but _rewrite_tour rebuilds the dict — same strip class as the judge_* fix).
+            "fallback_used":   result.get("fallback_used", False),
+            # AA-215: propagate revalidate outcome for observability/persist (brand_audit_status
+            # POST-fix already propagated above on line ~159).
+            "revalidate_ran":    result.get("revalidate_ran", False),
+            "revalidate_passed": result.get("revalidate_passed", False),
             "status": "success" if result.get("generated") and len(result.get("generated", {})) > 0 else "failed",
         }
 

@@ -42,6 +42,7 @@ class ContentState(TypedDict):
     brand_voice_examples:   list
     brand_good_examples:    str
     model_tier:             str
+    fallback_used:          bool   # AA-213: True khi Sonnet T1 fell back to Haiku T2
     subtitle_focus:         str
     is_tenant_rewrite:      bool
     is_branded:             bool
@@ -67,6 +68,10 @@ class ContentState(TypedDict):
     # AA-209: judge_score must be declared too, else LangGraph strips it from the final state and it
     # never reaches _rewrite_tour → _build_generated_metadata (metadata.judge.judge_score stayed null).
     judge_score:                float
+    # AA-215: revalidate-after-flag_fix verification (POST-fix). revalidate_ran=True chi khi
+    # fix_pass_applied; revalidate_passed phan anh ket qua re-validate+re-judge tren content da sua.
+    revalidate_ran:         bool
+    revalidate_passed:      bool
 
 # code → (dimension, deduction)
 _FAILURE_MAP: dict[str, tuple[str, float]] = {
@@ -224,6 +229,7 @@ def generate_node(state: ContentState) -> ContentState:
             "model_used": resp.model_used,
             "is_branded": is_branded,
             "error":      "",
+            "fallback_used": resp.fallback_used,
         }
     except json.JSONDecodeError as e:
         logger.warning("json_parse_failed", error=str(e))
@@ -451,6 +457,43 @@ def should_retry(state: ContentState) -> str:
 def increment_retry(state: ContentState) -> ContentState:
     return {**state, "retry_count": state.get("retry_count", 0) + 1}
 
+def revalidate_node(state: ContentState) -> ContentState:
+    """AA-215: verify the fix pass actually worked before publish.
+
+    Only re-checks tours that flag_fix repaired (fix_pass_applied=True). For those, re-run the
+    SAME validate + judge nodes on the repaired content and rewrite brand_audit_status to the
+    POST-fix state (was stale/PRE-fix). Passthrough for everything else:
+      - clean pass (no fix): already validated/judged, still publishable — untouched.
+      - flagged/manual_check but NOT fixed: already blocked by _is_publishable (AA-211) — untouched.
+    Re-validate (rule-based, free) catches structural/SEO regressions from the fix; re-judge
+    (GPT-4.1) re-confirms brand-fit. On fail -> manual_check so the existing export gate blocks it
+    and _enqueue_review routes it to HITL.
+    """
+    if not state.get("fix_pass_applied"):
+        return {**state, "revalidate_ran": False}
+
+    # Re-run in the same order as the main graph: validate sets quality_score that judge then
+    # min()'s against. Calling judge alone would min against the stale pre-fix validate score.
+    s = validate_node(state)
+    s = judge_node(s)
+
+    score = s.get("quality_score", 0.0)
+    audit_status = s.get("brand_audit_status", "")
+    # "clean" POST-fix = score gate passed AND the post-fix audit isn't itself manual_check.
+    # (brand_audit_node ran pre-fix; we don't re-run it here — judge is the post-fix brand gate.)
+    passed = score >= MIN_QUALITY and audit_status != "manual_check"
+
+    new_status = "fixed" if passed else "manual_check"
+    logger.info("revalidate_done", passed=passed, post_fix_score=score,
+                new_brand_audit_status=new_status,
+                fix_fields=state.get("fix_pass_fields", []))
+    return {
+        **s,
+        "brand_audit_status": new_status,
+        "revalidate_ran":     True,
+        "revalidate_passed":  passed,
+    }
+
 def build_graph() -> StateGraph:
     graph = StateGraph(ContentState)
 
@@ -460,6 +503,7 @@ def build_graph() -> StateGraph:
     graph.add_node("increment_retry", increment_retry)
     graph.add_node("brand_audit", brand_audit_node)
     graph.add_node("flag_fix", flag_fix_node)
+    graph.add_node("revalidate", revalidate_node)
 
     graph.set_entry_point("generate")
     graph.add_edge("generate", "validate")
@@ -472,7 +516,8 @@ def build_graph() -> StateGraph:
         "hitl":  END,
     })
     graph.add_edge("brand_audit", "flag_fix")
-    graph.add_edge("flag_fix", END)
+    graph.add_edge("flag_fix", "revalidate")
+    graph.add_edge("revalidate", END)
     graph.add_edge("increment_retry", "generate")
 
     return graph.compile()

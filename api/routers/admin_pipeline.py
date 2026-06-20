@@ -125,7 +125,7 @@ def _trim_to_word_boundary(text, limit, sentence=False):
 
 
 def _build_generated_metadata(result, *, brand_rule_id, brand_name, seo_mode,
-                              model_used, llm_cost_usd, dataforseo_used):
+                              model_used, llm_cost_usd, dataforseo_used, batch_id=None):
     """Assemble the generated_content.metadata dict for a new version row.
 
     AA-209: merge a ``judge`` object (brand_fit / distinct / mission_present / feedback /
@@ -143,6 +143,11 @@ def _build_generated_metadata(result, *, brand_rule_id, brand_name, seo_mode,
         "dataforseo_used": dataforseo_used,
         "generated_at":    datetime.datetime.utcnow().isoformat() + "Z",
         "pipeline_version": "v2",
+        "score_overall":   result.get("quality_score"),   # AA-213: was unused/null
+        "fallback_used":   result.get("fallback_used", False),  # AA-213
+        "batch_id":        batch_id,                       # AA-213: traceability
+        "revalidate_ran":    result.get("revalidate_ran", False),
+        "revalidate_passed": result.get("revalidate_passed", False),
     }
     if result.get("judge_brand_fit") is not None:
         metadata["judge"] = {
@@ -414,6 +419,7 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
                     model_used=result.get("model_used", ""),
                     llm_cost_usd=float(result.get("cost_usd") or 0.0),
                     dataforseo_used=dataforseo_used,
+                    batch_id=getattr(req, "batch_id", None),
                 ),
                 default=str,
             )
