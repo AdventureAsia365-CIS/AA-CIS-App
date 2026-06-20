@@ -9,7 +9,7 @@ real verb / non-trailing ending, porting Cowork v5 repair_seo_fields into the cl
 from services.content_generation.graph import (
     SEO_META_MIN,
     _FAILURE_MAP,
-    _meta_complete_sentence,
+    meta_complete_sentence,
     validate_node,
 )
 from api.routers.admin_pipeline import _trim_to_word_boundary
@@ -84,12 +84,12 @@ def test_in_band_complete_meta_clean():
 
 
 def test_bad_trailing_word_fires_incomplete():
-    assert _meta_complete_sentence(META_BAD_ENDING) is False
+    assert meta_complete_sentence(META_BAD_ENDING) is False
     assert "META_INCOMPLETE_SENTENCE" in _codes(META_BAD_ENDING)
 
 
 def test_short_fragment_fires_incomplete():
-    assert _meta_complete_sentence(META_NO_VERB) is False
+    assert meta_complete_sentence(META_NO_VERB) is False
     assert "META_INCOMPLETE_SENTENCE" in _codes(META_NO_VERB)
 
 

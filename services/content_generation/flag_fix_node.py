@@ -11,6 +11,7 @@ from shared.secrets import get_database_url
 
 from shared.llm_client.client import LLMClient
 from shared.llm_client.models import LLMRequest
+from .seo_meta_utils import best_meta_candidate, meta_in_band, SEO_META_MIN, SEO_META_MAX
 
 logger = structlog.get_logger()
 
@@ -77,6 +78,42 @@ def _build_fix_keys(state: dict) -> set:
 FIX_SYSTEM = """You are Adventure Asia's editorial fixer.
 Fix ONLY the specified fields. Keep all other fields exactly as-is.
 Preserve all product facts. Return strict JSON only."""
+
+
+def _rerepair_meta(post: str, tour: dict, content: dict, model_tier: str) -> str:
+    """AA-205 C-full: one bounded re-repair for seo_meta still out of band. Single LLM call,
+    no loop. Returns in-band candidate if produced, else the incoming post (graceful)."""
+    from .seo_meta_utils import meta_in_band as _in_band, SEO_META_MIN as _MIN, SEO_META_MAX as _MAX
+    cur = (post or "").strip()
+    try:
+        prompt = (
+            "Rewrite this SEO meta description to be " + str(_MIN) + "-" + str(_MAX)
+            + " characters and a COMPLETE sentence ending in a period.\n\n"
+            + "Current (" + str(len(cur)) + " chars): " + json.dumps(cur) + "\n"
+            + "Tour: " + str(content.get("name")) + " - " + str(tour.get("country", "")) + "\n\n"
+            + "Rules:\n- MUST be " + str(_MIN) + "-" + str(_MAX) + " characters "
+            + "(current is " + ("too short" if len(cur) < _MIN else "out of band") + ").\n"
+            + "- MUST end with a period and read as one complete sentence "
+            + "(no trailing preposition/conjunction).\n"
+            + "- Do NOT pad with filler — add a real intent clue or practical reassurance.\n"
+            + "- Return JSON: {\"seo_meta\": \"...\"}"
+        )
+        resp = LLMClient().generate(LLMRequest(
+            system_prompt=FIX_SYSTEM, user_prompt=prompt, model_tier=model_tier,
+        ))
+        raw = resp.content.strip()
+        fence = chr(96) * 3
+        if raw[:3] == fence:
+            raw = raw.split(fence)[1]
+            if raw[:4] == "json":
+                raw = raw[4:]
+            raw = raw.strip()
+        candidate = (json.loads(raw).get("seo_meta") or "").strip()
+        logger.info("meta_rerepair_done", before_len=len(cur), after_len=len(candidate))
+        return candidate if _in_band(candidate) else post
+    except Exception as e:
+        logger.warning("meta_rerepair_failed_graceful", error=str(e))
+        return post
 
 
 def flag_fix_node(state: dict) -> dict:
@@ -160,6 +197,19 @@ Keep all other fields unchanged."""
         for k, v in fixed_fields.items():
             if k in fix_keys:
                 new_generated[k] = v
+
+        # AA-205: deterministic post-repair band guard for seo_meta (no pad, no escalate).
+        # LLM repair can overshoot under SEO_META_MIN (e.g. 132). AA-215 revalidate re-runs
+        # validate and fires META_TOO_SHORT but that is only -0.5 sub-score, so the under-band
+        # meta still clears the 7.0 gate and reaches gold. Enforce the band here at the source.
+        if "seo_meta" in fix_keys:
+            _pre_meta = current_content.get("seo_meta", "") or ""
+            _guarded = best_meta_candidate(new_generated.get("seo_meta", "") or "", _pre_meta)
+            if not meta_in_band(_guarded):
+                _guarded = _rerepair_meta(
+                    _guarded, tour, new_generated, state.get("model_tier", "haiku"),
+                )
+            new_generated["seo_meta"] = _guarded
 
         logger.info("flag_fix_done", fixed_keys=list(fix_keys), cost=resp.cost_usd)
 
