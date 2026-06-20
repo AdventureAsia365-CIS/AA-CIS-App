@@ -16,6 +16,10 @@ logger = structlog.get_logger()
 
 MAX_RETRIES = 3
 MIN_QUALITY = 7.0
+# AA-216: structural failure (empty/missing field) caps quality below the gate regardless of
+# other sub-scores. Empty content scores brand/quality=10 (no rule to violate) which the
+# 4-bucket average can't pull under 7 — mirror judge's _MISSION_ABSENT_CAP pattern.
+MISSING_FIELD_CAP = 4.0
 
 class ContentState(TypedDict):
     tour:                   dict
@@ -394,7 +398,13 @@ def validate_node(state: ContentState) -> ContentState:
         ))
         for dim in ("brand", "seo", "structure", "quality")
     }
+    # AA-216: a MISSING_FIELD means the generation is structurally incomplete (often a JSON-parse
+    # failure → empty generated). Cap below MIN_QUALITY so should_retry never returns "done" and
+    # _is_publishable (AA-211) blocks it — empty content must route to retry/HITL, never gold.
+    _structural_fail = ("MISSING_FIELD" in fired) or (not generated.get("name"))
     quality_score = sum(sub_scores.values()) / 4
+    if _structural_fail:
+        quality_score = min(quality_score, MISSING_FIELD_CAP)
     failure_codes = list(dict.fromkeys(fired))   # unique, first-seen order
     passed_count  = sum(1 for d in sub_scores.values() if d == 10.0)
     failed_count  = len(failure_codes)
