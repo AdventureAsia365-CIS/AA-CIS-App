@@ -36,6 +36,7 @@ moto[s3,dynamodb,sqs,lambda]==5.0.3
 sentry-sdk[fastapi]>=1.40.0
 
 # Utils
+json-repair==0.61.0
 python-dotenv==1.0.1
 structlog==24.1.0
 
