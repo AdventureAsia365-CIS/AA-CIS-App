@@ -1,14 +1,21 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 16/06/2026 | ECS api:304 | CI green | Last commit: c4dacb3 (develop) / 883a3cd (main)
+# Updated: 20/06/2026 (S71) | ECS api:316 | CI green | Last commit: 2e15ceb (develop) / 987ea71 (main)
 
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway owq9as3wjl)
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel — AA-103 production)
-- ECS task def: api:304 | digest == ECR :latest (sha256:a65dfcd…230b67) | Deploy Dev green (AA-197)
+- ECS task def: api:316 | digest == ECR :latest (sha256:fcbf6cc…cff0e) | Deploy Dev green (AA-205)
+- AA-205 SHIPPED (S71): post-repair seo_meta band guard — extract seo_meta_utils (single source of
+  truth, breaks graph↔flag_fix circular import) + best_meta_candidate deterministic salvage +
+  bounded _rerepair_meta (1 LLM call). Under-140 repair output can no longer clear the 7.0 gate into gold
+- AA-215 SHIPPED (S70): revalidate node (flag_fix → revalidate → END) — re-validate+re-judge repaired content
+- AA-213 SHIPPED (S70): persist fallback_used + score_overall + batch_id + revalidate_* to generated_content.metadata
+- AA-214 SHIPPED (S70): .flake8 aligned to CI (max-line-length 120 + extend-ignore + exclude)
+- AA-211/212 SHIPPED (S69): export gate + HITL review_queue re-wire
 - AA-198 [F1] SHIPPED: brand_identity_id resolver + /admin/brand-rules + s1 brand-picker
 - AA-197 [F2] SHIPPED: DataForSEO rebuild — buyer-market location, seed builder, real keyword_ideas
 - "Deploy Prod" workflow = STUB/placeholder (no-op) — real ECS deploy runs via "Deploy Dev" on develop merge
-- AWS: RUNNING after AA-197 deploy — STOP ECS/RDS after session (see cost checklist)
+- AWS: RUNNING after AA-205 deploy (api:316) — STOP ECS/RDS after session (see cost checklist)
 - Lambda aa-cis-dev-acp-s4-evaluate: DEPLOYED ✅ (AA-49 H-1)
 - Lambda aa-cis-dev-acp-s4-trigger: DEPLOYED ✅ | ALB_INTERNAL_URL: FIXED ✅
 - Lambda aa-cis-dev-acp-s3-campaign-planner: DEPLOYED ✅ (AA-45)
