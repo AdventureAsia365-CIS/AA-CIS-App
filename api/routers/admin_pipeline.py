@@ -407,7 +407,7 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
             # (line ~533). Otherwise a flagged-unfixed / manual_check tour scoring >=7 is written
             # status='approved' while being routed to review_queue — and since process_export is
             # gated on gc.status='approved', that bypasses the HITL gate via any other export path.
-            status = "approved" if _is_publishable(result) else "pending"
+            status = "approved" if _is_publishable(result) else "hitl"
             is_branded = result.get("is_branded", True)
             og_tags_val = json.dumps({} if is_branded else {"unbranded": True})
             metadata_val = json.dumps(
