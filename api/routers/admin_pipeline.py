@@ -1729,12 +1729,16 @@ async def get_tour_version_detail(
             SELECT gc.id, gc.version_num, gc.model_editorial AS model_id,
                    qs.score_overall AS quality_score,
                    qs.score_brand, qs.score_seo, qs.score_structure,
+                   qs.score_quality, qs.failure_codes,
+                   qs.brand_audit_status, qs.brand_audit_codes, qs.brand_audit_issues,
+                   gc.fix_pass_applied, gc.fix_pass_fields,
                    gc.created_at,
                    gc.aa_name, gc.aa_subtitle, gc.aa_summary, gc.aa_description,
                    gc.aa_highlights, gc.aa_itineraries, gc.seo_title, gc.seo_meta,
                    gc.metadata,
                    tbr.brand_name AS brand_name,
-                   sc.top_keywords,
+                   sc.top_keywords, sc.keyword_ideas, sc.people_also_ask,
+                   sc.related_keywords, sc.keyword_search,
                    rt.country, rt.duration, rt.group_size, rt.price_raw,
                    rt.period, rt.provider, rt.inclusions, rt.exclusions
             FROM silver_aa_internal.generated_content gc
@@ -1745,7 +1749,9 @@ async def get_tour_version_detail(
             LEFT JOIN silver_aa_internal.raw_tours rt
                 ON rt.tour_id = gc.tour_id
             LEFT JOIN LATERAL (
-                SELECT top_keywords FROM silver_aa_internal.seo_context
+                SELECT top_keywords, keyword_ideas, people_also_ask,
+                       related_keywords, keyword_search
+                FROM silver_aa_internal.seo_context
                 WHERE tour_id = gc.tour_id
                 ORDER BY fetched_at DESC LIMIT 1
             ) sc ON true
@@ -1766,6 +1772,18 @@ async def get_tour_version_detail(
     keywords = row["top_keywords"]
     if not isinstance(keywords, list):
         keywords = json.loads(keywords) if keywords else []
+
+    # AA-219: jsonb columns arrive as str OR list/dict depending on driver path —
+    # guard each like list_tour_versions does. judge/revalidate live in metadata (AA-213).
+    def _as_list(v):
+        if isinstance(v, list):
+            return v
+        try:
+            return json.loads(v) if v else []
+        except Exception:
+            return []
+
+    _judge = meta.get("judge") if isinstance(meta, dict) else None
     return {
         "id":             str(row["id"]),
         "version_num":    row["version_num"],
@@ -1796,6 +1814,22 @@ async def get_tour_version_detail(
         "provider":       row["provider"],
         "inclusions":     row["inclusions"],
         "exclusions":     row["exclusions"],
+        # AA-219: surface judge/quality/audit/fix/failure/revalidate (were dropped → silent-empty UI).
+        "judge":            _judge,
+        "score_quality":    float(row["score_quality"]) if row["score_quality"] is not None else None,
+        "brand_audit_status": row["brand_audit_status"],
+        "brand_audit_codes":  _as_list(row["brand_audit_codes"]),
+        "brand_audit_issues": _as_list(row["brand_audit_issues"]),
+        "fix_pass_applied":   bool(row["fix_pass_applied"]) if row["fix_pass_applied"] is not None else False,
+        "fix_pass_fields":    _as_list(row["fix_pass_fields"]),
+        "failure_codes":      _as_list(row["failure_codes"]),
+        "revalidate_ran":     bool(meta.get("revalidate_ran")) if isinstance(meta, dict) else False,
+        "revalidate_passed":  bool(meta.get("revalidate_passed")) if isinstance(meta, dict) else False,
+        # AA-219 + AA-218: full DFS per tour seed (keyword_ideas/PAA/related + seed).
+        "keyword_ideas":      _as_list(row["keyword_ideas"]),
+        "people_also_ask":    _as_list(row["people_also_ask"]),
+        "related_keywords":   _as_list(row["related_keywords"]),
+        "seed":               row["keyword_search"],
     }
 
 

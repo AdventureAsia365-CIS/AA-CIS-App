@@ -1,7 +1,7 @@
 "use client";
 // app/admin/master-content/page.tsx
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { RefreshCw, ChevronDown, ChevronRight, Download, X, Trash2, RotateCcw } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
 import {
@@ -71,6 +71,22 @@ interface TourVersion {
   fix_pass_fields: string[];
 }
 
+interface JudgeMeta {
+  brand_fit: number | null;
+  distinct: number | null;
+  mission_present: boolean | null;
+  feedback: string | null;
+  judge_score: number | null;
+}
+
+interface KeywordIdea {
+  keyword: string;
+  search_volume: number | null;
+  competition: string | null;
+  competition_index: number | null;
+  cpc: number | null;
+}
+
 interface VersionDetail {
   id: string;
   version_num: number;
@@ -108,6 +124,16 @@ interface VersionDetail {
   brand_audit_issues: string[];
   fix_pass_applied: boolean;
   fix_pass_fields: string[];
+  // AA-219: judge / quality / failure / revalidate + full DFS per tour seed
+  judge: JudgeMeta | null;
+  score_quality: number | null;
+  failure_codes: string[];
+  revalidate_ran: boolean;
+  revalidate_passed: boolean;
+  keyword_ideas: KeywordIdea[];
+  people_also_ask: string[];
+  related_keywords: string[];
+  seed: string | null;
 }
 
 function scoreColor(s: number | null | undefined): string {
@@ -182,6 +208,95 @@ function modelLabel(m: string | null | undefined): string {
   if (!m) return "—";
   if (m.startsWith("gpt")) return m;
   return m.split(".").pop()?.replace(/-v\d+:\d+$/, "") ?? m;
+}
+
+// ── AA-219: DataForSEO per-panel section (sortable ideas + PAA + related) ──────
+function fmtVol(v: number | null): string { return v == null ? "—" : v.toLocaleString(); }
+function fmtCpcVal(v: number | null): string { return v == null ? "—" : `$${v.toFixed(2)}`; }
+
+type DfsSortKey = "keyword" | "volume" | "competition" | "cpc";
+
+function DfsCompareSection({ seed, ideas, paa, related }: {
+  seed: string | null; ideas: KeywordIdea[]; paa: string[]; related: string[];
+}) {
+  const [sortKey, setSortKey] = useState<DfsSortKey>("volume");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  function onSort(k: DfsSortKey) {
+    if (k === sortKey) setSortDir(d => (d === "asc" ? "desc" : "asc"));
+    else { setSortKey(k); setSortDir(k === "keyword" ? "asc" : "desc"); }
+  }
+  const sorted = useMemo(() => {
+    const arr = [...ideas];
+    const dir = sortDir === "asc" ? 1 : -1;
+    arr.sort((a, b) => {
+      if (sortKey === "keyword") {
+        const av = (a.keyword || "").toLowerCase(); const bv = (b.keyword || "").toLowerCase();
+        return av < bv ? -dir : av > bv ? dir : 0;
+      }
+      let av: number; let bv: number;
+      if (sortKey === "volume") { av = a.search_volume ?? -1; bv = b.search_volume ?? -1; }
+      else if (sortKey === "competition") { av = a.competition_index ?? -1; bv = b.competition_index ?? -1; }
+      else { av = a.cpc ?? -1; bv = b.cpc ?? -1; }
+      return (av - bv) * dir;
+    });
+    return arr;
+  }, [ideas, sortKey, sortDir]);
+
+  if (ideas.length === 0 && paa.length === 0 && related.length === 0) return null;
+
+  const arrow = (k: DfsSortKey) => (sortKey === k ? (sortDir === "asc" ? " ▲" : " ▼") : "");
+  const th = (k: DfsSortKey, align: "left" | "right"): React.CSSProperties => ({
+    padding: "4px 8px", textAlign: align, cursor: "pointer", userSelect: "none",
+    fontSize: 9, fontWeight: 700, color: sortKey === k ? A.ink : A.muted,
+    textTransform: "uppercase" as const, letterSpacing: "0.08em",
+  });
+
+  return (
+    <div style={{ borderBottom: `1px solid ${A.line}` }}>
+      <div style={{ padding: "5px 20px", background: A.line2, fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.12em", color: A.muted }}>
+        DataForSEO <span style={{ textTransform: "none" as const, fontWeight: 400, color: A.muted2 }}>· shared per tour seed</span>
+      </div>
+      <div style={{ padding: "8px 20px", fontSize: 12 }}>
+        <div style={{ marginBottom: 6, color: A.muted }}>Seed: <strong style={{ color: A.ink }}>{seed || "—"}</strong></div>
+        {ideas.length > 0 && (
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, marginBottom: 8 }}>
+            <thead>
+              <tr style={{ background: A.line2 }}>
+                <th style={th("keyword", "left")} onClick={() => onSort("keyword")}>Keyword{arrow("keyword")}</th>
+                <th style={th("volume", "right")} onClick={() => onSort("volume")}>Vol{arrow("volume")}</th>
+                <th style={th("competition", "right")} onClick={() => onSort("competition")}>Comp{arrow("competition")}</th>
+                <th style={th("cpc", "right")} onClick={() => onSort("cpc")}>CPC{arrow("cpc")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map((k, i) => (
+                <tr key={`${k.keyword}-${i}`} style={{ borderTop: `1px solid ${A.line}`, background: i % 2 === 0 ? "#fff" : A.bg }}>
+                  <td style={{ padding: "4px 8px", color: A.ink }}>{k.keyword}</td>
+                  <td style={{ padding: "4px 8px", textAlign: "right", fontFamily: mono, color: A.body }}>{fmtVol(k.search_volume)}</td>
+                  <td style={{ padding: "4px 8px", textAlign: "right", color: A.muted }}>
+                    {(k.competition || "—")}{k.competition_index != null ? ` (${k.competition_index})` : ""}
+                  </td>
+                  <td style={{ padding: "4px 8px", textAlign: "right", fontFamily: mono, color: A.gold }}>{fmtCpcVal(k.cpc)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        {paa.length > 0 && (
+          <div style={{ marginBottom: 6 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.08em", color: A.muted, marginBottom: 2 }}>People Also Ask</div>
+            {paa.map((q, i) => <div key={i} style={{ color: A.body, lineHeight: 1.5 }}>• {q}</div>)}
+          </div>
+        )}
+        {related.length > 0 && (
+          <div>
+            <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.08em", color: A.muted, marginBottom: 2 }}>Related Keywords</div>
+            <div style={{ color: A.body, lineHeight: 1.6 }}>{related.join(", ")}</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 // ── Version Compare Modal (full-screen, 2-4 panels) ───────────────────────────
@@ -426,6 +541,7 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
                       <ScoreBar label="Brand"     value={v.score_brand} />
                       <ScoreBar label="SEO"       value={v.score_seo} />
                       <ScoreBar label="Structure" value={v.score_structure} />
+                      <ScoreBar label="Quality"   value={v.score_quality} />
                     </div>
                   ) : (
                     <div style={{ fontSize: 12, color: A.muted2, padding: "8px 0" }}>
@@ -477,6 +593,43 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
                       )}
                     </div>
                   )}
+
+                  {/* AA-219: Judge (metadata.judge) */}
+                  {v && v.judge && (
+                    <div style={{ padding: "8px 0", borderTop: `1px solid ${A.line}`, marginTop: 4, fontSize: 11 }}>
+                      <div style={{ fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Judge</div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 4 }}>
+                        {v.judge.brand_fit != null && <Badge color="gold">fit {v.judge.brand_fit.toFixed(1)}</Badge>}
+                        {v.judge.distinct != null && <Badge color="gold">distinct {v.judge.distinct.toFixed(1)}</Badge>}
+                        {v.judge.mission_present != null && (
+                          <Badge color={v.judge.mission_present ? "green" : "red"}>
+                            {v.judge.mission_present ? "mission ✓" : "mission ✗"}
+                          </Badge>
+                        )}
+                        {v.judge.judge_score != null && <Badge color="blue">score {v.judge.judge_score.toFixed(1)}</Badge>}
+                      </div>
+                      {v.judge.feedback && <div style={{ color: A.body, lineHeight: 1.5 }}>{v.judge.feedback}</div>}
+                    </div>
+                  )}
+
+                  {/* AA-219: failure codes + revalidate */}
+                  {v && (v.failure_codes.length > 0 || v.revalidate_ran) && (
+                    <div style={{ padding: "8px 0", borderTop: `1px solid ${A.line}`, marginTop: 4, fontSize: 11 }}>
+                      <div style={{ fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>Validation</div>
+                      {v.failure_codes.length > 0 && (
+                        <div style={{ color: A.red, lineHeight: 1.6, marginBottom: 4 }}>
+                          {v.failure_codes.map(c => <div key={c} style={{ fontFamily: mono }}>• {c}</div>)}
+                        </div>
+                      )}
+                      {v.revalidate_ran ? (
+                        <Badge color={v.revalidate_passed ? "green" : "red"}>
+                          {v.revalidate_passed ? "revalidated ✓" : "reval failed"}
+                        </Badge>
+                      ) : (
+                        <span style={{ color: A.muted2 }}>—</span>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* Keywords */}
@@ -489,6 +642,16 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
                       {v.top_keywords.slice(0, 15).join(", ")}
                     </div>
                   </div>
+                )}
+
+                {/* AA-219: full DataForSEO (ideas table + PAA + related) per tour seed */}
+                {v && (
+                  <DfsCompareSection
+                    seed={v.seed}
+                    ideas={v.keyword_ideas}
+                    paa={v.people_also_ask}
+                    related={v.related_keywords}
+                  />
                 )}
 
                 {/* Content fields with diff highlight */}
