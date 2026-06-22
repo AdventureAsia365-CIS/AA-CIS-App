@@ -104,6 +104,10 @@ async def process_seo(
             "demographics":   json.dumps(seo_data.get("demographics", {})),
             "trends":         json.dumps(seo_data.get("trends", {})),
             "top_keywords":   json.dumps(seo_data.get("keywords", {}).get("top_keywords", [])),
+            # AA-218: DFS fetch_all returns these top-level lists — persist them
+            # (real keys are people_also_ask / related_keywords, not "related").
+            "people_also_ask":  json.dumps(seo_data.get("people_also_ask", []), default=str),
+            "related_keywords": json.dumps(seo_data.get("related_keywords", []), default=str),
             "cache_key":      cache_key,
             "expires_at":     datetime.utcnow() + timedelta(hours=24),
         })

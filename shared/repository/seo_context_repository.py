@@ -16,16 +16,18 @@ class SeoContextRepository:
             INSERT INTO {self.schema}.seo_context (
                 tour_id, tenant_id, keyword_search, provider,
                 keyword_ideas, demographics, trends, top_keywords,
-                cache_key, expires_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                cache_key, expires_at, people_also_ask, related_keywords
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (cache_key) DO UPDATE SET
-                tour_id        = EXCLUDED.tour_id,
-                keyword_ideas  = EXCLUDED.keyword_ideas,
-                top_keywords   = EXCLUDED.top_keywords,
-                demographics   = EXCLUDED.demographics,
-                trends         = EXCLUDED.trends,
-                expires_at     = EXCLUDED.expires_at,
-                fetched_at     = NOW()
+                tour_id          = EXCLUDED.tour_id,
+                keyword_ideas    = EXCLUDED.keyword_ideas,
+                top_keywords     = EXCLUDED.top_keywords,
+                demographics     = EXCLUDED.demographics,
+                trends           = EXCLUDED.trends,
+                people_also_ask  = EXCLUDED.people_also_ask,
+                related_keywords = EXCLUDED.related_keywords,
+                expires_at       = EXCLUDED.expires_at,
+                fetched_at       = NOW()
             RETURNING id::text
         """,
             data["tour_id"],
@@ -38,6 +40,8 @@ class SeoContextRepository:
             data.get("top_keywords", "[]"),
             data.get("cache_key"),
             data.get("expires_at"),
+            data.get("people_also_ask", "[]"),
+            data.get("related_keywords", "[]"),
         )
         return row["id"]
 

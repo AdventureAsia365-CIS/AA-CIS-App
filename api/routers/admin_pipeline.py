@@ -1643,7 +1643,8 @@ async def get_tour_seo_context(
         if country:
             row = await conn.fetchrow("""
                 SELECT keyword_search, provider, keyword_ideas, top_keywords,
-                       demographics, trends, fetched_at, expires_at
+                       demographics, trends, people_also_ask, related_keywords,
+                       fetched_at, expires_at
                 FROM silver_aa_internal.seo_context
                 WHERE tenant_id = $1 AND keyword_search ILIKE '%' || $2 || '%'
                 ORDER BY fetched_at DESC LIMIT 1
@@ -1652,7 +1653,8 @@ async def get_tour_seo_context(
             # No country on the tour — fall back to this tour's own row.
             row = await conn.fetchrow("""
                 SELECT keyword_search, provider, keyword_ideas, top_keywords,
-                       demographics, trends, fetched_at, expires_at
+                       demographics, trends, people_also_ask, related_keywords,
+                       fetched_at, expires_at
                 FROM silver_aa_internal.seo_context
                 WHERE tour_id = $1::uuid
                 ORDER BY fetched_at DESC LIMIT 1
@@ -1684,6 +1686,8 @@ async def get_tour_seo_context(
 
         keyword_ideas = _as_list(row["keyword_ideas"])
         top_keywords = _as_list(row["top_keywords"])
+        people_also_ask = _as_list(row["people_also_ask"])
+        related_keywords = _as_list(row["related_keywords"])
 
         # Buyer market: derive from tenant target_market if cheap; else null.
         buyer_market = None
@@ -1705,11 +1709,11 @@ async def get_tour_seo_context(
         "buyer_market_location_code": buyer_market_location_code,
         "keyword_ideas": keyword_ideas,
         "top_keywords": top_keywords,
-        # seo_context schema stores no PAA/related columns — return empty, don't fabricate.
-        "people_also_ask": [],
-        "related_keywords": [],
+        # AA-218: persisted on seo_context — read the real columns.
+        "people_also_ask": people_also_ask,
+        "related_keywords": related_keywords,
         "fetched_at": row["fetched_at"].isoformat() if row["fetched_at"] else None,
-        "notes": "people_also_ask/related_keywords not persisted in seo_context schema.",
+        "notes": None,
     }
 
 
