@@ -61,7 +61,12 @@ interface TourVersion {
   id: string;
   version_num: number;
   model_id: string | null;
-  quality_score: number | null;
+  quality_score: number | null;          // = score_overall (gate)
+  score_brand?: number | null;           // AA-220 (H1): validate sub-scores from list endpoint
+  score_seo?: number | null;
+  score_structure?: number | null;
+  score_quality?: number | null;
+  judge_score?: number | null;           // AA-220 (H1): metadata.judge.judge_score
   created_at: string | null;
   is_current: boolean;
   brand_audit_status: string | null;
@@ -186,13 +191,16 @@ function BrandAuditBadge({ status, fixPassApplied, codes }: { status: string | n
 
 // ── Score Bar ─────────────────────────────────────────────────────────────────
 
-function ScoreBar({ label, value }: { label: string; value: number | null }) {
+function ScoreBar({ label, value, tooltip }: { label: string; value: number | null; tooltip?: string }) {
   const pct = value != null ? Math.min(100, (value / 10) * 100) : 0;
   const color = scoreColor(value);
   return (
     <div style={{ marginBottom: 6 }}>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
-        <span style={{ fontSize: 11, color: A.muted }}>{label}</span>
+        <span
+          style={{ fontSize: 11, color: A.muted, cursor: tooltip ? "help" : undefined }}
+          title={tooltip}
+        >{label}</span>
         <span style={{ fontSize: 11, fontWeight: 700, color, fontFamily: mono }}>
           {value != null ? value.toFixed(1) : "—"}
         </span>
@@ -330,6 +338,29 @@ const CONTENT_FIELDS: [keyof VersionDetail, string][] = [
   ["exclusions",     "Exclusions"],
 ];
 
+// AA-220 (C): page-scope blob-download helper (pure) — shared by the compare modal and the
+// Rewrite History rows. No React state here; callers that want a spinner wrap it themselves.
+async function downloadBlob(url: string, filename: string) {
+  const r = await fetch(url);
+  if (!r.ok) return;
+  const blob = await r.blob();
+  const objUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = objUrl; a.download = filename; a.click();
+  URL.revokeObjectURL(objUrl);
+}
+
+// AA-220 (B/C): single-version DOCX export — page-scope so both the compare modal and the
+// Rewrite History row can trigger it.
+function exportVersionDocx(tourId: string, vnum: number) {
+  if (vnum <= 0) return;
+  const short = tourId.split("-")[0];
+  downloadBlob(
+    `/api/admin/tours/${tourId}/versions/${vnum}/export-docx`,
+    `tour_${short}_v${vnum}.docx`,
+  );
+}
+
 function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
   tourId: string;
   tourName: string;
@@ -343,39 +374,19 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
   const [error, setError]               = useState("");
   const [exporting, setExporting]       = useState(false);
 
-  // AA-220 (C): blob-download helper (same tail as exportTours).
-  async function downloadBlob(url: string, filename: string) {
-    setExporting(true);
-    try {
-      const r = await fetch(url);
-      if (!r.ok) return;
-      const blob = await r.blob();
-      const objUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = objUrl; a.download = filename; a.click();
-      URL.revokeObjectURL(objUrl);
-    } finally { setExporting(false); }
-  }
-
   // AA-220 (A/C): horizontal multi-version comparison export of the panels currently shown.
-  function exportComparison(format: "csv" | "xlsx") {
+  // Wraps the page-scope downloadBlob with the modal's local `exporting` spinner state.
+  async function exportComparison(format: "csv" | "xlsx") {
     const vnums = panels.map(p => Number(p.versionNum)).filter(v => v > 0);
     if (vnums.length === 0) return;
     const short = tourId.split("-")[0];
-    downloadBlob(
-      `/api/admin/tours/${tourId}/versions/export?versions=${vnums.join(",")}&format=${format}`,
-      `tour_${short}_versions_compare.${format}`,
-    );
-  }
-
-  // AA-220 (B/C): single-version DOCX export.
-  function exportDocx(vnum: number) {
-    if (vnum <= 0) return;
-    const short = tourId.split("-")[0];
-    downloadBlob(
-      `/api/admin/tours/${tourId}/versions/${vnum}/export-docx`,
-      `tour_${short}_v${vnum}.docx`,
-    );
+    setExporting(true);
+    try {
+      await downloadBlob(
+        `/api/admin/tours/${tourId}/versions/export?versions=${vnums.join(",")}&format=${format}`,
+        `tour_${short}_versions_compare.${format}`,
+      );
+    } finally { setExporting(false); }
   }
 
   useEffect(() => {
@@ -580,7 +591,7 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
                     )}
                     {Number(panel.versionNum) > 0 && (
                       <button
-                        onClick={() => exportDocx(Number(panel.versionNum))}
+                        onClick={() => exportVersionDocx(tourId, Number(panel.versionNum))}
                         disabled={exporting}
                         title="Export this version as DOCX"
                         style={{
@@ -610,11 +621,15 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
                   {/* Score bars */}
                   {v ? (
                     <div style={{ padding: "8px 0", borderTop: `1px solid ${A.line}`, marginTop: 4 }}>
-                      <ScoreBar label="Overall"   value={v.quality_score} />
-                      <ScoreBar label="Brand"     value={v.score_brand} />
-                      <ScoreBar label="SEO"       value={v.score_seo} />
-                      <ScoreBar label="Structure" value={v.score_structure} />
-                      <ScoreBar label="Quality"   value={v.score_quality} />
+                      <ScoreBar label="Overall (gate)"    value={v.quality_score}   tooltip="Điểm gate = min(validate, judge). Đây là điểm quyết định publish." />
+                      <ScoreBar label="Brand"             value={v.score_brand} />
+                      <ScoreBar label="SEO"               value={v.score_seo} />
+                      <ScoreBar label="Structure"         value={v.score_structure} />
+                      <ScoreBar label="Quality (validate)" value={v.score_quality} tooltip="Validate sub-score (rule-based, chưa qua judge cap)." />
+                      {/* AA-220 (G2): clarify gate vs sub-score so they're not read as the same metric */}
+                      <div style={{ fontSize: 10, color: A.muted2, lineHeight: 1.5, marginTop: 4 }}>
+                        Overall = min(validate, judge) là điểm gate. Quality = validate sub-score.
+                      </div>
                     </div>
                   ) : (
                     <div style={{ fontSize: 12, color: A.muted2, padding: "8px 0" }}>
@@ -1330,7 +1345,7 @@ export default function MasterContentPage() {
                                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                                     <thead>
                                       <tr style={{ background: A.line2 }}>
-                                        {["", "Version", "Model", "Score", "Audit", "Date", ""].map((h, hi) => (
+                                        {["", "Version", "Model", "Overall", "Brand", "SEO", "Struct", "Quality", "Judge", "Audit", "Date", ""].map((h, hi) => (
                                           <th key={hi} style={{ padding: "6px 10px", textAlign: "left" as const, fontSize: 10, fontWeight: 600, color: A.muted, textTransform: "uppercase" as const, letterSpacing: "0.08em" }}>{h}</th>
                                         ))}
                                       </tr>
@@ -1359,6 +1374,22 @@ export default function MasterContentPage() {
                                           <td style={{ padding: "6px 10px", fontWeight: 700, color: scoreColor(v.quality_score) }}>
                                             {v.quality_score != null ? v.quality_score.toFixed(1) : "—"}
                                           </td>
+                                          {/* AA-220 (H1): validate sub-scores + judge from list endpoint */}
+                                          <td style={{ padding: "6px 10px", color: v.score_brand != null ? scoreColor(v.score_brand) : A.muted2 }}>
+                                            {v.score_brand != null ? v.score_brand.toFixed(1) : "—"}
+                                          </td>
+                                          <td style={{ padding: "6px 10px", color: v.score_seo != null ? scoreColor(v.score_seo) : A.muted2 }}>
+                                            {v.score_seo != null ? v.score_seo.toFixed(1) : "—"}
+                                          </td>
+                                          <td style={{ padding: "6px 10px", color: v.score_structure != null ? scoreColor(v.score_structure) : A.muted2 }}>
+                                            {v.score_structure != null ? v.score_structure.toFixed(1) : "—"}
+                                          </td>
+                                          <td style={{ padding: "6px 10px", color: v.score_quality != null ? scoreColor(v.score_quality) : A.muted2 }}>
+                                            {v.score_quality != null ? v.score_quality.toFixed(1) : "—"}
+                                          </td>
+                                          <td style={{ padding: "6px 10px", color: v.judge_score != null ? scoreColor(v.judge_score) : A.muted2 }}>
+                                            {v.judge_score != null ? v.judge_score.toFixed(1) : "—"}
+                                          </td>
                                           <td style={{ padding: "6px 10px" }}>
                                             <BrandAuditBadge
                                               status={v.brand_audit_status ?? null}
@@ -1375,6 +1406,14 @@ export default function MasterContentPage() {
                                                 onClick={() => { if (t.tour_id) { setDetailTourId(t.tour_id); setDetailTourName(t.tour_name); } }}
                                                 style={{ padding: "2px 7px", fontSize: 11, border: `1px solid ${A.line}`, borderRadius: 4, background: "#fff", cursor: "pointer", color: A.body }}
                                               >View</button>
+                                              {/* AA-220 (H3): per-version DOCX export (shared page-scope helper) */}
+                                              {v.version_num > 0 && (
+                                                <button
+                                                  onClick={() => t.tour_id && exportVersionDocx(t.tour_id, Number(v.version_num))}
+                                                  title="Export this version as DOCX"
+                                                  style={{ padding: "2px 7px", fontSize: 11, border: `1px solid ${A.line}`, borderRadius: 4, background: "#fff", cursor: "pointer", color: A.body }}
+                                                >DOCX</button>
+                                              )}
                                               {!v.is_current && (
                                                 <button
                                                   onClick={() => t.tour_id && promoteVersion(t.tour_id, t.tour_name, v.version_num)}
