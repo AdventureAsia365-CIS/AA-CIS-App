@@ -222,6 +222,15 @@ def generate_node(state: ContentState) -> ContentState:
                         "error": f"JSON parse error: {e}"}
         logger.info("content_generated", retry=state.get("retry_count", 0),
                     model=resp.model_used, cost=resp.cost_usd)
+        # AA-225: persist keywords thực sự inject vào prompt (khớp prompts.py:61 + validate_node normalize)
+        _seo_used = state.get("seo", {})
+        _kws_raw = _seo_used.get("top_keywords", []) or _seo_used.get("keywords", {}).get("top_keywords", [])
+        _kws_norm = [
+            (kw["keyword"] if isinstance(kw, dict) else str(kw))
+            for kw in _kws_raw[:5] if kw
+        ]
+        if isinstance(generated, dict):
+            generated["seo_keywords_used"] = _kws_norm
         return {
             **state,
             "generated":  generated,
