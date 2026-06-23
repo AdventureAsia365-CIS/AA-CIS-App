@@ -341,6 +341,42 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
   );
   const [allVersions, setAllVersions]   = useState<TourVersion[]>([]);
   const [error, setError]               = useState("");
+  const [exporting, setExporting]       = useState(false);
+
+  // AA-220 (C): blob-download helper (same tail as exportTours).
+  async function downloadBlob(url: string, filename: string) {
+    setExporting(true);
+    try {
+      const r = await fetch(url);
+      if (!r.ok) return;
+      const blob = await r.blob();
+      const objUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objUrl; a.download = filename; a.click();
+      URL.revokeObjectURL(objUrl);
+    } finally { setExporting(false); }
+  }
+
+  // AA-220 (A/C): horizontal multi-version comparison export of the panels currently shown.
+  function exportComparison(format: "csv" | "xlsx") {
+    const vnums = panels.map(p => Number(p.versionNum)).filter(v => v > 0);
+    if (vnums.length === 0) return;
+    const short = tourId.split("-")[0];
+    downloadBlob(
+      `/api/admin/tours/${tourId}/versions/export?versions=${vnums.join(",")}&format=${format}`,
+      `tour_${short}_versions_compare.${format}`,
+    );
+  }
+
+  // AA-220 (B/C): single-version DOCX export.
+  function exportDocx(vnum: number) {
+    if (vnum <= 0) return;
+    const short = tourId.split("-")[0];
+    downloadBlob(
+      `/api/admin/tours/${tourId}/versions/${vnum}/export-docx`,
+      `tour_${short}_v${vnum}.docx`,
+    );
+  }
 
   useEffect(() => {
     fetch(`/api/admin/tours/${tourId}/versions`)
@@ -459,6 +495,30 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button
+            onClick={() => exportComparison("xlsx")}
+            disabled={exporting}
+            style={{
+              padding: "6px 12px", fontSize: 12, fontWeight: 600,
+              border: `1px solid ${A.line}`, borderRadius: 6,
+              background: "#fff", color: A.body, cursor: exporting ? "not-allowed" : "pointer",
+              opacity: exporting ? 0.5 : 1,
+            }}
+          >
+            {exporting ? "…" : "Export Comparison XLSX"}
+          </button>
+          <button
+            onClick={() => exportComparison("csv")}
+            disabled={exporting}
+            style={{
+              padding: "6px 12px", fontSize: 12, fontWeight: 600,
+              border: `1px solid ${A.line}`, borderRadius: 6,
+              background: "#fff", color: A.body, cursor: exporting ? "not-allowed" : "pointer",
+              opacity: exporting ? 0.5 : 1,
+            }}
+          >
+            CSV
+          </button>
           {n < 4 && (
             <button
               onClick={addPanel}
@@ -517,6 +577,19 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
                     </select>
                     {v && (
                       <span style={{ fontSize: 12, color: A.muted }}>{modelLabel(v.model_id)}</span>
+                    )}
+                    {Number(panel.versionNum) > 0 && (
+                      <button
+                        onClick={() => exportDocx(Number(panel.versionNum))}
+                        disabled={exporting}
+                        title="Export this version as DOCX"
+                        style={{
+                          padding: "2px 8px", fontSize: 11, fontWeight: 600,
+                          border: `1px solid ${A.line}`, borderRadius: 6,
+                          background: "#fff", color: A.body,
+                          cursor: exporting ? "not-allowed" : "pointer",
+                        }}
+                      >DOCX</button>
                     )}
                     {v?.created_at && (
                       <span style={{ fontSize: 11, color: A.muted2, marginLeft: "auto" }}>{relDate(v.created_at)}</span>
@@ -783,7 +856,12 @@ export default function MasterContentPage() {
   async function exportTours(format: "csv" | "xlsx") {
     setExporting(true);
     try {
-      const r = await fetch(`/api/admin/tours/export?format=${format}`);
+      // AA-220 (D): pass selected tour_ids when any rows are checked (mirror exportAuditCsv).
+      const params = new URLSearchParams({ format });
+      if (selectedIds.size > 0) {
+        params.set("tour_ids", [...selectedIds].join(","));
+      }
+      const r = await fetch(`/api/admin/tours/export?${params.toString()}`);
       if (!r.ok) return;
       const blob = await r.blob();
       const url = URL.createObjectURL(blob);
