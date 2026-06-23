@@ -1297,30 +1297,45 @@ async def get_all_tours(request: Request, x_admin_secret: str = Header(None)):
 async def export_tours(
     request: Request,
     format: str = "csv",
+    tour_ids: Optional[str] = None,
     x_admin_secret: str = Header(None),
 ):
     verify_admin_secret(x_admin_secret)
     if format not in ("csv", "xlsx"):
         raise HTTPException(status_code=400, detail="format must be csv or xlsx")
+
+    # AA-220 (D): optional tour_ids filter. Absent → no WHERE (back-compat, all tours).
+    # Present → WHERE rt.tour_id = ANY(...) BEFORE GROUP BY (pre-aggregation, keeps
+    # rewrite_count / published join correct per remaining tour).
+    params: list = []
+    where = ""
+    if tour_ids:
+        ids = [t.strip() for t in tour_ids.split(",") if t.strip()]
+        if ids:
+            params.append(ids)
+            where = f"WHERE rt.tour_id = ANY(${len(params)}::uuid[])"
+
+    query = f"""
+        SELECT
+            rt.tour_id::text, rt.src_name, rt.country,
+            rt.pipeline_status::text, rt.ingest_at,
+            rs.filename,
+            COUNT(gc.id)       AS rewrite_count,
+            MAX(gc.created_at) AS last_rewritten_at,
+            pt.aa_name, pt.aa_subtitle, pt.quality_score, pt.published_at
+        FROM silver_aa_internal.raw_tours rt
+        LEFT JOIN silver_aa_internal.raw_sources rs ON rs.id = rt.source_id
+        LEFT JOIN silver_aa_internal.generated_content gc ON gc.tour_id = rt.tour_id
+        LEFT JOIN gold_aa_internal.published_tours pt ON pt.tour_id = rt.tour_id
+        {where}
+        GROUP BY rt.tour_id, rt.src_name, rt.country, rt.pipeline_status,
+                 rt.ingest_at, rs.filename,
+                 pt.aa_name, pt.aa_subtitle, pt.quality_score, pt.published_at
+        ORDER BY rt.ingest_at DESC
+    """
     pool = request.app.state.pool
     async with pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT
-                rt.tour_id::text, rt.src_name, rt.country,
-                rt.pipeline_status::text, rt.ingest_at,
-                rs.filename,
-                COUNT(gc.id)       AS rewrite_count,
-                MAX(gc.created_at) AS last_rewritten_at,
-                pt.aa_name, pt.aa_subtitle, pt.quality_score, pt.published_at
-            FROM silver_aa_internal.raw_tours rt
-            LEFT JOIN silver_aa_internal.raw_sources rs ON rs.id = rt.source_id
-            LEFT JOIN silver_aa_internal.generated_content gc ON gc.tour_id = rt.tour_id
-            LEFT JOIN gold_aa_internal.published_tours pt ON pt.tour_id = rt.tour_id
-            GROUP BY rt.tour_id, rt.src_name, rt.country, rt.pipeline_status,
-                     rt.ingest_at, rs.filename,
-                     pt.aa_name, pt.aa_subtitle, pt.quality_score, pt.published_at
-            ORDER BY rt.ingest_at DESC
-        """)
+        rows = await conn.fetch(query, *params)
 
     import io
     import pandas as pd
@@ -1715,6 +1730,387 @@ async def get_tour_seo_context(
         "fetched_at": row["fetched_at"].isoformat() if row["fetched_at"] else None,
         "notes": None,
     }
+
+
+@router.get("/tours/{tour_id}/versions/export")
+async def export_tour_versions(
+    tour_id: str,
+    request: Request,
+    versions: str = "",
+    format: str = "xlsx",
+    x_admin_secret: str = Header(None),
+):
+    """AA-220 (A): horizontal field×version comparison export (CSV/XLSX).
+
+    Reuses the get_tour_version_detail SELECT but for N versions at once
+    (version_num = ANY) → transpose into a table where each row is a field
+    and each column is one version. MUST be registered ABOVE
+    /versions/{version_num} — version_num is typed int, so "export" would 422
+    there instead of falling through to this route.
+    """
+    verify_admin_secret(x_admin_secret)
+    if format not in ("csv", "xlsx"):
+        raise HTTPException(status_code=400, detail="format must be csv or xlsx")
+    try:
+        version_list = [int(v.strip()) for v in versions.split(",") if v.strip()]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="versions must be comma-separated ints")
+    if not version_list:
+        raise HTTPException(status_code=400, detail="versions query param is required")
+
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT gc.version_num, gc.model_editorial AS model_id,
+                   qs.score_overall, qs.score_brand, qs.score_seo,
+                   qs.score_structure, qs.score_quality, qs.failure_codes,
+                   qs.brand_audit_status, qs.brand_audit_codes, qs.brand_audit_issues,
+                   gc.fix_pass_applied, gc.fix_pass_fields, gc.metadata,
+                   gc.aa_name, gc.aa_subtitle, gc.aa_summary, gc.aa_description,
+                   gc.aa_highlights, gc.aa_itineraries, gc.seo_title, gc.seo_meta,
+                   tbr.brand_name AS brand_name
+            FROM silver_aa_internal.generated_content gc
+            LEFT JOIN silver_aa_internal.quality_scores qs
+                ON qs.generated_content_id = gc.id
+            LEFT JOIN shared.tenant_brand_rules tbr
+                ON tbr.id = (gc.metadata->>'brand_rule_id')::uuid
+            WHERE gc.tour_id = $1::uuid AND gc.version_num = ANY($2::int[])
+            ORDER BY gc.version_num
+        """, tour_id, version_list)
+    if not rows:
+        raise HTTPException(status_code=404, detail="No versions found")
+
+    # _as_list: jsonb columns arrive as str OR list depending on driver path (inline per
+    # this module's convention — no shared helper).
+    def _as_list(v):
+        if isinstance(v, list):
+            return v
+        try:
+            return json.loads(v) if v else []
+        except Exception:
+            return []
+
+    def _num(v):
+        return float(v) if v is not None else None
+
+    def _join(v):
+        items = _as_list(v)
+        return ", ".join(str(x) for x in items) if items else ""
+
+    def _hl(v):
+        items = _as_list(v)
+        return "\n".join(f"- {x}" for x in items) if items else ""
+
+    columns: dict = {}
+    for row in rows:
+        meta = {}
+        if row["metadata"]:
+            try:
+                meta = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else dict(row["metadata"])
+            except Exception:
+                meta = {}
+        judge = meta.get("judge") if isinstance(meta, dict) else None
+        judge = judge if isinstance(judge, dict) else {}
+        col = {
+            "brand_name":         row["brand_name"] or meta.get("brand_rule_id") and "custom" or "default",
+            "model":              row["model_id"],
+            "version_num":        row["version_num"],
+            "name":               row["aa_name"],
+            "subtitle":           row["aa_subtitle"],
+            "summary":            row["aa_summary"],
+            "highlights":         _hl(row["aa_highlights"]),
+            "itineraries":        row["aa_itineraries"],
+            "seo_title":          row["seo_title"],
+            "seo_meta":           row["seo_meta"],
+            "score_brand":        _num(row["score_brand"]),
+            "score_seo":          _num(row["score_seo"]),
+            "score_structure":    _num(row["score_structure"]),
+            "score_quality":      _num(row["score_quality"]),
+            "score_overall":      _num(row["score_overall"]),
+            "judge_fit":          judge.get("brand_fit"),
+            "judge_distinct":     judge.get("distinct"),
+            "judge_mission":      judge.get("mission_present"),
+            "judge_score":        judge.get("judge_score"),
+            "judge_feedback":     judge.get("feedback"),
+            "brand_audit_status": row["brand_audit_status"],
+            "brand_audit_codes":  _join(row["brand_audit_codes"]),
+            "fix_pass_fields":    _join(row["fix_pass_fields"]),
+            "failure_codes":      _join(row["failure_codes"]),
+            "revalidate_ran":     bool(meta.get("revalidate_ran")) if isinstance(meta, dict) else False,
+            "revalidate_passed":  bool(meta.get("revalidate_passed")) if isinstance(meta, dict) else False,
+            "cost":               meta.get("llm_cost_usd"),
+        }
+        columns[f"v{row['version_num']}"] = col
+
+    field_order = [
+        "brand_name", "model", "version_num", "name", "subtitle", "summary",
+        "highlights", "itineraries", "seo_title", "seo_meta",
+        "score_brand", "score_seo", "score_structure", "score_quality", "score_overall",
+        "judge_fit", "judge_distinct", "judge_mission", "judge_score", "judge_feedback",
+        "brand_audit_status", "brand_audit_codes", "fix_pass_fields", "failure_codes",
+        "revalidate_ran", "revalidate_passed", "cost",
+    ]
+
+    import io
+    import pandas as pd
+    from fastapi.responses import StreamingResponse
+
+    table = {"field": field_order}
+    for col_name, col in columns.items():
+        table[col_name] = [col.get(f) for f in field_order]
+    df = pd.DataFrame(table)
+
+    short = tour_id.split("-")[0]
+    if format == "csv":
+        buf = io.StringIO()
+        df.to_csv(buf, index=False)
+        buf.seek(0)
+        return StreamingResponse(
+            iter([buf.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=tour_{short}_versions_compare.csv"},
+        )
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False, sheet_name="Version Compare", freeze_panes=(1, 1))
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.read()]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=tour_{short}_versions_compare.xlsx"},
+    )
+
+
+@router.get("/tours/{tour_id}/versions/{version_num}/export-docx")
+async def export_tour_version_docx(
+    tour_id: str, version_num: int,
+    request: Request, x_admin_secret: str = Header(None),
+):
+    """AA-220 (B): single-version DOCX report — vertical layout, AAA palette, full DFS.
+
+    Registered ABOVE /versions/{version_num} for the same int-422 reason as endpoint A.
+    Unlike A, B joins seo_context (LATERAL) because the DOCX surfaces the full DFS block
+    (seed/buyer_market/keyword_ideas/top_keywords/PAA/related).
+    """
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT gc.id, gc.tenant_id, gc.version_num, gc.model_editorial AS model_id,
+                   qs.score_overall, qs.score_brand, qs.score_seo, qs.score_structure,
+                   qs.score_quality, qs.failure_codes,
+                   qs.brand_audit_status, qs.brand_audit_codes, qs.brand_audit_issues,
+                   gc.fix_pass_applied, gc.fix_pass_fields, gc.created_at,
+                   gc.aa_name, gc.aa_subtitle, gc.aa_summary, gc.aa_description,
+                   gc.aa_highlights, gc.aa_itineraries, gc.seo_title, gc.seo_meta,
+                   gc.metadata,
+                   tbr.brand_name AS brand_name,
+                   sc.top_keywords, sc.keyword_ideas, sc.people_also_ask,
+                   sc.related_keywords, sc.keyword_search
+            FROM silver_aa_internal.generated_content gc
+            LEFT JOIN silver_aa_internal.quality_scores qs
+                ON qs.generated_content_id = gc.id
+            LEFT JOIN shared.tenant_brand_rules tbr
+                ON tbr.id = (gc.metadata->>'brand_rule_id')::uuid
+            LEFT JOIN LATERAL (
+                SELECT top_keywords, keyword_ideas, people_also_ask,
+                       related_keywords, keyword_search
+                FROM silver_aa_internal.seo_context
+                WHERE tour_id = gc.tour_id
+                ORDER BY fetched_at DESC LIMIT 1
+            ) sc ON true
+            WHERE gc.tour_id = $1::uuid AND gc.version_num = $2
+            LIMIT 1
+        """, tour_id, version_num)
+        if not row:
+            raise HTTPException(status_code=404, detail="Version not found")
+
+        # Buyer market: derive from tenant target_market (best-effort, inside conn scope).
+        buyer_market = None
+        try:
+            from shared.services.tenant_config_service import TenantConfigService
+            from services.seo_intelligence.seed_builder import resolve_buyer_market
+            cfg = await TenantConfigService(conn).get_seo_config(str(row["tenant_id"]))
+            _code, buyer_market, _lang = resolve_buyer_market(cfg.target_market)
+        except Exception as _bm_err:
+            logger.warning("docx_buyer_market_failed", tour_id=tour_id, error=str(_bm_err))
+
+    def _as_list(v):
+        if isinstance(v, list):
+            return v
+        try:
+            return json.loads(v) if v else []
+        except Exception:
+            return []
+
+    meta = {}
+    if row["metadata"]:
+        try:
+            meta = json.loads(row["metadata"]) if isinstance(row["metadata"], str) else dict(row["metadata"])
+        except Exception:
+            meta = {}
+    judge = meta.get("judge") if isinstance(meta, dict) else None
+    judge = judge if isinstance(judge, dict) else {}
+    brand_name = row["brand_name"] or meta.get("brand_rule_id") and "custom" or "default"
+    model = row["model_id"]
+    created = row["created_at"].strftime("%Y-%m-%d %H:%M") if row["created_at"] else ""
+
+    highlights = _as_list(row["aa_highlights"])
+    keyword_ideas = _as_list(row["keyword_ideas"])
+    top_keywords = _as_list(row["top_keywords"])
+    paa = _as_list(row["people_also_ask"])
+    related = _as_list(row["related_keywords"])
+
+    import io
+    from docx import Document
+    from docx.shared import Pt, RGBColor
+    from fastapi.responses import StreamingResponse
+
+    ORANGE = RGBColor(0xDB, 0x96, 0x28)     # heading-accent
+    BLACKBLUE = RGBColor(0x1F, 0x29, 0x33)  # section headers
+    GRAY = RGBColor(0x33, 0x36, 0x3D)       # body
+
+    doc = Document()
+
+    # Off-white page background (best-effort — Word ignores silently if unsupported).
+    try:
+        from docx.oxml.ns import qn
+        from docx.oxml import OxmlElement
+        bg = OxmlElement("w:background")
+        bg.set(qn("w:color"), "F8F6F2")
+        doc.element.insert(0, bg)
+        disp = OxmlElement("w:displayBackgroundShape")
+        doc.settings.element.append(disp)
+    except Exception:
+        pass
+
+    def _section(text):
+        p = doc.add_paragraph()
+        bar = p.add_run("▌ ")
+        bar.bold = True
+        bar.font.color.rgb = ORANGE
+        r = p.add_run(text)
+        r.bold = True
+        r.font.size = Pt(13)
+        r.font.color.rgb = BLACKBLUE
+        return p
+
+    def _kv(label, value):
+        p = doc.add_paragraph()
+        lr = p.add_run(f"{label}: ")
+        lr.bold = True
+        lr.font.size = Pt(10.5)
+        lr.font.color.rgb = BLACKBLUE
+        vr = p.add_run("" if value is None else str(value))
+        vr.font.size = Pt(10.5)
+        vr.font.color.rgb = GRAY
+        return p
+
+    def _body(text):
+        # Preserve \n as soft line breaks within a single paragraph (no flatten).
+        p = doc.add_paragraph()
+        for i, line in enumerate(str(text or "").split("\n")):
+            if i > 0:
+                p.add_run().add_break()
+            r = p.add_run(line)
+            r.font.size = Pt(10.5)
+            r.font.color.rgb = GRAY
+        return p
+
+    # ── Header
+    title = doc.add_paragraph()
+    tr = title.add_run(row["aa_name"] or "(untitled)")
+    tr.bold = True
+    tr.font.size = Pt(20)
+    tr.font.color.rgb = BLACKBLUE
+    sub = doc.add_paragraph()
+    sr = sub.add_run(f"Version {version_num}   ·   {brand_name}   ·   {model}   ·   {created}")
+    sr.font.size = Pt(10)
+    sr.font.color.rgb = ORANGE
+
+    # ── Scores & Judge
+    _section("Scores & Judge")
+    _kv("Brand", row["score_brand"])
+    _kv("SEO", row["score_seo"])
+    _kv("Structure", row["score_structure"])
+    _kv("Quality", row["score_quality"])
+    _kv("Overall", row["score_overall"])
+    _kv("Judge — brand fit", judge.get("brand_fit"))
+    _kv("Judge — distinct", judge.get("distinct"))
+    _kv("Judge — mission present", judge.get("mission_present"))
+    _kv("Judge — score", judge.get("judge_score"))
+    if judge.get("feedback"):
+        _body(judge.get("feedback"))
+
+    # ── Brand Audit
+    _section("Brand Audit")
+    _kv("Status", row["brand_audit_status"])
+    _kv("Codes", ", ".join(str(c) for c in _as_list(row["brand_audit_codes"])) or "—")
+    _kv("Issues", ", ".join(str(c) for c in _as_list(row["brand_audit_issues"])) or "—")
+    _kv("Fix-pass fields", ", ".join(str(c) for c in _as_list(row["fix_pass_fields"])) or "—")
+    _kv("Failure codes", ", ".join(str(c) for c in _as_list(row["failure_codes"])) or "—")
+    _kv("Revalidate ran", bool(meta.get("revalidate_ran")))
+    _kv("Revalidate passed", bool(meta.get("revalidate_passed")))
+
+    # ── SEO / DataForSEO
+    _section("SEO / DataForSEO")
+    _kv("Seed", row["keyword_search"] or "—")
+    _kv("Buyer market", buyer_market or "—")
+    if keyword_ideas:
+        tbl = doc.add_table(rows=1, cols=5)
+        tbl.style = "Light Grid Accent 1"
+        for cell, label in zip(
+            tbl.rows[0].cells,
+            ["Keyword", "Volume", "Competition", "Comp. Index", "CPC"],
+        ):
+            cr = cell.paragraphs[0].add_run(label)
+            cr.bold = True
+        for kw in keyword_ideas[:25]:
+            cells = tbl.add_row().cells
+            if isinstance(kw, dict):
+                cells[0].text = str(kw.get("keyword") or "")
+                cells[1].text = "" if kw.get("search_volume") is None else str(kw.get("search_volume"))
+                cells[2].text = str(kw.get("competition") or "")
+                cells[3].text = "" if kw.get("competition_index") is None else str(kw.get("competition_index"))
+                cells[4].text = "" if kw.get("cpc") is None else str(kw.get("cpc"))
+            else:
+                cells[0].text = str(kw)
+    if top_keywords:
+        _kv("Top keywords", ", ".join(
+            str(k.get("keyword") if isinstance(k, dict) else k) for k in top_keywords))
+    if paa:
+        _kv("People also ask", "")
+        for q in paa:
+            doc.add_paragraph(str(q), style="List Bullet")
+    if related:
+        _kv("Related keywords", ", ".join(str(r) for r in related))
+
+    # ── Content
+    _section("Content")
+    _kv("Name", row["aa_name"])
+    _kv("Subtitle", row["aa_subtitle"])
+    _section("Summary")
+    _body(row["aa_summary"])
+    _section("Highlights")
+    for h in highlights:
+        doc.add_paragraph(str(h), style="List Bullet")
+    _section("Itineraries")
+    _body(row["aa_itineraries"])
+    _section("SEO")
+    _kv("SEO Title", row["seo_title"])
+    _kv("SEO Meta", row["seo_meta"])
+    _kv("SEO Meta length", f"{len(row['seo_meta'] or '')} chars")
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    short = tour_id.split("-")[0]
+    return StreamingResponse(
+        iter([buf.read()]),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f"attachment; filename=tour_{short}_v{version_num}.docx"},
+    )
 
 
 @router.get("/tours/{tour_id}/versions/{version_num}")
