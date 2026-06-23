@@ -160,6 +160,23 @@ def _build_generated_metadata(result, *, brand_rule_id, brand_name, seo_mode,
     return metadata
 
 
+def _extract_judge_score(metadata):
+    """AA-220 (H1): pull metadata.judge.judge_score from a generated_content metadata blob.
+
+    Mirrors get_tour_version_detail's canonical metadata handling — the jsonb column arrives as a
+    str OR a dict depending on the asyncpg codec path. Returns None for any missing/malformed level
+    (no metadata, unparseable, no judge object) so the list endpoint degrades to "—" in the UI.
+    """
+    if not metadata:
+        return None
+    try:
+        m = json.loads(metadata) if isinstance(metadata, str) else dict(metadata)
+    except Exception:
+        return None
+    j = m.get("judge") if isinstance(m, dict) else None
+    return j.get("judge_score") if isinstance(j, dict) else None
+
+
 # ── Pydantic models ───────────────────────────────────────────────────────────
 
 class TourRunRequest(BaseModel):
@@ -2238,7 +2255,9 @@ async def list_tour_versions(
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT gc.id, gc.version_num, gc.model_editorial AS model_id,
-                   qs.score_overall AS quality_score, gc.created_at,
+                   qs.score_overall AS quality_score,
+                   qs.score_brand, qs.score_seo, qs.score_structure, qs.score_quality,
+                   gc.metadata, gc.created_at,
                    (pt.generated_content_id = gc.id) AS is_current,
                    gc.fix_pass_applied, gc.fix_pass_fields,
                    qs.brand_audit_status, qs.brand_audit_codes, qs.brand_audit_issues
@@ -2249,12 +2268,18 @@ async def list_tour_versions(
             WHERE gc.tour_id = $1::uuid
             ORDER BY gc.version_num DESC
         """, tour_id)
+
     return {"versions": [
         {
             "id":                 str(r["id"]),
             "version_num":        r["version_num"],
             "model_id":           r["model_id"],
             "quality_score":      float(r["quality_score"]) if r["quality_score"] else None,
+            "score_brand":        float(r["score_brand"]) if r["score_brand"] is not None else None,
+            "score_seo":          float(r["score_seo"]) if r["score_seo"] is not None else None,
+            "score_structure":    float(r["score_structure"]) if r["score_structure"] is not None else None,
+            "score_quality":      float(r["score_quality"]) if r["score_quality"] is not None else None,
+            "judge_score":        _extract_judge_score(r["metadata"]),
             "created_at":         r["created_at"].isoformat() if r["created_at"] else None,
             "is_current":         bool(r["is_current"]),
             "brand_audit_status": r["brand_audit_status"],
