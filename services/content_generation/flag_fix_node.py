@@ -80,7 +80,7 @@ Fix ONLY the specified fields. Keep all other fields exactly as-is.
 Preserve all product facts. Return strict JSON only."""
 
 
-def _rerepair_meta(post: str, tour: dict, content: dict, model_tier: str) -> str:
+def _rerepair_meta(post: str, tour: dict, content: dict, model_tier: str, intent_clue: str = "") -> str:
     """AA-205 C-full: one bounded re-repair for seo_meta still out of band. Single LLM call,
     no loop. Returns in-band candidate if produced, else the incoming post (graceful)."""
     from .seo_meta_utils import meta_in_band as _in_band, SEO_META_MIN as _MIN, SEO_META_MAX as _MAX
@@ -95,7 +95,9 @@ def _rerepair_meta(post: str, tour: dict, content: dict, model_tier: str) -> str
             + "(current is " + ("too short" if len(cur) < _MIN else "out of band") + ").\n"
             + "- MUST end with a period and read as one complete sentence "
             + "(no trailing preposition/conjunction).\n"
-            + "- Do NOT pad with filler — add a real intent clue or practical reassurance.\n"
+            + "- Do NOT pad with filler.\n"
+            + (("- Weave in this real search-intent clue naturally (do not quote verbatim): "
+               + json.dumps(intent_clue) + "\n") if intent_clue else "")
             + "- Return JSON: {\"seo_meta\": \"...\"}"
         )
         resp = LLMClient().generate(LLMRequest(
@@ -202,13 +204,31 @@ Keep all other fields unchanged."""
         # LLM repair can overshoot under SEO_META_MIN (e.g. 132). AA-215 revalidate re-runs
         # validate and fires META_TOO_SHORT but that is only -0.5 sub-score, so the under-band
         # meta still clears the 7.0 gate and reaches gold. Enforce the band here at the source.
+        _meta_floor_failed = False
         if "seo_meta" in fix_keys:
             _pre_meta = current_content.get("seo_meta", "") or ""
             _guarded = best_meta_candidate(new_generated.get("seo_meta", "") or "", _pre_meta)
             if not meta_in_band(_guarded):
+                # AA-226: pull a real intent clue from seo context (PAA first, then related)
+                _seo_ctx = state.get("seo", {}) or {}
+                _paa = _seo_ctx.get("people_also_ask", []) or []
+                _rel = (_seo_ctx.get("related_searches", [])
+                        or _seo_ctx.get("related_keywords", []) or [])
+                _clue = ""
+                if _paa:
+                    _clue = _paa[0] if isinstance(_paa[0], str) else str(_paa[0])
+                elif _rel:
+                    _clue = _rel[0] if isinstance(_rel[0], str) else str(_rel[0])
                 _guarded = _rerepair_meta(
                     _guarded, tour, new_generated, state.get("model_tier", "haiku"),
+                    intent_clue=_clue,
                 )
+            # AA-226: if STILL out of band after clue-guided re-repair, do NOT accept an
+            # under/over-floor meta into gold — flag for HITL via manual_check.
+            if not meta_in_band(_guarded):
+                _meta_floor_failed = True
+                logger.warning("meta_floor_unrecoverable",
+                               final_len=len(_guarded), tour=current_content.get("name"))
             new_generated["seo_meta"] = _guarded
 
         logger.info("flag_fix_done", fixed_keys=list(fix_keys), cost=resp.cost_usd)
@@ -224,6 +244,9 @@ Keep all other fields unchanged."""
             "cost_usd":        state.get("cost_usd", 0) + resp.cost_usd,
             "fix_pass_applied": True,
             "fix_pass_fields":  list(fix_keys),
+            # AA-226: meta unrecoverable below floor -> force HITL; revalidate keeps this
+            # as manual_check (passed=False) so the export gate blocks it from gold.
+            **({"brand_audit_status": "manual_check"} if _meta_floor_failed else {}),
         }
 
     except Exception as e:
