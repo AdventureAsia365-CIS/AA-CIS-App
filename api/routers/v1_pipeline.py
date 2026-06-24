@@ -348,7 +348,10 @@ async def get_review_queue(
 ):
     """Get tours pending HITL review from review_queue table."""
     pool = request.app.state.pool
-    tenant_id = tenant.get("sub", "00000000-0000-0000-0000-000000000001")
+    # AA-229: CIS is single-tenant; review_queue rows are enqueued under master
+    # (_MASTER_TENANT_ID). Pin fetch to master so the admin UI sees them. Multi-tenant
+    # review fetch is deferred to ACP.
+    tenant_id = "00000000-0000-0000-0000-000000000001"
     offset = (page - 1) * page_size
 
     async with pool.acquire() as conn:
@@ -394,7 +397,10 @@ async def approve_review(
     enqueue path) → forward export via process_export.
     """
     pool = request.app.state.pool
-    tenant_id = tenant.get("sub", "00000000-0000-0000-0000-000000000001")
+    # AA-229: CIS is single-tenant; review_queue rows are enqueued under master
+    # (_MASTER_TENANT_ID). Pin fetch to master so the admin UI sees them. Multi-tenant
+    # review fetch is deferred to ACP.
+    tenant_id = "00000000-0000-0000-0000-000000000001"
 
     async with pool.acquire() as conn:
         # Atomic claim: flip pending→approved in one statement. Only the first caller wins.
@@ -472,7 +478,10 @@ async def reject_review(
     claims nothing → 409. No export on the reject path.
     """
     pool = request.app.state.pool
-    tenant_id = tenant.get("sub", "00000000-0000-0000-0000-000000000001")
+    # AA-229: CIS is single-tenant; review_queue rows are enqueued under master
+    # (_MASTER_TENANT_ID). Pin fetch to master so the admin UI sees them. Multi-tenant
+    # review fetch is deferred to ACP.
+    tenant_id = "00000000-0000-0000-0000-000000000001"
 
     async with pool.acquire() as conn:
         claimed = await conn.fetchrow("""
