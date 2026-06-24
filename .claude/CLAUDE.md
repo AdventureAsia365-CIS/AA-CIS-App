@@ -1,10 +1,10 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 20/06/2026 (S71) | ECS api:316 | CI green | Last commit: 2e15ceb (develop) / 987ea71 (main)
+# Updated: 20/06/2026 (S71) | ECS api:330 | CI green | Last commit: 70cde13 (develop) / 24def0d (main)
 
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway owq9as3wjl)
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel — AA-103 production)
-- ECS task def: api:316 | digest == ECR :latest (sha256:fcbf6cc…cff0e) | Deploy Dev green (AA-205)
+- ECS task def: api:330 | digest == ECR :latest (sha256:0944c1c…663f) | Deploy Dev green (AA-230)
 - AA-205 SHIPPED (S71): post-repair seo_meta band guard — extract seo_meta_utils (single source of
   truth, breaks graph↔flag_fix circular import) + best_meta_candidate deterministic salvage +
   bounded _rerepair_meta (1 LLM call). Under-140 repair output can no longer clear the 7.0 gate into gold
@@ -14,8 +14,8 @@
 - AA-211/212 SHIPPED (S69): export gate + HITL review_queue re-wire
 - AA-198 [F1] SHIPPED: brand_identity_id resolver + /admin/brand-rules + s1 brand-picker
 - AA-197 [F2] SHIPPED: DataForSEO rebuild — buyer-market location, seed builder, real keyword_ideas
-- "Deploy Prod" workflow = STUB/placeholder (no-op) — real ECS deploy runs via "Deploy Dev" on develop merge
-- AWS: RUNNING after AA-205 deploy (api:316) — STOP ECS/RDS after session (see cost checklist)
+- "Deploy Prod" workflow = STUB/placeholder (no-op) — real ECS deploy runs via "Deploy Dev" on develop merge (last run #126)
+- AWS: RUNNING after AA-230 deploy (api:330) — STOP ECS/RDS after session (see cost checklist)
 - Lambda aa-cis-dev-acp-s4-evaluate: DEPLOYED ✅ (AA-49 H-1)
 - Lambda aa-cis-dev-acp-s4-trigger: DEPLOYED ✅ | ALB_INTERNAL_URL: FIXED ✅
 - Lambda aa-cis-dev-acp-s3-campaign-planner: DEPLOYED ✅ (AA-45)
