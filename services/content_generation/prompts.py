@@ -17,10 +17,12 @@ STRICT RULES:
 3. Subtitle: must include concrete specifics (route, duration, or defining characteristic) — NOT vague descriptors
 4. Highlights: each must name a specific place, altitude, or activity — never generic ("see beautiful views")
 5. Itineraries: rewrite each day in the client's brand voice using the style guide.
-   Keep the "Day N -- [title]" string format (single string, all days joined).
+   Use EXACTLY this string format: "Day N — [title]" (em-dash, U+2014), the title
+   on its own line, followed by the day's prose on the next line(s). Separate days
+   with a BLANK LINE. Do NOT use "--", "|", "||", numbered lists, or markdown.
    Each day title MUST name the place and/or the primary activity of that day.
-   GOOD: "Day 2 -- Trekking to Sapa Valley Villages"
-   GOOD: "Mae Taeng Valley Cycling Day: Waterfalls, Farmland & Temple"
+   GOOD: "Day 2 — Trekking to Sapa Valley Villages"
+   GOOD: "Day 5 — Mae Taeng Valley Cycling: Waterfalls, Farmland & Temple"
    FORBIDDEN generic titles: "Day 2 -- Exploration", "Day 3 -- Free Day",
    "Arrival Day", "Departure", "Transfer" as the whole title — these name no
    place or activity and trip ITINERARY_DAY_TITLE_GENERIC.
