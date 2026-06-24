@@ -1,6 +1,7 @@
 import os
 import json
 import boto3
+from botocore.config import Config
 import openai
 import structlog
 from .models import LLMRequest, LLMResponse
@@ -38,6 +39,11 @@ class LLMClient:
         self._bedrock = boto3.client(
             "bedrock-runtime",
             region_name=BEDROCK_REGION,
+            config=Config(
+                read_timeout=300,
+                connect_timeout=10,
+                retries={"max_attempts": 2, "mode": "standard"},
+            ),
         )
         self._openai = openai.OpenAI(
             api_key=os.environ.get("OPENAI_API_KEY")
@@ -109,20 +115,35 @@ class LLMClient:
             "messages": messages,
         }
 
-        response = self._bedrock.invoke_model(
+        response = self._bedrock.invoke_model_with_response_stream(
             modelId=model,
             contentType="application/json",
             accept="application/json",
             body=json.dumps(body),
         )
 
-        result  = json.loads(response["body"].read())
-        content = result["content"][0]["text"]
-        usage   = result.get("usage", {})
-        in_tok  = usage.get("input_tokens", 0)
-        out_tok = usage.get("output_tokens", 0)
-        cache_read  = usage.get("cache_read_input_tokens", 0) or 0
-        cache_write = usage.get("cache_creation_input_tokens", 0) or 0
+        # AA-224: stream accumulation. Non-stream invoke_model held the HTTP connection open for
+        # the full generation (default 60s read_timeout) -> Sonnet branded prompts timed out ->
+        # silent fallback to Haiku. Streaming returns chunks incrementally so the socket never
+        # idles past read_timeout. Usage now arrives across events: input_tokens in
+        # message_start, output_tokens (cumulative) in message_delta.
+        content_parts = []
+        in_tok = out_tok = cache_read = cache_write = 0
+        for event in response["body"]:
+            chunk = json.loads(event["chunk"]["bytes"])
+            ctype = chunk.get("type")
+            if ctype == "message_start":
+                u = chunk.get("message", {}).get("usage", {})
+                in_tok      = u.get("input_tokens", 0)
+                cache_read  = u.get("cache_read_input_tokens", 0) or 0
+                cache_write = u.get("cache_creation_input_tokens", 0) or 0
+            elif ctype == "content_block_delta":
+                d = chunk.get("delta", {})
+                if d.get("type") == "text_delta":
+                    content_parts.append(d.get("text", ""))
+            elif ctype == "message_delta":
+                out_tok = chunk.get("usage", {}).get("output_tokens", out_tok)
+        content = "".join(content_parts)
         cost    = self._calc_cost(model, in_tok, out_tok)
 
         logger.info("llm_success", provider="bedrock", model=model,
