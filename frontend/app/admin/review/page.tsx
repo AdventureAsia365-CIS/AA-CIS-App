@@ -6,8 +6,6 @@ import { CheckCircle, XCircle, RotateCcw, ChevronDown, ChevronUp, Filter, Edit3,
 import AdminSidebar from "../_components/AdminSidebar";
 import { A, serif, mono, sans, Card, SLabel, Btn, LoadingScreen } from "../_components/adminUi";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
-
 function getToken() {
   if (typeof document === "undefined") return null;
   const m = document.cookie.match(/cis_api_token=([^;]+)/);
@@ -179,22 +177,20 @@ export default function AdminReviewPage() {
   useEffect(() => {
     const token = getToken();
     if (!token) { setLoading(false); return; }
-    fetch(`${API_URL}/v1/pipeline/review-queue`, { headers: { Authorization: `Bearer ${token}` } })
+    fetch(`/api/pipeline/review-queue`)
       .then(r => r.json())
       .then(d => { setItems((d.data || []).map(mapApiToReview)); setLoading(false); })
       .catch(() => setLoading(false));
   }, []);
 
   async function onApprove(id: string) {
-    const token = getToken();
-    await fetch(`${API_URL}/v1/pipeline/review-queue/${id}/approve`, { method: "POST", headers: { Authorization: `Bearer ${token}` } });
+    await fetch(`/api/pipeline/review-queue/${id}/approve`, { method: "POST" });
     setApproved(a => a + 1);
     setItems(p => p.filter(i => i.id !== id));
   }
 
   async function onReject(id: string) {
-    const token = getToken();
-    await fetch(`${API_URL}/v1/pipeline/review-queue/${id}/reject`, { method: "POST", headers: { Authorization: `Bearer ${token}` } });
+    await fetch(`/api/pipeline/review-queue/${id}/reject`, { method: "POST" });
     setRejected(r => r + 1);
     setItems(p => p.filter(i => i.id !== id));
   }
