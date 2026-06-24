@@ -255,6 +255,16 @@ def validate_node(state: ContentState) -> ContentState:
         if isinstance(it, str):
             it = _re.sub(r"\*\*([^*]+)\*\*", r"\1", it)
             it = it.replace("**", "")
+            # AA-228: normalize day-title separator to a single canonical form across model tiers.
+            # Haiku emits "Day N -- title | prose ... || Day N+1", Sonnet/GPT emit "Day N — title".
+            it = it.replace("||", "\n\n")                         # inter-day inline sep -> blank line
+            it = _re.sub(r"\bDay\s+(\d+)\s*[-–—]+\s*", r"Day \1 — ", it)  # any dash -> em-dash
+            it = _re.sub(r"(Day\s+\d+\s+—\s+[^\n|]+?)\s*\|\s*", r"\1\n", it)  # "title | prose" -> newline
+            # ensure a blank line before each "Day N" that isn't already at start/after blank line
+            it = _re.sub(r"(?<=\S)\n?(?=Day\s+\d+\s+—)", "\n\n", it.lstrip())
+            it = _re.sub(r"[ \t]+\n", "\n", it)                   # strip trailing spaces before newline
+            it = _re.sub(r"\n[ \t]+", "\n", it)                   # strip leading spaces after newline
+            it = _re.sub(r"\n{3,}", "\n\n", it)                   # collapse extra blank lines
         elif isinstance(it, dict):
             parts = [f"{k}: {v}" for k, v in it.items()]
             it = "\n\n".join(parts)
