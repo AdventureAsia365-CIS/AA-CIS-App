@@ -1549,6 +1549,35 @@ async def admin_review_queue(
     }
 
 
+# ── Review queue approve/reject (admin alias — AA-230: gateway authorizer blocks /v1/pipeline)
+# The /v1/pipeline/* routes sit behind the API Gateway Lambda authorizer (requires Bearer JWT).
+# The admin BFF sends X-Admin-Secret only, so those calls 401 at the gateway. /admin/* is exempt
+# from the authorizer, so we expose approve/reject here too and reuse the v1 logic verbatim.
+# tenant=None is passed because the underlying functions hardcode the master tenant internally.
+
+
+@router.post("/review-queue/{review_id}/approve")
+async def admin_approve_review(
+    review_id: str,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    from api.routers.v1_pipeline import approve_review
+    return await approve_review(review_id=review_id, request=request, tenant=None)
+
+
+@router.post("/review-queue/{review_id}/reject")
+async def admin_reject_review(
+    review_id: str,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    from api.routers.v1_pipeline import reject_review
+    return await reject_review(review_id=review_id, request=request, tenant=None)
+
+
 # ── Tour version endpoints ────────────────────────────────────────────────────
 # NOTE: /versions/{num}/promote MUST come before /versions/{num} — FastAPI greedy matching
 

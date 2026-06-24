@@ -177,20 +177,20 @@ export default function AdminReviewPage() {
   useEffect(() => {
     const token = getToken();
     if (!token) { setLoading(false); return; }
-    fetch(`/api/pipeline/review-queue`)
+    fetch(`/api/admin/review-queue`)
       .then(r => r.json())
       .then(d => { setItems((d.data || []).map(mapApiToReview)); setLoading(false); })
       .catch(() => setLoading(false));
   }, []);
 
   async function onApprove(id: string) {
-    await fetch(`/api/pipeline/review-queue/${id}/approve`, { method: "POST" });
+    await fetch(`/api/admin/review-queue/${id}/approve`, { method: "POST" });
     setApproved(a => a + 1);
     setItems(p => p.filter(i => i.id !== id));
   }
 
   async function onReject(id: string) {
-    await fetch(`/api/pipeline/review-queue/${id}/reject`, { method: "POST" });
+    await fetch(`/api/admin/review-queue/${id}/reject`, { method: "POST" });
     setRejected(r => r + 1);
     setItems(p => p.filter(i => i.id !== id));
   }
