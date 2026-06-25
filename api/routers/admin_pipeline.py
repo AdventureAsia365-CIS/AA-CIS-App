@@ -215,6 +215,7 @@ class TourRunRequest(BaseModel):
     brand_rules_version: Optional[int] = None
     brand_name: Optional[str] = None
     brand_identity_id: Optional[str] = None
+    allow_auto_upgrade: bool = False  # AA-237: opt-in haiku→sonnet auto-upgrade (default OFF)
 
 
 class UploadUrlRequest(BaseModel):
@@ -423,8 +424,10 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
         _UPGRADE_THRESHOLD = float(os.environ.get("AUTO_UPGRADE_THRESHOLD", "8.5"))
         _score = result.get("quality_score", 0.0)
         _model = result.get("model_used", "")
+        _auto_upgraded = False  # AA-237: did the opt-in sonnet re-run replace the haiku result?
         if (
-            result.get("status") == "success"
+            req.allow_auto_upgrade  # AA-237: gate the silent sonnet re-run behind explicit opt-in
+            and result.get("status") == "success"
             and 0 < _score < _UPGRADE_THRESHOLD
             and "haiku" in _model.lower()
         ):
@@ -438,6 +441,7 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
             )
             if _upgraded.get("quality_score", 0.0) > _score:
                 result = _upgraded
+                _auto_upgraded = True
 
         version_id = None
         _m_final = None
@@ -636,8 +640,9 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
             "generated":          result.get("generated"),
             "failure_codes":      result.get("failure_codes", []),   # AA-204: surface validate codes
             "seo_meta_stored":    _m_final,                           # AA-204: actual value written to DB
-            "cost_usd":           result.get("cost_usd"),
-            "model_used":         result.get("model_used"),
+            "cost_usd":           result.get("cost_usd"),       # AA-237: reflects upgraded run if any
+            "model_used":         result.get("model_used"),     # AA-237: reflects upgraded run if any
+            "auto_upgraded":      _auto_upgraded,                # AA-237: True iff sonnet re-run kept
             "brand_audit_status": result.get("brand_audit_status"),
             "brand_audit_codes":  result.get("brand_audit_codes", []),
             "brand_audit_issues": result.get("brand_audit_issues", []),
