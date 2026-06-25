@@ -43,6 +43,24 @@ def _is_uuid(value) -> bool:
         return False
 
 
+def _as_list(v):
+    """Guarantee a list. Handles list, JSON-string, dict, None — AA-235 shape guard.
+
+    jsonb columns arrive as str OR list depending on driver path. A JSON *object*
+    (e.g. empty DataForSEO `{seed: null}`) must collapse to [] — never pass a dict
+    downstream, or FE [...spread] / BE slice[:25] crash.
+    """
+    if isinstance(v, list):
+        return v
+    if isinstance(v, str):
+        try:
+            parsed = json.loads(v)
+        except (ValueError, TypeError):
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
 # AA-211/AA-212: master tenant for the aa_internal pipeline (same constant used inline elsewhere).
 _MASTER_TENANT_ID = "00000000-0000-0000-0000-000000000001"
 
@@ -1806,16 +1824,8 @@ async def get_tour_seo_context(
                 "notes": "No seo_context row for this tour's seed yet.",
             }
 
-        # keyword_ideas / top_keywords are stored as json.dumps strings → parse to list.
-        def _as_list(val):
-            if isinstance(val, list):
-                return val
-            try:
-                parsed = json.loads(val) if val else []
-            except Exception:
-                return []
-            return parsed if isinstance(parsed, list) else []
-
+        # keyword_ideas / top_keywords are stored as json.dumps strings → parse to list
+        # (AA-235: shape guard via module-level _as_list).
         keyword_ideas = _as_list(row["keyword_ideas"])
         top_keywords = _as_list(row["top_keywords"])
         people_also_ask = _as_list(row["people_also_ask"])
@@ -1896,16 +1906,6 @@ async def export_tour_versions(
         """, tour_id, version_list)
     if not rows:
         raise HTTPException(status_code=404, detail="No versions found")
-
-    # _as_list: jsonb columns arrive as str OR list depending on driver path (inline per
-    # this module's convention — no shared helper).
-    def _as_list(v):
-        if isinstance(v, list):
-            return v
-        try:
-            return json.loads(v) if v else []
-        except Exception:
-            return []
 
     def _num(v):
         return float(v) if v is not None else None
@@ -2052,14 +2052,6 @@ async def export_tour_version_docx(
             _code, buyer_market, _lang = resolve_buyer_market(cfg.target_market)
         except Exception as _bm_err:
             logger.warning("docx_buyer_market_failed", tour_id=tour_id, error=str(_bm_err))
-
-    def _as_list(v):
-        if isinstance(v, list):
-            return v
-        try:
-            return json.loads(v) if v else []
-        except Exception:
-            return []
 
     meta = {}
     if row["metadata"]:
@@ -2286,16 +2278,8 @@ async def get_tour_version_detail(
     if not isinstance(keywords, list):
         keywords = json.loads(keywords) if keywords else []
 
-    # AA-219: jsonb columns arrive as str OR list/dict depending on driver path —
-    # guard each like list_tour_versions does. judge/revalidate live in metadata (AA-213).
-    def _as_list(v):
-        if isinstance(v, list):
-            return v
-        try:
-            return json.loads(v) if v else []
-        except Exception:
-            return []
-
+    # AA-219/AA-235: jsonb columns arrive as str OR list/dict depending on driver path —
+    # module-level _as_list collapses dict/None → []. judge/revalidate live in metadata (AA-213).
     _judge = meta.get("judge") if isinstance(meta, dict) else None
     return {
         "id":             str(row["id"]),

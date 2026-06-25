@@ -224,9 +224,14 @@ function fmtCpcVal(v: number | null): string { return v == null ? "—" : `$${v.
 
 type DfsSortKey = "keyword" | "volume" | "competition" | "cpc";
 
-function DfsCompareSection({ seed, ideas, paa, related }: {
+function DfsCompareSection({ seed, ideas: ideasRaw, paa: paaRaw, related: relatedRaw }: {
   seed: string | null; ideas: KeywordIdea[]; paa: string[]; related: string[];
 }) {
+  // AA-235: jsonb columns can arrive as a {seed:null} object (empty DataForSEO), not an array.
+  // Guard before any spread/.length so [...ideas] never throws "o is not iterable".
+  const ideas   = Array.isArray(ideasRaw)   ? ideasRaw   : [];
+  const paa     = Array.isArray(paaRaw)     ? paaRaw     : [];
+  const related = Array.isArray(relatedRaw) ? relatedRaw : [];
   const [sortKey, setSortKey] = useState<DfsSortKey>("volume");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   function onSort(k: DfsSortKey) {
@@ -736,9 +741,9 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
                 {v && (
                   <DfsCompareSection
                     seed={v.seed}
-                    ideas={v.keyword_ideas}
-                    paa={v.people_also_ask}
-                    related={v.related_keywords}
+                    ideas={Array.isArray(v.keyword_ideas) ? v.keyword_ideas : []}
+                    paa={Array.isArray(v.people_also_ask) ? v.people_also_ask : []}
+                    related={Array.isArray(v.related_keywords) ? v.related_keywords : []}
                   />
                 )}
 
