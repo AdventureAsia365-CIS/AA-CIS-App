@@ -24,6 +24,11 @@ router = APIRouter(prefix="/admin", tags=["admin-pipeline"])
 
 _pipeline_semaphore = asyncio.Semaphore(2)
 
+# AA-223: strong refs to fire-and-forget run-tour jobs. asyncio only keeps a weak
+# ref to scheduled tasks — without this the task can be GC'd mid-flight, leaving the
+# job stuck 'running' forever. add_done_callback(discard) releases the ref on finish.
+_background_tasks: set = set()
+
 
 def _is_uuid(value) -> bool:
     """True when value is a valid UUID (shared.pipeline_runs.batch_id is uuid-typed).
@@ -625,15 +630,16 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
         await conn.close()
 
 
-async def _run_tour_safe(tour_req: TourRunRequest) -> None:
+async def _run_tour_safe(tour_req: TourRunRequest) -> dict | None:
     async with _pipeline_semaphore:
         last_exc: Exception | None = None
         for attempt in range(3):
             if attempt > 0:
                 await asyncio.sleep(2 ** attempt)
             try:
-                await _execute_run_tour(tour_req)
-                return
+                # AA-223: surface the executor result so _run_tour_job can read
+                # version_id. Final-fail path below still swallows and returns None.
+                return await _execute_run_tour(tour_req)
             except Exception as exc:
                 last_exc = exc
                 logger.warning("run_tour_attempt_failed", tour_id=tour_req.tour_id,
@@ -658,10 +664,73 @@ async def _run_tour_safe(tour_req: TourRunRequest) -> None:
             logger.error("failed_to_mark_pipeline_failed", error=str(db_exc))
 
 
+async def _run_tour_job(job_id: str, tour_req: TourRunRequest) -> None:
+    """AA-223: pipeline_jobs lifecycle wrapper around the existing executor.
+
+    _run_tour_safe (semaphore + 3x retry) SWALLOWS the final failure and returns
+    None — so a None result means retries were exhausted: mark the job failed.
+    A returned dict means the run completed (version_id may still be None for a
+    soft-fail, which we surface as succeeded + result_version_id NULL).
+    This is a SEPARATE tier from _run_tour_safe's own pipeline_runs fail-mark.
+    """
+    from .jobs_repo import mark_failed, mark_running, mark_succeeded
+
+    await mark_running(job_id)
+    try:
+        result = await _run_tour_safe(tour_req)
+        if result is None:
+            await mark_failed(job_id, "run_tour failed after retries (see logs)")
+        else:
+            await mark_succeeded(job_id, result.get("version_id"), None)
+    except Exception as e:
+        await mark_failed(job_id, repr(e))
+
+
 @router.post("/run-tour")
 async def run_tour(req: TourRunRequest, x_admin_secret: str = Header(None)):
     verify_admin_secret(x_admin_secret)
     return await _execute_run_tour(req)
+
+
+@router.post("/run-tour-async")
+async def run_tour_async(req: TourRunRequest, x_admin_secret: str = Header(None)):
+    """AA-223: 202 + job poll. Returns immediately; _run_tour_job runs the existing
+    executor in the background and tracks lifecycle in shared.pipeline_jobs."""
+    verify_admin_secret(x_admin_secret)
+    from fastapi.responses import JSONResponse
+
+    from .jobs_repo import create_job, find_active_duplicate
+
+    payload = req.model_dump()
+
+    dup = await find_active_duplicate(payload)
+    if dup:
+        return JSONResponse(status_code=202, content={
+            "job_id": dup, "status": "running", "dedup": True,
+            "poll_url": f"/admin/jobs/{dup}",
+        })
+
+    job_id = await create_job(payload, payload.get("tenant_id"))
+    task = asyncio.create_task(_run_tour_job(job_id, req))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    return JSONResponse(status_code=202, content={
+        "job_id": job_id, "status": "queued",
+        "poll_url": f"/admin/jobs/{job_id}",
+    })
+
+
+@router.get("/jobs/{job_id}")
+async def get_run_tour_job(job_id: str, x_admin_secret: str = Header(None)):
+    """AA-223: poll a run-tour job's lifecycle row."""
+    verify_admin_secret(x_admin_secret)
+    from .jobs_repo import get_job
+
+    job = await get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
 
 
 # ── GET /admin/brand-rules ────────────────────────────────────────────────────
