@@ -35,6 +35,9 @@ STRICT RULES:
 6. Do not make factual claims you cannot verify from the source data
 7. seo_meta must NOT contain budget travel language: "hostel", "budget", "public transport",
    "cheap", "backpacker", "dorm". The AA audience is $250k+ — write accordingly.
+8. SEO META LENGTH: seo_meta MUST be 140–155 characters — count carefully, NEVER under 140.
+   It must be one complete sentence ending in a period. If a draft is under 140, expand it
+   with concrete, relevant detail (place, activity, audience) — do NOT pad with filler words.
 
 Output ONLY valid JSON. No preamble, no markdown, no explanation.
 """
@@ -81,6 +84,9 @@ TOUR DATA:
 SEO CONTEXT:
 - Target keywords: {', '.join(seo_keywords[:5])}
 - People also ask: {'; '.join(paa[:3])}
+
+CRITICAL LENGTH REQUIREMENT — seo_meta: aim 145–152 characters, hard band 140–155, a complete
+sentence ending with a period. Under 140 is rejected. Count characters before finalizing.
 
 OUTPUT JSON FORMAT:
 {{
