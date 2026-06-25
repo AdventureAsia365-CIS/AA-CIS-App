@@ -113,6 +113,15 @@ async def lifespan(app: FastAPI):
     if app.state.s2_graph is not None:
         await _recover_stuck_s2_runs(pool, app.state.s2_graph)
 
+    # AA-223: recover run-tour jobs left 'running' by a prior container exit.
+    # Best-effort — a transient DB error here must NOT crash boot (crash-loop risk).
+    try:
+        from api.routers.jobs_repo import sweep_interrupted
+        n = await sweep_interrupted()
+        logger.info("aa223_startup_sweep", interrupted_jobs=n)
+    except Exception as e:
+        logger.warning("aa223_startup_sweep_failed", error=repr(e))
+
     yield
     await pool.close()
     if app.state.s2_pg_conn is not None:
