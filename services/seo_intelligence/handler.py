@@ -72,10 +72,13 @@ async def process_seo(
                 tour_id,
             )
             if row:
+                # AA-235: post-backfill keyword_ideas is [] (legacy was a {kw:vol} map).
+                # Guard so custom_keywords mode keeps search_volumes a dict, not a list.
+                _ki = json.loads(row["keyword_ideas"] or "[]")
                 existing = {
                     "keywords": {
                         "top_keywords": json.loads(row["top_keywords"] or "[]"),
-                        "search_volumes": json.loads(row["keyword_ideas"] or "{}"),
+                        "search_volumes": _ki if isinstance(_ki, dict) else {},
                     }
                 }
                 await cache.set(cache_key, existing, ttl_seconds=86400)
@@ -92,6 +95,13 @@ async def process_seo(
         effective_seed, location_code, location_name, language_code, activity,
     )
 
+    # AA-235: shape guard at the writer — keyword_ideas MUST persist as a JSON array.
+    # A dict/None (e.g. legacy search_volumes map or an empty DFS result) would store a
+    # JSON object that crashes the FE [...spread] and the export-docx [:25] slice.
+    _ideas = seo_data.get("keyword_ideas", [])
+    if not isinstance(_ideas, list):
+        _ideas = []
+
     conn = await asyncpg.connect(get_database_url())
     try:
         repo = SeoContextRepository(conn, tenant_slug="aa_internal")
@@ -100,7 +110,7 @@ async def process_seo(
             "keyword_search": effective_seed,
             # AA-203: persist the AA-197 top-level keyword_ideas list (full-metric:
             # volume/competition/cpc) — NOT keywords.search_volumes (an often-empty dict).
-            "keyword_ideas":  json.dumps(seo_data.get("keyword_ideas", []), default=str),
+            "keyword_ideas":  json.dumps(_ideas, default=str),
             "demographics":   json.dumps(seo_data.get("demographics", {})),
             "trends":         json.dumps(seo_data.get("trends", {})),
             "top_keywords":   json.dumps(seo_data.get("keywords", {}).get("top_keywords", [])),
