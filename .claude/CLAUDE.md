@@ -1,10 +1,14 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 25/06/2026 (S79) | ECS api:332 | CI green | Last commit: 9603444 (develop) / 0b933a0 (main)
+# Updated: 26/06/2026 (S81) | ECS api:335 | CI #589/#590 green | main ffb52d9 (Deploy Prod #131)
 
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway owq9as3wjl)
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel — AA-103 production)
-- ECS task def: api:332 | digest == ECR :latest (sha256:f4d60f6f…) | Deploy Dev green (AA-235)
+- ECS task def: api:335 | digest == ECR :latest (sha256:604f7414…) tag dev-411674e | Deploy Prod #131 | Vercel Ready
+- AA-238 + AA-239 SHIPPED Prod (S81): seo_meta band-guard — forbidden-word pad no longer accepted as
+  in-band (D1: forbidden-free is a HARD band criterion; unified _seo_meta_forbidden ∪ tenant list) +
+  sentence salvage picks longest complete-sentence prefix ≥140 instead of last-period-only/downward
+  (D3); un-fixable cases escalate to _rerepair_meta → manual_check/HITL rather than reaching gold
 - AA-235 SHIPPED Prod (S79): keyword_ideas shape guard — _as_list guarantees a list (dedup 4 inline
   copies → 1 module-level helper), FE Array.isArray guard in DfsCompareSection, writer persists [] on
   empty DFS + custom_keywords read-guard. Backfilled 21 legacy {seed:null} object rows → []. Fixes the
@@ -21,7 +25,7 @@
 - AA-198 [F1] SHIPPED: brand_identity_id resolver + /admin/brand-rules + s1 brand-picker
 - AA-197 [F2] SHIPPED: DataForSEO rebuild — buyer-market location, seed builder, real keyword_ideas
 - "Deploy Prod" workflow = STUB/placeholder (no-op) — real ECS deploy runs via "Deploy Dev" on develop merge (last run #128)
-- AWS: RUNNING after AA-235 deploy (api:332) — STOP ECS/RDS after session (see cost checklist)
+- AWS: RUNNING after AA-238/239 deploy (api:335) — STOP ECS/RDS after session (see cost checklist)
 - Lambda aa-cis-dev-acp-s4-evaluate: DEPLOYED ✅ (AA-49 H-1)
 - Lambda aa-cis-dev-acp-s4-trigger: DEPLOYED ✅ | ALB_INTERNAL_URL: FIXED ✅
 - Lambda aa-cis-dev-acp-s3-campaign-planner: DEPLOYED ✅ (AA-45)
