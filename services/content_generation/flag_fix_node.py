@@ -11,12 +11,13 @@ from shared.secrets import get_database_url
 
 from shared.llm_client.client import LLMClient
 from shared.llm_client.models import LLMRequest
-from .seo_meta_utils import best_meta_candidate, meta_in_band, SEO_META_MIN, SEO_META_MAX
+from .seo_meta_utils import (best_meta_candidate, meta_in_band, SEO_META_FORBIDDEN, SEO_META_MIN, SEO_META_MAX)
 
 logger = structlog.get_logger()
 
 # Failure code → generated dict key (keys match generate_node output, no "aa_" prefix)
 STAGE2_FIX_MAPPING = {
+    "BRAND_SEO_META_VIOLATION": "seo_meta",  # AA-238: forbidden word in meta -> repair
     "SUBTITLE_TRIP_TYPE_MISMATCH":  "subtitle",
     "SUBTITLE_CITY_LIST":           "subtitle",
     "SUBTITLE_WAYPOINT_FORMAT":     "subtitle",
@@ -45,7 +46,10 @@ STAGE2_FIX_MAPPING = {
 
 # AA-204: deterministic SEO length/sentence codes raised by validate_node. These must drive a
 # repair pass independently of the (non-deterministic) brand_audit "flagged" status.
-_DETERMINISTIC_SEO_CODES = {"SEO_META_TOO_LONG", "META_TOO_SHORT", "META_INCOMPLETE_SENTENCE"}
+_DETERMINISTIC_SEO_CODES = {
+    "SEO_META_TOO_LONG", "META_TOO_SHORT", "META_INCOMPLETE_SENTENCE",
+    "BRAND_SEO_META_VIOLATION",  # AA-238: forbidden meta forces a repair pass
+}
 
 
 def _should_fix(state: dict) -> bool:
@@ -80,7 +84,7 @@ Fix ONLY the specified fields. Keep all other fields exactly as-is.
 Preserve all product facts. Return strict JSON only."""
 
 
-def _rerepair_meta(post: str, tour: dict, content: dict, model_tier: str, intent_clue: str = "") -> str:
+def _rerepair_meta(post: str, tour: dict, content: dict, model_tier: str, intent_clue: str = "", forbidden=None) -> str:
     """AA-205 C-full: one bounded re-repair for seo_meta still out of band. Single LLM call,
     no loop. Returns in-band candidate if produced, else the incoming post (graceful)."""
     from .seo_meta_utils import meta_in_band as _in_band, SEO_META_MIN as _MIN, SEO_META_MAX as _MAX
@@ -96,6 +100,8 @@ def _rerepair_meta(post: str, tour: dict, content: dict, model_tier: str, intent
             + "- MUST end with a period and read as one complete sentence "
             + "(no trailing preposition/conjunction).\n"
             + "- Do NOT pad with filler.\n"
+            + (("- Avoid these words entirely: " + ", ".join(sorted(forbidden)) + ".\n")
+               if forbidden else "")
             + (("- Weave in this real search-intent clue naturally (do not quote verbatim): "
                + json.dumps(intent_clue) + "\n") if intent_clue else "")
             + "- Return JSON: {\"seo_meta\": \"...\"}"
@@ -112,7 +118,7 @@ def _rerepair_meta(post: str, tour: dict, content: dict, model_tier: str, intent
             raw = raw.strip()
         candidate = (json.loads(raw).get("seo_meta") or "").strip()
         logger.info("meta_rerepair_done", before_len=len(cur), after_len=len(candidate))
-        return candidate if _in_band(candidate) else post
+        return candidate if _in_band(candidate, forbidden) else post
     except Exception as e:
         logger.warning("meta_rerepair_failed_graceful", error=str(e))
         return post
@@ -207,8 +213,11 @@ Keep all other fields unchanged."""
         _meta_floor_failed = False
         if "seo_meta" in fix_keys:
             _pre_meta = current_content.get("seo_meta", "") or ""
-            _guarded = best_meta_candidate(new_generated.get("seo_meta", "") or "", _pre_meta)
-            if not meta_in_band(_guarded):
+            _post_meta = new_generated.get("seo_meta", "") or ""
+            _tf = {w.lower().strip() for w in (state.get("brand_forbidden_words") or []) if w}
+            _meta_forbidden = set(SEO_META_FORBIDDEN) | _tf  # AA-238/D4 unified
+            _guarded = best_meta_candidate(_post_meta, _pre_meta, forbidden=_meta_forbidden)
+            if not meta_in_band(_guarded, _meta_forbidden):
                 # AA-226: pull a real intent clue from seo context (PAA first, then related)
                 _seo_ctx = state.get("seo", {}) or {}
                 _paa = _seo_ctx.get("people_also_ask", []) or []
@@ -220,12 +229,12 @@ Keep all other fields unchanged."""
                 elif _rel:
                     _clue = _rel[0] if isinstance(_rel[0], str) else str(_rel[0])
                 _guarded = _rerepair_meta(
-                    _guarded, tour, new_generated, state.get("model_tier", "haiku"),
-                    intent_clue=_clue,
+                    _post_meta, tour, new_generated, state.get("model_tier", "haiku"),
+                    intent_clue=_clue, forbidden=_meta_forbidden,
                 )
             # AA-226: if STILL out of band after clue-guided re-repair, do NOT accept an
             # under/over-floor meta into gold — flag for HITL via manual_check.
-            if not meta_in_band(_guarded):
+            if not meta_in_band(_guarded, _meta_forbidden):
                 _meta_floor_failed = True
                 logger.warning("meta_floor_unrecoverable",
                                final_len=len(_guarded), tour=current_content.get("name"))
