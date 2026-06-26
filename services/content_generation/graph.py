@@ -11,7 +11,7 @@ from .prompts import SYSTEM_PROMPT, build_rewrite_prompt
 from .brand_audit_node import brand_audit_node
 from .flag_fix_node import flag_fix_node
 from .judge_node import judge_node
-from .seo_meta_utils import SEO_META_MIN, SEO_META_MAX, meta_complete_sentence
+from .seo_meta_utils import SEO_META_MIN, SEO_META_MAX, meta_complete_sentence, SEO_META_FORBIDDEN
 
 logger = structlog.get_logger()
 
@@ -357,10 +357,8 @@ def validate_node(state: ContentState) -> ContentState:
             score -= 0.5
 
     # seo_meta must not contain budget/accommodation language (AA audience = $250k+)
-    _seo_meta_forbidden = [
-        "hostel", "budget", "public transport", "cheap", "backpacker", "dorm",
-    ]
-    seo_meta_lower = (generated.get("seo_meta") or "").lower()
+    _seo_meta_forbidden = SEO_META_FORBIDDEN  # AA-238/D4: canonical deny-list
+    seo_meta_lower = (generated.get("seo_meta") or "").lower().replace("-", " ")  # AA-238: catch hyphen variants
     for term in _seo_meta_forbidden:
         if term in seo_meta_lower:
             issues.append(f"Budget language in seo_meta: '{term}'")
