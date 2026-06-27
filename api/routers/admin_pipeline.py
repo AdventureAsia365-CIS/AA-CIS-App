@@ -710,6 +710,157 @@ async def _run_tour_job(job_id: str, tour_req: TourRunRequest) -> None:
         await mark_failed(job_id, repr(e))
 
 
+# ── AA-234 Phần A: re-validate a human-edited generated_content version ────────
+async def _revalidate_tour(content_id: str) -> dict:
+    """Re-validate a single human-edited generated_content version in place.
+
+    Reads the edited content + its tour + seo_context (by tour_id, same keywords — NO
+    DFS refetch) + brand rule, runs build_revalidation_graph, then overwrites the
+    version's quality_scores rows and sets generated_content.revalidate_passed.
+    """
+    from services.content_generation.graph import build_revalidation_graph
+
+    conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+    try:
+        gc = await conn.fetchrow("""
+            SELECT gc.id, gc.tour_id, gc.tenant_id, gc.version_num,
+                   gc.aa_name, gc.aa_subtitle, gc.aa_summary, gc.aa_description,
+                   gc.aa_highlights, gc.aa_itineraries, gc.mobile_card_text,
+                   gc.seo_title, gc.seo_meta, gc.seo_keywords_used, gc.og_tags,
+                   gc.brand_rules_version, gc.metadata,
+                   rt.src_name, rt.country, rt.duration
+            FROM silver_aa_internal.generated_content gc
+            JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = gc.tour_id
+            WHERE gc.id = $1::uuid
+        """, content_id)
+        if not gc:
+            raise ValueError(f"generated_content {content_id} not found")
+
+        tenant_uuid = str(gc["tenant_id"])
+        import json as _j_meta
+        _meta = gc["metadata"]
+        if isinstance(_meta, str):
+            _meta = _j_meta.loads(_meta) if _meta else {}
+        _brand_name = (_meta or {}).get("brand_name")
+        brand_row = await _resolve_brand_rule(conn, tenant_uuid, None, _brand_name)
+        _br = dict(brand_row) if brand_row else {}
+
+        seo_row = await conn.fetchrow("""
+            SELECT keyword_search, provider, keyword_ideas, top_keywords
+            FROM silver_aa_internal.seo_context
+            WHERE tour_id = $1::uuid
+            ORDER BY fetched_at DESC LIMIT 1
+        """, gc["tour_id"])
+        seo = dict(seo_row) if seo_row else {}
+
+        generated = {
+            "name":         gc["aa_name"],
+            "subtitle":     gc["aa_subtitle"],
+            "summary":      gc["aa_summary"],
+            "description":  gc["aa_description"],
+            "highlights":   gc["aa_highlights"] or [],
+            "itineraries":  gc["aa_itineraries"],
+            "mobile_card_text": gc["mobile_card_text"],
+            "seo_title":    gc["seo_title"],
+            "seo_meta":     gc["seo_meta"],
+            "seo_keywords_used": gc["seo_keywords_used"] or [],
+            "og_tags":      gc["og_tags"] or {},
+        }
+        tour = {"name": gc["src_name"], "country": gc["country"], "duration": gc["duration"]}
+
+        initial_state = {
+            "tour": tour, "seo": seo, "generated": generated,
+            "model_tier": "haiku", "is_tenant_rewrite": False, "few_shots": [],
+            "quality_score": 0.0, "retry_count": 0, "feedback": "", "error": "",
+            "cost_usd": 0.0, "model_used": "",
+            "brand_system_prompt":  _br.get("system_prompt", ""),
+            "brand_style_guide":    _br.get("style_guide", ""),
+            "brand_forbidden_words": _br.get("forbidden_words", []),
+            "rewrite_language":     "en-US",
+            "brand_core_idea":        _br.get("core_idea", ""),
+            "brand_customer_segment": _br.get("customer_segment", ""),
+            "brand_customer_mindset": _br.get("customer_mindset", ""),
+            "brand_voice_examples":   _br.get("voice_examples", []),
+            "brand_good_examples":    _br.get("good_examples", ""),
+            "subtitle_focus": "standard", "seo_mode": "dataforseo",
+            "brand_audit_status": "", "brand_audit_codes": [], "brand_audit_issues": [],
+            "brand_audit_fields": [], "lessons_extracted": [],
+            "fix_pass_applied": False, "fix_pass_fields": [],
+        }
+
+        graph = build_revalidation_graph()
+
+        def _run():
+            import asyncio as _a
+            loop = _a.new_event_loop()
+            _a.set_event_loop(loop)
+            try:
+                return graph.invoke(initial_state)
+            finally:
+                loop.close()
+
+        result = await asyncio.get_event_loop().run_in_executor(None, _run)
+
+        passed = bool(result.get("revalidate_passed", False))
+        q_score = float(result.get("quality_score", 0.0))
+        _sub = result.get("sub_scores", {})
+        _fc = result.get("failure_codes", [])
+
+        await conn.execute(
+            "DELETE FROM silver_aa_internal.quality_scores WHERE generated_content_id = $1::uuid",
+            content_id)
+        await conn.execute("""
+            INSERT INTO silver_aa_internal.quality_scores (
+                generated_content_id, tour_id, tenant_id,
+                score_overall, score_brand, score_seo, score_structure, score_quality,
+                passed_count, failed_count, failure_codes,
+                brand_audit_status, brand_audit_codes, brand_audit_issues,
+                brand_audit_fields, lessons_extracted, validator_fn_version, evaluated_at
+            ) VALUES (
+                $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11::jsonb,
+                $12, $13::jsonb, $14::jsonb, $15::jsonb, $16::jsonb, 'v2-revalidate', NOW()
+            )
+        """,
+            content_id, str(gc["tour_id"]), tenant_uuid, q_score,
+            float(_sub.get("brand", 0.0)), float(_sub.get("seo", 0.0)),
+            float(_sub.get("structure", 0.0)), float(_sub.get("quality", 0.0)),
+            int(result.get("passed_count", 0)), int(result.get("failed_count", 0)),
+            json.dumps(_fc), result.get("brand_audit_status", ""),
+            json.dumps(result.get("brand_audit_codes", [])),
+            json.dumps(result.get("brand_audit_issues", [])),
+            json.dumps(result.get("brand_audit_fields", [])),
+            json.dumps(result.get("lessons_extracted", [])),
+        )
+        await conn.execute(
+            "UPDATE silver_aa_internal.generated_content SET revalidate_passed = $1 WHERE id = $2::uuid",
+            passed, content_id)
+
+        logger.info("revalidate_tour_done", content_id=content_id,
+                    revalidate_passed=passed, quality_score=q_score,
+                    brand_audit_status=result.get("brand_audit_status", ""))
+        return {
+            "content_id": content_id, "revalidate_passed": passed,
+            "quality_score": q_score, "brand_audit_status": result.get("brand_audit_status", ""),
+            "failure_codes": _fc,
+        }
+    finally:
+        await conn.close()
+
+
+async def _revalidate_job(job_id: str, content_id: str) -> None:
+    """AA-234: pipeline_jobs lifecycle wrapper around _revalidate_tour."""
+    from .jobs_repo import mark_failed, mark_running, mark_succeeded
+    await mark_running(job_id)
+    try:
+        result = await _revalidate_tour(content_id)
+        await mark_succeeded(job_id, content_id, None)
+        logger.info("revalidate_job_done", job_id=job_id,
+                    revalidate_passed=result["revalidate_passed"])
+    except Exception as e:
+        await mark_failed(job_id, repr(e))
+
+
+
 @router.post("/run-tour")
 async def run_tour(req: TourRunRequest, x_admin_secret: str = Header(None)):
     verify_admin_secret(x_admin_secret)
@@ -2631,10 +2782,11 @@ async def update_raw_tour_fields(
 # ── PATCH /admin/tours/{tour_id}/generated/{content_id} ──────────────────────
 
 _ALLOWED_GC_FIELDS = {
-    "aa_name", "aa_subtitle", "aa_summary", "aa_highlights",
-    "aa_itineraries", "seo_title", "seo_meta", "seo_keywords_used",
+    "aa_name", "aa_subtitle", "aa_summary", "aa_description", "aa_highlights",
+    "aa_itineraries", "mobile_card_text", "seo_title", "seo_meta",
+    "seo_keywords_used", "og_tags",
 }
-_JSONB_GC_FIELDS = {"aa_highlights", "seo_keywords_used"}
+_JSONB_GC_FIELDS = {"aa_highlights", "seo_keywords_used", "og_tags"}
 
 
 @router.patch("/tours/{tour_id}/generated/{content_id}")
@@ -2657,22 +2809,57 @@ async def update_generated_content_fields(
     values = []
     for f in fields:
         v = body[f]
-        values.append(_j_gc.dumps(v) if f in _JSONB_GC_FIELDS and isinstance(v, list) else v)
+        values.append(_j_gc.dumps(v) if f in _JSONB_GC_FIELDS and isinstance(v, (list, dict)) else v)
 
     set_clause = ", ".join(
         f"{f} = ${i+1}::jsonb" if f in _JSONB_GC_FIELDS else f"{f} = ${i+1}"
         for i, f in enumerate(fields)
     )
+    # AA-234: a human edit invalidates any prior re-validation. Mark human_edited + audit,
+    # and reset revalidate_passed to NULL so the approve gate forces a fresh re-validation.
+    reviewer = request.headers.get("x-reviewer-id") or "admin"
+    audit_sql = (", human_edited = true, reviewed_by = $%d, edited_at = now(),"
+                 " edit_diff = $%d::jsonb, revalidate_passed = NULL"
+                 % (len(fields) + 1, len(fields) + 2))
     pool = request.app.state.pool
     async with pool.acquire() as conn:
         updated = await conn.fetchval(
-            f"UPDATE silver_aa_internal.generated_content SET {set_clause}"
-            f" WHERE id = ${len(fields)+1}::uuid AND tour_id = ${len(fields)+2}::uuid RETURNING id",
-            *values, content_id, tour_id,
+            f"UPDATE silver_aa_internal.generated_content SET {set_clause}{audit_sql}"
+            f" WHERE id = ${len(fields)+3}::uuid AND tour_id = ${len(fields)+4}::uuid RETURNING id",
+            *values, reviewer, _j_gc.dumps({"fields": fields}), content_id, tour_id,
         )
     if not updated:
         raise HTTPException(status_code=404, detail=f"Content {content_id} not found")
-    return {"content_id": content_id, "updated": fields}
+    return {"content_id": content_id, "updated": fields, "human_edited": True,
+            "revalidate_required": True}
+
+
+@router.post("/tours/{tour_id}/generated/{content_id}/revalidate")
+async def revalidate_generated_content(
+    tour_id: str,
+    content_id: str,
+    x_admin_secret: str = Header(None),
+):
+    """AA-234: async re-validate a human-edited version (202 + job poll).
+
+    Runs build_revalidation_graph (validate+judge+brand_audit, NO flag_fix) in the
+    background via the pipeline_jobs pattern, overwrites the version's scores, and
+    sets revalidate_passed. Poll GET /admin/jobs/{job_id} for the outcome.
+    """
+    verify_admin_secret(x_admin_secret)
+    from fastapi.responses import JSONResponse
+    from .jobs_repo import create_job
+
+    job_id = await create_job(
+        {"job_type": "revalidate", "content_id": content_id, "tour_id": tour_id},
+        "00000000-0000-0000-0000-000000000001",
+    )
+    task = asyncio.create_task(_revalidate_job(job_id, content_id))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return JSONResponse(status_code=202, content={
+        "job_id": job_id, "status": "queued", "poll_url": f"/admin/jobs/{job_id}",
+    })
 
 
 # ── GET /admin/metrics ────────────────────────────────────────────────────────

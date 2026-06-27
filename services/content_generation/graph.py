@@ -516,6 +516,50 @@ def revalidate_node(state: ContentState) -> ContentState:
         "revalidate_passed":  passed,
     }
 
+def human_edit_gate_node(state: ContentState) -> ContentState:
+    """AA-234: gate node for the re-validation graph (human-edited content).
+
+    Unlike revalidate_node (which only verifies an automated flag_fix pass and no-ops when
+    fix_pass_applied is False), this runs on content a reviewer edited by hand. flag_fix is
+    deliberately NOT in this graph — the human edit is final, the system only re-scores and
+    gates. Pass = validate+judge score clears MIN_QUALITY AND brand_audit isn't manual_check.
+    On fail the reviewer must fix and re-validate again before approve is allowed.
+    """
+    score = state.get("quality_score", 0.0)
+    audit_status = state.get("brand_audit_status", "")
+    passed = score >= MIN_QUALITY and audit_status != "manual_check"
+    logger.info("human_edit_revalidate_done", passed=passed, score=score,
+                brand_audit_status=audit_status,
+                failure_codes=state.get("failure_codes", []))
+    return {
+        **state,
+        "revalidate_ran":    True,
+        "revalidate_passed": passed,
+    }
+
+
+def build_revalidation_graph() -> StateGraph:
+    """AA-234: re-score a human-edited generated_content version IN PLACE.
+
+    validate -> judge -> brand_audit -> human_edit_gate -> END. NO generate (content is the
+    reviewer's edit, not LLM-generated), NO retry loop, NO flag_fix (the human edit is final).
+    Compiled over the SAME ContentState so no field is stripped from the final state.
+    """
+    graph = StateGraph(ContentState)
+    graph.add_node("validate", validate_node)
+    graph.add_node("llm_judge", judge_node)
+    graph.add_node("brand_audit", brand_audit_node)
+    graph.add_node("human_edit_gate", human_edit_gate_node)
+
+    graph.set_entry_point("validate")
+    graph.add_edge("validate", "llm_judge")
+    graph.add_edge("llm_judge", "brand_audit")
+    graph.add_edge("brand_audit", "human_edit_gate")
+    graph.add_edge("human_edit_gate", END)
+
+    return graph.compile()
+
+
 def build_graph() -> StateGraph:
     graph = StateGraph(ContentState)
 

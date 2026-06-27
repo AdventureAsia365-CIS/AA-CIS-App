@@ -154,7 +154,8 @@ async def test_approve_null_token_exports_once_then_409_on_second_call():
     # 1st approve: claim succeeds (pending row, NULL token). 2nd approve: claim returns nothing.
     conn.fetchrow = AsyncMock(side_effect=[
         {"generated_content_id": GCID, "step_fn_task_token": None},
-        None,
+        None,    # 2nd approve: claim returns nothing (row already approved)
+        None,    # AA-234: gate-disambiguation query → not gate-blocked → "already processed"
     ])
     conn.execute = AsyncMock(return_value="UPDATE 1")
     req = _make_request(_make_pool(conn))

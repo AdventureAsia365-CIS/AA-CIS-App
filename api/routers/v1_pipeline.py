@@ -404,14 +404,37 @@ async def approve_review(
 
     async with pool.acquire() as conn:
         # Atomic claim: flip pending→approved in one statement. Only the first caller wins.
+        # AA-234: the claim ALSO gates on the linked version — a human-edited version may be
+        # claimed ONLY after a passing re-validation. The gate lives in the UPDATE WHERE (one
+        # query, no extra round-trip): block when human_edited AND revalidate_passed is not TRUE.
         claimed = await conn.fetchrow("""
-            UPDATE silver_aa_internal.review_queue
+            UPDATE silver_aa_internal.review_queue rq
             SET review_status = 'approved', reviewed_at = NOW()
-            WHERE id = $1::uuid AND tenant_id = $2::uuid AND review_status = 'pending'
-            RETURNING generated_content_id, step_fn_task_token
+            FROM silver_aa_internal.generated_content gc
+            WHERE rq.id = $1::uuid AND rq.tenant_id = $2::uuid
+              AND rq.review_status = 'pending'
+              AND gc.id = rq.generated_content_id
+              AND NOT (COALESCE(gc.human_edited, false) AND gc.revalidate_passed IS NOT TRUE)
+            RETURNING rq.generated_content_id, rq.step_fn_task_token
         """, review_id, tenant_id)
 
         if not claimed:
+            # Disambiguate: a still-pending row that failed to claim was blocked by the
+            # re-validation gate; otherwise it was already processed (or not found).
+            blocked = await conn.fetchrow("""
+                SELECT 1
+                FROM silver_aa_internal.review_queue rq
+                JOIN silver_aa_internal.generated_content gc ON gc.id = rq.generated_content_id
+                WHERE rq.id = $1::uuid AND rq.tenant_id = $2::uuid
+                  AND rq.review_status = 'pending'
+                  AND gc.human_edited = true AND gc.revalidate_passed IS NOT TRUE
+            """, review_id, tenant_id)
+            if blocked:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Human-edited content must pass re-validation before approve "
+                           "(revalidate_passed is not TRUE). Run re-validate and retry.",
+                )
             raise HTTPException(status_code=409, detail="Review already processed or not found")
 
         generated_content_id = str(claimed["generated_content_id"])
