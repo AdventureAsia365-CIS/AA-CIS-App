@@ -19,11 +19,11 @@ from services.content_generation.graph import (
 )
 
 
-def _state(score, audit_status=""):
+def _state(score, audit_status="", failure_codes=None):
     return {
         "quality_score": score,
         "brand_audit_status": audit_status,
-        "failure_codes": [],
+        "failure_codes": failure_codes or [],
     }
 
 
@@ -77,6 +77,29 @@ def test_revalidation_graph_has_no_flag_fix_or_generate():
     assert "llm_judge" in nodes
     assert "brand_audit" in nodes
     assert "human_edit_gate" in nodes
+
+
+def test_gate_hard_block_code_fails_despite_high_score():
+    # AA-234: a hard-block rule violation (meta under floor) must fail the gate even when
+    # the overall score clears MIN_QUALITY — the exact bug #1 the gate closes.
+    out = human_edit_gate_node(_state(9.0, "pass", ["META_TOO_SHORT"]))
+    assert out["revalidate_passed"] is False
+
+
+def test_gate_forbidden_word_hard_blocks():
+    out = human_edit_gate_node(_state(8.5, "flagged", ["FORBIDDEN_WORD"]))
+    assert out["revalidate_passed"] is False
+
+
+def test_gate_soft_code_does_not_block():
+    # HIGHLIGHTS_NOT_LIST is a soft/format code — surfaced but must NOT block approve.
+    out = human_edit_gate_node(_state(8.0, "pass", ["HIGHLIGHTS_NOT_LIST"]))
+    assert out["revalidate_passed"] is True
+
+
+def test_gate_mixed_codes_hard_wins():
+    out = human_edit_gate_node(_state(9.0, "pass", ["HIGHLIGHTS_NOT_LIST", "META_TOO_SHORT"]))
+    assert out["revalidate_passed"] is False
 
 
 if __name__ == "__main__":
