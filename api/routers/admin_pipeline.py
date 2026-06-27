@@ -648,6 +648,7 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
             "brand_audit_issues": result.get("brand_audit_issues", []),
             "fix_pass_applied":   result.get("fix_pass_applied", False),
             "fix_pass_fields":    result.get("fix_pass_fields", []),
+            "fallback_used":    result.get("fallback_used", False),  # AA-233
         }
     finally:
         await conn.close()
