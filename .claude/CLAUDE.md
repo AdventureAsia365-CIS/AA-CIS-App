@@ -1,10 +1,17 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 26/06/2026 (S81) | ECS api:335 | CI #589/#590 green | main ffb52d9 (Deploy Prod #131)
+# Updated: 27/06/2026 (S82) | ECS api:338 | CI #597/#598 green | main 037c579 (Deploy Prod #134)
 
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway owq9as3wjl)
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel — AA-103 production)
-- ECS task def: api:335 | digest == ECR :latest (sha256:604f7414…) tag dev-411674e | Deploy Prod #131 | Vercel Ready
+- ECS task def: api:338 | digest == ECR :latest (sha256:e369915b…) tag dev-f63f357 | Deploy Prod #134 | Vercel Ready
+- AA-234 Phần A SHIPPED Prod (S82): re-validate human-edited review content before approve. Reviewer
+  edits a version in place (full fields, no new version) → async re-validate (build_revalidation_graph:
+  validate→judge→brand_audit→human_edit_gate, NO flag_fix) → approve gated on revalidate_passed. Hard-block
+  codes (META_TOO_SHORT/FORBIDDEN_WORD/etc) fail the gate even at high score. Migration 072. Phần B (AA-240)
+  + Phần C (AA-241) still pending — AA-234 In Progress.
+- AA-233 SHIPPED Prod (S82): _execute_run_tour return dict surfaces fallback_used (was None; DB correct since AA-224)
+- S82 backlog cleanup: AA-221 canceled (dup AA-223), AA-236 canceled (dead Lambda path), AA-160 deferred
 - AA-238 + AA-239 SHIPPED Prod (S81): seo_meta band-guard — forbidden-word pad no longer accepted as
   in-band (D1: forbidden-free is a HARD band criterion; unified _seo_meta_forbidden ∪ tenant list) +
   sentence salvage picks longest complete-sentence prefix ≥140 instead of last-period-only/downward
@@ -25,7 +32,7 @@
 - AA-198 [F1] SHIPPED: brand_identity_id resolver + /admin/brand-rules + s1 brand-picker
 - AA-197 [F2] SHIPPED: DataForSEO rebuild — buyer-market location, seed builder, real keyword_ideas
 - "Deploy Prod" workflow = STUB/placeholder (no-op) — real ECS deploy runs via "Deploy Dev" on develop merge (last run #128)
-- AWS: RUNNING after AA-238/239 deploy (api:335) — STOP ECS/RDS after session (see cost checklist)
+- AWS: RUNNING after S82 deploy (api:338) — STOP ECS/RDS/NAT after session (cis-stop)
 - Lambda aa-cis-dev-acp-s4-evaluate: DEPLOYED ✅ (AA-49 H-1)
 - Lambda aa-cis-dev-acp-s4-trigger: DEPLOYED ✅ | ALB_INTERNAL_URL: FIXED ✅
 - Lambda aa-cis-dev-acp-s3-campaign-planner: DEPLOYED ✅ (AA-45)
