@@ -103,6 +103,32 @@ _FAILURE_MAP: dict[str, tuple[str, float]] = {
     "DFS_INTENT_UNDERUSED":      ("seo",       1.0),
 }
 
+# AA-240: canonical validate-node forbidden list (single source; validate_node + review-queue
+# handler both consume so the re-derived per-field reason can never drift from what fired).
+_VALIDATE_FORBIDDEN = [
+    "curated", "pristine", "refined", "tailored", "bespoke",
+    "stunning", "breathtaking", "magical", "paradise",
+    "cheap", "deal", "book now", "instant booking", "discount",
+]
+
+# AA-240: failure code -> editable gc field (column) so the review UI marks which field failed.
+# Multi-field codes (FORBIDDEN_WORD, MISSING_FIELD) are resolved by re-scanning live content in
+# the handler, so they are intentionally NOT in this 1:1 map.
+_CODE_FIELD_MAP = {
+    "SUBTITLE_GENERIC":          "aa_subtitle",
+    "SUMMARY_OFF_BRAND":         "aa_summary",
+    "HIGHLIGHTS_NOT_LIST":       "aa_highlights",
+    "HIGHLIGHTS_TOO_FEW":        "aa_highlights",
+    "HIGHLIGHTS_TOO_GENERIC":    "aa_highlights",
+    "ITINERARY_STRUCTURE_WEAK":  "aa_itineraries",
+    "SEO_TITLE_TOO_LONG":        "seo_title",
+    "SEO_META_TOO_LONG":         "seo_meta",
+    "META_TOO_SHORT":            "seo_meta",
+    "META_INCOMPLETE_SENTENCE":  "seo_meta",
+    "BRAND_SEO_META_VIOLATION":  "seo_meta",
+    "DFS_INTENT_UNDERUSED":      "seo_meta",
+}
+
 def _build_brand_diff_block(state: ContentState) -> str:
     """AA-202: build the brand-differentiation system block from brand_* state fields.
 
@@ -338,11 +364,7 @@ def validate_node(state: ContentState) -> ContentState:
             score -= 1.0
 
     # Forbidden words — AA core list + tenant custom list
-    forbidden = [
-        "curated", "pristine", "refined", "tailored", "bespoke",
-        "stunning", "breathtaking", "magical", "paradise",
-        "cheap", "deal", "book now", "instant booking", "discount",
-    ]
+    forbidden = list(_VALIDATE_FORBIDDEN)  # AA-240: shared const
     # P3-S3: Merge tenant forbidden_words (lowercase, deduplicated)
     tenant_forbidden = [w.lower().strip() for w in (state.get("brand_forbidden_words") or []) if w]
     all_forbidden = list(dict.fromkeys(forbidden + tenant_forbidden))  # preserve order, dedupe
