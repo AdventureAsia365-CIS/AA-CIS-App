@@ -1,11 +1,11 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 29/06/2026 (S83) | ECS api:339 | main 1eba1da (Deploy Prod #136)
+# Updated: 29/06/2026 (S84) | ECS api:340 | main 38caa5f (Deploy Prod #137) | Vercel Prod Ready
 
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway owq9as3wjl)
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel — AA-103 production)
-- ECS task def: api:339 | digest == ECR :latest (sha256:bd9463f7…) tag dev-dba71b7 | Deploy Prod #136 | Vercel Ready
-- AA-240 [AA-234 Phần B] SHIPPED Prod (S83): review-queue surfaces per-field failure reasons. GET
+- ECS task def: api:340 (FE-only S84, ECS khong dung — :340 tu deploy khac, can xac minh) | Deploy Prod #137 | main 38caa5f | Vercel Prod 38caa5f Ready
+- AA-241 [AA-234 Phần C] SHIPPED Prod (S84): Review Queue UI full 11-field edit + fail markers + revalidate gate + reviewer audit. AA-234 epic DONE. AA-242 (Regenerate) tach doc lap Backlog.
   /admin/review-queue now returns full editable gc fields + audit columns (human_edited/reviewed_by/
   edited_at/revalidate_passed) + a `failures` array re-derived on CURRENT content via
   _derive_field_failures (shared _VALIDATE_FORBIDDEN/_CODE_FIELD_MAP consts from graph.py + seo_meta_utils
@@ -37,7 +37,7 @@
 - AA-198 [F1] SHIPPED: brand_identity_id resolver + /admin/brand-rules + s1 brand-picker
 - AA-197 [F2] SHIPPED: DataForSEO rebuild — buyer-market location, seed builder, real keyword_ideas
 - "Deploy Prod" workflow = STUB/placeholder (no-op) — real ECS deploy runs via "Deploy Dev" on develop merge (last run #128)
-- AWS: RUNNING after S83 deploy (api:339) — KEEP running for S84 (do NOT cis-stop this session)
+- AWS: STOPPED after S84 (cis-stop done — ECS desired=0, RDS stop, NAT stop). cis-start can o dau S85.
 - Lambda aa-cis-dev-acp-s4-evaluate: DEPLOYED ✅ (AA-49 H-1)
 - Lambda aa-cis-dev-acp-s4-trigger: DEPLOYED ✅ | ALB_INTERNAL_URL: FIXED ✅
 - Lambda aa-cis-dev-acp-s3-campaign-planner: DEPLOYED ✅ (AA-45)
