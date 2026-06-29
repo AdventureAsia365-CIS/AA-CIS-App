@@ -1,124 +1,397 @@
 "use client";
-// app/admin/review/page.tsx — HITL review queue under admin layout
+// app/admin/review/page.tsx — HITL review queue (AA-234 Part C / AA-241)
+// Consumes AA-240 GET /admin/review-queue (full fields + failures[] + 072 audit).
+// Lifecycle: edit → PATCH (sets human_edited, resets revalidate_passed=NULL)
+//            → POST revalidate (202 + job) → poll /jobs → Approve gated on revalidate_passed===true.
 
-import { useState, useEffect } from "react";
-import { CheckCircle, XCircle, RotateCcw, ChevronDown, ChevronUp, Filter, Edit3, Flag } from "lucide-react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import {
+  CheckCircle, XCircle, RotateCcw, ChevronDown, ChevronUp, Filter,
+  Edit3, AlertTriangle, Save, ShieldCheck, Loader2, X,
+} from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
-import { A, serif, mono, sans, Card, SLabel, Btn, LoadingScreen } from "../_components/adminUi";
+import { A, serif, mono, sans, Card, Btn, LoadingScreen } from "../_components/adminUi";
 
-function getToken() {
-  if (typeof document === "undefined") return null;
-  const m = document.cookie.match(/cis_api_token=([^;]+)/);
-  return m ? decodeURIComponent(m[1]) : null;
+// ── Reviewer identity (temporary until AA-232 per-user auth) ───────────────────
+// Stored once in localStorage, sent as x-reviewer-id; BFF forwards it; backend
+// writes generated_content.reviewed_by. Empty → backend falls back to "admin".
+function getReviewerId(): string {
+  if (typeof window === "undefined") return "";
+  let id = window.localStorage.getItem("cis_reviewer_id") || "";
+  if (!id) {
+    const entered = window.prompt("Reviewer name (for the edit audit trail):", "");
+    id = (entered || "").trim();
+    if (id) window.localStorage.setItem("cis_reviewer_id", id);
+  }
+  return id;
 }
 
-function mapApiToReview(r: any) {
+function authHeaders(json = false): Record<string, string> {
+  const h: Record<string, string> = {};
+  const rid = (typeof window !== "undefined" && window.localStorage.getItem("cis_reviewer_id")) || "";
+  if (rid) h["x-reviewer-id"] = rid;
+  if (json) h["Content-Type"] = "application/json";
+  return h;
+}
+
+// ── Field model ───────────────────────────────────────────────────────────────
+// Mirrors backend _ALLOWED_GC_FIELDS (11). og_tags is read-only in v1 (data empty).
+const TEXT_FIELDS = ["aa_name", "aa_subtitle", "seo_title"] as const;       // single-line
+const AREA_FIELDS = ["aa_summary", "aa_description", "mobile_card_text", "seo_meta"] as const; // textarea
+const LIST_FIELDS = ["aa_highlights", "seo_keywords_used"] as const;        // newline = item
+// aa_itineraries → raw textarea + Day preview. og_tags → read-only.
+
+const FIELD_LABEL: Record<string, string> = {
+  aa_name: "Name",
+  aa_subtitle: "Subtitle",
+  aa_summary: "Summary",
+  aa_description: "Description",
+  aa_highlights: "Highlights",
+  aa_itineraries: "Itinerary",
+  mobile_card_text: "Mobile card text",
+  seo_title: "SEO title",
+  seo_meta: "SEO meta",
+  seo_keywords_used: "SEO keywords",
+  og_tags: "OG tags",
+};
+
+const SEO_META_MIN = 140;
+const SEO_META_MAX = 155;
+
+function asList(v: any): string[] {
+  if (Array.isArray(v)) return v.map(String);
+  if (typeof v === "string") {
+    try { const p = JSON.parse(v); return Array.isArray(p) ? p.map(String) : []; }
+    catch { return v.trim() ? [v] : []; }
+  }
+  return [];
+}
+
+// Build the editable draft from a raw API row.
+function toDraft(r: any) {
   return {
-    id:      r.id,
-    name:    r.aa_name || r.src_name || "Unknown",
-    country: r.country || "Unknown",
-    score:   parseFloat(r.score_overall || "0"),
-    date:    r.ingest_at ? new Date(r.ingest_at).toLocaleDateString() : "",
-    issues:  (() => { try { return JSON.parse(r.failure_summary || "[]"); } catch { return []; } })(),
-    original:  { name: r.src_name || "", summary: r.src_summary || "", seo_title: "", seo_meta: "" },
-    generated: { name: r.aa_name || "", subtitle: r.aa_subtitle || "", summary: r.aa_summary || "", seo_title: r.seo_title || "", seo_meta: r.seo_meta || "" },
-    seo_checks: [
-      { label: "Title ≤60 chars",   status: (r.seo_title?.length <= 60 ? "pass" : "fail"), value: `${r.seo_title?.length || 0} chars` },
-      { label: "Meta 80–160 chars", status: (r.seo_meta?.length  >= 80 ? "pass" : "fail"), value: `${r.seo_meta?.length  || 0} chars` },
-    ],
+    aa_name: r.aa_name || "",
+    aa_subtitle: r.aa_subtitle || "",
+    aa_summary: r.aa_summary || "",
+    aa_description: r.aa_description || "",
+    aa_highlights: asList(r.aa_highlights).join("\n"),
+    aa_itineraries: r.aa_itineraries || "",
+    mobile_card_text: r.mobile_card_text || "",
+    seo_title: r.seo_title || "",
+    seo_meta: r.seo_meta || "",
+    seo_keywords_used: asList(r.seo_keywords_used).join("\n"),
+  } as Record<string, string>;
+}
+
+// Convert a draft field back to the PATCH wire value (lists → arrays).
+function draftToPatchValue(field: string, raw: string): any {
+  if ((LIST_FIELDS as readonly string[]).includes(field)) {
+    return raw.split("\n").map(s => s.trim()).filter(Boolean);
+  }
+  return raw;
+}
+
+// ── Per-field failure index ───────────────────────────────────────────────────
+// failures: [{field, code, reason}] from AA-240, re-derived live on current content.
+function failureMap(failures: any[]): Record<string, { code: string; reason: string }[]> {
+  const m: Record<string, { code: string; reason: string }[]> = {};
+  for (const f of failures || []) {
+    if (!f?.field) continue;
+    (m[f.field] ||= []).push({ code: f.code, reason: f.reason });
+  }
+  return m;
+}
+
+// ── Validation-state pill ─────────────────────────────────────────────────────
+function RevalidatePill({ state }: { state: boolean | null }) {
+  const cfg = state === true
+    ? { bg: A.greenSoft, color: A.green, label: "Re-validation passed", Icon: ShieldCheck }
+    : state === false
+      ? { bg: A.redSoft, color: A.red, label: "Re-validation failed", Icon: XCircle }
+      : { bg: "#FEF3C7", color: "#92400E", label: "Needs re-validation", Icon: AlertTriangle };
+  const { Icon } = cfg;
+  return (
+    <span style={{
+      display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 600,
+      padding: "3px 9px", borderRadius: 20, background: cfg.bg, color: cfg.color,
+    }}>
+      <Icon size={11} /> {cfg.label}
+    </span>
+  );
+}
+
+// ── Field label + inline failure reasons ──────────────────────────────────────
+function FieldLabel({ field, fails }: { field: string; fails?: { code: string; reason: string }[] }) {
+  const failed = !!fails?.length;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4, flexWrap: "wrap" }}>
+      <span style={{
+        fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.1em",
+        color: failed ? A.red : "#6B7280",
+      }}>{FIELD_LABEL[field] || field}</span>
+      {failed && fails!.map((f, i) => (
+        <span key={i} title={f.code} style={{
+          fontSize: 10, color: A.red, background: A.redSoft, border: "1px solid #FECACA",
+          borderRadius: 4, padding: "1px 6px",
+        }}>{f.reason}</span>
+      ))}
+    </div>
+  );
+}
+
+function fieldBoxStyle(failed: boolean): React.CSSProperties {
+  return {
+    width: "100%", boxSizing: "border-box", fontFamily: sans, fontSize: 13, color: A.body,
+    padding: "8px 10px", borderRadius: 6, background: A.card, lineHeight: 1.6,
+    border: `1px solid ${failed ? "#FCA5A5" : A.line}`,
+    outline: "none", resize: "vertical" as const,
   };
 }
 
-const SEO_STYLE: Record<string, { bg: string; color: string }> = {
-  pass: { bg: "#D1FAE5", color: "#065F46" },
-  warn: { bg: "#FEF3C7", color: "#92400E" },
-  fail: { bg: "#FEE2E2", color: "#991B1B" },
-};
-
-function Field({ label, children, green = false }: { label: string; children: React.ReactNode; green?: boolean }) {
+// ── Itinerary preview (read-only, highlights "Day N" headers) ──────────────────
+function ItineraryPreview({ text }: { text: string }) {
+  const lines = (text || "").split("\n");
   return (
-    <div>
-      <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.1em", color: green ? "#166534" : "#6B7280", marginBottom: 4 }}>{label}</div>
-      {children}
+    <div style={{
+      fontFamily: sans, fontSize: 12, color: A.body, lineHeight: 1.7,
+      padding: "8px 10px", borderRadius: 6, background: A.bg, border: `1px solid ${A.line}`,
+      maxHeight: 320, overflowY: "auto", whiteSpace: "pre-wrap" as const,
+    }}>
+      {lines.map((ln, i) =>
+        /^\s*Day\s+\d+/i.test(ln)
+          ? <div key={i} style={{ fontWeight: 700, color: A.ink, marginTop: i ? 10 : 0 }}>{ln}</div>
+          : <div key={i}>{ln || "\u00A0"}</div>
+      )}
     </div>
   );
 }
 
-function BeforeAfter({ item }: { item: any }) {
-  const [editSummary, setEditSummary] = useState(item.generated.summary);
-  const [editMeta, setEditMeta]       = useState(item.generated.seo_meta);
-  void editSummary; void editMeta;
+// ── Editor body ───────────────────────────────────────────────────────────────
+function ReviewEditor({ item, onSaved, onRevalidated }: {
+  item: any;
+  onSaved: (id: string, draft: Record<string, string>) => void;
+  onRevalidated: (id: string, passed: boolean | null) => void;
+}) {
+  const [draft, setDraft] = useState<Record<string, string>>(() => toDraft(item.raw));
+  const [dirty, setDirty] = useState<Set<string>>(new Set());
+  const [saving, setSaving] = useState(false);
+  const [revalidating, setRevalidating] = useState(false);
+  const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  const fails = failureMap(item.raw.failures);
 
-  const colBase: React.CSSProperties = { flex: 1, borderRadius: 8, overflow: "hidden", display: "flex", flexDirection: "column" };
+  // reset local draft if the underlying row changes (e.g. after refetch)
+  useEffect(() => { setDraft(toDraft(item.raw)); setDirty(new Set()); }, [item.raw]);
+
+  function set(field: string, value: string) {
+    setDraft(d => ({ ...d, [field]: value }));
+    setDirty(s => new Set(s).add(field));
+    setMsg(null);
+  }
+
+  async function save() {
+    if (dirty.size === 0) { setMsg({ kind: "err", text: "No changes to save." }); return; }
+    setSaving(true); setMsg(null);
+    const body: Record<string, any> = {};
+    for (const f of dirty) body[f] = draftToPatchValue(f, draft[f]);
+    try {
+      const res = await fetch(
+        `/api/admin/tours/${item.raw.tour_id}/generated/${item.raw.generated_content_id}`,
+        { method: "PATCH", headers: authHeaders(true), body: JSON.stringify(body) },
+      );
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(e.detail || `Save failed (${res.status})`);
+      }
+      setDirty(new Set());
+      onSaved(item.id, draft);                 // marks human_edited, revalidate_passed=null in parent
+      setMsg({ kind: "ok", text: "Saved. Re-validate before approving." });
+    } catch (err: any) {
+      setMsg({ kind: "err", text: err.message || "Save failed." });
+    } finally { setSaving(false); }
+  }
+
+  async function revalidate() {
+    if (dirty.size > 0) { setMsg({ kind: "err", text: "Save your edits first." }); return; }
+    setRevalidating(true); setMsg(null);
+    try {
+      const res = await fetch(
+        `/api/admin/tours/${item.raw.tour_id}/generated/${item.raw.generated_content_id}/revalidate`,
+        { method: "POST", headers: authHeaders() },
+      );
+      if (res.status !== 202) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(e.detail || `Could not start re-validation (${res.status})`);
+      }
+      const { job_id } = await res.json();
+      const outcome = await pollJob(job_id);
+      if (outcome === "succeeded") {
+        // Job finished; the verdict lives on the row, not the job. Refetch it.
+        const passed = await fetchRevalidateState(item.id);
+        onRevalidated(item.id, passed);
+        setMsg(passed === true
+          ? { kind: "ok", text: "Re-validation passed. You can approve now." }
+          : { kind: "err", text: "Re-validation failed. Fix the flagged fields and try again." });
+      } else {
+        onRevalidated(item.id, null);
+        setMsg({ kind: "err", text:
+          outcome === "timeout" ? "Re-validation is taking too long — refresh to check."
+          : outcome === "interrupted" ? "Re-validation was interrupted. Try again."
+          : "Re-validation job failed. Try again." });
+      }
+    } catch (err: any) {
+      setMsg({ kind: "err", text: err.message || "Re-validation error." });
+    } finally { setRevalidating(false); }
+  }
 
   return (
-    <div style={{ borderTop: `1px solid ${A.line}` }}>
-      <div style={{ display: "flex", gap: 12, padding: "16px 20px" }}>
-        <div style={{ ...colBase, background: "#FFF5F5", border: "1px solid #FECACA" }}>
-          <div style={{ padding: "8px 14px", background: "#FECACA", fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", color: "#991B1B", textTransform: "uppercase" as const }}>
-            ✕ Before — Original Supplier
-          </div>
-          <div style={{ padding: 14, display: "flex", flexDirection: "column", gap: 10, overflowY: "auto", maxHeight: 300 }}>
-            <Field label="Name"><span style={{ fontFamily: mono, fontSize: 12 }}>{item.original.name}</span></Field>
-            <Field label="Summary"><span style={{ fontFamily: mono, fontSize: 12, lineHeight: 1.6 }}>{item.original.summary}</span></Field>
-          </div>
-        </div>
-        <div style={{ ...colBase, background: "#F0FDF4", border: "1px solid #86EFAC" }}>
-          <div style={{ padding: "8px 14px", background: "#86EFAC", fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", color: "#166534", textTransform: "uppercase" as const, display: "flex", alignItems: "center", gap: 6 }}>
-            <Edit3 size={11} /> After — AI Rewrite (Editable)
-          </div>
-          <div style={{ padding: 14, display: "flex", flexDirection: "column", gap: 10, overflowY: "auto", maxHeight: 300 }}>
-            <Field label="Name" green><strong style={{ fontSize: 13, color: "#14532D" }}>{item.generated.name}</strong></Field>
-            <Field label="Subtitle" green><em style={{ fontSize: 12, color: "#166534" }}>{item.generated.subtitle}</em></Field>
-            <Field label="Summary" green>
-              <div contentEditable suppressContentEditableWarning
-                onInput={e => setEditSummary((e.target as HTMLElement).innerText)}
-                style={{ fontSize: 12, color: "#14532D", lineHeight: 1.7, padding: "4px 6px", borderRadius: 4, background: "rgba(255,255,255,0.6)", minHeight: 48, outline: "none" }}>
-                {item.generated.summary}
-              </div>
-            </Field>
-            <Field label="SEO Title" green><span style={{ fontFamily: mono, fontSize: 12, color: "#14532D" }}>{item.generated.seo_title}</span></Field>
-            <Field label="SEO Meta" green>
-              <div contentEditable suppressContentEditableWarning
-                onInput={e => setEditMeta((e.target as HTMLElement).innerText)}
-                style={{ fontFamily: mono, fontSize: 12, color: "#14532D", padding: "4px 6px", borderRadius: 4, background: "rgba(255,255,255,0.6)", minHeight: 36, outline: "none" }}>
-                {item.generated.seo_meta}
-              </div>
-            </Field>
-          </div>
-        </div>
+    <div style={{ borderTop: `1px solid ${A.line}`, padding: "18px 20px", background: A.bg }}>
+      {/* action bar */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+        <RevalidatePill state={item.revalidate_passed} />
+        {item.human_edited && (
+          <span style={{ fontSize: 11, color: A.muted, display: "inline-flex", alignItems: "center", gap: 4 }}>
+            <Edit3 size={11} /> Edited{item.edited_at ? ` · ${new Date(item.edited_at).toLocaleString()}` : ""}
+            {item.reviewed_by ? ` · ${item.reviewed_by}` : ""}
+          </span>
+        )}
+        <div style={{ flex: 1 }} />
+        <Btn variant="ghost" size="sm" disabled={saving || dirty.size === 0} onClick={save}>
+          {saving ? <Loader2 size={12} className="spin" /> : <Save size={12} />} Save edits{dirty.size ? ` (${dirty.size})` : ""}
+        </Btn>
+        <Btn variant="primary" size="sm" disabled={revalidating || dirty.size > 0} onClick={revalidate}>
+          {revalidating ? <Loader2 size={12} className="spin" /> : <ShieldCheck size={12} />} Re-validate
+        </Btn>
       </div>
-      <div style={{ padding: "12px 20px", background: A.bg, borderTop: `1px solid ${A.line}` }}>
-        <div style={{ fontSize: 10, fontWeight: 600, color: A.muted, textTransform: "uppercase" as const, letterSpacing: "0.12em", marginBottom: 8 }}>SEO Validation</div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-          {item.seo_checks.map((c: any, i: number) => {
-            const s = SEO_STYLE[c.status] ?? SEO_STYLE.pass;
-            return (
-              <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 12px", borderRadius: 6, background: s.bg }}>
-                <span style={{ fontSize: 12, color: A.body }}>{c.label}</span>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ fontSize: 11, color: A.muted }}>{c.value}</span>
-                  <span style={{ fontSize: 10, fontWeight: 700, color: s.color, padding: "2px 7px", borderRadius: 4, border: `1px solid ${s.color}33` }}>{c.status}</span>
+
+      {msg && (
+        <div style={{
+          fontSize: 12, padding: "8px 12px", borderRadius: 6, marginBottom: 14,
+          background: msg.kind === "ok" ? A.greenSoft : A.redSoft,
+          color: msg.kind === "ok" ? A.green : A.red,
+        }}>{msg.text}</div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "14px 20px" }}>
+        {/* single-line text */}
+        {TEXT_FIELDS.map(f => (
+          <div key={f} style={{ gridColumn: f === "seo_title" ? "1 / -1" : "auto" }}>
+            <FieldLabel field={f} fails={fails[f]} />
+            <input value={draft[f]} onChange={e => set(f, e.target.value)} style={fieldBoxStyle(!!fails[f])} />
+          </div>
+        ))}
+
+        {/* textareas */}
+        {AREA_FIELDS.map(f => (
+          <div key={f} style={{ gridColumn: "1 / -1" }}>
+            <FieldLabel field={f} fails={fails[f]} />
+            <textarea
+              value={draft[f]} onChange={e => set(f, e.target.value)} rows={f === "aa_summary" || f === "aa_description" ? 4 : 2}
+              style={fieldBoxStyle(!!fails[f])}
+            />
+            {f === "seo_meta" && (() => {
+              const n = draft.seo_meta.length;
+              const inBand = n >= SEO_META_MIN && n <= SEO_META_MAX;
+              return (
+                <div style={{ fontSize: 11, marginTop: 3, color: inBand ? A.green : A.red, fontFamily: mono }}>
+                  {n} chars · band {SEO_META_MIN}–{SEO_META_MAX}
                 </div>
-              </div>
-            );
-          })}
+              );
+            })()}
+          </div>
+        ))}
+
+        {/* newline lists */}
+        {LIST_FIELDS.map(f => (
+          <div key={f}>
+            <FieldLabel field={f} fails={fails[f]} />
+            <textarea
+              value={draft[f]} onChange={e => set(f, e.target.value)} rows={5}
+              placeholder="One item per line"
+              style={{ ...fieldBoxStyle(!!fails[f]), fontFamily: mono, fontSize: 12 }}
+            />
+            <div style={{ fontSize: 10, color: A.muted, marginTop: 3 }}>One item per line</div>
+          </div>
+        ))}
+
+        {/* itinerary: raw edit + live Day preview */}
+        <div style={{ gridColumn: "1 / -1" }}>
+          <FieldLabel field="aa_itineraries" fails={fails.aa_itineraries} />
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <textarea
+              value={draft.aa_itineraries} onChange={e => set("aa_itineraries", e.target.value)} rows={14}
+              style={{ ...fieldBoxStyle(!!fails.aa_itineraries), fontFamily: mono, fontSize: 12 }}
+            />
+            <ItineraryPreview text={draft.aa_itineraries} />
+          </div>
+        </div>
+
+        {/* og_tags: read-only in v1 (data empty until pipeline populates) */}
+        <div style={{ gridColumn: "1 / -1" }}>
+          <FieldLabel field="og_tags" />
+          <pre style={{
+            margin: 0, fontFamily: mono, fontSize: 11, color: A.muted, padding: "8px 10px",
+            borderRadius: 6, background: A.bg, border: `1px solid ${A.line}`, overflowX: "auto",
+          }}>
+            {JSON.stringify(item.raw.og_tags ?? {}, null, 2)}
+          </pre>
+          <div style={{ fontSize: 10, color: A.muted, marginTop: 3 }}>Read-only — OG tags are generated, not hand-edited yet.</div>
         </div>
       </div>
     </div>
   );
 }
 
-function ReviewCard({ item, onApprove, onReject, onRegenerate, onFlag }: {
+// Poll GET /admin/jobs/{id} until terminal. The job row carries lifecycle only
+// (queued/running/succeeded/failed/interrupted) — NOT the revalidate outcome.
+// revalidate_passed lives on generated_content, written by _revalidate_job, so
+// the caller must refetch the row after a successful job to read the verdict.
+type JobOutcome = "succeeded" | "failed" | "interrupted" | "timeout";
+async function pollJob(jobId: string): Promise<JobOutcome> {
+  const deadline = Date.now() + 120_000; // 2 min ceiling
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 2000));
+    const res = await fetch(`/api/admin/jobs/${jobId}`, { headers: authHeaders() });
+    if (!res.ok) continue;
+    const job = await res.json();
+    if (job.status === "succeeded") return "succeeded";
+    if (job.status === "failed") return "failed";
+    if (job.status === "interrupted") return "interrupted";
+  }
+  return "timeout";
+}
+
+// Refetch a single row from the queue to read its current revalidate_passed.
+// Returns true/false/null (null = not found, e.g. it left the pending queue).
+async function fetchRevalidateState(reviewId: string): Promise<boolean | null> {
+  const res = await fetch(`/api/admin/review-queue`, { headers: authHeaders() });
+  if (!res.ok) return null;
+  const d = await res.json();
+  const row = (d.data || []).find((r: any) => String(r.id) === reviewId);
+  if (!row) return null;
+  return row.revalidate_passed === true ? true : row.revalidate_passed === false ? false : null;
+}
+
+// ── Card ──────────────────────────────────────────────────────────────────────
+function ReviewCard({ item, onApprove, onReject, onRegenerate, onSaved, onRevalidated }: {
   item: any;
   onApprove: (id: string) => void;
-  onReject:  (id: string) => void;
-  onRegenerate: (id: string) => void;
-  onFlag: (id: string) => void;
+  onReject: (id: string) => void;
+  onRegenerate: (item: any) => void;
+  onSaved: (id: string, draft: Record<string, string>) => void;
+  onRevalidated: (id: string, passed: boolean | null) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const hasFail    = item.seo_checks.some((c: any) => c.status === "fail");
+  const failCount = (item.raw.failures || []).length;
   const scoreColor = item.score >= 7 ? A.green : item.score >= 5 ? A.amber : A.red;
+
+  // Approve gate (AA-234 Part A semantics):
+  // - if edited at all → must have a passed re-validation
+  // - if never edited → allow when it already cleared (score≥7 and no live failures)
+  const canApprove = item.human_edited
+    ? item.revalidate_passed === true
+    : (item.score >= 7 && failCount === 0);
+  const approveHint = item.human_edited && item.revalidate_passed !== true
+    ? "Re-validate after editing" : failCount > 0 ? "Resolve flagged fields" : "";
 
   return (
     <Card style={{ padding: 0, overflow: "hidden" }}>
@@ -131,74 +404,163 @@ function ReviewCard({ item, onApprove, onReject, onRegenerate, onFlag }: {
         }}>
           {item.score.toFixed(1)}
         </div>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontWeight: 600, color: A.ink, fontSize: 14 }}>{item.name}</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 600, color: A.ink, fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</span>
+            {item.human_edited && (
+              <span style={{ fontSize: 10, color: A.muted, border: `1px solid ${A.line}`, borderRadius: 4, padding: "1px 6px", display: "inline-flex", alignItems: "center", gap: 3, flexShrink: 0 }}>
+                <Edit3 size={9} /> edited
+              </span>
+            )}
+          </div>
           <div style={{ fontSize: 11.5, color: A.muted, marginTop: 2 }}>{item.country} · {item.date}</div>
         </div>
-        {item.issues.length > 0 && (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, maxWidth: 280 }}>
-            {item.issues.slice(0, 3).map((issue: string, i: number) => (
-              <span key={i} style={{ fontSize: 10.5, padding: "2px 9px", background: A.redSoft, color: A.red, border: "1px solid #FECACA", borderRadius: 20 }}>{issue}</span>
+
+        {failCount > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, maxWidth: 300 }}>
+            {(item.raw.failures || []).slice(0, 3).map((f: any, i: number) => (
+              <span key={i} title={f.code} style={{ fontSize: 10.5, padding: "2px 9px", background: A.redSoft, color: A.red, border: "1px solid #FECACA", borderRadius: 20 }}>
+                {FIELD_LABEL[f.field] || f.field}
+              </span>
             ))}
-            {item.issues.length > 3 && <span style={{ fontSize: 10.5, color: A.muted }}>+{item.issues.length - 3}</span>}
+            {failCount > 3 && <span style={{ fontSize: 10.5, color: A.muted }}>+{failCount - 3}</span>}
           </div>
         )}
+
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <button onClick={() => onFlag(item.id)} style={{ padding: 7, border: `1px solid ${A.line}`, borderRadius: 8, background: "none", cursor: "pointer", color: A.muted, display: "flex" }}>
-            <Flag size={13} />
-          </button>
-          <button onClick={() => onRegenerate(item.id)} style={{ padding: 7, border: `1px solid ${A.line}`, borderRadius: 8, background: "none", cursor: "pointer", color: A.muted, display: "flex" }}>
+          <button onClick={() => onRegenerate(item)} title="Regenerate (overwrites this version)"
+            style={{ padding: 7, border: `1px solid ${A.line}`, borderRadius: 8, background: "none", cursor: "pointer", color: A.muted, display: "flex" }}>
             <RotateCcw size={13} />
           </button>
           <Btn variant="danger" size="sm" onClick={() => onReject(item.id)}>
             <XCircle size={12} /> Reject
           </Btn>
-          <Btn variant={hasFail ? "ghost" : "primary"} size="sm" disabled={hasFail} onClick={() => onApprove(item.id)}>
-            <CheckCircle size={12} /> {hasFail ? "Fix First" : "Approve"}
-          </Btn>
-          <button onClick={() => setExpanded(!expanded)} style={{ padding: 7, border: `1px solid ${A.line}`, borderRadius: 8, background: "none", cursor: "pointer", color: A.muted, display: "flex" }}>
+          <span title={approveHint} style={{ display: "inline-flex" }}>
+            <Btn variant={canApprove ? "primary" : "ghost"} size="sm" disabled={!canApprove}
+              onClick={() => onApprove(item.id)}>
+              <CheckCircle size={12} /> Approve
+            </Btn>
+          </span>
+          <button onClick={() => setExpanded(!expanded)}
+            style={{ padding: 7, border: `1px solid ${A.line}`, borderRadius: 8, background: "none", cursor: "pointer", color: A.muted, display: "flex" }}>
             {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
           </button>
         </div>
       </div>
-      {expanded && <BeforeAfter item={item} />}
+      {expanded && <ReviewEditor item={item} onSaved={onSaved} onRevalidated={onRevalidated} />}
     </Card>
   );
 }
 
-export default function AdminReviewPage() {
-  const [items, setItems]           = useState<any[]>([]);
-  const [loading, setLoading]       = useState(true);
-  const [filterCountry, setCountry] = useState("all");
-  const [filterScore, setScore]     = useState("all");
-  const [approved, setApproved]     = useState(0);
-  const [rejected, setRejected]     = useState(0);
+// ── Regenerate confirm modal ──────────────────────────────────────────────────
+function RegenerateModal({ item, onClose }: {
+  item: any; onClose: () => void;
+}) {
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 50,
+      display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: A.card, borderRadius: 12, maxWidth: 440, width: "100%", padding: 24,
+        border: `1px solid ${A.line}`,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+          <AlertTriangle size={20} style={{ color: A.amber }} />
+          <div style={{ fontFamily: serif, fontSize: 18, fontWeight: 500, color: A.ink }}>Regenerate this version?</div>
+          <div style={{ flex: 1 }} />
+          <button onClick={onClose} style={{ border: "none", background: "none", cursor: "pointer", color: A.muted, display: "flex" }}><X size={18} /></button>
+        </div>
+        <p style={{ fontSize: 13, color: A.body, lineHeight: 1.6, margin: "0 0 8px" }}>
+          Regenerating re-runs the full pipeline for <strong>{item.name}</strong> and overwrites the
+          current content in place, discarding any manual edits.
+        </p>
+        <p style={{ fontSize: 12, color: A.muted, lineHeight: 1.6, margin: "0 0 20px" }}>
+          This action isn't available yet — it's tracked in AA-242. For now, reject the tour and
+          re-run it from the pipeline page.
+        </p>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+          <Btn variant="ghost" size="sm" onClick={onClose}>Close</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
 
-  useEffect(() => {
-    const token = getToken();
-    if (!token) { setLoading(false); return; }
-    fetch(`/api/admin/review-queue`)
-      .then(r => r.json())
-      .then(d => { setItems((d.data || []).map(mapApiToReview)); setLoading(false); })
-      .catch(() => setLoading(false));
+// ── Row mapper ────────────────────────────────────────────────────────────────
+function mapRow(r: any) {
+  return {
+    id: String(r.id),
+    raw: r,
+    name: r.aa_name || r.src_name || "Untitled tour",
+    country: r.country || "Unknown",
+    score: typeof r.score_overall === "number" ? r.score_overall : parseFloat(r.score_overall || "0"),
+    date: r.created_at ? new Date(r.created_at).toLocaleDateString() : "",
+    human_edited: !!r.human_edited,
+    edited_at: r.edited_at || null,
+    reviewed_by: r.reviewed_by || null,
+    revalidate_passed: r.revalidate_passed === true ? true : r.revalidate_passed === false ? false : null,
+  };
+}
+
+// ── Page ──────────────────────────────────────────────────────────────────────
+export default function AdminReviewPage() {
+  const [items, setItems] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [filterCountry, setCountry] = useState("all");
+  const [filterScore, setScore] = useState("all");
+  const [approved, setApproved] = useState(0);
+  const [rejected, setRejected] = useState(0);
+  const [regenTarget, setRegenTarget] = useState<any>(null);
+  const reviewerInit = useRef(false);
+
+  const load = useCallback(async () => {
+    setLoading(true); setError(null);
+    try {
+      const res = await fetch(`/api/admin/review-queue`, { headers: authHeaders() });
+      if (!res.ok) throw new Error(`Could not load the review queue (${res.status})`);
+      const d = await res.json();
+      setItems((d.data || []).map(mapRow));
+    } catch (err: any) {
+      setError(err.message || "Could not load the review queue.");
+    } finally { setLoading(false); }
   }, []);
 
+  useEffect(() => {
+    if (!reviewerInit.current) { reviewerInit.current = true; getReviewerId(); }
+    load();
+  }, [load]);
+
+  // After a successful save: mark edited, invalidate prior re-validation.
+  function onSaved(id: string) {
+    setItems(p => p.map(i => i.id === id
+      ? { ...i, human_edited: true, revalidate_passed: null, edited_at: new Date().toISOString() }
+      : i));
+  }
+  function onRevalidated(id: string, passed: boolean | null) {
+    setItems(p => p.map(i => i.id === id ? { ...i, revalidate_passed: passed } : i));
+  }
+
   async function onApprove(id: string) {
-    await fetch(`/api/admin/review-queue/${id}/approve`, { method: "POST" });
+    const res = await fetch(`/api/admin/review-queue/${id}/approve`, { method: "POST", headers: authHeaders() });
+    if (!res.ok) { setError(`Approve failed (${res.status}).`); return; }
     setApproved(a => a + 1);
     setItems(p => p.filter(i => i.id !== id));
   }
-
   async function onReject(id: string) {
-    await fetch(`/api/admin/review-queue/${id}/reject`, { method: "POST" });
+    const res = await fetch(`/api/admin/review-queue/${id}/reject`, { method: "POST", headers: authHeaders() });
+    if (!res.ok) { setError(`Reject failed (${res.status}).`); return; }
     setRejected(r => r + 1);
     setItems(p => p.filter(i => i.id !== id));
   }
 
   const countries = [...new Set(items.map(i => i.country))];
-  const filtered  = items.filter(item => {
+  const filtered = items.filter(item => {
     const mc = filterCountry === "all" || item.country === filterCountry;
-    const ms = filterScore === "all" || (filterScore === "critical" && item.score < 5) || (filterScore === "low" && item.score >= 5 && item.score < 7);
+    const ms = filterScore === "all"
+      || (filterScore === "critical" && item.score < 5)
+      || (filterScore === "low" && item.score >= 5 && item.score < 7);
     return mc && ms;
   });
 
@@ -209,18 +571,19 @@ export default function AdminReviewPage() {
 
   return (
     <div style={{ display: "flex", minHeight: "100vh", fontFamily: sans, background: A.bg }}>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}.spin{animation:spin .8s linear infinite}`}</style>
       <AdminSidebar />
       <main style={{ flex: 1, overflowY: "auto", padding: "32px 36px 56px" }}>
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 24 }}>
           <div>
             <div style={{ fontFamily: serif, fontSize: 26, fontWeight: 500, color: A.ink, letterSpacing: "-0.02em" }}>Review Queue</div>
-            <div style={{ fontSize: 13, color: A.muted, marginTop: 4 }}>Tours requiring human review · Quality score below 7.0</div>
+            <div style={{ fontSize: 13, color: A.muted, marginTop: 4 }}>Edit, re-validate, then approve. Approval is blocked until an edited tour passes re-validation.</div>
           </div>
           <div style={{ display: "flex", gap: 24 }}>
             {[
               { label: "Approved", value: approved, color: A.green },
               { label: "Rejected", value: rejected, color: A.red },
-              { label: "Pending",  value: items.length, color: A.gold },
+              { label: "Pending", value: items.length, color: A.gold },
             ].map(s => (
               <div key={s.label} style={{ textAlign: "center" as const }}>
                 <div style={{ fontFamily: serif, fontSize: 22, fontWeight: 500, color: s.color, letterSpacing: "-0.02em" }}>{s.value}</div>
@@ -233,33 +596,45 @@ export default function AdminReviewPage() {
         <div style={{ display: "flex", gap: 10, marginBottom: 20, alignItems: "center" }}>
           <Filter size={14} style={{ color: A.muted }} />
           <select value={filterCountry} onChange={e => setCountry(e.target.value)} style={selectStyle}>
-            <option value="all">All Countries</option>
+            <option value="all">All countries</option>
             {countries.map(c => <option key={c}>{c}</option>)}
           </select>
           <select value={filterScore} onChange={e => setScore(e.target.value)} style={selectStyle}>
-            <option value="all">All Scores</option>
+            <option value="all">All scores</option>
             <option value="critical">Critical (&lt;5.0)</option>
             <option value="low">Low (5.0–6.9)</option>
           </select>
+          <div style={{ flex: 1 }} />
+          <Btn variant="ghost" size="sm" onClick={load}><RotateCcw size={12} /> Refresh</Btn>
         </div>
+
+        {error && (
+          <div style={{ fontSize: 13, padding: "10px 14px", borderRadius: 8, marginBottom: 16, background: A.redSoft, color: A.red, border: "1px solid #FECACA" }}>
+            {error}
+          </div>
+        )}
 
         {loading ? <LoadingScreen msg="Loading review queue…" /> : filtered.length === 0 ? (
           <div style={{ textAlign: "center" as const, padding: "60px 0" }}>
             <CheckCircle size={40} style={{ margin: "0 auto 12px", color: A.green, display: "block" }} />
             <div style={{ fontFamily: serif, fontSize: 18, fontWeight: 500, color: A.ink }}>Review queue is empty</div>
-            <div style={{ fontSize: 13, color: A.muted, marginTop: 6 }}>All tours have been reviewed</div>
+            <div style={{ fontSize: 13, color: A.muted, marginTop: 6 }}>Every tour has been reviewed.</div>
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             {filtered.map(item => (
               <ReviewCard key={item.id} item={item}
                 onApprove={onApprove} onReject={onReject}
-                onRegenerate={id => console.log("Regenerate", id)}
-                onFlag={id => alert(`Content issue reported for ${id}`)} />
+                onRegenerate={setRegenTarget}
+                onSaved={onSaved} onRevalidated={onRevalidated} />
             ))}
           </div>
         )}
       </main>
+
+      {regenTarget && (
+        <RegenerateModal item={regenTarget} onClose={() => setRegenTarget(null)} />
+      )}
     </div>
   );
 }

@@ -23,6 +23,13 @@ async function handler(
     "X-Admin-Secret": ADMIN_SECRET,
   };
 
+  // AA-241: forward reviewer identity for the edit audit trail (generated_content.reviewed_by).
+  // Temporary until AA-232 per-user auth; backend falls back to "admin" when absent.
+  const reviewerId = req.headers.get("x-reviewer-id");
+  if (reviewerId) {
+    outHeaders["x-reviewer-id"] = reviewerId;
+  }
+
   let body: ArrayBuffer | string | undefined;
   if (req.method !== "GET" && req.method !== "HEAD") {
     if (isMultipart) {
