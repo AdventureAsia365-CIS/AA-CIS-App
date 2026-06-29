@@ -1,15 +1,20 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 27/06/2026 (S82) | ECS api:338 | CI #597/#598 green | main 037c579 (Deploy Prod #134)
+# Updated: 29/06/2026 (S83) | ECS api:339 | main 1eba1da (Deploy Prod #136)
 
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway owq9as3wjl)
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel — AA-103 production)
-- ECS task def: api:338 | digest == ECR :latest (sha256:e369915b…) tag dev-f63f357 | Deploy Prod #134 | Vercel Ready
+- ECS task def: api:339 | digest == ECR :latest (sha256:bd9463f7…) tag dev-dba71b7 | Deploy Prod #136 | Vercel Ready
+- AA-240 [AA-234 Phần B] SHIPPED Prod (S83): review-queue surfaces per-field failure reasons. GET
+  /admin/review-queue now returns full editable gc fields + audit columns (human_edited/reviewed_by/
+  edited_at/revalidate_passed) + a `failures` array re-derived on CURRENT content via
+  _derive_field_failures (shared _VALIDATE_FORBIDDEN/_CODE_FIELD_MAP consts from graph.py + seo_meta_utils
+  thresholds — no logic copy). A code whose field a reviewer has since fixed is NOT re-surfaced. No new
+  migration (still 072). 12/12 unit tests. Carryover AA-241 (Phần C) — edit UI maps 1:1 to PATCH fields.
 - AA-234 Phần A SHIPPED Prod (S82): re-validate human-edited review content before approve. Reviewer
   edits a version in place (full fields, no new version) → async re-validate (build_revalidation_graph:
   validate→judge→brand_audit→human_edit_gate, NO flag_fix) → approve gated on revalidate_passed. Hard-block
-  codes (META_TOO_SHORT/FORBIDDEN_WORD/etc) fail the gate even at high score. Migration 072. Phần B (AA-240)
-  + Phần C (AA-241) still pending — AA-234 In Progress.
+  codes (META_TOO_SHORT/FORBIDDEN_WORD/etc) fail the gate even at high score. Migration 072.
 - AA-233 SHIPPED Prod (S82): _execute_run_tour return dict surfaces fallback_used (was None; DB correct since AA-224)
 - S82 backlog cleanup: AA-221 canceled (dup AA-223), AA-236 canceled (dead Lambda path), AA-160 deferred
 - AA-238 + AA-239 SHIPPED Prod (S81): seo_meta band-guard — forbidden-word pad no longer accepted as
@@ -32,7 +37,7 @@
 - AA-198 [F1] SHIPPED: brand_identity_id resolver + /admin/brand-rules + s1 brand-picker
 - AA-197 [F2] SHIPPED: DataForSEO rebuild — buyer-market location, seed builder, real keyword_ideas
 - "Deploy Prod" workflow = STUB/placeholder (no-op) — real ECS deploy runs via "Deploy Dev" on develop merge (last run #128)
-- AWS: RUNNING after S82 deploy (api:338) — STOP ECS/RDS/NAT after session (cis-stop)
+- AWS: RUNNING after S83 deploy (api:339) — KEEP running for S84 (do NOT cis-stop this session)
 - Lambda aa-cis-dev-acp-s4-evaluate: DEPLOYED ✅ (AA-49 H-1)
 - Lambda aa-cis-dev-acp-s4-trigger: DEPLOYED ✅ | ALB_INTERNAL_URL: FIXED ✅
 - Lambda aa-cis-dev-acp-s3-campaign-planner: DEPLOYED ✅ (AA-45)
@@ -124,6 +129,13 @@ S3 Bronze upload → Ingestion Lambda → shared.pipeline_runs (status=ingesting
 - S3-mediated ECS exec: write script → upload S3 → presign → ECS execute-command
 - DBeaver tunnel: cis-tunnel alias → localhost:15432
 - SSM only, no SSH port 22
+
+## SESSION ALIASES (~/.zshrc)
+```bash
+cis-start  # start NAT Instance + RDS + ECS
+cis-stop   # stop ECS + RDS + NAT Instance
+cis-status # check NAT instance state
+```
 
 ## KNOWN TECH DEBT — DO NOT BREAK
 - api_task_def_arn hardcoded :21 in main.tf (AA-CIS-Infra) — do not change (AA-22)
