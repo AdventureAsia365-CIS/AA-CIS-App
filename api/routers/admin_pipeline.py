@@ -1754,6 +1754,95 @@ async def export_audit(
 
 # ── Review queue (admin alias — no JWT required) ─────────────────────────────
 
+def _derive_field_failures(gc: dict, codes: list) -> list:
+    """AA-240: re-derive per-field failure reasons on the CURRENT gc content.
+
+    `codes` = historical failure_codes + brand_audit_codes from quality_scores (snapshot at
+    last validate). We re-measure the live field values so a code whose field a reviewer has
+    since fixed is NOT surfaced (the UI must mark only fields that still fail right now).
+    Multi-field codes (FORBIDDEN_WORD, MISSING_FIELD) are resolved by scanning live content.
+    Import is lazy (mirrors build_revalidation_graph at call sites) to avoid pulling the
+    LangGraph/boto graph module into router import time.
+    """
+    import json as _json
+    from services.content_generation.graph import _CODE_FIELD_MAP, _VALIDATE_FORBIDDEN
+    from services.content_generation.seo_meta_utils import (
+        SEO_META_MIN, SEO_META_MAX, SEO_META_FORBIDDEN, meta_complete_sentence,
+    )
+
+    seen = set(codes or [])
+    meta = (gc.get("seo_meta") or "")
+    title = (gc.get("seo_title") or "")
+    meta_norm = meta.lower().replace("-", " ")  # AA-238: catch hyphen variants
+
+    hl = gc.get("aa_highlights")
+    if isinstance(hl, str):
+        try:
+            hl = _json.loads(hl)
+        except Exception:
+            hl = []
+    hl = hl if isinstance(hl, list) else []
+
+    # gc column -> required (validate uses name/subtitle/summary/highlights/itineraries/seo_*)
+    _required_cols = [
+        "aa_name", "aa_subtitle", "aa_summary",
+        "aa_highlights", "aa_itineraries", "seo_title", "seo_meta",
+    ]
+
+    out = []
+
+    def add(field, code, reason):
+        out.append({"field": field, "code": code, "reason": reason})
+
+    # length / sentence — re-measured dynamically
+    if "META_TOO_SHORT" in seen and meta.strip() and len(meta) < SEO_META_MIN:
+        add("seo_meta", "META_TOO_SHORT", f"meta {len(meta)}<{SEO_META_MIN}")
+    if "SEO_META_TOO_LONG" in seen and len(meta) > SEO_META_MAX:
+        add("seo_meta", "SEO_META_TOO_LONG", f"meta {len(meta)}>{SEO_META_MAX}")
+    if "SEO_TITLE_TOO_LONG" in seen and len(title) > 60:
+        add("seo_title", "SEO_TITLE_TOO_LONG", f"title {len(title)}>60")
+    if "META_INCOMPLETE_SENTENCE" in seen and meta.strip() and not meta_complete_sentence(meta):
+        add("seo_meta", "META_INCOMPLETE_SENTENCE", "meta không kết câu hoàn chỉnh")
+    if "BRAND_SEO_META_VIOLATION" in seen:
+        hit = next((t for t in SEO_META_FORBIDDEN if t in meta_norm), None)
+        if hit:
+            add("seo_meta", "BRAND_SEO_META_VIOLATION", f"meta chứa từ off-brand: '{hit}'")
+
+    # highlights structural
+    if "HIGHLIGHTS_NOT_LIST" in seen and not isinstance(gc.get("aa_highlights"), (list, str)):
+        add("aa_highlights", "HIGHLIGHTS_NOT_LIST", "highlights không phải list")
+    if "HIGHLIGHTS_TOO_FEW" in seen and len(hl) < 3:
+        add("aa_highlights", "HIGHLIGHTS_TOO_FEW", f"chỉ {len(hl)} highlight, cần ≥3")
+
+    # MISSING_FIELD — which required field is empty now
+    if "MISSING_FIELD" in seen:
+        for col in _required_cols:
+            if not gc.get(col):
+                add(col, "MISSING_FIELD", f"{col} rỗng")
+
+    # FORBIDDEN_WORD — scan live text, map to the field that contains it
+    if "FORBIDDEN_WORD" in seen:
+        for col in ("aa_name", "aa_subtitle", "aa_summary", "seo_title", "seo_meta"):
+            txt = (gc.get(col) or "").lower()
+            hit = next((w for w in _VALIDATE_FORBIDDEN if w in txt), None)
+            if hit:
+                add(col, "FORBIDDEN_WORD", f"chứa từ cấm: '{hit}'")
+
+    # static-label codes (no live numeric re-measure available)
+    _static = {
+        "SUBTITLE_GENERIC": "subtitle generic/off-brand",
+        "SUMMARY_OFF_BRAND": "summary off-brand opener",
+        "HIGHLIGHTS_TOO_GENERIC": "highlight phrase quá generic",
+        "ITINERARY_STRUCTURE_WEAK": "itinerary thiếu day-structure / quá ngắn",
+        "DFS_INTENT_UNDERUSED": "SEO keyword chưa xuất hiện ở title/meta",
+    }
+    for code, reason in _static.items():
+        if code in seen and code in _CODE_FIELD_MAP:
+            add(_CODE_FIELD_MAP[code], code, reason)
+
+    return out
+
+
 @router.get("/review-queue")
 async def admin_review_queue(
     request: Request,
@@ -1769,11 +1858,16 @@ async def admin_review_queue(
         rows = await conn.fetch("""
             SELECT rq.id, rq.tour_id, rq.generated_content_id,
                    rq.review_status, rq.score_overall, rq.failure_summary, rq.created_at,
-                   gc.aa_name, gc.aa_subtitle, gc.aa_summary,
-                   gc.seo_title, gc.seo_meta,
+                   gc.aa_name, gc.aa_subtitle, gc.aa_summary, gc.aa_description,
+                   gc.aa_highlights, gc.aa_itineraries, gc.mobile_card_text,
+                   gc.seo_title, gc.seo_meta, gc.seo_keywords_used, gc.og_tags,
+                   gc.human_edited, gc.reviewed_by, gc.edited_at, gc.revalidate_passed,
+                   qs.failure_codes, qs.brand_audit_codes,
                    rt.src_name, rt.country, rt.duration
             FROM silver_aa_internal.review_queue rq
             JOIN silver_aa_internal.generated_content gc ON gc.id = rq.generated_content_id
+            LEFT JOIN silver_aa_internal.quality_scores qs
+                   ON qs.generated_content_id = rq.generated_content_id
             JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = rq.tour_id
             WHERE rq.tenant_id = $1::uuid
               AND rq.review_status = 'pending'
@@ -1784,11 +1878,48 @@ async def admin_review_queue(
             SELECT COUNT(*) FROM silver_aa_internal.review_queue
             WHERE tenant_id = $1::uuid AND review_status = 'pending'
         """, tenant_id)
+
+    data = []
+    for r in rows:
+        gc = {
+            "aa_name":           r["aa_name"],
+            "aa_subtitle":       r["aa_subtitle"],
+            "aa_summary":        r["aa_summary"],
+            "aa_description":    r["aa_description"],
+            "aa_highlights":     _as_list(r["aa_highlights"]),
+            "aa_itineraries":    r["aa_itineraries"],
+            "mobile_card_text":  r["mobile_card_text"],
+            "seo_title":         r["seo_title"],
+            "seo_meta":          r["seo_meta"],
+            "seo_keywords_used": _as_list(r["seo_keywords_used"]),
+            "og_tags":           r["og_tags"] if isinstance(r["og_tags"], dict) else {},
+        }
+        codes = list(_as_list(r["failure_codes"])) + list(_as_list(r["brand_audit_codes"]))
+        data.append({
+            "id":                 str(r["id"]),
+            "tour_id":            str(r["tour_id"]),
+            "generated_content_id": str(r["generated_content_id"]),
+            "review_status":      r["review_status"],
+            "score_overall":      float(r["score_overall"]) if r["score_overall"] is not None else None,
+            "failure_summary":    r["failure_summary"],
+            "created_at":         str(r["created_at"]) if r["created_at"] else None,
+            # editable fields (match _ALLOWED_GC_FIELDS so Part C edit maps 1:1 to PATCH)
+            **gc,
+            # AA-234 Part A audit columns (migration 072)
+            "human_edited":       bool(r["human_edited"]),
+            "reviewed_by":        r["reviewed_by"],
+            "edited_at":          str(r["edited_at"]) if r["edited_at"] else None,
+            "revalidate_passed":  r["revalidate_passed"],  # 3-state: None/True/False
+            # AA-240 per-field failure reasons re-derived on current content
+            "failures":           _derive_field_failures(gc, codes),
+            # raw-tour context
+            "src_name":           r["src_name"],
+            "country":            r["country"],
+            "duration":           r["duration"],
+        })
+
     return {
-        "data": [
-            {k: str(v) if hasattr(v, "hex") else v for k, v in dict(r).items()}
-            for r in rows
-        ],
+        "data": data,
         "pagination": {"page": page, "page_size": page_size, "total": total},
     }
 
