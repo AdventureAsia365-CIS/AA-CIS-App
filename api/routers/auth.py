@@ -232,22 +232,16 @@ async def verify_tenant_api_key(
     raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
 
 
-# ── AA-232 — Per-user admin JWT auth ────────────────────────────────────────
+# ── AA-232 — Per-user admin JWT auth (helpers + models) ──────────────────────
 #
-# Flow:
-#   POST /auth/admin-login  { username, password }
-#   → bcrypt verify against shared.admin_users.password_hash
-#   → if match + is_active: return signed JWT { sub: admin_users.id, username,
-#     role, exp }
-#   → frontend (middleware.ts) stores JWT, verifies via POST /auth/verify-admin
-#     on each protected admin/internal request (mirrors tenant verify pattern)
-#
-# Deliberately mirrors tenant_login/verify_tenant_token shape (same JWT_SECRET,
-# same HS256, same verify_jwt() helper) but:
-#   - verifies bcrypt password_hash, not sha256 api_key_hash
-#   - sub = admin_users.id (UUID), role = admin_users.role ('admin'|'reviewer')
-#   - uses request.app.state.pool directly (tenant_login's Depends(lambda: None)
-#     is broken/deprecated — do not copy that pattern, per S86 discovery)
+# The live endpoints (POST /auth/admin-login, POST /auth/verify-admin) are
+# declared in api/main.py, mirroring tenant_login/verify_tenant there — the
+# /auth `router` object in this module is NOT mounted (see main.py: it imports
+# these helpers/models and re-declares the routes on `app` with Depends(get_pool)).
+# This module owns the reusable pieces only: bcrypt password verify, admin JWT
+# mint, and the request/response models. Admin JWTs share JWT_SECRET/HS256/
+# verify_jwt() with tenant tokens but carry sub = admin_users.id (UUID) and
+# role = 'admin'|'reviewer' (vs tenant's role = 'tenant').
 
 
 class AdminLoginRequest(BaseModel):
@@ -260,6 +254,13 @@ class AdminLoginResponse(BaseModel):
     admin_id: str
     username: str
     role: str
+
+
+class VerifyAdminResponse(BaseModel):
+    admin_id: str
+    username: str
+    role: str
+    valid: bool
 
 
 def _verify_password(raw_password: str, password_hash: str) -> bool:
@@ -280,79 +281,3 @@ def _create_admin_jwt(admin_id: str, username: str, role: str) -> str:
         "exp":      datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_H),
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
-
-
-@router.post("/admin-login", response_model=AdminLoginResponse)
-async def admin_login(body: AdminLoginRequest, request: Request):
-    """
-    Verify admin/reviewer username+password against shared.admin_users.
-    Returns signed JWT on success. Constant-shape response on failure
-    (401 whether username doesn't exist or password is wrong — no
-    enumeration signal).
-    """
-    if not body.username or not body.password:
-        raise HTTPException(status_code=400, detail="Username and password required")
-
-    pool: asyncpg.Pool = request.app.state.pool
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT id::text, username, password_hash, role::text, is_active
-            FROM shared.admin_users
-            WHERE username = $1
-            """,
-            body.username,
-        )
-
-    # Always run bcrypt compare (even on no-row) to keep response timing
-    # consistent — avoids leaking "username exists" via fast-path timing.
-    dummy_hash = "$2b$12$" + "0" * 53  # syntactically valid bcrypt hash, never matches
-    hash_to_check = row["password_hash"] if row else dummy_hash
-    password_ok = _verify_password(body.password, hash_to_check)
-
-    if not row or not row["is_active"] or not password_ok:
-        raise HTTPException(status_code=401, detail="Invalid username or password")
-
-    token = _create_admin_jwt(
-        admin_id=row["id"],
-        username=row["username"],
-        role=row["role"],
-    )
-
-    return AdminLoginResponse(
-        token=token,
-        admin_id=row["id"],
-        username=row["username"],
-        role=row["role"],
-    )
-
-
-class VerifyAdminResponse(BaseModel):
-    admin_id: str
-    username: str
-    role: str
-    valid: bool
-
-
-@router.post("/verify-admin", response_model=VerifyAdminResponse)
-async def verify_admin_token(token: str):
-    """
-    Verify an admin JWT. Used by Next.js middleware (server-side), mirrors
-    /auth/verify-tenant. Returns 401 if invalid/expired.
-
-    NOTE: does not re-check shared.admin_users.is_active on every call
-    (stateless JWT, same trade-off as verify-tenant) — a deactivated admin
-    stays valid until their token expires (JWT_EXPIRY_H = 24h). Acceptable
-    for now (small trusted user set); revisit if that window matters later.
-    """
-    payload = verify_jwt(token)
-    if payload.get("role") not in ("admin", "reviewer"):
-        # Explicit whitelist — same secret/alg means any token minted with
-        # a different role (e.g. tenant) would otherwise decode fine here.
-        raise HTTPException(status_code=401, detail="Not an admin token")
-    return VerifyAdminResponse(
-        admin_id=payload["sub"],
-        username=payload["username"],
-        role=payload["role"],
-        valid=True,
-    )
