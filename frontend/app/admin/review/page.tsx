@@ -452,12 +452,91 @@ function ReviewCard({ item, onApprove, onReject, onRegenerate, onSaved, onRevali
   );
 }
 
-// ── Regenerate confirm modal ──────────────────────────────────────────────────
-function RegenerateModal({ item, onClose }: {
-  item: any; onClose: () => void;
+// ── Regenerate confirm modal (AA-242) ──────────────────────────────────────────
+// Reruns the FULL pipeline (real Bedrock cost) → new generated_content version +
+// a new review_queue row. If the regenerated version comes back publishable
+// (gc.status === "approved"), the CURRENT review row (item.id) is auto-closed as
+// 'superseded'. If it lands in HITL instead, nothing is superseded — both the old
+// and new versions stay pending so the reviewer can compare and decide.
+//
+// The publishable verdict is read from the backend gate (gc.status), never guessed
+// from a client-side score. onReload = the page's queue refetch.
+function RegenerateModal({ item, onClose, onReload }: {
+  item: any; onClose: () => void; onReload: () => Promise<void> | void;
 }) {
+  const presetTier: string = item.raw?.requested_tier || "";   // "haiku" | "sonnet" | ""
+  const [tier, setTier] = useState<string>("");                // only used when no preset
+  const [running, setRunning] = useState(false);
+  const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+
+  const effectiveTier = presetTier || tier;                    // never silently defaulted
+  const canRun = !running && !!effectiveTier;
+  const close = () => { if (!running) onClose(); };            // block dismiss mid-run
+
+  async function doRegenerate() {
+    if (!effectiveTier) { setMsg({ kind: "err", text: "Choose a model tier first." }); return; }
+    setRunning(true); setMsg(null);
+    try {
+      // a. kick off the async pipeline run for THIS tour (fresh batch_id each time)
+      const res = await fetch(`/api/admin/run-tour-async`, {
+        method: "POST",
+        headers: authHeaders(true),
+        body: JSON.stringify({
+          tour_id: item.raw.tour_id,
+          batch_id: crypto.randomUUID(),
+          tenant_id: "00000000-0000-0000-0000-000000000001",
+          model_tier: effectiveTier,
+          allow_auto_upgrade: false,
+        }),
+      });
+      // b. must be 202 accepted or we stop before polling
+      if (res.status !== 202) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(e.detail || `Could not start regeneration (${res.status})`);
+      }
+      // c. + d. reuse the shared generic poller (same one Re-validate uses)
+      const { job_id } = await res.json();
+      setMsg({ kind: "ok", text: "Regenerating — running the full pipeline, please wait…" });
+      const outcome = await pollJob(job_id);
+      // e. anything but success → surface it, do NOT supersede, do NOT refetch
+      if (outcome !== "succeeded") {
+        setMsg({ kind: "err", text:
+          outcome === "timeout" ? "Regeneration is taking too long — refresh the queue to check."
+          : outcome === "interrupted" ? "Regeneration was interrupted. Try again."
+          : "Regeneration job failed. Try again." });
+        return;
+      }
+      // f. locate the freshly-created version: newest review row for the same tour_id
+      const qRes = await fetch(`/api/admin/review-queue`, { headers: authHeaders() });
+      if (!qRes.ok) throw new Error(`Regeneration finished but the queue could not be reloaded (${qRes.status})`);
+      const q = await qRes.json();
+      const sameTour = (q.data || []).filter((r: any) => String(r.tour_id) === String(item.raw.tour_id));
+      const newest = sameTour.reduce(
+        (a: any, b: any) => (!a || new Date(b.created_at) > new Date(a.created_at) ? b : a), null);
+      // g. publishable gate = gc.status === "approved" (backend _is_publishable), never a score guess
+      if (newest && newest.status === "approved") {
+        const sRes = await fetch(`/api/admin/review-queue/${item.id}/supersede`, {
+          method: "POST", headers: authHeaders(),
+        });
+        // 409 = already not pending (raced/closed) — treat as done, not an error
+        if (!sRes.ok && sRes.status !== 409) {
+          const e = await sRes.json().catch(() => ({}));
+          throw new Error(e.detail || `Could not close the old review row (${sRes.status})`);
+        }
+      }
+      // h. (approved) old row now superseded → drops from pending; new one shows.
+      // i. (hitl)     nothing superseded → both old + new stay for the reviewer.
+      await onReload();
+      onClose();
+    } catch (err: any) {
+      setMsg({ kind: "err", text: err.message || "Regeneration error." });
+    } finally {
+      setRunning(false);
+    }
+  }
+
   return (
-    <div onClick={onClose} style={{
+    <div onClick={close} style={{
       position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 50,
       display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
     }}>
@@ -469,18 +548,57 @@ function RegenerateModal({ item, onClose }: {
           <AlertTriangle size={20} style={{ color: A.amber }} />
           <div style={{ fontFamily: serif, fontSize: 18, fontWeight: 500, color: A.ink }}>Regenerate this version?</div>
           <div style={{ flex: 1 }} />
-          <button onClick={onClose} style={{ border: "none", background: "none", cursor: "pointer", color: A.muted, display: "flex" }}><X size={18} /></button>
+          <button onClick={close} disabled={running} style={{
+            border: "none", background: "none", cursor: running ? "not-allowed" : "pointer",
+            color: A.muted, display: "flex", opacity: running ? 0.4 : 1,
+          }}><X size={18} /></button>
         </div>
         <p style={{ fontSize: 13, color: A.body, lineHeight: 1.6, margin: "0 0 8px" }}>
-          Regenerating re-runs the full pipeline for <strong>{item.name}</strong> and overwrites the
-          current content in place, discarding any manual edits.
+          This re-runs the <strong>full pipeline</strong> for <strong>{item.name}</strong> on real
+          models — it costs actual Bedrock spend. Prefer fixing the fields by hand (Edit) when you can;
+          only regenerate when the content is beyond a manual fix.
         </p>
-        <p style={{ fontSize: 12, color: A.muted, lineHeight: 1.6, margin: "0 0 20px" }}>
-          This action isn't available yet — it's tracked in AA-242. For now, reject the tour and
-          re-run it from the pipeline page.
+        <p style={{ fontSize: 12, color: A.muted, lineHeight: 1.6, margin: "0 0 16px" }}>
+          If the new version comes back publishable, this review row is closed automatically as
+          <strong> superseded</strong>. If it doesn't, both versions stay in the queue for you to compare.
         </p>
+
+        {!presetTier ? (
+          <div style={{ marginBottom: 18 }}>
+            <div style={{ fontSize: 12, color: A.body, marginBottom: 6 }}>
+              No model tier was recorded for this tour — choose one:
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              {(["haiku", "sonnet"] as const).map(t => (
+                <button key={t} onClick={() => setTier(t)} disabled={running} style={{
+                  flex: 1, padding: "8px 10px", borderRadius: 8, cursor: running ? "not-allowed" : "pointer",
+                  fontSize: 13, fontFamily: sans, textTransform: "capitalize" as const,
+                  border: `1px solid ${tier === t ? A.gold : A.line}`,
+                  background: tier === t ? A.gold : A.card,
+                  color: tier === t ? "#fff" : A.body,
+                }}>{t}</button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div style={{ fontSize: 11, color: A.muted, marginBottom: 18, fontFamily: mono }}>
+            Model tier: {presetTier}
+          </div>
+        )}
+
+        {msg && (
+          <div style={{
+            fontSize: 12, padding: "8px 12px", borderRadius: 6, marginBottom: 16,
+            background: msg.kind === "ok" ? A.greenSoft : A.redSoft,
+            color: msg.kind === "ok" ? A.green : A.red,
+          }}>{msg.text}</div>
+        )}
+
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
-          <Btn variant="ghost" size="sm" onClick={onClose}>Close</Btn>
+          <Btn variant="ghost" size="sm" onClick={close} disabled={running}>Cancel</Btn>
+          <Btn variant="primary" size="sm" disabled={!canRun} onClick={doRegenerate}>
+            {running ? <Loader2 size={12} className="spin" /> : <RotateCcw size={12} />} Regenerate
+          </Btn>
         </div>
       </div>
     </div>
@@ -633,7 +751,7 @@ export default function AdminReviewPage() {
       </main>
 
       {regenTarget && (
-        <RegenerateModal item={regenTarget} onClose={() => setRegenTarget(null)} />
+        <RegenerateModal item={regenTarget} onClose={() => setRegenTarget(null)} onReload={load} />
       )}
     </div>
   );
