@@ -1862,8 +1862,9 @@ async def admin_review_queue(
                    gc.aa_highlights, gc.aa_itineraries, gc.mobile_card_text,
                    gc.seo_title, gc.seo_meta, gc.seo_keywords_used, gc.og_tags,
                    gc.human_edited, gc.reviewed_by, gc.edited_at, gc.revalidate_passed,
+                   gc.requested_tier, gc.status,
                    qs.failure_codes, qs.brand_audit_codes,
-                   rt.src_name, rt.country, rt.duration
+                   rt.src_name, rt.country, rt.duration, rt.batch_id AS raw_tours_batch_id
             FROM silver_aa_internal.review_queue rq
             JOIN silver_aa_internal.generated_content gc ON gc.id = rq.generated_content_id
             LEFT JOIN silver_aa_internal.quality_scores qs
@@ -1912,6 +1913,13 @@ async def admin_review_queue(
             "revalidate_passed":  r["revalidate_passed"],  # 3-state: None/True/False
             # AA-240 per-field failure reasons re-derived on current content
             "failures":           _derive_field_failures(gc, codes),
+            # AA-242 regenerate context: tier the caller originally requested (may be null),
+            # and the raw-tour batch so the FE can pass it back through run-tour-async
+            "requested_tier":     r["requested_tier"],
+            "raw_tours_batch_id": str(r["raw_tours_batch_id"]) if r["raw_tours_batch_id"] else None,
+            # gc.status = publishable gate (_is_publishable → 'approved' | 'hitl'); FE keys
+            # the supersede decision on this, never on a client-side score heuristic
+            "status":             r["status"],
             # raw-tour context
             "src_name":           r["src_name"],
             "country":            r["country"],
@@ -1951,6 +1959,28 @@ async def admin_reject_review(
     verify_admin_secret(x_admin_secret)
     from api.routers.v1_pipeline import reject_review
     return await reject_review(review_id=review_id, request=request, tenant=None)
+
+
+@router.post("/review-queue/{review_id}/supersede")
+async def admin_supersede_review(
+    review_id: str,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    """AA-242: đóng review_queue row cũ khi Regenerate tạo ra version mới publishable
+    cho cùng tour. Khác 'rejected' (reviewer đánh giá xấu) — đây là tự động thay thế,
+    không phải reviewer từ chối chất lượng."""
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        result = await conn.execute("""
+            UPDATE silver_aa_internal.review_queue
+            SET review_status = 'superseded'::review_status_enum
+            WHERE id = $1::uuid AND review_status = 'pending'
+        """, review_id)
+    if result == "UPDATE 0":
+        raise HTTPException(status_code=409, detail="review row not pending or not found")
+    return {"status": "superseded", "review_id": review_id}
 
 
 # ── Tour version endpoints ────────────────────────────────────────────────────
