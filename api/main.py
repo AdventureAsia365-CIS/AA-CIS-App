@@ -11,6 +11,8 @@ from shared.repository.raw_tour_repository import RawTourRepository
 from api.routers.auth import (
     _hash_api_key, _create_jwt, verify_jwt,
     TenantLoginRequest, TenantLoginResponse,
+    _verify_password, _create_admin_jwt,
+    AdminLoginRequest, AdminLoginResponse, VerifyAdminResponse,
 )
 from api.routers.v1_tours import router as v1_tours_router
 from api.routers.v1_exports import router as v1_exports_router
@@ -215,6 +217,57 @@ async def verify_tenant(request: Request):
         "name": payload["name"],
         "plan_tier": payload["plan_tier"],
     }
+
+@app.post("/auth/admin-login", response_model=AdminLoginResponse, tags=["auth"])
+async def admin_login(
+    body: AdminLoginRequest,
+    db: asyncpg.Pool = Depends(get_pool),
+):
+    """
+    Per-user admin/reviewer login (AA-232). Verifies username+password against
+    shared.admin_users (bcrypt). Constant-shape 401 on any failure — unknown
+    user, wrong password, and inactive account all look identical (no
+    enumeration signal). Helpers/models live in api.routers.auth.
+    """
+    if not body.username or not body.password:
+        raise HTTPException(status_code=400, detail="Username and password required")
+    async with db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id::text, username, password_hash, role::text, is_active "
+            "FROM shared.admin_users WHERE username = $1",
+            body.username,
+        )
+    # Always run bcrypt compare (even on no-row) to keep response timing constant.
+    dummy_hash = "$2b$12$" + "0" * 53  # valid bcrypt shape, never matches
+    password_ok = _verify_password(body.password, row["password_hash"] if row else dummy_hash)
+    if not row or not row["is_active"] or not password_ok:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    token = _create_admin_jwt(row["id"], row["username"], row["role"])
+    return AdminLoginResponse(
+        token=token,
+        admin_id=row["id"],
+        username=row["username"],
+        role=row["role"],
+    )
+
+@app.post("/auth/verify-admin", response_model=VerifyAdminResponse, tags=["auth"])
+async def verify_admin(request: Request):
+    """
+    Verify an admin JWT (server-side, called by Next.js middleware) — mirrors
+    /auth/verify-tenant. Stateless: does not re-check admin_users.is_active on
+    each call, so a deactivated admin stays valid until token expiry (24h).
+    """
+    body = await request.json()
+    payload = verify_jwt(body.get("token", ""))
+    if payload.get("role") not in ("admin", "reviewer"):
+        # Explicit whitelist — same secret/alg means a tenant JWT would decode fine here.
+        raise HTTPException(status_code=401, detail="Not an admin token")
+    return VerifyAdminResponse(
+        admin_id=payload["sub"],
+        username=payload["username"],
+        role=payload["role"],
+        valid=True,
+    )
 
 @app.get("/health")
 async def health():

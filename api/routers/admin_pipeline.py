@@ -2978,16 +2978,23 @@ async def update_generated_content_fields(
     )
     # AA-234: a human edit invalidates any prior re-validation. Mark human_edited + audit,
     # and reset revalidate_passed to NULL so the approve gate forces a fresh re-validation.
-    reviewer = request.headers.get("x-reviewer-id") or "admin"
-    audit_sql = (", human_edited = true, reviewed_by = $%d, edited_at = now(),"
+    #
+    # AA-232 (forward-compat with migration 074): reviewed_by is being retyped from a free-text
+    # varchar into a UUID FK -> shared.admin_users. Until per-user admin JWT auth resolves a real
+    # admin_users.id, writing the unverified x-reviewer-id handle here would be an invalid UUID
+    # (and a FK violation once admin_users is the target). Leave reviewed_by NULL and keep the
+    # handle for audit continuity inside edit_diff (jsonb — type-safe both sides of the migration).
+    reviewer_handle = request.headers.get("x-reviewer-id") or "admin"
+    audit_sql = (", human_edited = true, reviewed_by = NULL, edited_at = now(),"
                  " edit_diff = $%d::jsonb, revalidate_passed = NULL"
-                 % (len(fields) + 1, len(fields) + 2))
+                 % (len(fields) + 1))
     pool = request.app.state.pool
     async with pool.acquire() as conn:
         updated = await conn.fetchval(
             f"UPDATE silver_aa_internal.generated_content SET {set_clause}{audit_sql}"
-            f" WHERE id = ${len(fields)+3}::uuid AND tour_id = ${len(fields)+4}::uuid RETURNING id",
-            *values, reviewer, _j_gc.dumps({"fields": fields}), content_id, tour_id,
+            f" WHERE id = ${len(fields)+2}::uuid AND tour_id = ${len(fields)+3}::uuid RETURNING id",
+            *values, _j_gc.dumps({"fields": fields, "reviewer_handle": reviewer_handle}),
+            content_id, tour_id,
         )
     if not updated:
         raise HTTPException(status_code=404, detail=f"Content {content_id} not found")

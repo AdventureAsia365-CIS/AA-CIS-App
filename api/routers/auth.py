@@ -16,6 +16,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import asyncpg
+import bcrypt
 import jwt  # PyJWT
 from fastapi import APIRouter, Depends, HTTPException, Request, Security, status
 from fastapi.security import APIKeyHeader
@@ -229,3 +230,54 @@ async def verify_tenant_api_key(
             }
 
     raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
+
+
+# ── AA-232 — Per-user admin JWT auth (helpers + models) ──────────────────────
+#
+# The live endpoints (POST /auth/admin-login, POST /auth/verify-admin) are
+# declared in api/main.py, mirroring tenant_login/verify_tenant there — the
+# /auth `router` object in this module is NOT mounted (see main.py: it imports
+# these helpers/models and re-declares the routes on `app` with Depends(get_pool)).
+# This module owns the reusable pieces only: bcrypt password verify, admin JWT
+# mint, and the request/response models. Admin JWTs share JWT_SECRET/HS256/
+# verify_jwt() with tenant tokens but carry sub = admin_users.id (UUID) and
+# role = 'admin'|'reviewer' (vs tenant's role = 'tenant').
+
+
+class AdminLoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class AdminLoginResponse(BaseModel):
+    token: str
+    admin_id: str
+    username: str
+    role: str
+
+
+class VerifyAdminResponse(BaseModel):
+    admin_id: str
+    username: str
+    role: str
+    valid: bool
+
+
+def _verify_password(raw_password: str, password_hash: str) -> bool:
+    """bcrypt compare. Returns False (not raise) on any malformed-hash error —
+    a corrupt/legacy hash should fail closed, not 500."""
+    try:
+        return bcrypt.checkpw(raw_password.encode(), password_hash.encode())
+    except (ValueError, TypeError):
+        return False
+
+
+def _create_admin_jwt(admin_id: str, username: str, role: str) -> str:
+    payload = {
+        "sub":      admin_id,
+        "username": username,
+        "role":     role,
+        "iat":      datetime.now(timezone.utc),
+        "exp":      datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_H),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
