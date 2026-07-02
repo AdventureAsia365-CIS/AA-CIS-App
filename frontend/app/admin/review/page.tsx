@@ -636,22 +636,23 @@ export default function AdminReviewPage() {
   const [error, setError] = useState<string | null>(null);
   const [filterCountry, setCountry] = useState("all");
   const [filterScore, setScore] = useState("all");
-  const [approved, setApproved] = useState(0);
-  const [rejected, setRejected] = useState(0);
+  const [filterStatus, setFilterStatus] = useState("pending");
+  const [total, setTotal] = useState(0);
   const [regenTarget, setRegenTarget] = useState<any>(null);
   const reviewerInit = useRef(false);
 
   const load = useCallback(async () => {
     setLoading(true); setError(null);
     try {
-      const res = await fetch(`/api/admin/review-queue`, { headers: authHeaders() });
+      const res = await fetch(`/api/admin/review-queue?status=${filterStatus}`, { headers: authHeaders() });
       if (!res.ok) throw new Error(`Could not load the review queue (${res.status})`);
       const d = await res.json();
       setItems((d.data || []).map(mapRow));
+      setTotal(d.pagination?.total ?? (d.data || []).length);
     } catch (err: any) {
       setError(err.message || "Could not load the review queue.");
     } finally { setLoading(false); }
-  }, []);
+  }, [filterStatus]);
 
   useEffect(() => {
     if (!reviewerInit.current) { reviewerInit.current = true; getReviewerId(); }
@@ -671,14 +672,14 @@ export default function AdminReviewPage() {
   async function onApprove(id: string) {
     const res = await fetch(`/api/admin/review-queue/${id}/approve`, { method: "POST", headers: authHeaders() });
     if (!res.ok) { setError(`Approve failed (${res.status}).`); return; }
-    setApproved(a => a + 1);
     setItems(p => p.filter(i => i.id !== id));
+    setTotal(t => Math.max(0, t - 1));
   }
   async function onReject(id: string) {
     const res = await fetch(`/api/admin/review-queue/${id}/reject`, { method: "POST", headers: authHeaders() });
     if (!res.ok) { setError(`Reject failed (${res.status}).`); return; }
-    setRejected(r => r + 1);
     setItems(p => p.filter(i => i.id !== id));
+    setTotal(t => Math.max(0, t - 1));
   }
 
   const countries = [...new Set(items.map(i => i.country))];
@@ -706,16 +707,10 @@ export default function AdminReviewPage() {
             <div style={{ fontSize: 13, color: A.muted, marginTop: 4 }}>Edit, re-validate, then approve. Approval is blocked until an edited tour passes re-validation.</div>
           </div>
           <div style={{ display: "flex", gap: 24 }}>
-            {[
-              { label: "Approved", value: approved, color: A.green },
-              { label: "Rejected", value: rejected, color: A.red },
-              { label: "Pending", value: items.length, color: A.gold },
-            ].map(s => (
-              <div key={s.label} style={{ textAlign: "center" as const }}>
-                <div style={{ fontFamily: serif, fontSize: 22, fontWeight: 500, color: s.color, letterSpacing: "-0.02em" }}>{s.value}</div>
-                <div style={{ fontSize: 11, color: A.muted }}>{s.label}</div>
-              </div>
-            ))}
+            <div style={{ textAlign: "center" as const }}>
+              <div style={{ fontFamily: serif, fontSize: 22, fontWeight: 500, color: A.gold, letterSpacing: "-0.02em" }}>{total}</div>
+              <div style={{ fontSize: 11, color: A.muted }}>{filterStatus === "all" ? "Total" : filterStatus[0].toUpperCase() + filterStatus.slice(1)}</div>
+            </div>
           </div>
         </div>
 
@@ -729,6 +724,12 @@ export default function AdminReviewPage() {
             <option value="all">All scores</option>
             <option value="critical">Critical (&lt;5.0)</option>
             <option value="low">Low (5.0–6.9)</option>
+          </select>
+          <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} style={selectStyle}>
+            <option value="pending">Pending</option>
+            <option value="approved">Approved</option>
+            <option value="rejected">Rejected</option>
+            <option value="all">All</option>
           </select>
           <div style={{ flex: 1 }} />
           <Btn variant="ghost" size="sm" onClick={load}><RotateCcw size={12} /> Refresh</Btn>
