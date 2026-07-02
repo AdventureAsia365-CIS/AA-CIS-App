@@ -396,6 +396,12 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
             # AA-197: build a complete seed (no double-"tours"); fall back to src_name.
             seed = build_seed(row.get("country"), row.get("activities")) or row.get("src_name", "")
             if seed:
+                # AA-249: no cache= passed — process_seo() defaults to its own
+                # module-level Redis singleton (services/seo_intelligence/handler.py),
+                # shared across same-country tours. Kept out of this call because this
+                # function also runs from the background 3-worker job queue (AA-223)
+                # with no Request in scope, so request.app.state.redis isn't reachable
+                # here anyway.
                 seo_result = await process_seo(
                     tour_id=req.tour_id, destination=seed, seed=seed,
                     tenant_id=tenant_uuid, seo_mode=effective_seo_mode,
