@@ -43,7 +43,7 @@ def _seo_data():
     }
 
 
-async def _run_with_shared_cache(cache, seo_data):
+async def _run_with_shared_cache(cache, seo_data, tour_id="11111111-1111-1111-1111-111111111111"):
     insert_mock = AsyncMock(return_value="fake-seo-id")
     repo_mock = MagicMock()
     repo_mock.insert = insert_mock
@@ -59,31 +59,40 @@ async def _run_with_shared_cache(cache, seo_data):
          patch.object(seo_handler, "get_database_url", return_value="postgres://stub"):
         asyncpg_mock.connect = AsyncMock(return_value=fake_conn)
         result = await seo_handler.process_seo(
-            tour_id="11111111-1111-1111-1111-111111111111",
+            tour_id=tour_id,
             destination="South Korea tours",
             seed="South Korea tours",
             tenant_id=None,
             seo_mode="dataforseo",
             cache=cache,
         )
-    return result, fake_client.fetch_all
+    return result, fake_client.fetch_all, insert_mock
 
 
 @pytest.mark.asyncio
-async def test_second_call_same_seed_is_cache_hit_no_second_dataforseo_call():
+async def test_second_tour_same_seed_is_cache_hit_no_second_dataforseo_call():
     cache = _StatefulFakeCache()
     seo_data = _seo_data()
+    tour_a = "11111111-1111-1111-1111-111111111111"
+    tour_b = "22222222-2222-2222-2222-222222222222"
 
-    result_1, fetch_all_1 = await _run_with_shared_cache(cache, seo_data)
+    result_1, fetch_all_1, insert_1 = await _run_with_shared_cache(cache, seo_data, tour_id=tour_a)
     assert result_1["status"] == "fetched"
     assert fetch_all_1.await_count == 1
+    assert insert_1.await_count == 1
 
-    # Second tour, same country/seed, same cache instance (simulates 2 same-country
-    # tours in one batch sharing the TTL window) — must NOT call DataForSEO again.
-    result_2, fetch_all_2 = await _run_with_shared_cache(cache, seo_data)
+    # Second, DIFFERENT tour, same country/seed, same cache instance (simulates 2
+    # same-country tours in one batch sharing the TTL window) — must NOT call
+    # DataForSEO again, but MUST still get its own seo_context row (AA-249: the
+    # cache_hit early-return used to skip repo.insert() entirely here — confirmed
+    # live on Dev that a 2nd same-country tour got cache_hit and silently never
+    # got a row, reintroducing the original AA-249 symptom via a different path).
+    result_2, fetch_all_2, insert_2 = await _run_with_shared_cache(cache, seo_data, tour_id=tour_b)
     assert result_2["status"] == "cache_hit"
     assert fetch_all_2.await_count == 0
     assert result_2["data"] == seo_data
+    assert insert_2.await_count == 1, "cache_hit must still persist a row for THIS tour_id"
+    assert insert_2.await_args.args[0]["tour_id"] == tour_b
 
 
 @pytest.mark.asyncio
