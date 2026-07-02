@@ -74,49 +74,67 @@ async def process_seo(
     except Exception as _cache_err:
         logger.warning("seo_cache_get_failed", error=str(_cache_err))
         cached = None
+
     if cached:
+        # AA-249: the cache decides whether DataForSEO needs to be called again —
+        # it must NOT decide whether THIS tour gets its own seo_context row. Redis
+        # is shared across every tour of the same country/market; a hit here only
+        # means some other tour already paid for the fetch, not that this tour_id
+        # has been persisted. Falls through to the shared insert below instead of
+        # returning early (that early return was the bug: confirmed live on Dev —
+        # a 2nd same-country tour got cache_hit and silently never got a row).
         logger.info("cache_hit", destination=effective_seed, seo_mode=seo_mode)
-        return {"status": "cache_hit", "data": cached}
-
-    # "custom_keywords" — use existing seo_context from DB, skip DataForSEO API call
-    if seo_mode == "custom_keywords":
-        logger.info("seo_custom_keywords", tour_id=tour_id, destination=destination)
-        conn = await asyncpg.connect(get_database_url())
-        try:
-            row = await conn.fetchrow(
-                """SELECT top_keywords, keyword_ideas
-                   FROM silver_aa_internal.seo_context
-                   WHERE tour_id = $1::uuid
-                   ORDER BY fetched_at DESC LIMIT 1""",
-                tour_id,
-            )
-            if row:
-                # AA-235: post-backfill keyword_ideas is [] (legacy was a {kw:vol} map).
-                # Guard so custom_keywords mode keeps search_volumes a dict, not a list.
-                _ki = json.loads(row["keyword_ideas"] or "[]")
-                existing = {
-                    "keywords": {
-                        "top_keywords": json.loads(row["top_keywords"] or "[]"),
-                        "search_volumes": _ki if isinstance(_ki, dict) else {},
+        seo_data = cached
+    else:
+        # "custom_keywords" — use existing seo_context from DB, skip DataForSEO API call
+        if seo_mode == "custom_keywords":
+            logger.info("seo_custom_keywords", tour_id=tour_id, destination=destination)
+            conn = await asyncpg.connect(get_database_url())
+            try:
+                row = await conn.fetchrow(
+                    """SELECT top_keywords, keyword_ideas
+                       FROM silver_aa_internal.seo_context
+                       WHERE tour_id = $1::uuid
+                       ORDER BY fetched_at DESC LIMIT 1""",
+                    tour_id,
+                )
+                if row:
+                    # AA-235: post-backfill keyword_ideas is [] (legacy was a {kw:vol} map).
+                    # Guard so custom_keywords mode keeps search_volumes a dict, not a list.
+                    _ki = json.loads(row["keyword_ideas"] or "[]")
+                    existing = {
+                        "keywords": {
+                            "top_keywords": json.loads(row["top_keywords"] or "[]"),
+                            "search_volumes": _ki if isinstance(_ki, dict) else {},
+                        }
                     }
-                }
-                try:
-                    await cache.set(redis_seed_key, existing, ttl_seconds=86400)
-                except Exception as _cache_err:
-                    logger.warning("seo_cache_set_failed", error=str(_cache_err))
-                return {"status": "custom_keywords", "data": existing}
-        finally:
-            await conn.close()
-        # No existing data — return empty rather than calling DataForSEO
-        return {"status": "custom_keywords_empty", "data": {}}
+                    try:
+                        await cache.set(redis_seed_key, existing, ttl_seconds=86400)
+                    except Exception as _cache_err:
+                        logger.warning("seo_cache_set_failed", error=str(_cache_err))
+                    # Row already belongs to THIS tour_id (queried by tour_id, not
+                    # shared by country) — no re-insert needed, unlike the cache_hit
+                    # case above.
+                    return {"status": "custom_keywords", "data": existing}
+            finally:
+                await conn.close()
+            # No existing data — return empty rather than calling DataForSEO
+            return {"status": "custom_keywords_empty", "data": {}}
 
-    # "dataforseo" (default) — live keyword fetch
-    logger.info("cache_miss", destination=effective_seed, seo_mode=seo_mode, location=location_name)
-    client = DataForSEOClient()
-    seo_data = await client.fetch_all(
-        effective_seed, location_code, location_name, language_code, activity,
-    )
+        # "dataforseo" (default) — live keyword fetch
+        logger.info("cache_miss", destination=effective_seed, seo_mode=seo_mode, location=location_name)
+        client = DataForSEOClient()
+        seo_data = await client.fetch_all(
+            effective_seed, location_code, location_name, language_code, activity,
+        )
+        try:
+            await cache.set(redis_seed_key, seo_data, ttl_seconds=86400)
+        except Exception as _cache_err:
+            logger.warning("seo_cache_set_failed", error=str(_cache_err))
 
+    # AA-249: persist runs for BOTH cache_hit and freshly-fetched data — every tour
+    # gets its own seo_context row regardless of whether the Redis cache saved us
+    # the DataForSEO call.
     # AA-235: shape guard at the writer — keyword_ideas MUST persist as a JSON array.
     # A dict/None (e.g. legacy search_volumes map or an empty DFS result) would store a
     # JSON object that crashes the FE [...spread] and the export-docx [:25] slice.
@@ -149,11 +167,7 @@ async def process_seo(
     finally:
         await conn.close()
 
-    try:
-        await cache.set(redis_seed_key, seo_data, ttl_seconds=86400)
-    except Exception as _cache_err:
-        logger.warning("seo_cache_set_failed", error=str(_cache_err))
-    return {"status": "fetched", "id": seo_id, "data": seo_data}
+    return {"status": "cache_hit" if cached else "fetched", "id": seo_id, "data": seo_data}
 
 
 async def _lookup_destination(tour_id: str) -> str:
