@@ -1,12 +1,15 @@
 // frontend/app/api/auth/login/route.ts
-// AA-232: admin login now tries JWT (/auth/admin-login) first.
-// Falls back to the legacy shared-secret check ONLY on infra failure
-// (network error / non-2xx-non-401 / JSON parse failure from the JWT
-// endpoint) — e.g. admin-login route not yet deployed, or backend
-// temporarily unreachable. A 401 from /auth/admin-login (wrong
-// username/password) does NOT fall back — it must fail closed, otherwise
-// anyone who knows ADMIN_SECRET could bypass a correctly-rejected JWT
-// login, defeating the whole point of AA-232.
+// AA-232: admin login goes through JWT (/auth/admin-login) only.
+//
+// AA-252 (security fix): the legacy ADMIN_SECRET shared-secret fallback is
+// retired. It used to trigger on JWT infra failure (network error/timeout/
+// 500) and returned { token: password, role: "admin" } with NO cis_admin_token
+// cookie — a session shape middleware.ts had to specially allow through
+// without JWT verification. That carve-out was exploitable: cis_role is a
+// plain client-writable cookie, so anyone could set it by hand and skip auth
+// entirely, no secret required. Both real admins (nghiep, admin) already have
+// JWT accounts in shared.admin_users — the fallback served no one. On infra
+// failure we now return a real error instead of silently granting access.
 import { NextRequest, NextResponse } from "next/server";
 
 const API_URL = process.env.API_URL ?? "https://api-cis.lumiguides.it.com";
@@ -30,8 +33,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ token: password, role: "content", name: "Content" });
   }
 
-  // ── AA-232: try real per-user JWT login first ────────────────────────────
-  let jwtInfraFailed = false;
+  // ── AA-232: real per-user JWT login (only path — AA-252 retired the
+  // shared-secret fallback) ────────────────────────────────────────────────
   try {
     const res = await fetch(`${API_URL}/auth/admin-login`, {
       method: "POST",
@@ -41,63 +44,37 @@ export async function POST(req: NextRequest) {
     });
 
     if (res.status === 401) {
-      // Correctly rejected — real credentials check failed. Do NOT fall
-      // back to the shared-secret path; that would let a wrong username/
-      // password succeed anyway as long as the caller also knows ADMIN_SECRET.
       return NextResponse.json({ detail: "Invalid credentials" }, { status: 401 });
     }
-
-    if (res.ok) {
-      const data = await res.json();
-      const response = NextResponse.json({
-        token: data.token, // JWT — stored client-side too for API calls that need it directly
-        role: data.role,   // 'admin' | 'reviewer'
-        name: data.username,
-        admin_id: data.admin_id,
-      });
-      // Server-readable cookie for middleware verification (see middleware.ts).
-      // httpOnly so client JS can't read/tamper with it; the JSON body above
-      // still carries the token for any client code that needs to attach it
-      // to direct API calls.
-      response.cookies.set("cis_admin_token", data.token, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === "production",
-        sameSite: "lax",
-        path: "/",
-        maxAge: 60 * 60 * 24, // 24h — matches backend JWT_EXPIRY_H
-      });
-      return response;
-    }
-
-    // Any other status (500, etc.) from a route that DID respond — treat as
-    // infra failure, allow fallback below.
-    jwtInfraFailed = true;
-  } catch {
-    // Network error / timeout / route not deployed yet — infra failure.
-    jwtInfraFailed = true;
-  }
-
-  if (!jwtInfraFailed) {
-    // Should be unreachable (every branch above either returns or sets the
-    // flag), but fail closed rather than silently falling through.
-    return NextResponse.json({ detail: "Login failed" }, { status: 502 });
-  }
-
-  // ── Legacy fallback: shared ADMIN_SECRET check ──────────────────────────
-  // AA-232 interim only — remove once /auth/admin-login is confirmed stable
-  // in prod and all real admins have accounts in shared.admin_users.
-  try {
-    const res = await fetch(`${API_URL}/admin/tenants`, {
-      method: "GET",
-      headers: { "x-admin-secret": password, "Content-Type": "application/json" },
-    });
 
     if (!res.ok) {
-      return NextResponse.json({ detail: "Invalid credentials" }, { status: 401 });
+      // Backend responded but not OK/401 (e.g. 500) — surface as a real
+      // error. No more silent fallback into an unauthenticated session.
+      return NextResponse.json({ detail: "Login failed — backend error" }, { status: 502 });
     }
 
-    return NextResponse.json({ token: password, role: "admin", name: username || "Admin" });
+    const data = await res.json();
+    const response = NextResponse.json({
+      token: data.token, // JWT — stored client-side too for API calls that need it directly
+      role: data.role,   // 'admin' | 'reviewer'
+      name: data.username,
+      admin_id: data.admin_id,
+    });
+    // Server-readable cookie for middleware verification (see middleware.ts).
+    // httpOnly so client JS can't read/tamper with it; the JSON body above
+    // still carries the token for any client code that needs to attach it
+    // to direct API calls.
+    response.cookies.set("cis_admin_token", data.token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/",
+      maxAge: 60 * 60 * 24, // 24h — matches backend JWT_EXPIRY_H
+    });
+    return response;
   } catch {
+    // Network error / timeout / route unreachable — a real infra failure,
+    // not a reason to grant access. Surface it instead of falling back.
     return NextResponse.json({ detail: "Backend connection error" }, { status: 502 });
   }
 }
