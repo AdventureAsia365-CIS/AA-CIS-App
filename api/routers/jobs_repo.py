@@ -60,6 +60,25 @@ async def mark_succeeded(job_id: str, version_id: str | None, pipeline_run_id: s
         await conn.close()
 
 
+async def update_stage(job_id: str, stage: str) -> None:
+    """AA-250 B2: record the LangGraph node that just completed for this job.
+
+    Reuses heartbeat_at (same column sweep_interrupted() reads) so a job actively
+    streaming stage updates counts as alive — no separate liveness signal needed.
+    """
+    conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+    try:
+        await conn.execute(
+            "UPDATE shared.pipeline_jobs "
+            "SET current_stage=$2, heartbeat_at=now() "
+            "WHERE id=$1::uuid",
+            job_id,
+            stage,
+        )
+    finally:
+        await conn.close()
+
+
 async def mark_failed(job_id: str, error: str) -> None:
     conn = await asyncpg.connect(os.environ["DATABASE_URL"])
     try:
@@ -80,7 +99,7 @@ async def get_job(job_id: str) -> dict | None:
     try:
         row = await conn.fetchrow(
             "SELECT id, job_type, status, result_version_id, pipeline_run_id, error, "
-            "       created_at, started_at, finished_at, heartbeat_at "
+            "       current_stage, created_at, started_at, finished_at, heartbeat_at "
             "FROM shared.pipeline_jobs WHERE id=$1::uuid",
             job_id,
         )
@@ -100,6 +119,7 @@ async def get_job(job_id: str) -> dict | None:
             "result_version_id": _uid(row["result_version_id"]),
             "pipeline_run_id":   _uid(row["pipeline_run_id"]),
             "error":             row["error"],
+            "current_stage":     row["current_stage"],
             "created_at":        _ts(row["created_at"]),
             "started_at":        _ts(row["started_at"]),
             "finished_at":       _ts(row["finished_at"]),
