@@ -87,6 +87,7 @@ async def _rewrite_tour(
     is_tenant_rewrite: bool = False,
     subtitle_focus: str = "standard",
     seo_mode: str = "dataforseo",
+    on_stage=None,  # AA-250 B2: optional async callback(node_name: str), fired after each node completes
 ) -> dict:
     """Rewrite single tour using LangGraph."""
     logger.info("rewriting_tour", idx=idx, total=total, name=tour.get("name", ""))
@@ -130,15 +131,24 @@ async def _rewrite_tour(
             "fix_pass_fields":    [],
         }
 
-        def run_graph():
-            import asyncio as _asyncio
-            loop = _asyncio.new_event_loop()
-            _asyncio.set_event_loop(loop)
-            try:
-                return graph.invoke(initial_state)
-            finally:
-                loop.close()
-        result = await asyncio.get_event_loop().run_in_executor(None, run_graph)
+        # AA-250 B2: stream node-by-node (instead of graph.invoke()) so on_stage can report
+        # live progress to shared.pipeline_jobs.current_stage. stream_mode="updates" emits
+        # {node_name: node_output} per completed step; every node in graph.py returns
+        # `{**state, ...}` (verified: generate_node/validate_node/judge_node/brand_audit_node/
+        # flag_fix_node/increment_retry/revalidate_node all spread the full incoming state), so
+        # node_output is always the COMPLETE state at that point, not a partial delta — tracking
+        # the most recent node_output reconstructs the same final state graph.invoke() used to
+        # return. Sync node functions are auto-dispatched to a thread-pool executor internally by
+        # LangGraph's Runnable wrapping (langgraph._internal._runnable: iscoroutinefunction check
+        # -> run_in_executor) when driven via astream, so this does not block the event loop —
+        # the manual run_in_executor(None, run_graph) wrapping the old sync invoke() is no longer
+        # needed.
+        result = dict(initial_state)
+        async for event in graph.astream(initial_state, stream_mode="updates"):
+            for node_name, node_output in event.items():
+                result = node_output
+                if on_stage is not None:
+                    await on_stage(node_name)
 
         return {
             "idx": idx,

@@ -49,8 +49,14 @@ def _graph_state(with_judge: bool):
 
 
 async def _run_rewrite(state):
+    # AA-250 B2: _rewrite_tour streams via graph.astream(stream_mode="updates") instead of
+    # graph.invoke() — stub astream as an async generator yielding one {node: full_state} event,
+    # matching what a real node (which always returns `{**state, ...}`) would emit.
+    async def fake_astream(*_args, **_kwargs):
+        yield {"judge": state}
+
     fake_graph = MagicMock()
-    fake_graph.invoke.return_value = state
+    fake_graph.astream = fake_astream
     with patch.object(v1_pipeline, "build_graph", return_value=fake_graph):
         return await _rewrite_tour(_TOUR, idx=0, total=1)
 
