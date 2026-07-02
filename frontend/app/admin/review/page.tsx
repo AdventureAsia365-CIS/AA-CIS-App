@@ -404,6 +404,13 @@ function ReviewCard({ item, onApprove, onReject, onRegenerate, onSaved, onRevali
         }}>
           {item.score.toFixed(1)}
         </div>
+        {item.failure_summary && (
+          <div title={item.failure_summary} style={{
+            fontSize: 11, color: A.red, background: A.redSoft, border: "1px solid #FECACA",
+            borderRadius: 6, padding: "3px 9px", maxWidth: 220, flexShrink: 0,
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          }}>{item.failure_summary}</div>
+        )}
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontWeight: 600, color: A.ink, fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}>
             <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</span>
@@ -618,6 +625,7 @@ function mapRow(r: any) {
     edited_at: r.edited_at || null,
     reviewed_by: r.reviewed_by || null,
     revalidate_passed: r.revalidate_passed === true ? true : r.revalidate_passed === false ? false : null,
+    failure_summary: r.failure_summary || "",
   };
 }
 
