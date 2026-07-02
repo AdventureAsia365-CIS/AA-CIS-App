@@ -2,6 +2,7 @@ import asyncio
 import asyncpg
 import json
 import os
+import redis.asyncio as _aioredis
 import structlog
 from datetime import datetime, timedelta
 from .dataforseo_client import (
@@ -13,9 +14,19 @@ from shared.secrets import get_database_url
 from shared.services.tenant_config_service import TenantConfigService
 from shared.repository.seo_context_repository import SeoContextRepository
 from shared.cache.redis_cache import RedisCache
-from shared.cache.local_cache import LocalCache
 
 logger = structlog.get_logger()
+
+# AA-249: module-level singleton, built once at import — shared by every
+# process_seo() call regardless of caller (HTTP route or the background 3-worker
+# job queue, AA-223, neither of which guarantees a Request/app.state in scope).
+# redis.asyncio.from_url() is lazy — it does no I/O here, just builds a client
+# backed by its own internal connection pool; real connections open on first
+# command and are managed/reconnected by the library for the life of the worker
+# process. No explicit shutdown hook: the socket closes with the process, and a
+# single long-lived client isn't a meaningful leak to guard against.
+_REDIS_HOST = os.environ.get("REDIS_HOST", "aa-cis-dev-redis.wvp8vb.0001.usw1.cache.amazonaws.com")
+_seo_redis_client = _aioredis.from_url(f"redis://{_REDIS_HOST}:6379", encoding="utf-8", decode_responses=True)
 
 
 async def process_seo(
@@ -50,11 +61,19 @@ async def process_seo(
         except Exception as _mkt_err:
             logger.warning("seo_market_resolve_failed", tenant_id=tenant_id, error=str(_mkt_err))
 
-    cache = cache or LocalCache()
+    # AA-249: default to the real Redis singleton (module-level, see top of file).
+    cache = cache or RedisCache(client=_seo_redis_client)
+    # AA-249: this is the ephemeral cache-layer key (Redis, TTL, shared across tours
+    # of the same country/market) — deliberately named apart from the seo_context.
+    # cache_key DB column (persist layer, per-tour, trace-only since migration 075).
     # Cache per (seed, buyer market) — same tour for a different market is a distinct entry.
-    cache_key = RedisCache.make_key(effective_seed, str(location_code))
+    redis_seed_key = RedisCache.make_key(effective_seed, str(location_code))
 
-    cached = await cache.get(cache_key)
+    try:
+        cached = await cache.get(redis_seed_key)
+    except Exception as _cache_err:
+        logger.warning("seo_cache_get_failed", error=str(_cache_err))
+        cached = None
     if cached:
         logger.info("cache_hit", destination=effective_seed, seo_mode=seo_mode)
         return {"status": "cache_hit", "data": cached}
@@ -81,7 +100,10 @@ async def process_seo(
                         "search_volumes": _ki if isinstance(_ki, dict) else {},
                     }
                 }
-                await cache.set(cache_key, existing, ttl_seconds=86400)
+                try:
+                    await cache.set(redis_seed_key, existing, ttl_seconds=86400)
+                except Exception as _cache_err:
+                    logger.warning("seo_cache_set_failed", error=str(_cache_err))
                 return {"status": "custom_keywords", "data": existing}
         finally:
             await conn.close()
@@ -118,14 +140,19 @@ async def process_seo(
             # (real keys are people_also_ask / related_keywords, not "related").
             "people_also_ask":  json.dumps(seo_data.get("people_also_ask", []), default=str),
             "related_keywords": json.dumps(seo_data.get("related_keywords", []), default=str),
-            "cache_key":      cache_key,
+            # DB cache_key column: trace-only since migration 075 (row identity is
+            # tour_id) — still populated so it's easy to see which seed produced a row.
+            "cache_key":      redis_seed_key,
             "expires_at":     datetime.utcnow() + timedelta(hours=24),
         })
         logger.info("seo_inserted", id=seo_id)
     finally:
         await conn.close()
 
-    await cache.set(cache_key, seo_data, ttl_seconds=86400)
+    try:
+        await cache.set(redis_seed_key, seo_data, ttl_seconds=86400)
+    except Exception as _cache_err:
+        logger.warning("seo_cache_set_failed", error=str(_cache_err))
     return {"status": "fetched", "id": seo_id, "data": seo_data}
 
 
