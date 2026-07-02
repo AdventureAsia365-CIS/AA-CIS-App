@@ -1855,13 +1855,20 @@ async def admin_review_queue(
     x_admin_secret: str = Header(None),
     page: int = 1,
     page_size: int = 20,
+    status: str = "pending",
 ):
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
     tenant_id = "00000000-0000-0000-0000-000000000001"
     offset = (page - 1) * page_size
+    if status == "all":
+        status_clause = "AND rq.review_status != 'superseded'"
+        status_params: list = []
+    else:
+        status_clause = "AND rq.review_status = $4"
+        status_params = [status]
     async with pool.acquire() as conn:
-        rows = await conn.fetch("""
+        rows = await conn.fetch(f"""
             SELECT rq.id, rq.tour_id, rq.generated_content_id,
                    rq.review_status, rq.score_overall, rq.failure_summary, rq.created_at,
                    gc.aa_name, gc.aa_subtitle, gc.aa_summary, gc.aa_description,
@@ -1877,14 +1884,18 @@ async def admin_review_queue(
                    ON qs.generated_content_id = rq.generated_content_id
             JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = rq.tour_id
             WHERE rq.tenant_id = $1::uuid
-              AND rq.review_status = 'pending'
+              {status_clause}
             ORDER BY rq.created_at DESC
             LIMIT $2 OFFSET $3
-        """, tenant_id, page_size, offset)
-        total = await conn.fetchval("""
+        """, tenant_id, page_size, offset, *status_params)
+        if status == "all":
+            total_where = "AND review_status != 'superseded'"
+        else:
+            total_where = "AND review_status = $2"
+        total = await conn.fetchval(f"""
             SELECT COUNT(*) FROM silver_aa_internal.review_queue
-            WHERE tenant_id = $1::uuid AND review_status = 'pending'
-        """, tenant_id)
+            WHERE tenant_id = $1::uuid {total_where}
+        """, tenant_id, *status_params)
 
     data = []
     for r in rows:
