@@ -5,7 +5,7 @@
 // GET  /api/admin/tours/{id}/detail       → raw + generated + published
 // POST /api/admin/run-tour                → trigger rewrite
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { Play, RefreshCw, ArrowRight, Search, CheckCircle, XCircle, Loader2, ChevronRight } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
 import {
@@ -139,6 +139,32 @@ export default function S1RewritePage() {
   const [runComplete, setRunComplete]       = useState(false);
   const [detailTour, setDetailTour]         = useState<Tour | null>(null);
   const [compareOpen, setCompareOpen]       = useState(false);
+  const [jobIds, setJobIds]                 = useState<Record<string, string>>({}); // tour_id -> job_id
+  const [toast, setToast]                   = useState<string | null>(null);
+
+  // AA-248: async run-tour + polling. Refs mirror state for use inside the
+  // polling interval / worker loop, which close over values once and would
+  // otherwise see stale state (same pattern as CatalogTab.tsx).
+  const queueRef          = useRef<Tour[]>([]);
+  const activeWorkersRef  = useRef(0);
+  const runTourIdsRef     = useRef<string[]>([]);
+  const waitersRef        = useRef<Record<string, () => void>>({});
+  const pollingRef        = useRef<ReturnType<typeof setInterval> | null>(null);
+  const jobIdsRef         = useRef<Record<string, string>>({});
+  const tourStatusesRef   = useRef<Record<string, TourRunStatus>>({});
+  const toursRef          = useRef<Tour[]>([]);
+
+  useEffect(() => { jobIdsRef.current = jobIds; }, [jobIds]);
+  useEffect(() => { tourStatusesRef.current = tourStatuses; }, [tourStatuses]);
+  useEffect(() => { toursRef.current = tours; }, [tours]);
+
+  function resolveWaiter(tourId: string) {
+    const resolve = waitersRef.current[tourId];
+    if (resolve) {
+      delete waitersRef.current[tourId];
+      resolve();
+    }
+  }
 
   const loadTours = useCallback(async () => {
     setLoading(true);
@@ -211,10 +237,13 @@ export default function S1RewritePage() {
 
   const selectedTours = tours.filter(t => selectedIds.has(t.tour_id));
 
+  // AA-248: fires the async job and returns immediately once queued/running —
+  // it does NOT await completion. The polling effect below tracks the job
+  // through to succeeded/failed and updates tourStatuses accordingly.
   async function runSingleTour(tour: Tour): Promise<void> {
     setTourStatuses(prev => ({ ...prev, [tour.tour_id]: "running" }));
     try {
-      const res = await fetch("/api/admin/run-tour", {
+      const res = await fetch("/api/admin/run-tour-async", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -231,10 +260,8 @@ export default function S1RewritePage() {
         const err = await res.json().catch(() => ({ detail: res.statusText }));
         throw new Error(err.detail || "Run failed");
       }
-      const data: RunResult = await res.json();
-      setRunResults(prev => ({ ...prev, [tour.tour_id]: data }));
-      const isDone = data.version_id != null || data.status === "success";
-      setTourStatuses(prev => ({ ...prev, [tour.tour_id]: isDone ? "done" : "failed" }));
+      const data: { job_id: string; status: string } = await res.json();
+      setJobIds(prev => ({ ...prev, [tour.tour_id]: data.job_id }));
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Unknown error";
       setRunResults(prev => ({
@@ -242,6 +269,27 @@ export default function S1RewritePage() {
         [tour.tour_id]: { tour_id: tour.tour_id, status: "failed", quality_score: null, version_id: null, error: msg },
       }));
       setTourStatuses(prev => ({ ...prev, [tour.tour_id]: "failed" }));
+      resolveWaiter(tour.tour_id);
+    }
+  }
+
+  // 3-worker pool: each worker pulls the next tour off queueRef, fires the
+  // async job, then waits for that tour's status to leave "running" (resolved
+  // either immediately on dispatch failure, or by the polling effect once the
+  // job settles) before pulling the next one. Caps concurrent in-flight jobs
+  // at 3 regardless of how many tours were selected.
+  async function runWorker() {
+    activeWorkersRef.current += 1;
+    try {
+      while (queueRef.current.length > 0) {
+        const tour = queueRef.current.shift();
+        if (!tour) break;
+        const waitPromise = new Promise<void>(resolve => { waitersRef.current[tour.tour_id] = resolve; });
+        await runSingleTour(tour);
+        await waitPromise;
+      }
+    } finally {
+      activeWorkersRef.current -= 1;
     }
   }
 
@@ -251,17 +299,109 @@ export default function S1RewritePage() {
     setRunComplete(false);
     setTourStatuses({});
     setRunResults({});
+    setJobIds({});
+    waitersRef.current = {};
 
-    const toRun = [...selectedTours];
-    for (let i = 0; i < toRun.length; i += 3) {
-      const chunk = toRun.slice(i, i + 3);
-      await Promise.all(chunk.map(t => runSingleTour(t)));
-    }
-    setRunning(false);
-    await loadTours();
-    setTourStatuses({});
-    setRunComplete(true);
+    queueRef.current = [...selectedTours];
+    runTourIdsRef.current = selectedTours.map(t => t.tour_id);
+
+    const workerCount = Math.min(3, queueRef.current.length);
+    await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
   }
+
+  // Finalize once every dispatched tour has left "running" (done or failed) —
+  // mirrors the old end-of-run behavior (reload tours, clear transient state,
+  // show the completion CTA), but triggered by polling instead of an await chain.
+  useEffect(() => {
+    if (!running) return;
+    const ids = runTourIdsRef.current;
+    if (ids.length === 0) return;
+    const allSettled = ids.every(id => tourStatuses[id] === "done" || tourStatuses[id] === "failed");
+    if (!allSettled) return;
+
+    setRunning(false);
+    setTourStatuses({});
+    setRunResults({});
+    setJobIds({});
+    setRunComplete(true);
+    loadTours();
+  }, [running, tourStatuses, loadTours]);
+
+  // Poll GET /admin/jobs/{job_id} every 5s for any tour still "running",
+  // modeled on CatalogTab.tsx's polling pattern (pollingRef guard, 5min cutoff).
+  useEffect(() => {
+    const anyRunning = Object.values(tourStatuses).some(s => s === "running");
+
+    if (!anyRunning) {
+      if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
+      return;
+    }
+    if (pollingRef.current) return; // already polling
+
+    const startTime = Date.now();
+    pollingRef.current = setInterval(async () => {
+      if (Date.now() - startTime > 300_000) {
+        const timedOutIds = Object.keys(jobIdsRef.current).filter(id => tourStatusesRef.current[id] === "running");
+        timedOutIds.forEach(tourId => {
+          setRunResults(prev => ({
+            ...prev,
+            [tourId]: {
+              tour_id: tourId, status: "failed", quality_score: null, version_id: null,
+              error: "No response after 5 minutes — check job status manually",
+            },
+          }));
+          setTourStatuses(prev => ({ ...prev, [tourId]: "failed" }));
+          resolveWaiter(tourId);
+        });
+        if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
+        return;
+      }
+
+      const runningIds = Object.keys(jobIdsRef.current).filter(id => tourStatusesRef.current[id] === "running");
+      await Promise.all(runningIds.map(async (tourId) => {
+        const jobId = jobIdsRef.current[tourId];
+        try {
+          const res = await fetch(`/api/admin/jobs/${jobId}`);
+          if (!res.ok) return;
+          const job = await res.json();
+
+          if (job.status === "succeeded") {
+            let qualityScore: number | null = null;
+            try {
+              const histRes = await fetch(`/api/admin/tours/${tourId}/history`);
+              if (histRes.ok) {
+                const histData = await histRes.json();
+                const entry = (histData.history || []).find((h: { id: string }) => h.id === job.result_version_id);
+                qualityScore = entry?.score_overall ?? null;
+              }
+            } catch {}
+            setRunResults(prev => ({
+              ...prev,
+              [tourId]: { tour_id: tourId, status: "success", quality_score: qualityScore, version_id: job.result_version_id },
+            }));
+            setTourStatuses(prev => ({ ...prev, [tourId]: "done" }));
+            const tourName = toursRef.current.find(t => t.tour_id === tourId)?.src_name ?? "Tour";
+            setToast(`✅ "${tourName}" — rewrite complete.`);
+            setTimeout(() => setToast(null), 5000);
+            resolveWaiter(tourId);
+          } else if (job.status === "failed" || job.status === "interrupted") {
+            setRunResults(prev => ({
+              ...prev,
+              [tourId]: { tour_id: tourId, status: "failed", quality_score: null, version_id: null, error: job.error ?? "Job failed" },
+            }));
+            setTourStatuses(prev => ({ ...prev, [tourId]: "failed" }));
+            resolveWaiter(tourId);
+          }
+          // "queued" / "running": leave as-is, no change.
+        } catch {}
+      }));
+    }, 5000);
+  }, [tourStatuses]);
+
+  // Cleanup polling on unmount
+  useEffect(() => () => {
+    if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
+  }, []);
 
   const statusCounts = Object.values(tourStatuses).reduce(
     (acc, s) => { acc[s] = (acc[s] || 0) + 1; return acc; },
@@ -629,6 +769,21 @@ export default function S1RewritePage() {
           tourIds={[...selectedIds]}
           onClose={() => setCompareOpen(false)}
         />
+      )}
+
+      {/* Toast — bottom-right, auto-dismiss after 5s (AA-248) */}
+      {toast && (
+        <div style={{
+          position: "fixed", bottom: 24, right: 28, zIndex: 9999,
+          display: "flex", alignItems: "center", gap: 8,
+          padding: "12px 18px", borderRadius: 10,
+          background: "#fff", border: `1px solid ${A.green}`,
+          boxShadow: "0 4px 20px rgba(0,0,0,0.15)",
+          fontSize: 13, fontWeight: 600, color: A.ink, fontFamily: sans,
+          maxWidth: 380,
+        }}>
+          {toast}
+        </div>
       )}
     </div>
   );
