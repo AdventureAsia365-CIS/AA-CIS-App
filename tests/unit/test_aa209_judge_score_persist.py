@@ -67,8 +67,15 @@ async def test_metadata_judge_score_non_null_through_rewrite_chain():
         "model_used": "haiku", "cost_usd": 0.001,
         **_JUDGE_KEYS,
     }
+    # AA-250 B2: _rewrite_tour streams via graph.astream(stream_mode="updates") instead of
+    # graph.invoke() — stub astream as an async generator yielding one {node: full_state} event,
+    # matching what a real node (which always returns `{**state, ...}`) would emit.
+
+    async def fake_astream(*_args, **_kwargs):
+        yield {"judge": state}
+
     fake_graph = MagicMock()
-    fake_graph.invoke.return_value = state
+    fake_graph.astream = fake_astream
     with patch.object(v1_pipeline, "build_graph", return_value=fake_graph):
         out = await _rewrite_tour({"name": "T", "country": "Korea"}, idx=0, total=1)
 

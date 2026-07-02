@@ -69,18 +69,76 @@ interface RunResult {
 }
 
 
+// ── Stage progress bar (AA-250 B2) ──────────────────────────────────────────────
+// Maps the 7 real LangGraph node names (services/content_generation/graph.py::build_graph,
+// confirmed via STEP 0 code read) down to 4 user-facing steps. validate/llm_judge/
+// increment_retry collapse to one step because they're the retry loop the user perceives as
+// a single "scoring" phase; brand_audit/flag_fix collapse likewise.
+const STAGE_STEPS = [
+  { step: 1, label: "Generating content" },
+  { step: 2, label: "Validating & scoring" },
+  { step: 3, label: "Brand audit" },
+  { step: 4, label: "Final check" },
+] as const;
+
+const STAGE_TO_STEP: Record<string, number> = {
+  generate:        1,
+  validate:        2,
+  llm_judge:       2,
+  increment_retry: 2,
+  brand_audit:     3,
+  flag_fix:        3,
+  revalidate:      4,
+};
+
+function StageProgressBar({ stage, isRetry }: { stage: string | null | undefined; isRetry: boolean }) {
+  const rawStep = stage ? (STAGE_TO_STEP[stage] ?? 1) : 0;
+  // A job that has looped generate -> validate -> llm_judge -> increment_retry -> generate is
+  // still conceptually "in the validate-retry loop", not starting over — pin the bar at step 2
+  // instead of jumping back to step 1 on re-entering generate (spec: don't regress the step).
+  const step = isRetry && rawStep === 1 ? 2 : rawStep;
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 3 }}>
+      {STAGE_STEPS.map((s, i) => (
+        <React.Fragment key={s.step}>
+          <div
+            title={s.label}
+            style={{
+              width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
+              background: step > s.step ? A.green : step === s.step ? A.amber : A.line,
+            }}
+          />
+          {i < STAGE_STEPS.length - 1 && (
+            <div style={{ width: 12, height: 2, background: step > s.step ? A.green : A.line, flexShrink: 0 }} />
+          )}
+        </React.Fragment>
+      ))}
+      <span style={{ fontSize: 11, color: A.muted, marginLeft: 5, whiteSpace: "nowrap" as const }}>
+        {step > 0 ? STAGE_STEPS[step - 1].label : "Queued"}
+      </span>
+      {isRetry && step === 2 && <Badge color="amber">retry</Badge>}
+    </div>
+  );
+}
+
 // ── Pipeline status badge ─────────────────────────────────────────────────────
 
-function PipelineStatusBadge({ tour, runStatus, result }: {
+function PipelineStatusBadge({ tour, runStatus, result, stage, isRetry }: {
   tour: Tour;
   runStatus: TourRunStatus;
   result?: RunResult;
+  stage?: string | null;
+  isRetry?: boolean;
 }) {
   if (runStatus === "running") {
     return (
-      <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, color: A.amber }}>
-        <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} /> Processing…
-      </span>
+      <div>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, color: A.amber }}>
+          <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} /> Processing…
+        </span>
+        <StageProgressBar stage={stage} isRetry={!!isRetry} />
+      </div>
     );
   }
   if (runStatus === "done") {
@@ -141,6 +199,10 @@ export default function S1RewritePage() {
   const [compareOpen, setCompareOpen]       = useState(false);
   const [jobIds, setJobIds]                 = useState<Record<string, string>>({}); // tour_id -> job_id
   const [toast, setToast]                   = useState<string | null>(null);
+  // AA-250 B2: tour_id -> last-seen current_stage from GET /admin/jobs/{id}, and whether that
+  // job has looped back into "generate" more than once (validate-retry loop indicator).
+  const [tourStages, setTourStages]         = useState<Record<string, string | null>>({});
+  const [tourRetryFlags, setTourRetryFlags] = useState<Record<string, boolean>>({});
 
   // AA-248: async run-tour + polling. Refs mirror state for use inside the
   // polling interval / worker loop, which close over values once and would
@@ -153,6 +215,11 @@ export default function S1RewritePage() {
   const jobIdsRef         = useRef<Record<string, string>>({});
   const tourStatusesRef   = useRef<Record<string, TourRunStatus>>({});
   const toursRef          = useRef<Tour[]>([]);
+  // AA-250 B2: last distinct stage seen + how many times "generate" was entered, per tour_id —
+  // used to detect the validate-retry loop (generate entered a 2nd+ time) without needing the
+  // backend to expose retry_count.
+  const tourStagesRef        = useRef<Record<string, string | null>>({});
+  const generateEntryCountRef = useRef<Record<string, number>>({});
 
   useEffect(() => { jobIdsRef.current = jobIds; }, [jobIds]);
   useEffect(() => { tourStatusesRef.current = tourStatuses; }, [tourStatuses]);
@@ -300,6 +367,10 @@ export default function S1RewritePage() {
     setTourStatuses({});
     setRunResults({});
     setJobIds({});
+    setTourStages({});
+    setTourRetryFlags({});
+    tourStagesRef.current = {};
+    generateEntryCountRef.current = {};
     waitersRef.current = {};
 
     queueRef.current = [...selectedTours];
@@ -323,6 +394,10 @@ export default function S1RewritePage() {
     setTourStatuses({});
     setRunResults({});
     setJobIds({});
+    setTourStages({});
+    setTourRetryFlags({});
+    tourStagesRef.current = {};
+    generateEntryCountRef.current = {};
     setRunComplete(true);
     loadTours();
   }, [running, tourStatuses, loadTours]);
@@ -364,6 +439,20 @@ export default function S1RewritePage() {
           const res = await fetch(`/api/admin/jobs/${jobId}`);
           if (!res.ok) return;
           const job = await res.json();
+
+          // AA-250 B2: track current_stage + count distinct entries into "generate" so the
+          // stepper can detect a validate-retry loop (backend doesn't expose retry_count).
+          const newStage: string | null = job.current_stage ?? null;
+          if (newStage && newStage !== tourStagesRef.current[tourId]) {
+            if (newStage === "generate" && tourStagesRef.current[tourId] !== "generate") {
+              generateEntryCountRef.current[tourId] = (generateEntryCountRef.current[tourId] || 0) + 1;
+              if (generateEntryCountRef.current[tourId] > 1) {
+                setTourRetryFlags(prev => ({ ...prev, [tourId]: true }));
+              }
+            }
+            tourStagesRef.current[tourId] = newStage;
+            setTourStages(prev => ({ ...prev, [tourId]: newStage }));
+          }
 
           if (job.status === "succeeded") {
             let qualityScore: number | null = null;
@@ -664,7 +753,12 @@ export default function S1RewritePage() {
                         </td>
                         <td style={{ ...TD, color: A.muted2, fontSize: 12 }}>{relativeTime(t.last_rewritten_at)}</td>
                         <td style={{ ...TD, color: A.muted2, fontSize: 12 }}>{relativeTime(t.ingest_at)}</td>
-                        <td style={TD}><PipelineStatusBadge tour={t} runStatus={runStatus} result={result} /></td>
+                        <td style={TD}>
+                          <PipelineStatusBadge
+                            tour={t} runStatus={runStatus} result={result}
+                            stage={tourStages[t.tour_id]} isRetry={!!tourRetryFlags[t.tour_id]}
+                          />
+                        </td>
                         <td style={{ ...TD, color: A.muted2 }}><ChevronRight size={14} /></td>
                       </tr>
                     );

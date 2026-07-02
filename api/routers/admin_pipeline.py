@@ -290,8 +290,24 @@ async def _resolve_brand_rule(conn, tenant_uuid, brand_identity_id, brand_name):
     )
 
 
-async def _execute_run_tour(req: TourRunRequest) -> dict:
-    """Core tour rewrite — called by HTTP endpoint and background retry task."""
+async def _execute_run_tour(req: TourRunRequest, job_id: str | None = None) -> dict:
+    """Core tour rewrite — called by HTTP endpoint and background retry task.
+
+    AA-250 B2: job_id, when set (async job path only — _run_tour_job), builds an on_stage
+    callback that persists each completed LangGraph node name to
+    shared.pipeline_jobs.current_stage via jobs_repo.update_stage(), so the S1 async job poll
+    can drive a stage-progress bar. None for the sync /admin/run-tour endpoint (no job row to
+    update) — on_stage stays None and _rewrite_tour behaves exactly as before.
+    """
+    on_stage = None
+    if job_id is not None:
+        from .jobs_repo import update_stage as _update_stage
+
+        async def _on_stage(node_name: str) -> None:
+            await _update_stage(job_id, node_name)
+
+        on_stage = _on_stage
+
     conn = await asyncpg.connect(os.environ["DATABASE_URL"])
     TENANT_SLUG_MAP = {"aa_internal": "00000000-0000-0000-0000-000000000001"}
     tenant_uuid = TENANT_SLUG_MAP.get(req.tenant_id, req.tenant_id)
@@ -425,6 +441,7 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
             model_tier=req.model_tier,
             subtitle_focus=req.subtitle_focus,
             seo_mode=effective_seo_mode,
+            on_stage=on_stage,
         )
 
         _UPGRADE_THRESHOLD = float(os.environ.get("AUTO_UPGRADE_THRESHOLD", "8.5"))
@@ -444,6 +461,7 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
                 model_tier="sonnet",
                 subtitle_focus=req.subtitle_focus,
                 seo_mode=effective_seo_mode,
+                on_stage=on_stage,
             )
             if _upgraded.get("quality_score", 0.0) > _score:
                 result = _upgraded
@@ -660,7 +678,7 @@ async def _execute_run_tour(req: TourRunRequest) -> dict:
         await conn.close()
 
 
-async def _run_tour_safe(tour_req: TourRunRequest) -> dict | None:
+async def _run_tour_safe(tour_req: TourRunRequest, job_id: str | None = None) -> dict | None:
     async with _pipeline_semaphore:
         last_exc: Exception | None = None
         for attempt in range(3):
@@ -669,7 +687,7 @@ async def _run_tour_safe(tour_req: TourRunRequest) -> dict | None:
             try:
                 # AA-223: surface the executor result so _run_tour_job can read
                 # version_id. Final-fail path below still swallows and returns None.
-                return await _execute_run_tour(tour_req)
+                return await _execute_run_tour(tour_req, job_id=job_id)
             except Exception as exc:
                 last_exc = exc
                 logger.warning("run_tour_attempt_failed", tour_id=tour_req.tour_id,
@@ -707,7 +725,7 @@ async def _run_tour_job(job_id: str, tour_req: TourRunRequest) -> None:
 
     await mark_running(job_id)
     try:
-        result = await _run_tour_safe(tour_req)
+        result = await _run_tour_safe(tour_req, job_id=job_id)
         if result is None:
             await mark_failed(job_id, "run_tour failed after retries (see logs)")
         else:

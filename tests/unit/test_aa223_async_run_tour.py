@@ -200,3 +200,62 @@ async def test_get_job_200():
          patch("api.routers.jobs_repo.get_job", AsyncMock(return_value=job)):
         res = await admin_pipeline.get_run_tour_job(FAKE_UUID, x_admin_secret="secret")
     assert res == job
+
+
+# ── AA-250 B2: current_stage (migration 076) ────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_update_stage_writes_stage_and_heartbeat():
+    conn = _fake_conn()
+    with patch("api.routers.jobs_repo.asyncpg.connect", AsyncMock(return_value=conn)):
+        await jobs_repo.update_stage(FAKE_UUID, "brand_audit")
+    sql = conn.execute.call_args.args[0]
+    assert "current_stage=$2" in sql
+    assert "heartbeat_at=now()" in sql
+    assert conn.execute.call_args.args[1:] == (FAKE_UUID, "brand_audit")
+    conn.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_get_job_selects_and_returns_current_stage():
+    conn = _fake_conn()
+    conn.fetchrow.return_value = {
+        "id": uuid.UUID(FAKE_UUID), "job_type": "run_tour", "status": "running",
+        "result_version_id": None, "pipeline_run_id": None, "error": None,
+        "current_stage": "llm_judge",
+        "created_at": None, "started_at": None, "finished_at": None, "heartbeat_at": None,
+    }
+    with patch("api.routers.jobs_repo.asyncpg.connect", AsyncMock(return_value=conn)):
+        job = await jobs_repo.get_job(FAKE_UUID)
+    sql = conn.fetchrow.call_args.args[0]
+    assert "current_stage" in sql
+    assert job["current_stage"] == "llm_judge"
+
+
+@pytest.mark.asyncio
+async def test_get_job_current_stage_null_before_first_stage_report():
+    """A job that hasn't streamed a node yet (queued, or created pre-migration-076)."""
+    conn = _fake_conn()
+    conn.fetchrow.return_value = {
+        "id": uuid.UUID(FAKE_UUID), "job_type": "run_tour", "status": "queued",
+        "result_version_id": None, "pipeline_run_id": None, "error": None,
+        "current_stage": None,
+        "created_at": None, "started_at": None, "finished_at": None, "heartbeat_at": None,
+    }
+    with patch("api.routers.jobs_repo.asyncpg.connect", AsyncMock(return_value=conn)):
+        job = await jobs_repo.get_job(FAKE_UUID)
+    assert job["current_stage"] is None
+
+
+@pytest.mark.asyncio
+async def test_run_tour_job_passes_job_id_to_run_tour_safe():
+    """AA-250 B2 wiring guard: _run_tour_job must thread job_id through so
+    _execute_run_tour can build the on_stage callback (jobs_repo.update_stage)."""
+    req = _req()
+    with patch("api.routers.admin_pipeline._run_tour_safe",
+               AsyncMock(return_value={"version_id": FAKE_UUID})) as rts, \
+         patch("api.routers.jobs_repo.mark_running", AsyncMock()), \
+         patch("api.routers.jobs_repo.mark_succeeded", AsyncMock()), \
+         patch("api.routers.jobs_repo.mark_failed", AsyncMock()):
+        await admin_pipeline._run_tour_job("job-5", req)
+    rts.assert_awaited_once_with(req, job_id="job-5")
