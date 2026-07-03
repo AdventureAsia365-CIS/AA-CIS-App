@@ -1,4 +1,10 @@
+// AA-253: despite the "tenant" path segment, this route reads/writes the
+// AA-internal admin's brand rules (backend hardcodes the AA-internal
+// tenant_id — see api/routers/admin_pipeline.py get_brand_identity). It is
+// an admin route, gated with requireAdmin() like the other X-Admin-Secret
+// proxies, not requireTenant().
 import { NextRequest, NextResponse } from "next/server";
+import { requireAdmin } from "@/lib/auth-server";
 
 const API_URL      = process.env.API_URL      ?? "https://api-cis.lumiguides.it.com";
 const ADMIN_SECRET = process.env.ADMIN_SECRET  ?? "";
@@ -12,7 +18,10 @@ function apiHeaders(extra: Record<string, string> = {}): Record<string, string> 
   };
 }
 
-export async function GET(_req: NextRequest) {
+export async function GET(req: NextRequest) {
+  const auth = await requireAdmin(req);
+  if (!auth.ok) return auth.response;
+
   const res = await fetch(`${API_URL}/admin/brand-identity`, {
     headers: apiHeaders(),
     cache: "no-store",
@@ -22,6 +31,9 @@ export async function GET(_req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const auth = await requireAdmin(req);
+  if (!auth.ok) return auth.response;
+
   const body = await req.json();
   const res = await fetch(`${API_URL}/admin/brand-identity`, {
     method: "POST",
