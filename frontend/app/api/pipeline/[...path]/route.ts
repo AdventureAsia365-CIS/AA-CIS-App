@@ -1,4 +1,8 @@
+// AA-253: this route forwarded X-Admin-Secret unconditionally with no
+// caller check — requireAdmin() now verifies the real admin JWT before
+// any request reaches the backend.
 import { NextRequest, NextResponse } from "next/server";
+import { requireAdmin } from "@/lib/auth-server";
 
 const API_URL = process.env.API_URL ?? "https://api-cis.lumiguides.it.com";
 const ADMIN_SECRET = process.env.ADMIN_SECRET ?? "";
@@ -7,6 +11,9 @@ async function handler(
   req: NextRequest,
   { params }: { params: Promise<{ path: string[] }> }
 ) {
+  const auth = await requireAdmin(req);
+  if (!auth.ok) return auth.response;
+
   if (!ADMIN_SECRET) {
     return NextResponse.json({ detail: "Admin secret not configured" }, { status: 503 });
   }

@@ -1,13 +1,20 @@
+// AA-253: this route forwarded X-Admin-Secret unconditionally with no
+// caller check — requireAdmin() now verifies the real admin JWT before
+// any request reaches the backend.
 import { NextRequest, NextResponse } from "next/server";
+import { requireAdmin } from "@/lib/auth-server";
 
 const API_URL      = process.env.API_URL      ?? "https://api-cis.lumiguides.it.com";
 const ADMIN_SECRET = process.env.ADMIN_SECRET  ?? "";
 const API_KEY      = process.env.INTERNAL_API_KEY ?? "";
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await requireAdmin(req);
+  if (!auth.ok) return auth.response;
+
   const { id } = await params;
 
   const res = await fetch(`${API_URL}/v1/tours/${id}/full`, {
