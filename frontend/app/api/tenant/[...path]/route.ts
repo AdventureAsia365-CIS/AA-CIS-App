@@ -15,8 +15,24 @@
 //
 // Tenant branch is unchanged — still Bearer cis_tenant_token, still a real
 // per-tenant JWT, never was the problem.
+//
+// AA-253: the staff branch used to trust the plain, client-writable
+// cis_role cookie ("admin" or "content") at face value — no JWT check at
+// all — before forwarding ADMIN_SECRET. requireAdmin() now performs real
+// verification (POST /auth/verify-admin, signature-checked) instead.
+//
+// Known behavior change: backend /auth/verify-admin only whitelists
+// role in ("admin","reviewer") and content-role sessions carry no JWT
+// (separate login path, see login/route.ts) — so content-role callers now
+// get 401 through this proxy where they previously passed on the cookie
+// alone. This mirrors the same known-limitation carve-out middleware.ts
+// already calls out for page-level gating (content is unhardened by
+// design, tracked under AA-253) — flagged here, not silently patched
+// around, since it needs a product decision (does content need write
+// access through this proxy, or was the old pass-through itself the bug).
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
+import { requireAdmin } from "@/lib/auth-server";
 
 const API_URL = process.env.API_URL ?? "https://api-cis.lumiguides.it.com";
 const ADMIN_SECRET = process.env.ADMIN_SECRET ?? "";
@@ -32,21 +48,14 @@ async function handler(
   const headers: Record<string, string> = { "Content-Type": "application/json" };
 
   if (isStaff) {
+    const auth = await requireAdmin(req);
+    if (!auth.ok) return auth.response;
+
     if (!ADMIN_SECRET) {
       return NextResponse.json({ detail: "Admin secret not configured" }, { status: 503 });
     }
     headers["x-admin-secret"] = ADMIN_SECRET;
-
-    // AA-232: forward verified admin identity when present, same as
-    // /api/admin/[...path]/route.ts. Content-role sessions don't carry a
-    // JWT (separate login path) — this is a no-op for them.
-    const adminToken = cookieStore.get("cis_admin_token")?.value;
-    if (adminToken) {
-      const payload = decodeJwtPayloadUnsafe(adminToken);
-      if (payload?.sub && typeof payload.sub === "string") {
-        headers["x-admin-user-id"] = payload.sub;
-      }
-    }
+    headers["x-admin-user-id"] = auth.adminId;
   } else {
     const tenantToken = cookieStore.get("cis_tenant_token")?.value ?? "";
     if (!tenantToken) {
@@ -74,20 +83,6 @@ async function handler(
     });
   } catch {
     return NextResponse.json({ detail: "Upstream connection error" }, { status: 502 });
-  }
-}
-
-/** Decode (not verify) a JWT payload — see admin_proxy_route.ts for the
- * same helper + rationale (middleware.ts already verified the signature
- * before this route is reached for any gated page). */
-function decodeJwtPayloadUnsafe(token: string): Record<string, unknown> | null {
-  try {
-    const parts = token.split(".");
-    if (parts.length !== 3) return null;
-    const json = Buffer.from(parts[1], "base64url").toString("utf-8");
-    return JSON.parse(json);
-  } catch {
-    return null;
   }
 }
 
