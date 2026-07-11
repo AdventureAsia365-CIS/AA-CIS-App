@@ -340,7 +340,7 @@ async def _execute_run_tour(req: TourRunRequest, job_id: str | None = None) -> d
         }
 
         brand_rules: dict = {}
-        brand_rule_id: str = ""
+        brand_rule_id: Optional[str] = None
         brand_name_val: str = ""
         brand_rule_version: Optional[int] = None
         try:
@@ -351,7 +351,7 @@ async def _execute_run_tour(req: TourRunRequest, job_id: str | None = None) -> d
                 getattr(req, "brand_name", None),
             )
             if br_row:
-                brand_rule_id = str(br_row["id"]) if br_row["id"] else ""
+                brand_rule_id = str(br_row["id"]) if br_row["id"] else None
                 brand_name_val = br_row["brand_name"] or ""
                 brand_rule_version = int(br_row["version"]) if br_row["version"] is not None else None
                 _voice = br_row["voice_examples"]
@@ -2253,7 +2253,7 @@ async def export_tour_versions(
             LEFT JOIN silver_aa_internal.quality_scores qs
                 ON qs.generated_content_id = gc.id
             LEFT JOIN shared.tenant_brand_rules tbr
-                ON tbr.id = (gc.metadata->>'brand_rule_id')::uuid
+                ON tbr.id = NULLIF(gc.metadata->>'brand_rule_id', '')::uuid
             WHERE gc.tour_id = $1::uuid AND gc.version_num = ANY($2::int[])
             ORDER BY gc.version_num
         """, tour_id, version_list)
@@ -2382,7 +2382,7 @@ async def export_tour_version_docx(
             LEFT JOIN silver_aa_internal.quality_scores qs
                 ON qs.generated_content_id = gc.id
             LEFT JOIN shared.tenant_brand_rules tbr
-                ON tbr.id = (gc.metadata->>'brand_rule_id')::uuid
+                ON tbr.id = NULLIF(gc.metadata->>'brand_rule_id', '')::uuid
             LEFT JOIN LATERAL (
                 SELECT top_keywords, keyword_ideas, people_also_ask,
                        related_keywords, keyword_search
@@ -2603,7 +2603,7 @@ async def get_tour_version_detail(
             LEFT JOIN silver_aa_internal.quality_scores qs
                 ON qs.generated_content_id = gc.id
             LEFT JOIN shared.tenant_brand_rules tbr
-                ON tbr.id = (gc.metadata->>'brand_rule_id')::uuid
+                ON tbr.id = NULLIF(gc.metadata->>'brand_rule_id', '')::uuid
             LEFT JOIN silver_aa_internal.raw_tours rt
                 ON rt.tour_id = gc.tour_id
             LEFT JOIN LATERAL (
