@@ -282,6 +282,43 @@ def generate_node(state: ContentState) -> ContentState:
                 "cost_usd": state.get("cost_usd", 0) + (resp.cost_usd if resp else 0),
                 "error": str(e)}
 
+# AA-251 (ADR-2026-021, hướng 4): generic tour-marketing filler that shouldn't count
+# toward a DFS_INTENT_UNDERUSED keyword match — a keyword matching only on "tours"
+# is not evidence the content reflects real search intent.
+_DFS_INTENT_STOPWORDS = frozenset({
+    "tour", "tours", "travel", "trip", "trips", "package", "packages",
+    "best", "top", "in", "the", "a", "of", "and", "for", "to", "with",
+})
+_DFS_INTENT_TOKEN_RE = re.compile(r"[a-z0-9]+")
+# Fraction of a keyword's significant tokens that must show up in seo_title+seo_meta
+# for the keyword to count as reflected. 0.5 tolerates word-order/synonym drift
+# without accepting a single incidental token match on an unrelated keyword.
+_DFS_INTENT_OVERLAP_THRESHOLD = 0.5
+
+
+def _dfs_intent_tokens(text: str) -> set[str]:
+    return {
+        t for t in _DFS_INTENT_TOKEN_RE.findall(text.lower())
+        if t not in _DFS_INTENT_STOPWORDS and len(t) > 2
+    }
+
+
+def _keyword_intent_matched(kw_texts: list[str], field_text: str) -> bool:
+    """Token-overlap match: a keyword counts as reflected once >= threshold of its
+    significant tokens appear in seo_title+seo_meta — not the whole phrase verbatim."""
+    field_tokens = _dfs_intent_tokens(field_text)
+    if not field_tokens:
+        return False
+    for kw in kw_texts:
+        kw_tokens = _dfs_intent_tokens(kw)
+        if not kw_tokens:
+            continue
+        overlap = kw_tokens & field_tokens
+        if len(overlap) / len(kw_tokens) >= _DFS_INTENT_OVERLAP_THRESHOLD:
+            return True
+    return False
+
+
 def validate_node(state: ContentState) -> ContentState:
     """Node 2: Quality check — structured failure codes, 4 sub-dimensions, score 0-10."""
     generated = state.get("generated", {})
@@ -456,7 +493,7 @@ def validate_node(state: ContentState) -> ContentState:
             (generated.get("seo_title", "") or "") + " " +
             (generated.get("seo_meta", "") or "")
         ).lower()
-        if kw_texts and not any(kw in seo_field_text for kw in kw_texts):
+        if kw_texts and not _keyword_intent_matched(kw_texts, seo_field_text):
             issues.append("SEO keywords not reflected in seo_title or seo_meta")
             fired.append("DFS_INTENT_UNDERUSED")
             score -= 1.0

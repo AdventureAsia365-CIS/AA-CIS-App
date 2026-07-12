@@ -410,7 +410,11 @@ async def _execute_run_tour(req: TourRunRequest, job_id: str | None = None) -> d
             from services.seo_intelligence.handler import process_seo
             from services.seo_intelligence.seed_builder import build_seed
             # AA-197: build a complete seed (no double-"tours"); fall back to src_name.
-            seed = build_seed(row.get("country"), row.get("activities")) or row.get("src_name", "")
+            # AA-251 (ADR-2026-021): pass src_name through so the seed falls back to
+            # tour-specific text instead of the generic "{country} tours" phrase.
+            seed = build_seed(
+                row.get("country"), row.get("activities"), row.get("src_name"),
+            ) or row.get("src_name", "")
             if seed:
                 # AA-249: no cache= passed — process_seo() defaults to its own
                 # module-level Redis singleton (services/seo_intelligence/handler.py),
