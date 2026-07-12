@@ -772,13 +772,22 @@ export function TourDetailPanelV2({ tourId, tourName, rewriteCount = 0, onClose 
                           <td style={{ padding: "8px 12px", color: A.gold }}>{h.cost_usd != null ? `$${h.cost_usd.toFixed(4)}` : "—"}</td>
                           <td style={{ padding: "8px 12px", color: A.muted2, fontSize: 12 }}>{relTime(h.created_at)}</td>
                           <td style={{ padding: "8px 12px" }}>
-                            <button
-                              onClick={e => { e.stopPropagation(); promoteVersion(h.version_num); }}
-                              disabled={promoting}
-                              style={{ padding: "3px 8px", fontSize: 11, border: `1px solid ${A.gold}`, borderRadius: 4, background: A.goldTint, cursor: "pointer", color: A.gold, fontWeight: 600 }}
-                            >
-                              {promoting ? "…" : "Make Current"}
-                            </button>
+                            <div style={{ display: "flex", gap: 6 }}>
+                              <button
+                                onClick={e => { e.stopPropagation(); loadVersion(h.version_num); }}
+                                disabled={loadingVersion}
+                                style={{ padding: "3px 8px", fontSize: 11, border: `1px solid ${A.line}`, borderRadius: 4, background: "#fff", cursor: "pointer", color: A.muted, fontWeight: 600 }}
+                              >
+                                {loadingVersion && isActive ? "…" : "View content"}
+                              </button>
+                              <button
+                                onClick={e => { e.stopPropagation(); promoteVersion(h.version_num); }}
+                                disabled={promoting}
+                                style={{ padding: "3px 8px", fontSize: 11, border: `1px solid ${A.gold}`, borderRadius: 4, background: A.goldTint, cursor: "pointer", color: A.gold, fontWeight: 600 }}
+                              >
+                                {promoting ? "…" : "Make Current"}
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       );
