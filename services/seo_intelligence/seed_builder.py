@@ -59,12 +59,23 @@ def first_activity(activities) -> str:
     return ""
 
 
-def build_seed(country_raw: str, activities) -> str:
-    """Complete DFS seed. Never produces a double 'tours'."""
+def build_seed(country_raw: str, activities, tour_name: str = "") -> str:
+    """Complete DFS seed. Never produces a double 'tours'.
+
+    AA-251 (ADR-2026-021, hướng 4): priority is activity+country (most specific,
+    unchanged AA-197 behavior) > tour_name+country > country-only "{country} tours".
+    The country-only fallback made the seed — and every DFS keyword derived from
+    it — generic, which is what made DFS_INTENT_UNDERUSED false-positive across
+    ~85% of the KR/LK catalogue. tour_name (raw_tours.src_name, always populated)
+    is the nearest per-tour specificity available without a live per-tour DFS call.
+    """
     c = normalize_country(country_raw)
     a = first_activity(activities)
     if a and c:
         return f"{a} in {c}"
+    n = (tour_name or "").strip()
+    if n:
+        return f"{n} {c}".strip() if c else n
     if c:
         return f"{c} tours"
     return ""
