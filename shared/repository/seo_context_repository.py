@@ -19,6 +19,7 @@ class SeoContextRepository:
                 cache_key, expires_at, people_also_ask, related_keywords
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (tour_id) DO UPDATE SET
+                keyword_search   = EXCLUDED.keyword_search,
                 cache_key        = EXCLUDED.cache_key,
                 keyword_ideas    = EXCLUDED.keyword_ideas,
                 top_keywords     = EXCLUDED.top_keywords,
