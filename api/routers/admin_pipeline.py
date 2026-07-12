@@ -764,11 +764,26 @@ async def _revalidate_tour(content_id: str) -> dict:
         if not gc:
             raise ValueError(f"generated_content {content_id} not found")
 
+        # AA-293: this function's own asyncpg.connect() has no jsonb type codec
+        # registered (same as the rest of the app — no connection anywhere does),
+        # so jsonb columns come back as raw JSON text, not list/dict. A codec
+        # registered on this connection would also mis-encode the json.dumps(...)
+        # params this same function binds to ::jsonb columns below (INSERT into
+        # quality_scores) — encoding an already-dumped string a second time. Decode
+        # each jsonb field explicitly instead, same idiom as admin_settings.py's
+        # local _jsonb() helper.
+        def _jsonb(val):
+            if val is None:
+                return None
+            if isinstance(val, str):
+                try:
+                    return json.loads(val)
+                except (TypeError, ValueError):
+                    return val
+            return val
+
         tenant_uuid = str(gc["tenant_id"])
-        import json as _j_meta
-        _meta = gc["metadata"]
-        if isinstance(_meta, str):
-            _meta = _j_meta.loads(_meta) if _meta else {}
+        _meta = _jsonb(gc["metadata"])
         _brand_name = (_meta or {}).get("brand_name")
         brand_row = await _resolve_brand_rule(conn, tenant_uuid, None, _brand_name)
         _br = dict(brand_row) if brand_row else {}
@@ -780,19 +795,22 @@ async def _revalidate_tour(content_id: str) -> dict:
             ORDER BY fetched_at DESC LIMIT 1
         """, gc["tour_id"])
         seo = dict(seo_row) if seo_row else {}
+        if seo:
+            seo["keyword_ideas"] = _jsonb(seo.get("keyword_ideas")) or []
+            seo["top_keywords"] = _jsonb(seo.get("top_keywords")) or []
 
         generated = {
             "name":         gc["aa_name"],
             "subtitle":     gc["aa_subtitle"],
             "summary":      gc["aa_summary"],
             "description":  gc["aa_description"],
-            "highlights":   gc["aa_highlights"] or [],
+            "highlights":   _jsonb(gc["aa_highlights"]) or [],
             "itineraries":  gc["aa_itineraries"],
             "mobile_card_text": gc["mobile_card_text"],
             "seo_title":    gc["seo_title"],
             "seo_meta":     gc["seo_meta"],
-            "seo_keywords_used": gc["seo_keywords_used"] or [],
-            "og_tags":      gc["og_tags"] or {},
+            "seo_keywords_used": _jsonb(gc["seo_keywords_used"]) or [],
+            "og_tags":      _jsonb(gc["og_tags"]) or {},
         }
         tour = {"name": gc["src_name"], "country": gc["country"], "duration": gc["duration"]}
 
