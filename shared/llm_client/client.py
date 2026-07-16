@@ -72,6 +72,16 @@ class LLMClient:
                 else:
                     logger.warning("t1_failed_trying_t2", model=BEDROCK_SONNET, error=str(e))
 
+            # T1.5: Claude Sonnet qua satellite (acc1) — AA-296, khi acc2 không có Anthropic
+            try:
+                resp = self._call_bedrock_satellite(request, model=BEDROCK_SONNET)
+                resp.fallback_used = False    # KHÔNG phải fallback — vẫn đúng Sonnet, đúng ý định
+                resp.satellite_used = True    # NHƯNG đánh dấu rõ đây là qua satellite acc1
+                logger.info("t1_5_satellite_used", model=BEDROCK_SONNET, reason="acc2 T1 failed")
+                return resp
+            except Exception as e:
+                logger.warning("t1_5_satellite_failed_trying_t2", model=BEDROCK_SONNET, error=str(e))
+
         # T2: Claude Haiku — fast / default tier, or Sonnet fallback
         try:
             resp = self._call_bedrock(request, model=BEDROCK_HAIKU, use_cache=True)
@@ -154,6 +164,45 @@ class LLMClient:
         return LLMResponse(
             content=content, model_used=model, provider="bedrock",
             input_tokens=in_tok, output_tokens=out_tok, cost_usd=cost,
+        )
+
+    def _call_bedrock_satellite(self, request: LLMRequest, model: str) -> LLMResponse:
+        """AA-296 — gọi Claude qua acc1 (satellite), dùng khi acc2 không có Anthropic
+        model (TrueIDC channel-program org chặn). Xem shared/llm_client/bedrock_satellite.py
+        cho chi tiết AssumeRole chain + bug 2-dạng-ARN đã fix trong IAM policy.
+
+        request.system_prompt được forward qua tham số system= của invoke_claude()
+        (Anthropic Messages API "system" field riêng, không nối vào user prompt) —
+        khớp với cách _call_bedrock (acc2, T1) gửi system qua build_cached_system_prompt.
+        """
+        from .bedrock_satellite import invoke_claude, BedrockUnavailable
+        model_key = "sonnet" if model == BEDROCK_SONNET else "haiku"
+        try:
+            result = invoke_claude(
+                request.user_prompt,
+                model=model_key,
+                max_tokens=request.max_tokens,
+                system=request.system_prompt,
+            )
+        except BedrockUnavailable as e:
+            raise RuntimeError(f"Satellite Bedrock failed: {e}") from e
+
+        in_tok = result.usage.get("input_tokens", 0)
+        out_tok = result.usage.get("output_tokens", 0)
+        cost = self._calc_cost(model, in_tok, out_tok)
+
+        logger.info("llm_success", provider="bedrock-satellite", model=result.model_used,
+                    in_tokens=in_tok, out_tokens=out_tok, cost_usd=cost,
+                    latency_ms=result.latency_ms)
+
+        return LLMResponse(
+            content=result.text,
+            model_used=f"satellite-{result.model_used}",
+            provider="bedrock-satellite",
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            cost_usd=cost,
+            fallback_used=False,  # set lại đúng ở generate() tuỳ ngữ cảnh gọi
         )
 
     def _call_openai(self, request: LLMRequest, model: str) -> LLMResponse:
