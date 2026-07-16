@@ -23,3 +23,5 @@ class LLMResponse(BaseModel):
     output_tokens: int = 0
     cost_usd:      float = 0.0
     fallback_used: bool = False
+    # AA-296 — True khi response qua Bedrock satellite (acc1); khác fallback_used (chất lượng thấp hơn ý định)
+    satellite_used: bool = False
