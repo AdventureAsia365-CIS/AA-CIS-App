@@ -55,6 +55,7 @@ class ContentState(TypedDict):
     brand_good_examples:    str
     model_tier:             str
     fallback_used:          bool   # AA-213: True khi Sonnet T1 fell back to Haiku T2
+    satellite_used:         bool   # AA-296: True khi content được viết qua Bedrock satellite (acc1)
     subtitle_focus:         str
     is_tenant_rewrite:      bool
     is_branded:             bool
@@ -275,6 +276,7 @@ def generate_node(state: ContentState) -> ContentState:
             "is_branded": is_branded,
             "error":      "",
             "fallback_used": resp.fallback_used,
+            "satellite_used": resp.satellite_used,
         }
     except Exception as e:
         logger.error("generation_failed", error=str(e))
