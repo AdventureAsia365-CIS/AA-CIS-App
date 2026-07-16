@@ -90,6 +90,17 @@ class LLMClient:
         except Exception as e:
             logger.warning("t2_failed_trying_t3", model=BEDROCK_HAIKU, error=str(e))
 
+        # T2.5: Claude Haiku qua satellite (acc1) — AA-296 follow-up
+        try:
+            resp = self._call_bedrock_satellite(request, model=BEDROCK_HAIKU)
+            # giữ đúng logic gốc T2: chỉ coi là fallback nếu ý định ban đầu là sonnet
+            resp.fallback_used = tier == "sonnet"
+            resp.satellite_used = True
+            logger.info("t2_5_satellite_used", model=BEDROCK_HAIKU, reason="acc2 T2 failed")
+            return resp
+        except Exception as e:
+            logger.warning("t2_5_satellite_failed_trying_t3", model=BEDROCK_HAIKU, error=str(e))
+
         # T3: GPT-4.1 — last resort for all tiers
         try:
             resp = self._call_openai(request, model="gpt-4.1")
