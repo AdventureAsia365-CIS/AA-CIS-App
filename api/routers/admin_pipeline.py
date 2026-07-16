@@ -512,7 +512,7 @@ async def _execute_run_tour(req: TourRunRequest, job_id: str | None = None) -> d
                         aa_description, aa_highlights, aa_itineraries,
                         seo_title, seo_meta, seo_keywords_used,
                         model_editorial, status, og_tags, metadata,
-                        brand_rules_version, requested_tier, fallback_used
+                        brand_rules_version, requested_tier, fallback_used, satellite_used
                     ) VALUES (
                         $1::uuid, $2::uuid,
                         COALESCE((SELECT MAX(version_num) + 1
@@ -520,7 +520,7 @@ async def _execute_run_tour(req: TourRunRequest, job_id: str | None = None) -> d
                         WHERE tour_id = $1::uuid), 1),
                         $3, $4, $5, $6, $7::jsonb, $8,
                         $9, $10, $11::jsonb, $12, $13::content_status_enum, $14::jsonb, $15::jsonb,
-                        $16, $17, $18
+                        $16, $17, $18, $19
                     ) RETURNING id
                 """,
                     req.tour_id, tenant_uuid,
@@ -540,6 +540,7 @@ async def _execute_run_tour(req: TourRunRequest, job_id: str | None = None) -> d
                     brand_rule_version,
                     req.model_tier,                          # AA-224: requested_tier
                     bool(result.get("fallback_used", False)),  # AA-224: fallback_used
+                    bool(result.get("satellite_used", False)),  # AA-296: satellite_used
                 )
                 if version_id:
                     logger.info("version_inserted", tour_id=req.tour_id, version_id=str(version_id))

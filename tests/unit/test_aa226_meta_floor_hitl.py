@@ -15,7 +15,8 @@ def _meta(n):
 
 def _resp(payload, cost=0.004):
     return SimpleNamespace(content=json.dumps(payload), cost_usd=cost,
-                           model_used="haiku", fallback_used=False)
+                           model_used="haiku", fallback_used=False,
+                           satellite_used=False)
 
 def _state(seo=None, cur_meta=None):
     # brand_audit flags seo_meta so _should_fix + _build_fix_keys include it.
