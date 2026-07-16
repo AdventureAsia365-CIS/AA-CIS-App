@@ -78,7 +78,10 @@ ACC1_EXTERNAL_ID = "aa296-satellite-bedrock"
 ACC1_REGION = "us-west-1"
 
 INFERENCE_PROFILE_SONNET = "arn:aws:bedrock:us-west-1:867490540162:inference-profile/global.anthropic.claude-sonnet-4-6"
-INFERENCE_PROFILE_HAIKU = "arn:aws:bedrock:us-west-1:867490540162:inference-profile/global.anthropic.claude-haiku-4-5-20251001-v1:0"
+INFERENCE_PROFILE_HAIKU = (
+    "arn:aws:bedrock:us-west-1:867490540162:inference-profile/"
+    "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+)
 
 ANTHROPIC_VERSION = "bedrock-2023-05-31"
 
