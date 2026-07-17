@@ -36,7 +36,9 @@
 - AA-211/212 SHIPPED (S69): export gate + HITL review_queue re-wire
 - AA-198 [F1] SHIPPED: brand_identity_id resolver + /admin/brand-rules + s1 brand-picker
 - AA-197 [F2] SHIPPED: DataForSEO rebuild — buyer-market location, seed builder, real keyword_ideas
-- "Deploy Prod" workflow = STUB/placeholder (no-op) — real ECS deploy runs via "Deploy Dev" on develop merge (last run #128)
+- Pre-ADR-2026-023 note: "Deploy Prod" workflow used to be a STUB/placeholder (no-op), real ECS deploy ran
+  via "Deploy Dev" on develop merge (last run #128) — this Dev/Prod split and the develop branch no longer
+  exist post-ADR-2026-023 (see CI/CD section below)
 - AWS: STOPPED after S84 (cis-stop done — ECS desired=0, RDS stop, NAT stop). cis-start can o dau S85.
 - Lambda aa-cis-dev-acp-s4-evaluate: DEPLOYED ✅ (AA-49 H-1)
 - Lambda aa-cis-dev-acp-s4-trigger: DEPLOYED ✅ | ALB_INTERNAL_URL: FIXED ✅
@@ -147,8 +149,9 @@ cis-status # check NAT instance state
 - AA-36: No char limits on rewrite fields — Backlog
 
 ## CI/CD
-- Push to develop → GitHub Actions ci.yml → build → deploy-dev.yml → ECR push → ECS deploy
-- Push to main → Deploy Prod CI auto-triggers
+- ADR-2026-023 (trunk-based, effective 09/07/2026): `develop` branch removed. Feature/fix branch → PR →
+  CI required → merge straight to `main` (human-only). Push to main auto-triggers deploy (paths-filter,
+  single pipeline — no more separate Dev/Prod workflows).
 - Image tag: always :latest (never commit hash)
 - Lint: flake8 (120 char limit, 2 spaces before inline comment)
 - No static AWS keys — GitHub Actions OIDC only
