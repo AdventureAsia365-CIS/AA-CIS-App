@@ -136,6 +136,17 @@ def _get_satellite_session() -> boto3.Session:
     return _cached_session
 
 
+def get_satellite_client(service_name: str = "bedrock-runtime"):
+    """Client boto3 bất kỳ (satellite acc1) qua session AssumeRole dùng chung
+    (cache TTL) — service_name mặc định "bedrock-runtime" (InvokeModel, như
+    invoke_claude() đang dùng) hoặc "bedrock" (control-plane, vd
+    CreateModelInvocationJob cho Batch API, AA-302). Không đổi hành vi
+    invoke_claude() hiện có — đây là entry point mới, tái sử dụng cùng
+    _get_satellite_session() để tránh trùng lặp logic STS assume-role."""
+    session = _get_satellite_session()
+    return session.client(service_name, region_name=ACC1_REGION)
+
+
 def invoke_claude(
     prompt: str,
     model: str = "sonnet",
