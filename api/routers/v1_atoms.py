@@ -221,8 +221,12 @@ async def decompose(
         )
 
     try:
+        # Bedrock jobName regex forbids "_" ([a-zA-Z0-9]{1,63}(-*[a-zA-Z0-9\+\-\.]){0,63}) —
+        # job_id itself stays untouched (DB key + log field), only the value
+        # passed to Bedrock is sanitized.
+        bedrock_job_name = job_id.replace("_", "-")
         bedrock.create_model_invocation_job(
-            jobName=job_id,
+            jobName=bedrock_job_name,
             roleArn=BEDROCK_BATCH_ROLE_ARN,
             modelId=BATCH_MODEL_ID,
             inputDataConfig={
