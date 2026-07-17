@@ -35,6 +35,12 @@ router = APIRouter(prefix="/v1/atoms", tags=["atoms"])
 AWS_REGION = os.environ.get("AWS_REGION", "us-west-1")
 BRONZE_BUCKET = os.environ.get("BRONZE_BUCKET", "aa-cis-bronze-005097885195")
 
+# Bucket is owned by account 2 (005097885195) even though this job submits
+# via account 1 (867490540162) satellite AssumeRole — Bedrock defaults
+# s3BucketOwner to the CALLER's account if omitted, which is wrong here and
+# is why the S108b test job (rlp2kr2537zm) failed GetObject validation.
+BRONZE_BUCKET_OWNER_ACCOUNT_ID = os.environ.get("BRONZE_BUCKET_OWNER_ACCOUNT_ID", "005097885195")
+
 # Terraform accounts/acc1-bedrock (feat/aa-302-bedrock-batch-iam-acc1) đã
 # apply — role thật, account 1.
 BEDROCK_BATCH_ROLE_ARN = os.environ.get(
@@ -220,10 +226,17 @@ async def decompose(
             roleArn=BEDROCK_BATCH_ROLE_ARN,
             modelId=BATCH_MODEL_ID,
             inputDataConfig={
-                "s3InputDataConfig": {"s3InputFormat": "JSONL", "s3Uri": input_s3_uri},
+                "s3InputDataConfig": {
+                    "s3InputFormat": "JSONL",
+                    "s3Uri": input_s3_uri,
+                    "s3BucketOwner": BRONZE_BUCKET_OWNER_ACCOUNT_ID,
+                },
             },
             outputDataConfig={
-                "s3OutputDataConfig": {"s3Uri": output_s3_uri},
+                "s3OutputDataConfig": {
+                    "s3Uri": output_s3_uri,
+                    "s3BucketOwner": BRONZE_BUCKET_OWNER_ACCOUNT_ID,
+                },
             },
         )
     except ClientError as e:
