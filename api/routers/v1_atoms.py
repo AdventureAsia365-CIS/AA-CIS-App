@@ -8,9 +8,11 @@ POST /v1/atoms/decompose
        acp_contract.tour_atoms is a separate, later piece of work.
 
 Requires BEDROCK_BATCH_ROLE_ARN (account 1 role, accounts/acc1-bedrock
-Terraform — not applied yet as of AA-302 Bước 19). Until that's applied,
-the Bedrock call fails with AccessDenied/ValidationException — expected,
-not a code bug; JSONL build + S3 upload work independently of it.
+Terraform — applied 2026-07-17). NOTE: production boto3 (requirements.txt,
+1.34.69) does not yet have create_model_invocation_job — this endpoint's
+Bedrock call will fail with an SDK-level error (unknown operation) until
+the production SDK is upgraded. Verified working in isolation via a
+separate venv (boto3 1.43.49), not yet through this service.
 """
 import json
 import os
@@ -25,6 +27,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from api.routers.auth import verify_jwt as _verify_jwt
+from shared.llm_client.bedrock_satellite import BedrockUnavailable, get_satellite_client
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/v1/atoms", tags=["atoms"])
@@ -32,10 +35,11 @@ router = APIRouter(prefix="/v1/atoms", tags=["atoms"])
 AWS_REGION = os.environ.get("AWS_REGION", "us-west-1")
 BRONZE_BUCKET = os.environ.get("BRONZE_BUCKET", "aa-cis-bronze-005097885195")
 
-# TODO AA-302: điền sau khi Terraform accounts/acc1-bedrock (branch
-# feat/aa-302-bedrock-batch-iam-acc1) được apply — giá trị thật sẽ là
-# arn:aws:iam::867490540162:role/aa-bedrock-batch-inference-role
-BEDROCK_BATCH_ROLE_ARN = os.environ.get("BEDROCK_BATCH_ROLE_ARN", "")
+# Terraform accounts/acc1-bedrock (feat/aa-302-bedrock-batch-iam-acc1) đã
+# apply — role thật, account 1.
+BEDROCK_BATCH_ROLE_ARN = os.environ.get(
+    "BEDROCK_BATCH_ROLE_ARN", "arn:aws:iam::867490540162:role/aa-bedrock-batch-inference-role"
+)
 
 # Cùng inference profile satellite AA-296 đã xác nhận hoạt động
 # (shared/llm_client/bedrock_satellite.py) — dùng Sonnet cho tác vụ extract
@@ -190,7 +194,26 @@ async def decompose(
             "(xem AA-302). JSONL đã build và upload S3 thành công tại " + input_s3_uri + ".",
         )
 
-    bedrock = boto3.client("bedrock", region_name=AWS_REGION)
+    try:
+        # ECS task role (acc2) không có quyền gọi CreateModelInvocationJob trên
+        # acc1 trực tiếp — client "bedrock" (control-plane) phải qua cùng
+        # AssumeRole satellite chain AA-296 dùng cho "bedrock-runtime", không
+        # phải boto3.client("bedrock", ...) mặc định (chạy bằng identity acc2).
+        bedrock = get_satellite_client("bedrock")
+    except BedrockUnavailable as e:
+        logger.error("atom_decompose_satellite_assume_role_failed", job_id=job_id, error=str(e))
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO acp_contract.atom_decompose_jobs
+                    (job_id, tour_ids, status, input_s3_uri, output_s3_uri, error_message)
+                VALUES ($1, $2::jsonb, 'failed', $3, $4, $5)
+            """, job_id, tour_ids_json, input_s3_uri, output_s3_uri, f"AssumeRole to satellite failed: {e}")
+        raise HTTPException(
+            503,
+            f"Không AssumeRole được vào satellite Bedrock (acc1): {e}. JSONL đã build và upload S3 "
+            "thành công tại " + input_s3_uri + ".",
+        )
+
     try:
         bedrock.create_model_invocation_job(
             jobName=job_id,
