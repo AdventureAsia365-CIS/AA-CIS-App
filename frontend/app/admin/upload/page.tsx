@@ -1078,15 +1078,12 @@ function TourContentTab() {
   }
 
   async function doCommit() {
-    const toCommit = fileStates.filter(f => f.status === "parsed" && (f.parseResult?.ready_count ?? 0) > 0);
+    const toCommit = fileStates.filter(f => f.status === "parsed");
     if (toCommit.length === 0) return;
 
     // Atomically pre-set all statuses before rendering step 4
     setFileStates(prev => prev.map(f => {
-      if (f.status === "parsed" && (f.parseResult?.ready_count ?? 0) === 0) {
-        return { ...f, status: "done" as const, commitResult: { status: "skipped", tour_count: 0 } };
-      }
-      if (f.status === "parsed" && (f.parseResult?.ready_count ?? 0) > 0) {
+      if (f.status === "parsed") {
         return { ...f, status: "committing" as const };
       }
       return f;
@@ -1132,6 +1129,10 @@ function TourContentTab() {
 
   const totalReady   = fileStates.reduce((n, f) => n + (f.parseResult?.ready_count ?? 0), 0);
   const totalBlocked = fileStates.reduce((n, f) => n + (f.parseResult?.blocked_count ?? 0), 0);
+  // Files eligible for a real commit call — independent of ready_count, since doCommit()
+  // now sends every "parsed" file to the backend and lets it decide (see AA-312).
+  const commitFileCount  = fileStates.filter(f => f.status === "parsed").length;
+  const hasFilesToCommit = commitFileCount > 0;
   const allUploading = fileStates.some(f => f.status === "uploading" || f.status === "parsing");
   const allDone      = fileStates.length > 0 && fileStates.every(f => ["done", "error", "blocked-file"].includes(f.status));
 
@@ -1416,17 +1417,17 @@ function TourContentTab() {
             <Btn variant="secondary" onClick={reset}>← Upload Another</Btn>
             <Btn
               variant="primary"
-              disabled={totalReady === 0}
+              disabled={!hasFilesToCommit}
               onClick={doCommit}
               style={{
-                background: totalReady > 0 ? A.gold : A.muted,
-                border: `1px solid ${totalReady > 0 ? A.gold : A.muted}`,
+                background: hasFilesToCommit ? A.gold : A.muted,
+                border: `1px solid ${hasFilesToCommit ? A.gold : A.muted}`,
                 display: "flex", alignItems: "center", gap: 8,
-                opacity: totalReady === 0 ? 0.5 : 1,
-                cursor: totalReady === 0 ? "not-allowed" : "pointer",
+                opacity: hasFilesToCommit ? 1 : 0.5,
+                cursor: hasFilesToCommit ? "pointer" : "not-allowed",
               }}
             >
-              Confirm & Save to DB ({totalReady} tours) <ArrowRight size={14} />
+              Confirm & Save to DB ({commitFileCount} file{commitFileCount === 1 ? "" : "s"}) <ArrowRight size={14} />
             </Btn>
           </div>
         </div>
