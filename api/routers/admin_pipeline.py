@@ -726,15 +726,24 @@ async def _run_tour_job(job_id: str, tour_req: TourRunRequest) -> None:
     soft-fail, which we surface as succeeded + result_version_id NULL).
     This is a SEPARATE tier from _run_tour_safe's own pipeline_runs fail-mark.
     """
-    from .jobs_repo import mark_failed, mark_running, mark_succeeded
+    from .jobs_repo import mark_failed, mark_interrupted, mark_running, mark_succeeded
 
-    await mark_running(job_id)
     try:
+        await mark_running(job_id)
         result = await _run_tour_safe(tour_req, job_id=job_id)
         if result is None:
             await mark_failed(job_id, "run_tour failed after retries (see logs)")
         else:
             await mark_succeeded(job_id, result.get("version_id"), None)
+    except asyncio.CancelledError:
+        # AA-295: rolling-deploy SIGTERM (or any explicit task.cancel()) lands here — mark the
+        # job interrupted immediately instead of leaving it 'running' until the next boot's
+        # sweep_interrupted() (which only fires once per boot and only once heartbeat_at is
+        # already >5min stale). Re-raise: never swallow CancelledError, asyncio needs it to
+        # propagate for correct task/loop cancellation semantics.
+        logger.warning("run_tour_job_cancelled", job_id=job_id, tour_id=tour_req.tour_id)
+        await mark_interrupted(job_id, "cancelled (deploy/shutdown)")
+        raise
     except Exception as e:
         await mark_failed(job_id, repr(e))
 
@@ -896,13 +905,18 @@ async def _revalidate_tour(content_id: str) -> dict:
 
 async def _revalidate_job(job_id: str, content_id: str) -> None:
     """AA-234: pipeline_jobs lifecycle wrapper around _revalidate_tour."""
-    from .jobs_repo import mark_failed, mark_running, mark_succeeded
-    await mark_running(job_id)
+    from .jobs_repo import mark_failed, mark_interrupted, mark_running, mark_succeeded
     try:
+        await mark_running(job_id)
         result = await _revalidate_tour(content_id)
         await mark_succeeded(job_id, content_id, None)
         logger.info("revalidate_job_done", job_id=job_id,
                     revalidate_passed=result["revalidate_passed"])
+    except asyncio.CancelledError:
+        # AA-295: same bug/fix as _run_tour_job — see comment there.
+        logger.warning("revalidate_job_cancelled", job_id=job_id, content_id=content_id)
+        await mark_interrupted(job_id, "cancelled (deploy/shutdown)")
+        raise
     except Exception as e:
         await mark_failed(job_id, repr(e))
 

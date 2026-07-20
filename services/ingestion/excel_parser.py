@@ -29,6 +29,8 @@ COLUMN_MAP = {
     "tour_id":            "tour_id_external",
     "inclusions":         "inclusions",
     "exclusions":         "exclusions",
+    "includes":           "inclusions",
+    "excludes":           "exclusions",
     "provider":           "provider",
     "price":              "price_raw",
     "links":              "links",
