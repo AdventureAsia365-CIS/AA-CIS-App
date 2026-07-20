@@ -93,6 +93,25 @@ async def mark_failed(job_id: str, error: str) -> None:
         await conn.close()
 
 
+async def mark_interrupted(job_id: str, reason: str) -> None:
+    """AA-295: mark a single job interrupted immediately (asyncio.CancelledError caught in
+    the job wrapper — e.g. rolling-deploy shutdown), rather than waiting on sweep_interrupted()'s
+    once-per-boot, heartbeat-staleness-gated bulk sweep. Same status value sweep_interrupted()
+    already uses; reused error column, same as mark_failed (schema has no separate reason column).
+    """
+    conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+    try:
+        await conn.execute(
+            "UPDATE shared.pipeline_jobs "
+            "SET status='interrupted', error=$2, finished_at=now(), heartbeat_at=now() "
+            "WHERE id=$1::uuid",
+            job_id,
+            reason,
+        )
+    finally:
+        await conn.close()
+
+
 async def get_job(job_id: str) -> dict | None:
     """Return a JSON-safe dict (UUID->str, timestamp->isoformat) or None."""
     conn = await asyncpg.connect(os.environ["DATABASE_URL"])

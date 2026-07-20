@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+import asyncio
 import asyncpg
 import redis.asyncio as aioredis
 import os
@@ -126,6 +127,20 @@ async def lifespan(app: FastAPI):
         logger.warning("aa223_startup_sweep_failed", error=repr(e))
 
     yield
+
+    # AA-295: drain in-flight background jobs (run-tour-async / revalidate) before closing
+    # the pool. _background_tasks is module-private to admin_pipeline (leading underscore) —
+    # reached into here rather than made public because it's only ever needed at this one
+    # shutdown call site. Without this, a rolling-deploy SIGTERM tears the pool/redis down
+    # immediately while a job is still mid-flight, and the job never gets a chance to reach
+    # its own except-CancelledError handler (see admin_pipeline._run_tour_job).
+    from api.routers.admin_pipeline import _background_tasks
+    if _background_tasks:
+        logger.warning("shutdown_draining_background_tasks", count=len(_background_tasks))
+        _done, _pending = await asyncio.wait(_background_tasks, timeout=25)
+        if _pending:
+            logger.error("shutdown_forced_task_abandon", count=len(_pending))
+
     await pool.close()
     if app.state.s2_pg_conn is not None:
         await app.state.s2_pg_conn.close()

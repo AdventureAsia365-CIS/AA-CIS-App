@@ -12,6 +12,7 @@ so result is None ⇒ mark_failed; a returned dict ⇒ mark_succeeded (version_i
 be None for a soft-fail). These tests pin exactly that contract.
 """
 
+import asyncio
 import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -87,6 +88,21 @@ async def test_sweep_interrupted_parses_count():
     with patch("api.routers.jobs_repo.asyncpg.connect", AsyncMock(return_value=conn)):
         n = await jobs_repo.sweep_interrupted()
     assert n == 3
+
+
+@pytest.mark.asyncio
+async def test_mark_interrupted_writes_status_and_reason():
+    """AA-295: single-job interrupt marker (used from the CancelledError handlers below),
+    complementary to the bulk sweep_interrupted() above — same status value, immediate
+    instead of once-per-boot/heartbeat-staleness-gated."""
+    conn = _fake_conn()
+    with patch("api.routers.jobs_repo.asyncpg.connect", AsyncMock(return_value=conn)):
+        await jobs_repo.mark_interrupted("job-9", "cancelled (deploy/shutdown)")
+    sql = conn.execute.call_args.args[0]
+    assert "status='interrupted'" in sql
+    assert "error=$2" in sql
+    assert conn.execute.call_args.args[1:] == ("job-9", "cancelled (deploy/shutdown)")
+    conn.close.assert_awaited_once()
 
 
 # ── _run_tour_job: 4 branches ──────────────────────────────────────────────────
@@ -259,3 +275,81 @@ async def test_run_tour_job_passes_job_id_to_run_tour_safe():
          patch("api.routers.jobs_repo.mark_failed", AsyncMock()):
         await admin_pipeline._run_tour_job("job-5", req)
     rts.assert_awaited_once_with(req, job_id="job-5")
+
+
+# ── AA-295: explicit CancelledError handling (rolling-deploy shutdown) ─────────
+
+@pytest.mark.asyncio
+async def test_run_tour_job_cancelled_marks_interrupted_and_reraises():
+    """A rolling-deploy SIGTERM (or any task.cancel()) mid-run must NOT be silently
+    swallowed by the outer `except Exception` — it has to hit mark_interrupted and
+    still propagate, or the caller/asyncio loses correct cancellation semantics."""
+    req = _req()
+    with patch("api.routers.admin_pipeline._run_tour_safe",
+               AsyncMock(side_effect=asyncio.CancelledError())), \
+         patch("api.routers.jobs_repo.mark_running", AsyncMock()) as mr, \
+         patch("api.routers.jobs_repo.mark_interrupted", AsyncMock()) as mi, \
+         patch("api.routers.jobs_repo.mark_succeeded", AsyncMock()) as ms, \
+         patch("api.routers.jobs_repo.mark_failed", AsyncMock()) as mf:
+        with pytest.raises(asyncio.CancelledError):
+            await admin_pipeline._run_tour_job("job-6", req)
+    mr.assert_awaited_once_with("job-6")
+    mi.assert_awaited_once()
+    assert mi.call_args.args[0] == "job-6"
+    ms.assert_not_called()
+    mf.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_tour_job_mark_running_inside_try_still_succeeds():
+    """Regression guard: moving mark_running() inside the try (to catch its own
+    CancelledError too) must not change the normal success path's behavior."""
+    req = _req()
+    with patch("api.routers.admin_pipeline._run_tour_safe",
+               AsyncMock(return_value={"version_id": FAKE_UUID})), \
+         patch("api.routers.jobs_repo.mark_running", AsyncMock()) as mr, \
+         patch("api.routers.jobs_repo.mark_succeeded", AsyncMock()) as ms, \
+         patch("api.routers.jobs_repo.mark_interrupted", AsyncMock()) as mi, \
+         patch("api.routers.jobs_repo.mark_failed", AsyncMock()) as mf:
+        await admin_pipeline._run_tour_job("job-7", req)
+    mr.assert_awaited_once_with("job-7")
+    ms.assert_awaited_once_with("job-7", FAKE_UUID, None)
+    mi.assert_not_called()
+    mf.assert_not_called()
+
+
+# ── AA-295: same fix, _revalidate_job (AA-234's job wrapper) ───────────────────
+
+@pytest.mark.asyncio
+async def test_revalidate_job_success():
+    """No pre-existing unit test called _revalidate_job directly (only _revalidate_tour,
+    in test_aa293_revalidate_jsonb_codec.py) — this is also the regression guard for
+    mark_running() now living inside the try."""
+    result = {"revalidate_passed": True}
+    with patch("api.routers.admin_pipeline._revalidate_tour", AsyncMock(return_value=result)), \
+         patch("api.routers.jobs_repo.mark_running", AsyncMock()) as mr, \
+         patch("api.routers.jobs_repo.mark_succeeded", AsyncMock()) as ms, \
+         patch("api.routers.jobs_repo.mark_interrupted", AsyncMock()) as mi, \
+         patch("api.routers.jobs_repo.mark_failed", AsyncMock()) as mf:
+        await admin_pipeline._revalidate_job("job-8", "content-1")
+    mr.assert_awaited_once_with("job-8")
+    ms.assert_awaited_once_with("job-8", "content-1", None)
+    mi.assert_not_called()
+    mf.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_revalidate_job_cancelled_marks_interrupted_and_reraises():
+    with patch("api.routers.admin_pipeline._revalidate_tour",
+               AsyncMock(side_effect=asyncio.CancelledError())), \
+         patch("api.routers.jobs_repo.mark_running", AsyncMock()) as mr, \
+         patch("api.routers.jobs_repo.mark_interrupted", AsyncMock()) as mi, \
+         patch("api.routers.jobs_repo.mark_succeeded", AsyncMock()) as ms, \
+         patch("api.routers.jobs_repo.mark_failed", AsyncMock()) as mf:
+        with pytest.raises(asyncio.CancelledError):
+            await admin_pipeline._revalidate_job("job-9", "content-2")
+    mr.assert_awaited_once_with("job-9")
+    mi.assert_awaited_once()
+    assert mi.call_args.args[0] == "job-9"
+    ms.assert_not_called()
+    mf.assert_not_called()
