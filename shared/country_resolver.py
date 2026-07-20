@@ -7,7 +7,7 @@ import re
 
 COUNTRY_MASTER = {
     "Japan":         ["JAPAN", "JAPANESE"],
-    "Sri Lanka":     ["SRI LANKA", "SRILANKA", "LKA"],
+    "Sri Lanka":     ["SRI LANKA", "SRILANKA", "LKA", "SRI-LANDKA", "SRI LANDKA"],
     "South Korea":   ["SOUTH KOREA", "KOREA", "KOR", "REPUBLIC OF KOREA"],
     "Vietnam":       ["VIETNAM", "VIET NAM", "VNM"],
     "Thailand":      ["THAILAND", "THAI"],
@@ -26,6 +26,7 @@ COUNTRY_MASTER = {
     "Tibet":         ["TIBET"],
     "Taiwan":        ["TAIWAN", "TWN"],
     "Maldives":      ["MALDIVES", "MDV"],
+    "Pakistan":      ["PAKISTAN", "PAK"],
 }
 
 # alias (uppercase) → canonical name
