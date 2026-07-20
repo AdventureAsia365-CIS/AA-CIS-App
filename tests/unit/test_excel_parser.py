@@ -62,3 +62,40 @@ def test_nan_becomes_none():
         assert records[0]["duration"] is None
     finally:
         os.unlink(path)
+
+def test_includes_excludes_alias_maps_to_inclusions_exclusions():
+    """AA-247: 10/14 real supplier files use the shortened "Includes"/"Excludes" header
+    instead of "Inclusions"/"Exclusions" — without this alias those two columns don't hit
+    COLUMN_MAP and their data is silently dropped on ingest."""
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        path = f.name
+    try:
+        make_excel([{
+            "Name": "Sapa Trek", "Country": "Vietnam",
+            "Includes": "Guide, meals, transport",
+            "Excludes": "Flights, insurance",
+        }], path)
+        parser = ExcelParser(path, source_file="test.xlsx")
+        records = parser.parse()
+        assert records[0]["inclusions"] == "Guide, meals, transport"
+        assert records[0]["exclusions"] == "Flights, insurance"
+    finally:
+        os.unlink(path)
+
+def test_inclusions_exclusions_full_word_still_works():
+    """Regression guard: adding the includes/excludes alias must not break the existing
+    full-word "Inclusions"/"Exclusions" header some supplier files already use."""
+    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+        path = f.name
+    try:
+        make_excel([{
+            "Name": "Sapa Trek", "Country": "Vietnam",
+            "Inclusions": "Guide, meals, transport",
+            "Exclusions": "Flights, insurance",
+        }], path)
+        parser = ExcelParser(path, source_file="test.xlsx")
+        records = parser.parse()
+        assert records[0]["inclusions"] == "Guide, meals, transport"
+        assert records[0]["exclusions"] == "Flights, insurance"
+    finally:
+        os.unlink(path)
