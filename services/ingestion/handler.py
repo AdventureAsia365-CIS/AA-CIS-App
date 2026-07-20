@@ -176,21 +176,7 @@ async def process_file(s3_bucket: str, s3_key: str, seo_mode: str = "standard") 
         await source_repo.update_status(source_id, "done", row_count=len(ids) + len(staged_ids))
         logger.info("inserted", count=len(ids), staged=len(staged_ids), source_id=source_id)
 
-        # 3. Trigger Step Functions pipeline (S11 Phase 4)
         batch_id = batch_id_new
-        sfn_arn  = os.environ.get("STEP_FUNCTIONS_ARN")
-
-        if sfn_arn:
-            _start_pipeline(
-                sfn_arn=sfn_arn,
-                batch_id=batch_id,
-                tour_ids=[str(i) for i in ids],
-                tenant_id=tenant_slug,
-                s3_key=s3_key,
-                seo_mode=seo_mode,
-            )
-        else:
-            logger.warning("sfn_not_configured", msg="STEP_FUNCTIONS_ARN not set — skipping pipeline trigger")
 
         return {
             "status":        "done",
@@ -199,7 +185,6 @@ async def process_file(s3_bucket: str, s3_key: str, seo_mode: str = "standard") 
             "tours_staged":  len(staged_ids),
             "staged_ids":    staged_ids,
             "source_id":     batch_id,
-            "sfn_triggered": bool(sfn_arn),
         }
 
     except Exception as e:
@@ -218,6 +203,8 @@ def _extract_supplier(s3_key: str) -> str | None:
     return parts[1] if len(parts) >= 3 else None
 
 
+# UNUSED as of AA-311 (20/07/2026) — retired call in process_file(), see AA-182 for SM bypass context.
+# Kept for reference, do not re-wire without re-reading AA-182 decision.
 def _start_pipeline(
     sfn_arn: str,
     batch_id: str,
