@@ -325,12 +325,20 @@ async def _execute_run_tour(req: TourRunRequest, job_id: str | None = None) -> d
                 detail="Tour is trashed. Restore before rewriting.",
             )
 
+        # AA-314: no jsonb codec is registered on this asyncpg connection (or anywhere in
+        # this app) — src_highlights arrives as a JSON-encoded str, not a list. Feeding it
+        # straight into prompts.py's f-string leaked raw JSON syntax (["A", "B"]) into the
+        # rewrite prompt for every tour. Parse it here so downstream gets a real list.
+        src_highlights = row["src_highlights"]
+        if not isinstance(src_highlights, list):
+            src_highlights = json.loads(src_highlights) if src_highlights else []
+
         tour = {
             "name":        row["src_name"],
             "subtitle":    row["src_subtitle"],
             "summary":     row["src_summary"],
             "description": row["src_description"],
-            "highlights":  row["src_highlights"],
+            "highlights":  src_highlights,
             "itineraries": row["src_itineraries"],
             "country":     row["country"],
             "duration":    row["duration"],
