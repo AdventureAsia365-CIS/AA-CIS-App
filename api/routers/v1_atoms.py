@@ -23,6 +23,7 @@ path does NOT depend on this — invoke_claude() only needs invoke_model,
 already present in the pinned boto3.
 """
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -37,6 +38,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from api.routers.auth import verify_jwt as _verify_jwt
+from services.acp_shared.atom_constants import THIN_TRIP_ATOM_MIN
 from shared.llm_client.bedrock_satellite import BedrockUnavailable, get_satellite_client, invoke_claude
 
 logger = structlog.get_logger()
@@ -110,7 +112,10 @@ Respond with ONLY a JSON object matching this exact contract:
 }
 
 visual_potential is an integer 1-3 (3 = strong photo/video potential). No prose outside the \
-JSON object."""
+JSON object.
+
+If the itinerary is thin, return FEW atoms. Never pad. Returning 3 honest atoms beats 10 \
+invented ones."""
 
 
 def _build_user_prompt(row: dict) -> str:
@@ -130,6 +135,14 @@ def _build_user_prompt(row: dict) -> str:
     if row.get("exclusions"):
         parts.append(f"EXCLUSIONS:\n{row['exclusions']}")
     return "\n\n".join(parts)
+
+
+def _source_hash(row: dict) -> str:
+    """sha256 of _build_user_prompt()'s own output (migration 084) — hashing
+    the exact string sent to the model, rather than re-deriving the field
+    concatenation, guarantees the hash can never drift out of sync with what
+    was actually decomposed."""
+    return hashlib.sha256(_build_user_prompt(row).encode("utf-8")).hexdigest()
 
 
 # ── Inline path (<100 tours) ─────────────────────────────────────────────────
@@ -155,10 +168,31 @@ async def _decompose_inline(rows: list, pool) -> dict:
 
     succeeded: list[dict] = []
     failed: list[dict] = []
+    skipped: list[dict] = []
 
     for r in rows:
         tour_id = str(r["id"])
-        prompt = _build_user_prompt(dict(r))
+        row = dict(r)
+        source_hash = _source_hash(row)
+
+        # Idempotency (AA-299, migration 084): compare against the source_hash
+        # of the tour's MOST RECENT atom row, not just tour_id presence — same
+        # hash ⇒ source unchanged, skip; different hash (including legacy rows
+        # with source_hash NULL, from before this migration) ⇒ source changed
+        # or never truly hashed, decompose again. Old atoms are NOT deleted
+        # when this happens (see migration 084 header) — only new ones are added.
+        async with pool.acquire() as conn:
+            latest_hash = await conn.fetchval(
+                """SELECT source_hash FROM acp_contract.tour_atoms
+                   WHERE tour_id = $1::uuid ORDER BY created_at DESC LIMIT 1""", tour_id,
+            )
+        if latest_hash is not None and latest_hash == source_hash:
+            logger.info("atom_decompose_inline_tour_skipped", job_id=job_id, tour_id=tour_id,
+                        reason="source unchanged (hash match)")
+            skipped.append({"tour_id": tour_id, "reason": "source unchanged (hash match)"})
+            continue
+
+        prompt = _build_user_prompt(row)
         try:
             result = await asyncio.to_thread(
                 invoke_claude, prompt, model="sonnet", max_tokens=4096, system=_SYSTEM_PROMPT,
@@ -176,15 +210,62 @@ async def _decompose_inline(rows: list, pool) -> dict:
             failed.append({"tour_id": tour_id, "error": f"invalid atom JSON from model: {e}"})
             continue
 
-        succeeded.append({"tour_id": tour_id, "atom_count": len(atoms)})
+        # distinctiveness/media/usage_log/cooldown_until/human_seam_notes are
+        # deliberately absent from this INSERT — score_distinctiveness() does
+        # not exist yet (AA-317, out of scope here), so those columns stay at
+        # their migration-079 defaults (distinctiveness='LOW') rather than
+        # this PR guessing a value.
+        try:
+            async with pool.acquire() as conn:
+                for atom in atoms:
+                    atom_id = f"atom_{uuid.uuid4().hex[:10]}"
+                    await conn.execute("""
+                        INSERT INTO acp_contract.tour_atoms
+                            (atom_id, tour_id, owner_scope, text, activity_type, emotional_hook,
+                             visual_potential, persona_fit, season_note, starred, deleted, weight,
+                             source_hash, created_at, updated_at)
+                        VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13,
+                                now(), now())
+                    """, atom_id, tour_id, "platform", atom.get("text"), atom.get("activity_type"),
+                        atom.get("emotional_hook"), atom.get("visual_potential", 1),
+                        json.dumps(atom.get("persona_fit") or []), atom.get("season_note"),
+                        False, False, 1.0, source_hash)
+        except Exception as e:
+            logger.error("atom_decompose_inline_insert_failed", job_id=job_id, tour_id=tour_id,
+                         error_type=type(e).__name__, error=str(e))
+            failed.append({"tour_id": tour_id, "error": f"atom insert failed: {type(e).__name__}: {e}"})
+            continue
+
+        atom_count = len(atoms)
+        thin_trip = atom_count < THIN_TRIP_ATOM_MIN
+        logger.info("atom_decompose_inline_tour_completed", job_id=job_id, tour_id=tour_id,
+                    atom_count=atom_count, thin_trip=thin_trip)
+        succeeded.append({"tour_id": tour_id, "atom_count": atom_count, "thin_trip": thin_trip})
 
     atoms_created = sum(s["atom_count"] for s in succeeded)
-    # No 'partial' value in the status CHECK constraint (migration 081) — a PR
-    # decision, not a schema change: any tour succeeding counts the job as
-    # 'completed' (it produced usable output), 'failed' only when nothing did.
-    # Per-tour detail always lives in error_message so a partial run is never
-    # silently indistinguishable from a clean one.
-    status = "completed" if succeeded else "failed"
+    # Status (AA-299): skipped tours are NOT failures — a tour whose source
+    # hasn't changed since the last decompose is a no-op, not an error, so it
+    # must not drag the batch status to 'failed'.
+    #   - every tour skipped and/or succeeded, none failed  -> 'completed'
+    #   - every tour failed for real                        -> 'failed'
+    #   - a real mix of (succeeded/skipped) AND real failures: the AA-299
+    #     decision doc calls this 'partial', but 'partial' is NOT a valid
+    #     value in the status CHECK constraint (migration 081: submitted /
+    #     in_progress / completed / failed only), and this PR does not add
+    #     one — flagged for a decision rather than silently inventing an enum
+    #     value. Falls back to 'completed' here (conservative: some tours DID
+    #     produce usable output) until that's decided; per-tour detail always
+    #     lives in error_message, so the mix is never lost, only the summary
+    #     `status` column collapses it for now.
+    # TODO(AA-299): decision deliberately deferred — not enough live evidence
+    # yet that the real mix case (succeeded/skipped AND real failures in one
+    # call) actually happens. Revisit once a live sample run shows it; don't
+    # add a 'partial' status value speculatively before that.
+    total = len(rows)
+    if total > 0 and len(failed) == total:
+        status = "failed"
+    else:
+        status = "completed"
     error_message = json.dumps(failed) if failed else None
 
     async with pool.acquire() as conn:
@@ -199,7 +280,7 @@ async def _decompose_inline(rows: list, pool) -> dict:
 
     logger.info(
         "atom_decompose_inline_completed", job_id=job_id, tour_count=len(rows),
-        succeeded=len(succeeded), failed=len(failed), atoms_created=atoms_created,
+        succeeded=len(succeeded), failed=len(failed), skipped=len(skipped), atoms_created=atoms_created,
     )
     return {
         "job_id": job_id,
@@ -208,8 +289,10 @@ async def _decompose_inline(rows: list, pool) -> dict:
         "status": status,
         "succeeded": len(succeeded),
         "failed": len(failed),
+        "skipped": len(skipped),
         "atoms_created": atoms_created,
         "failures": failed,
+        "skipped_tours": skipped,
     }
 
 
