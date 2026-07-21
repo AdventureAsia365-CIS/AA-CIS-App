@@ -67,6 +67,11 @@ def build_rewrite_prompt(tour: dict, seo: dict, few_shots: list[dict] = None,
     paa          = seo.get("people_also_ask", [])
 
     itineraries_raw = tour.get('itineraries') or tour.get('itinerary') or ""
+    # AA-314: tour['highlights'] is a list (parsed by the caller) — join it the same
+    # way seo_keywords/paa below turn a list into readable prompt text, instead of
+    # interpolating the list's Python repr straight into the prompt.
+    highlights_raw = tour.get('highlights') or []
+    highlights_text = ', '.join(highlights_raw) if isinstance(highlights_raw, list) else highlights_raw
 
     return f"""Rewrite the following tour content for Adventure Asia brand.
 {few_shot_text}
@@ -76,7 +81,7 @@ TOUR DATA:
 - Duration: {tour.get('duration')}
 - Summary: {tour.get('summary')}
 - Description: {tour.get('description')}
-- Highlights: {tour.get('highlights')}
+- Highlights: {highlights_text}
 - Itineraries: {itineraries_raw}
 - Inclusions: {tour.get('inclusions')}
 - Exclusions: {tour.get('exclusions')}

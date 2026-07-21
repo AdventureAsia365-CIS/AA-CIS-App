@@ -43,13 +43,19 @@ async def process_export(version_id: str) -> dict:
             "aa_subtitle":          row.get("aa_subtitle"),
             "aa_summary":           row.get("aa_summary"),
             "aa_description":       row.get("aa_description"),
-            "aa_highlights":        json.dumps(row.get("aa_highlights") or []),
+            # AA-314: gc.aa_highlights/seo_keywords_used/og_tags come back from asyncpg as
+            # already-JSON-encoded str (no jsonb codec registered anywhere in this app — see
+            # AA-293/AA-314 audit). json.dumps()'ing them again here double-encoded all three
+            # columns for every export (47/48 published_tours rows, confirmed live). Pass the
+            # existing JSON string straight through — PublishedCatalogRepository.insert() does
+            # not re-serialize either, it hands the value to asyncpg's default jsonb codec as-is.
+            "aa_highlights":        row.get("aa_highlights") or "[]",
             "aa_itineraries":       row.get("aa_itineraries"),
             "mobile_card_text":     row.get("mobile_card_text"),
             "seo_title":            row.get("seo_title"),
             "seo_meta":             row.get("seo_meta"),
-            "seo_keywords_used": json.dumps(row.get("seo_keywords_used") or []),
-            "og_tags":              json.dumps(row.get("og_tags") or {}),
+            "seo_keywords_used":    row.get("seo_keywords_used") or "[]",
+            "og_tags":              row.get("og_tags") or "{}",
             "quality_score":        row.get("quality_score"),
             "quality_score_id": (
                 str(row["quality_score_id"]) if row.get("quality_score_id") else None
