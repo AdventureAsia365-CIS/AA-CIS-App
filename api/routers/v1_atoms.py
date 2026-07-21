@@ -95,7 +95,15 @@ marketing platform. An atom is one concrete, verbatim-derived moment from the tr
 summary, not a paraphrase, not an invented detail.
 
 Extract concrete, verbatim-derived moments only. If input is thin or empty, return an empty \
-list — never invent content not present in the source text.
+list — never invent content not present in the source text. Text must be a direct quote or \
+minimal trim of the source material — do not add facts, names, numbers, or descriptive \
+details that are not explicitly present in the input text, even if you know them to be true \
+from general knowledge.
+
+Example of what NOT to do: if the input says "visit a hillside temple", the atom must say \
+only that — NOT "visit a 12th-century hillside temple famous for its hand-carved wooden \
+gates", even though such details might be true of similar temples in general. Any fact not \
+in the input text does not go in the atom, no matter how plausible or well-known.
 
 Respond with ONLY a JSON object matching this exact contract:
 {
@@ -181,6 +189,9 @@ async def _decompose_inline(rows: list, pool) -> dict:
         # with source_hash NULL, from before this migration) ⇒ source changed
         # or never truly hashed, decompose again. Old atoms are NOT deleted
         # when this happens (see migration 084 header) — only new ones are added.
+        # No `deleted`/`is_empty_marker` filter here on purpose (migration 085):
+        # a zero-atom marker row IS the tour's most recent tour_atoms row in
+        # that case, and must be picked up the same as a real atom row would be.
         async with pool.acquire() as conn:
             latest_hash = await conn.fetchval(
                 """SELECT source_hash FROM acp_contract.tour_atoms
@@ -217,19 +228,42 @@ async def _decompose_inline(rows: list, pool) -> dict:
         # this PR guessing a value.
         try:
             async with pool.acquire() as conn:
-                for atom in atoms:
-                    atom_id = f"atom_{uuid.uuid4().hex[:10]}"
+                if atoms:
+                    for atom in atoms:
+                        atom_id = f"atom_{uuid.uuid4().hex[:10]}"
+                        await conn.execute("""
+                            INSERT INTO acp_contract.tour_atoms
+                                (atom_id, tour_id, owner_scope, text, activity_type, emotional_hook,
+                                 visual_potential, persona_fit, season_note, starred, deleted, weight,
+                                 source_hash, created_at, updated_at)
+                            VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13,
+                                    now(), now())
+                        """, atom_id, tour_id, "platform", atom.get("text"), atom.get("activity_type"),
+                            atom.get("emotional_hook"), atom.get("visual_potential", 1),
+                            json.dumps(atom.get("persona_fit") or []), atom.get("season_note"),
+                            False, False, 1.0, source_hash)
+                else:
+                    # AA-299 (migration 085): a genuine zero-atom result (never-pad,
+                    # thin source) must still leave ONE row behind, or the next
+                    # call's idempotency check has no source_hash to compare
+                    # against and re-decomposes this tour forever. Not a real atom,
+                    # but also NOT a deleted one — `deleted` means "a real atom
+                    # existed and was removed" (audit/GDPR/veto-stats meaning),
+                    # which is a different fact from "no atom was ever produced
+                    # here." is_empty_marker=true / deleted=false keeps those two
+                    # concepts separate; every place that filters "real, currently
+                    # displayable atoms" must exclude is_empty_marker explicitly
+                    # (see the pending-tours LEFT JOIN below) rather than relying
+                    # on the deleted flag to hide markers.
+                    marker_id = f"atom_marker_{uuid.uuid4().hex[:10]}"
                     await conn.execute("""
                         INSERT INTO acp_contract.tour_atoms
-                            (atom_id, tour_id, owner_scope, text, activity_type, emotional_hook,
-                             visual_potential, persona_fit, season_note, starred, deleted, weight,
-                             source_hash, created_at, updated_at)
-                        VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13,
-                                now(), now())
-                    """, atom_id, tour_id, "platform", atom.get("text"), atom.get("activity_type"),
-                        atom.get("emotional_hook"), atom.get("visual_potential", 1),
-                        json.dumps(atom.get("persona_fit") or []), atom.get("season_note"),
-                        False, False, 1.0, source_hash)
+                            (atom_id, tour_id, owner_scope, text, starred, deleted,
+                             is_empty_marker, weight, source_hash, created_at, updated_at)
+                        VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, now(), now())
+                    """, marker_id, tour_id, "platform",
+                        "(zero-atom marker — no content, see is_empty_marker)",
+                        False, False, True, 1.0, source_hash)
         except Exception as e:
             logger.error("atom_decompose_inline_insert_failed", job_id=job_id, tour_id=tour_id,
                          error_type=type(e).__name__, error=str(e))
@@ -321,7 +355,7 @@ async def decompose(
                        vtr.itinerary_source, vtr.inclusions, vtr.exclusions
                 FROM acp_contract.v_trip_registry vtr
                 LEFT JOIN acp_contract.tour_atoms ta
-                    ON ta.tour_id = vtr.id AND NOT ta.deleted
+                    ON ta.tour_id = vtr.id AND NOT ta.deleted AND NOT ta.is_empty_marker
                 WHERE ta.tour_id IS NULL
             """)
 

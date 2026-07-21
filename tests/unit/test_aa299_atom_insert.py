@@ -238,3 +238,91 @@ async def test_decompose_inline_all_real_failures_status_failed():
     assert result["succeeded"] == 0
     assert result["skipped"] == 0
     assert result["status"] == "failed"
+
+
+# ── (d) zero-atom result ⇒ marker row written (migration 085) ──────────────
+
+@pytest.mark.asyncio
+async def test_decompose_inline_zero_atoms_writes_marker_row():
+    """A genuine never-pad empty result must still leave a source_hash-bearing
+    row behind, or the next call's idempotency check has nothing to compare
+    against (AA-299, live-observed gap: Yaksa Trek call #1 -> 0 atoms, call #2
+    re-ran Bedrock instead of skipping)."""
+    row = _row()
+    expected_hash = v1_atoms._source_hash(row)
+    conn = _fake_conn(latest_source_hash=None)
+    pool = _make_pool(conn)
+
+    with patch("api.routers.v1_atoms.invoke_claude", return_value=_fake_llm_result([])):
+        result = await v1_atoms._decompose_inline([row], pool)
+
+    assert result["succeeded"] == 1
+    assert result["atoms_created"] == 0
+
+    insert_calls = _insert_calls(conn)
+    assert len(insert_calls) == 1
+
+    sql, marker_id, tour_id, owner_scope, text, starred, deleted, \
+        is_empty_marker, weight, source_hash = insert_calls[0].args
+
+    assert re.match(r"^atom_marker_[0-9a-f]{10}$", marker_id)
+    assert tour_id == TOUR_ID
+    assert owner_scope == "platform"
+    assert starred is False
+    # deleted stays False on purpose: `deleted` means "a real atom existed and
+    # was removed" (audit/GDPR/veto-stats meaning) -- a marker row was never a
+    # real atom in the first place, a distinct fact is_empty_marker captures.
+    assert deleted is False
+    assert is_empty_marker is True
+    assert weight == 1.0
+    assert source_hash == expected_hash
+
+
+@pytest.mark.asyncio
+async def test_decompose_inline_skips_after_prior_zero_atom_marker():
+    """A prior zero-atom marker row's source_hash must be honored by the
+    idempotency check the same as a real atom row's would be -- no re-run,
+    no re-invoking Bedrock, when the source is unchanged."""
+    row = _row()
+    marker_hash = v1_atoms._source_hash(row)
+    conn = _fake_conn(latest_source_hash=marker_hash)  # marker row IS the "latest" row
+    pool = _make_pool(conn)
+
+    with patch("api.routers.v1_atoms.invoke_claude") as mock_invoke:
+        result = await v1_atoms._decompose_inline([row], pool)
+
+    mock_invoke.assert_not_called()
+    assert result["skipped"] == 1
+    assert result["succeeded"] == 0
+    assert result["skipped_tours"] == [{"tour_id": TOUR_ID, "reason": "source unchanged (hash match)"}]
+    assert len(_insert_calls(conn)) == 0
+
+
+@pytest.mark.asyncio
+async def test_decompose_pending_tours_query_excludes_empty_markers():
+    """The pending-tours auto-sweep (POST /v1/atoms/decompose with no tour_ids)
+    must not treat a zero-atom marker row as "this tour already has a real
+    atom" -- otherwise a thin tour that only ever produced a marker would
+    silently vanish from the sweep forever, despite having zero real,
+    displayable atoms. Asserts on the actual SQL string sent to conn.fetch."""
+    conn = AsyncMock()
+    conn.fetch.return_value = []  # short-circuits decompose() to the early return
+
+    ctx = AsyncMock()
+    ctx.__aenter__ = AsyncMock(return_value=conn)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    pool = MagicMock()
+    pool.acquire = MagicMock(return_value=ctx)
+
+    request = MagicMock()
+    request.app.state.pool = pool
+
+    body = v1_atoms.DecomposeRequest(tour_ids=None)
+    result = await v1_atoms.decompose(body, request, tenant={"sub": "test", "role": "admin"})
+
+    assert result == {"message": "no tours pending decompose", "tour_count": 0}
+
+    pending_query_calls = [c for c in conn.fetch.call_args_list if "v_trip_registry" in c.args[0]]
+    assert len(pending_query_calls) == 1
+    query_sql = pending_query_calls[0].args[0]
+    assert "AND NOT ta.deleted AND NOT ta.is_empty_marker" in query_sql
