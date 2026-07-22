@@ -24,6 +24,7 @@ run_id. Self-chosen decision, see AA-301 implementation notes.
 """
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from typing import Optional
@@ -178,12 +179,23 @@ _ATOM_ROW_QUERY = """
 """
 
 
+def _parse_jsonb(value, default):
+    """asyncpg has no jsonb codec registered on this app's connections
+    (same gap AA-314 already found and fixed for src_highlights elsewhere,
+    api/routers/v1_tours.py) — JSONB columns arrive as raw JSON-encoded
+    strings, not parsed dict/list. Parse manually at the point of use."""
+    if isinstance(value, str):
+        return json.loads(value) if value else default
+    return value if value is not None else default
+
+
 def _row_to_atom(row) -> AtomRecord:
     return AtomRecord(
         atom_id=row["atom_id"], trip_id=row["tour_id"], text=row["text"],
         distinctiveness=row["distinctiveness"] or "LOW", starred=row["starred"],
         deleted=row["deleted"], weight=float(row["weight"]),
-        cooldown_until=row["cooldown_until"] or {}, usage_log=row["usage_log"] or [],
+        cooldown_until=_parse_jsonb(row["cooldown_until"], {}),
+        usage_log=_parse_jsonb(row["usage_log"], []),
     )
 
 

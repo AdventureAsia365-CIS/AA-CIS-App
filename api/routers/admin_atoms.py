@@ -20,6 +20,7 @@ GET   /admin/atoms/preview-slotgrid   — runway_map -> plan_quarter ->
                                          approve_quarter_plan -> allocate_month
                                          for one tenant, returns the SlotGrid
 """
+import json
 from datetime import date
 from decimal import Decimal
 from typing import Optional
@@ -45,7 +46,16 @@ _AA_INTERNAL_TENANT_ID = UUID("00000000-0000-0000-0000-000000000001")
 def _safe(row) -> dict:
     """Same pattern as v1_tours.py's local safe() helper — UUID/Decimal/
     datetime -> JSON-safe. No shared api/utils.safe() exists in this repo
-    (checked); every router defines its own local copy."""
+    (checked); every router defines its own local copy.
+
+    Also parses `media` (tour_atoms.media, JSONB) if it comes back as a raw
+    string — asyncpg has no jsonb codec registered on this app's
+    connections (same gap AA-314 already found for src_highlights
+    elsewhere, api/routers/v1_tours.py; also just found for
+    cooldown_until/usage_log in services/acp_planning/quarter.py). Without
+    this, atom.media?.has_photo on the frontend silently reads undefined
+    off a JSON string instead of the real boolean — no crash, just always
+    "no photo" regardless of actual data."""
     if not row:
         return {}
     d = dict(row)
@@ -56,6 +66,8 @@ def _safe(row) -> dict:
             d[k] = float(v)
         elif hasattr(v, "isoformat"):
             d[k] = v.isoformat()
+    if "media" in d and isinstance(d["media"], str):
+        d["media"] = json.loads(d["media"]) if d["media"] else {}
     return d
 
 
