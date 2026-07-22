@@ -15,10 +15,18 @@ N4/N5/N6 pipeline (services/acp_planning/) for the first visual look at the
 whole ACP v2 pipeline end to end.
 
 GET   /admin/atoms                    — list/filter, batch of 50 by default
+GET   /admin/atoms/summary            — dashboard counts + by-tour accordion data
+PATCH /admin/atoms/bulk               — star / soft-delete many atoms at once
 PATCH /admin/atoms/{atom_id}          — star / soft-delete / light text edit
 GET   /admin/atoms/preview-slotgrid   — runway_map -> plan_quarter ->
                                          approve_quarter_plan -> allocate_month
                                          for one tenant, returns the SlotGrid
+
+Route order note: /atoms/bulk and /atoms/summary/preview-slotgrid are
+registered BEFORE /atoms/{atom_id} — this repo's own CRITICAL rule
+(CLAUDE.md: "/{id}/full MUST come BEFORE /{id}") applies here too, since
+FastAPI would otherwise greedily match "bulk" as {atom_id} on a PATCH
+/atoms/bulk request.
 """
 import json
 from datetime import date
@@ -165,6 +173,125 @@ async def list_atoms(
         "atoms": [_safe(r) for r in rows], "count": len(rows),
         "total": total, "limit": limit, "offset": offset,
     }
+
+
+# ── GET /admin/atoms/summary — dashboard counts + by-tour accordion data ───
+
+@router.get("/atoms/summary")
+async def atoms_summary(
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    """Whole-dataset counts, deliberately independent of whatever filter is
+    currently applied on the paginated /atoms list — a separate endpoint
+    rather than extra fields bolted onto GET /atoms, because the dashboard
+    only needs to change when the underlying data changes (a star/delete/
+    bulk action), not on every filter click or load-more page fetch. Folding
+    it into the list response would mean recomputing 3 extra aggregate
+    queries on every single filter/pagination round-trip for no reason —
+    fewer total queries over a real editing session with this split."""
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        breakdown_rows = await conn.fetch("""
+            SELECT distinctiveness, count(*) AS c
+            FROM acp_contract.tour_atoms
+            WHERE NOT deleted AND NOT is_empty_marker
+            GROUP BY distinctiveness
+        """)
+        totals = await conn.fetchrow("""
+            SELECT count(*) AS total,
+                   count(*) FILTER (WHERE updated_at != created_at) AS reviewed
+            FROM acp_contract.tour_atoms
+            WHERE NOT deleted AND NOT is_empty_marker
+        """)
+        by_tour_rows = await conn.fetch("""
+            SELECT ta.tour_id, rt.src_name AS tour_name,
+                   count(*) AS atom_count,
+                   count(*) FILTER (WHERE ta.updated_at = ta.created_at) AS unreviewed_count
+            FROM acp_contract.tour_atoms ta
+            JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = ta.tour_id
+            WHERE NOT ta.deleted AND NOT ta.is_empty_marker
+            GROUP BY ta.tour_id, rt.src_name
+            ORDER BY rt.src_name
+        """)
+
+    breakdown = {"HIGH": 0, "MED": 0, "LOW": 0}
+    for r in breakdown_rows:
+        if r["distinctiveness"] in breakdown:
+            breakdown[r["distinctiveness"]] = r["c"]
+
+    by_tour = [
+        {
+            "tour_id": str(r["tour_id"]), "tour_name": r["tour_name"],
+            "atom_count": r["atom_count"], "is_thin": r["atom_count"] < THIN_TRIP_ATOM_MIN,
+            "unreviewed_count": r["unreviewed_count"],
+        }
+        for r in by_tour_rows
+    ]
+
+    return {
+        "distinctiveness_breakdown": breakdown,
+        "total_count": totals["total"] if totals else 0,
+        "reviewed_count": totals["reviewed"] if totals else 0,
+        "by_tour": by_tour,
+    }
+
+
+# ── PATCH /admin/atoms/bulk — star / delete many atoms at once ─────────────
+
+class BulkAtomPatchRequest(BaseModel):
+    atom_ids: list[str]
+    starred: Optional[bool] = None
+    deleted: Optional[bool] = None
+
+
+@router.patch("/atoms/bulk")
+async def patch_atoms_bulk(
+    body: BulkAtomPatchRequest,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    """Star/soft-delete many atoms in a single UPDATE ... WHERE atom_id =
+    ANY($1), not N sequential PATCH calls — for the curation UI's
+    multi-select bulk actions. Only starred/deleted are supported in bulk
+    (no bulk text edit — editing many atoms' text to the same value isn't
+    a real use case)."""
+    verify_admin_secret(x_admin_secret)
+
+    if not body.atom_ids:
+        raise HTTPException(status_code=400, detail="atom_ids must not be empty")
+    if body.starred is None and body.deleted is None:
+        raise HTTPException(status_code=400, detail="no fields to update")
+
+    sets = []
+    params: list = []
+
+    def _set(column: str, value) -> None:
+        params.append(value)
+        sets.append(f"{column} = ${len(params)}")
+
+    if body.starred is not None:
+        _set("starred", body.starred)
+    if body.deleted is not None:
+        _set("deleted", body.deleted)
+    sets.append("updated_at = now()")
+
+    params.append(body.atom_ids)
+    query = f"""
+        UPDATE acp_contract.tour_atoms
+        SET {", ".join(sets)}
+        WHERE atom_id = ANY(${len(params)}) AND NOT is_empty_marker
+        RETURNING atom_id, tour_id, text, distinctiveness, starred, deleted,
+                  visual_potential, media, created_at, updated_at
+    """
+
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, *params)
+
+    return {"updated": [_safe(r) for r in rows], "updated_count": len(rows)}
 
 
 # ── PATCH /admin/atoms/{atom_id} — star / delete / light edit ──────────────
