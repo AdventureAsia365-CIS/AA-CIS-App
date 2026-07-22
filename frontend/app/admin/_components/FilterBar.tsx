@@ -18,6 +18,8 @@ interface FilterOption {
   current: string;
   options: { label: string; value: string }[];
   onChange: (v: string) => void;
+  /** Text for the default (value="") option — defaults to "All". */
+  allLabel?: string;
 }
 
 export function FilterBar({ search, onSearch, placeholder, filters, extra }: FilterBarProps) {
@@ -66,7 +68,7 @@ export function FilterBar({ search, onSearch, placeholder, filters, extra }: Fil
             outline: "none", cursor: "pointer",
           }}
         >
-          <option value="">{f.label}: All</option>
+          <option value="">{f.label}: {f.allLabel ?? "All"}</option>
           {f.options.map(o => (
             <option key={o.value} value={o.value}>{o.label}</option>
           ))}

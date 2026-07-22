@@ -61,6 +61,19 @@ interface Summary {
 
 const DIST_BADGE: Record<string, "green" | "amber" | "gray"> = { HIGH: "green", MED: "amber", LOW: "gray" };
 
+// Clearance so the fixed floating bulk-action bar (~56px tall, sitting 24px
+// off the viewport bottom) never covers the Load More button underneath it.
+const FLOATING_BAR_CLEARANCE = 92;
+
+type SortKey = "" | "atoms_asc" | "atoms_desc" | "unreviewed_desc" | "name_asc";
+
+const SORT_OPTIONS: { label: string; value: SortKey }[] = [
+  { label: "Số atom (tăng dần)", value: "atoms_asc" },
+  { label: "Số atom (giảm dần)", value: "atoms_desc" },
+  { label: "% chưa review (nhiều nhất trước)", value: "unreviewed_desc" },
+  { label: "Tên tour (A-Z)", value: "name_asc" },
+];
+
 export default function CurationPage() {
   const router = useRouter();
 
@@ -76,6 +89,7 @@ export default function CurationPage() {
   const [distinctiveness, setDistinctiveness] = useState("");
   const [unreviewedOnly, setUnreviewedOnly] = useState(false);
   const [thinOnly, setThinOnly] = useState(false);
+  const [sortBy, setSortBy] = useState<SortKey>("");
 
   const [expandedTourIds, setExpandedTourIds] = useState<Set<string>>(new Set());
   const didInitExpand = useRef(false);
@@ -267,15 +281,23 @@ export default function CurationPage() {
         extra.push({ tour_id: tourId, tour_name: list[0].tour_name, atom_count: list.length, is_thin: false, unreviewed_count: 0 });
       }
     }
-    return [...order, ...extra];
-  }, [summary, atomsByTour]);
+    const combined = [...order, ...extra];
+    if (!sortBy) return combined; // default — unchanged order from summary.by_tour
+    const sorted = [...combined];
+    if (sortBy === "atoms_asc") sorted.sort((a, b) => a.atom_count - b.atom_count);
+    else if (sortBy === "atoms_desc") sorted.sort((a, b) => b.atom_count - a.atom_count);
+    else if (sortBy === "unreviewed_desc") {
+      sorted.sort((a, b) => (b.unreviewed_count / (b.atom_count || 1)) - (a.unreviewed_count / (a.atom_count || 1)));
+    } else if (sortBy === "name_asc") sorted.sort((a, b) => a.tour_name.localeCompare(b.tour_name));
+    return sorted;
+  }, [summary, atomsByTour, sortBy]);
 
   const searchLower = search.trim().toLowerCase();
 
   return (
     <div style={{ display: "flex", minHeight: "100vh", background: A.bg }}>
       <AdminSidebar />
-      <main style={{ flex: 1, padding: "28px 32px", maxWidth: 1400, display: "flex", flexDirection: "column" }}>
+      <main style={{ flex: 1, padding: "28px 32px", maxWidth: 1400, margin: "0 auto", display: "flex", flexDirection: "column" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
           <Sparkles size={18} color={A.gold} />
           <h1 style={{ fontFamily: serif, fontSize: 22, fontWeight: 500, color: A.ink, margin: 0 }}>
@@ -293,7 +315,7 @@ export default function CurationPage() {
 
         {/* ── Dashboard ──────────────────────────────────────────────────── */}
         {summary && (
-          <div style={{ display: "flex", gap: 10, marginBottom: 18, flexWrap: "wrap" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 10, marginBottom: 18 }}>
             <StatCard icon={<Sparkles size={16} />} label="Total Atoms" value={String(summary.total_count)} />
             {(["HIGH", "MED", "LOW"] as const).map(level => {
               const count = summary.distinctiveness_breakdown[level];
@@ -302,7 +324,7 @@ export default function CurationPage() {
                   <StatCard
                     icon={<Star size={16} />} label={level} value={String(count)}
                     accent={count === 0 ? A.muted2 : DIST_BADGE[level] === "green" ? A.green : DIST_BADGE[level] === "amber" ? A.amber : A.muted}
-                    sub={count === 0 ? "none yet (AA-317 pending)" : "distinctiveness"}
+                    sub={count === 0 ? "chưa có (AA-317)" : "distinctiveness"}
                   />
                 </div>
               );
@@ -328,6 +350,12 @@ export default function CurationPage() {
                 { label: "LOW", value: "LOW" },
               ],
               onChange: setDistinctiveness,
+            },
+            {
+              label: "Sắp xếp", value: sortBy, current: sortBy,
+              allLabel: "Mặc định",
+              options: SORT_OPTIONS,
+              onChange: v => setSortBy(v as SortKey),
             },
           ]}
           extra={
@@ -357,7 +385,12 @@ export default function CurationPage() {
         ) : (
           // Fixed-height scroll container, not a page-length scroll + separate
           // Pagination — replaces Pagination.tsx per Nghiep's direct feedback.
-          <div style={{ flex: 1, minHeight: 0, overflowY: "auto", border: `1px solid ${A.line}`, borderRadius: 10, background: "#fff" }}>
+          <div style={{
+            flex: 1, minHeight: 0, overflowY: "auto", border: `1px solid ${A.line}`, borderRadius: 10, background: "#fff",
+            // Room for Load More to scroll clear of the floating bulk-action
+            // bar, which is position:fixed and would otherwise sit on top of it.
+            paddingBottom: selectedIds.size > 0 ? FLOATING_BAR_CLEARANCE : 0,
+          }}>
             {orderedSections.map(section => {
               const sectionAtoms = (atomsByTour.get(section.tour_id) || []).filter(a =>
                 !searchLower || a.text.toLowerCase().includes(searchLower) || a.tour_name.toLowerCase().includes(searchLower));
