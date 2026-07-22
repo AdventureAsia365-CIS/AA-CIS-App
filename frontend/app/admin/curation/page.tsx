@@ -68,10 +68,10 @@ const FLOATING_BAR_CLEARANCE = 92;
 type SortKey = "" | "atoms_asc" | "atoms_desc" | "unreviewed_desc" | "name_asc";
 
 const SORT_OPTIONS: { label: string; value: SortKey }[] = [
-  { label: "Số atom (tăng dần)", value: "atoms_asc" },
-  { label: "Số atom (giảm dần)", value: "atoms_desc" },
-  { label: "% chưa review (nhiều nhất trước)", value: "unreviewed_desc" },
-  { label: "Tên tour (A-Z)", value: "name_asc" },
+  { label: "Atom count (asc)", value: "atoms_asc" },
+  { label: "Atom count (desc)", value: "atoms_desc" },
+  { label: "% unreviewed (most first)", value: "unreviewed_desc" },
+  { label: "Tour name (A–Z)", value: "name_asc" },
 ];
 
 export default function CurationPage() {
@@ -352,8 +352,8 @@ export default function CurationPage() {
               onChange: setDistinctiveness,
             },
             {
-              label: "Sắp xếp", value: sortBy, current: sortBy,
-              allLabel: "Mặc định",
+              label: "Sort", value: sortBy, current: sortBy,
+              allLabel: "Default",
               options: SORT_OPTIONS,
               onChange: v => setSortBy(v as SortKey),
             },
