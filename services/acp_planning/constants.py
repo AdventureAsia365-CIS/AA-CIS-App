@@ -33,4 +33,8 @@ ATOM_COOLDOWN_WEEKS = 6
 # share redistributed proportionally to non-thin trips. Not specified in the
 # original issue text (only "cap thin trip's share" is mandated) — 0.15 is a
 # self-chosen default, see AA-301 implementation notes.
+# TẠM THỜI — chưa có xác nhận chính thức từ Ms. Thư. Xem AA-319.
+# KHÔNG liên quan tới "Sapa 0.15" trong research Session 104 (đó là share
+# tự tính của 1 destination bình thường, không phải ngưỡng cap chủ định
+# cho tour thin) — trùng số ngẫu nhiên, đừng nhầm lẫn khi đọc lại.
 THIN_TRIP_MAX_SHARE = 0.15
