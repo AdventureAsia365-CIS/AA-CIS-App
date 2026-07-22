@@ -314,6 +314,18 @@ class TestPreviewSlotgrid:
         assert result["demo_params"]["channels"] == ["blog"]
         assert result["demo_params"]["capacity_posts_per_week"] == 4
 
+        # AA-320 follow-up gap, closed here: previously nothing asserted
+        # that this read-only preview endpoint never writes to the DB —
+        # runway_map()/plan_quarter()/allocate_month() only ever call
+        # conn.fetch, and approve_quarter_plan() is a plain in-memory
+        # mutation with no conn/pool argument at all (services/acp_planning
+        # has zero conn.execute/INSERT/UPDATE anywhere, grep-confirmed) —
+        # this makes that guarantee regression-proof instead of only true
+        # by current code inspection. executemany is not used anywhere in
+        # this call chain either (checked before adding this).
+        conn.execute.assert_not_called()
+        conn.executemany.assert_not_called()
+
     @staticmethod
     def _trip_row(trip_id):
         return {
