@@ -294,6 +294,195 @@ class TestPatchAtom:
         assert exc.value.status_code == 403
 
 
+class TestAtomsSummary:
+    @pytest.mark.asyncio
+    async def test_breakdown_and_totals_independent_of_list_filters(self):
+        conn = AsyncMock()
+        conn.fetch.side_effect = [
+            [{"distinctiveness": "LOW", "c": 230}, {"distinctiveness": "HIGH", "c": 5}],
+            [
+                {"tour_id": uuid.uuid4(), "tour_name": "Sapa Valley Trek",
+                 "atom_count": 4, "unreviewed_count": 4},
+                {"tour_id": uuid.uuid4(), "tour_name": "Mongolia Gobi",
+                 "atom_count": 12, "unreviewed_count": 0},
+            ],
+        ]
+        conn.fetchrow.return_value = {"total": 235, "reviewed": 12}
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await admin_atoms.atoms_summary(request, x_admin_secret=_TEST_SECRET)
+
+        assert result["distinctiveness_breakdown"] == {"HIGH": 5, "MED": 0, "LOW": 230}
+        assert result["total_count"] == 235
+        assert result["reviewed_count"] == 12
+
+    @pytest.mark.asyncio
+    async def test_by_tour_marks_thin_trips(self):
+        from services.acp_shared.atom_constants import THIN_TRIP_ATOM_MIN
+        conn = AsyncMock()
+        conn.fetch.side_effect = [
+            [],
+            [
+                {"tour_id": uuid.uuid4(), "tour_name": "Ha Giang Loop",
+                 "atom_count": 4, "unreviewed_count": 4},  # < THIN_TRIP_ATOM_MIN=5 -> thin
+                {"tour_id": uuid.uuid4(), "tour_name": "Mongolia Gobi",
+                 "atom_count": 12, "unreviewed_count": 0},  # not thin
+            ],
+        ]
+        conn.fetchrow.return_value = {"total": 16, "reviewed": 0}
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await admin_atoms.atoms_summary(request, x_admin_secret=_TEST_SECRET)
+
+        by_name = {t["tour_name"]: t for t in result["by_tour"]}
+        assert by_name["Ha Giang Loop"]["atom_count"] < THIN_TRIP_ATOM_MIN
+        assert by_name["Ha Giang Loop"]["is_thin"] is True
+        assert by_name["Mongolia Gobi"]["is_thin"] is False
+
+    @pytest.mark.asyncio
+    async def test_wrong_secret_rejected(self):
+        pool = _make_pool(AsyncMock())
+        request = _make_request(pool)
+        with pytest.raises(HTTPException) as exc:
+            await admin_atoms.atoms_summary(request, x_admin_secret="wrong")
+        assert exc.value.status_code == 403
+
+
+class TestBulkPatchAtoms:
+    @pytest.mark.asyncio
+    async def test_bulk_star(self):
+        conn = AsyncMock()
+        conn.fetch.return_value = [
+            _atom_row(atom_id="atom_1", starred=True),
+            _atom_row(atom_id="atom_2", starred=True),
+        ]
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        body = admin_atoms.BulkAtomPatchRequest(atom_ids=["atom_1", "atom_2"], starred=True)
+        result = await admin_atoms.patch_atoms_bulk(body, request, x_admin_secret=_TEST_SECRET)
+
+        assert result["updated_count"] == 2
+        query, *params = conn.fetch.call_args[0]
+        assert "atom_id = ANY($" in query
+        assert "starred = $1" in query
+        assert ["atom_1", "atom_2"] in params
+
+    @pytest.mark.asyncio
+    async def test_bulk_delete_uses_single_update_not_n_calls(self):
+        """One UPDATE ... WHERE atom_id = ANY($1), not N sequential PATCH
+        calls — the whole point of the bulk endpoint."""
+        conn = AsyncMock()
+        conn.fetch.return_value = [_atom_row(atom_id=f"atom_{i}", deleted=True) for i in range(5)]
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        body = admin_atoms.BulkAtomPatchRequest(
+            atom_ids=[f"atom_{i}" for i in range(5)], deleted=True)
+        result = await admin_atoms.patch_atoms_bulk(body, request, x_admin_secret=_TEST_SECRET)
+
+        assert result["updated_count"] == 5
+        assert conn.fetch.call_count == 1  # exactly one DB round-trip
+
+    @pytest.mark.asyncio
+    async def test_empty_atom_ids_rejected(self):
+        pool = _make_pool(AsyncMock())
+        request = _make_request(pool)
+        body = admin_atoms.BulkAtomPatchRequest(atom_ids=[], starred=True)
+        with pytest.raises(HTTPException) as exc:
+            await admin_atoms.patch_atoms_bulk(body, request, x_admin_secret=_TEST_SECRET)
+        assert exc.value.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_no_fields_rejected(self):
+        pool = _make_pool(AsyncMock())
+        request = _make_request(pool)
+        body = admin_atoms.BulkAtomPatchRequest(atom_ids=["atom_1"])
+        with pytest.raises(HTTPException) as exc:
+            await admin_atoms.patch_atoms_bulk(body, request, x_admin_secret=_TEST_SECRET)
+        assert exc.value.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_wrong_secret_rejected(self):
+        pool = _make_pool(AsyncMock())
+        request = _make_request(pool)
+        body = admin_atoms.BulkAtomPatchRequest(atom_ids=["atom_1"], starred=True)
+        with pytest.raises(HTTPException) as exc:
+            await admin_atoms.patch_atoms_bulk(body, request, x_admin_secret="wrong")
+        assert exc.value.status_code == 403
+
+    def test_bulk_route_registered_before_dynamic_atom_id_route(self):
+        """FastAPI route-order regression guard — this repo's own CRITICAL
+        rule (CLAUDE.md: '/{id}/full MUST come BEFORE /{id}') applies here:
+        PATCH /atoms/bulk must be registered before PATCH /atoms/{atom_id}
+        or FastAPI would greedily match 'bulk' as {atom_id}.
+
+        Makes a REAL HTTP request through a real (but minimal, lifespan-free)
+        FastAPI app mounting just this router, and confirms PATCH
+        /admin/atoms/bulk actually invokes the bulk handler — identified by
+        its distinctive response shape ({"updated": [...], "updated_count"}),
+        which patch_atom("bulk", ...) could never produce.
+
+        Deliberately NOT introspecting app.routes (the previous version of
+        this test): a real CI failure — fresh `pip install -r
+        requirements.txt` resolving the unpinned `fastapi>=0.110.1` to
+        fastapi 0.139.2/starlette 1.3.1, a newer major Starlette than this
+        dev environment's frozen 0.37.2 — showed that newer FastAPI wraps
+        include_router()'d routes in an opaque `_IncludedRouter` object.
+        `app.routes` no longer exposes a flat, walkable list of `Route`
+        objects with `.path`/`.methods` for anything added via
+        `include_router()` — an internal implementation detail this test
+        must not depend on, reproduced directly in a clean venv built from
+        this exact requirements.txt before writing this fix.
+
+        Also deliberately NOT using the real api.main.app + TestClient's
+        lifespan — that dials real Redis/Postgres on startup
+        (api/main.py's `lifespan()`), which would hang/fail in the Unit
+        Tests CI job (no Redis/Postgres service available there). Mounting
+        just this router on a bare `FastAPI()` instance exercises real
+        Starlette routing/dispatch without any of that."""
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        conn = AsyncMock()
+        conn.fetch.return_value = [_atom_row(atom_id="atom_1", starred=True)]
+        conn.fetchrow.return_value = _atom_row(atom_id="atom_abc1234567", starred=True)
+        pool = _make_pool(conn)
+
+        mini_app = FastAPI()
+        mini_app.include_router(admin_atoms.router)
+        mini_app.state.pool = pool
+
+        client = TestClient(mini_app)
+
+        bulk_res = client.patch(
+            "/admin/atoms/bulk",
+            json={"atom_ids": ["atom_1"], "starred": True},
+            headers={"x-admin-secret": _TEST_SECRET},
+        )
+        assert bulk_res.status_code == 200, bulk_res.text
+        bulk_body = bulk_res.json()
+        assert "updated_count" in bulk_body, (
+            f"PATCH /admin/atoms/bulk did not hit the bulk handler — got {bulk_body!r}. "
+            "If routing regressed (bulk matched as {atom_id}), this would 404/500 instead.")
+        assert bulk_body["updated_count"] == 1
+
+        # contrasting real request — confirms the dynamic route still works
+        # for an actual atom_id, i.e. this isn't just "bulk 404s so 200 must
+        # mean it worked"
+        single_res = client.patch(
+            "/admin/atoms/atom_abc1234567",
+            json={"starred": True},
+            headers={"x-admin-secret": _TEST_SECRET},
+        )
+        assert single_res.status_code == 200, single_res.text
+        single_body = single_res.json()
+        assert "updated_count" not in single_body
+        assert single_body["atom_id"] == "atom_abc1234567"
+
+
 class TestPreviewSlotgrid:
     @pytest.mark.asyncio
     async def test_invalid_tenant_id_400(self):
