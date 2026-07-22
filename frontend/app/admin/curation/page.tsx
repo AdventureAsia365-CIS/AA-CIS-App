@@ -80,7 +80,13 @@ export default function CurationPage() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [atoms, setAtoms] = useState<Atom[]>([]);
   const [total, setTotal] = useState(0);
-  const [offset, setOffset] = useState(0);
+  // Ref, not state — loadAtoms() below is memoized on filter values only, so a
+  // stale-closure bug would silently re-read whatever `offset` was captured at
+  // that memoization (typically 0) on every "Load more" click, re-fetching and
+  // duplicating the first page instead of advancing. A ref sidesteps the
+  // closure entirely: .current is always current, no matter how old the
+  // closure that reads it is.
+  const offsetRef = useRef(0);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
@@ -122,7 +128,7 @@ export default function CurationPage() {
 
   // ── atom list — resets on filter change, appends on "Load more" ──────────
   const loadAtoms = useCallback(async (reset: boolean) => {
-    const nextOffset = reset ? 0 : offset;
+    const nextOffset = reset ? 0 : offsetRef.current;
     if (reset) setLoading(true); else setLoadingMore(true);
     setError("");
     const params = new URLSearchParams({ limit: String(LOAD_LIMIT), offset: String(nextOffset) });
@@ -135,14 +141,13 @@ export default function CurationPage() {
       const data = await res.json();
       setAtoms(prev => (reset ? data.atoms : [...prev, ...data.atoms]));
       setTotal(data.total);
-      setOffset(nextOffset + data.atoms.length);
+      offsetRef.current = nextOffset + data.atoms.length;
     } catch (err: any) {
       setError(err.message || "Failed to load atoms.");
     } finally {
       setLoading(false);
       setLoadingMore(false);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [distinctiveness, unreviewedOnly, thinOnly]);
 
   useEffect(() => { loadSummary(); }, [loadSummary]);
