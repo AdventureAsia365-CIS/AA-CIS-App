@@ -3,7 +3,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Search, CalendarDays, FileText, Share2 } from "lucide-react";
+import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Search, CalendarDays, FileText, Share2, Sparkles } from "lucide-react";
 import { A, serif, sans } from "./adminUi";
 
 interface Notif {
@@ -24,6 +24,7 @@ const CONTENT_NAV = [
   { href: "/admin/review",         icon: <ClipboardList size={15} />, label: "Review Queue" },
   { href: "/admin/brand",          icon: <Palette size={15} />,       label: "Brand Identity" },
   { href: "/admin/master-content", icon: <Library size={15} />,       label: "Master Content" },
+  { href: "/admin/curation",       icon: <Sparkles size={15} />,      label: "Atom Curation" },
 ];
 
 const PIPELINE_NAV = [

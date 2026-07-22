@@ -33,6 +33,7 @@ from api.routers.admin import router as admin_router
 from api.routers.admin_pipeline import router as admin_pipeline_router
 from api.routers.admin_acp_proxy import router as admin_acp_proxy_router
 from api.routers.admin_settings import router as admin_settings_router
+from api.routers.admin_atoms import router as admin_atoms_router
 from api.routers.acp_health import router as acp_health_router
 from api.middleware.rate_limit import rate_limit_middleware
 from api.middleware.sentry_context import sentry_context_middleware
@@ -186,6 +187,7 @@ app.include_router(admin_router)
 app.include_router(admin_pipeline_router)
 app.include_router(admin_acp_proxy_router)
 app.include_router(admin_settings_router)
+app.include_router(admin_atoms_router)
 app.include_router(acp_health_router)
 
 app.middleware("http")(rate_limit_middleware)
