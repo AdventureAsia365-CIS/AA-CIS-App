@@ -48,11 +48,16 @@ def _make_request(pool):
 
 
 def _atom_row(**over):
+    # media is JSONB on tour_atoms — asyncpg has no jsonb codec registered
+    # on this app's connections, so it comes back as a raw JSON string, not
+    # a parsed dict (found live in AA-300's preview-slotgrid 500 bug; fixed
+    # in admin_atoms.py::_safe()). Fixtures must match real asyncpg shape,
+    # not a hand-convenient Python dict, or a regression here goes untested.
     base = {
         "atom_id": "atom_abc1234567", "tour_id": uuid.uuid4(), "tour_name": "Sapa Valley Trek",
         "text": "Crossing the bamboo bridge at Ta Van village", "activity_type": "trek",
         "emotional_hook": None, "visual_potential": 2, "distinctiveness": "LOW",
-        "media": {"has_photo": False, "has_video": False, "media_refs": []},
+        "media": '{"has_photo": false, "has_video": false, "media_refs": []}',
         "starred": False, "deleted": False,
         "created_at": "2026-07-01T00:00:00", "updated_at": "2026-07-01T00:00:00",
         "unreviewed": True, "tour_atom_count": 4,
@@ -336,10 +341,16 @@ class TestPreviewSlotgrid:
 
     @staticmethod
     def _atom_db_row(atom_id, trip_id, **over):
+        # cooldown_until/usage_log are JSONB on tour_atoms — asyncpg returns
+        # raw JSON strings here, not parsed dict/list (the exact live bug
+        # this fixture must reproduce: services/acp_planning/quarter.py's
+        # _row_to_atom() crashed on this with a real 500, uncaught by this
+        # test suite because these fixtures used real Python {}/[] instead
+        # of the actual string shape asyncpg produces).
         base = {
             "atom_id": atom_id, "tour_id": trip_id, "text": f"{atom_id} text content here",
             "distinctiveness": "HIGH", "starred": False, "deleted": False, "weight": 1.0,
-            "cooldown_until": {}, "usage_log": [],
+            "cooldown_until": "{}", "usage_log": "[]",
         }
         base.update(over)
         return base

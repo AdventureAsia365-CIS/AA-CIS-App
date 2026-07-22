@@ -1,9 +1,13 @@
 """AA-301 — N5 Quarter Plan: B4 (fuzzy special matching) and B5 (thin-trip
 share cap) fixes, Gate B (approval required).
 
-Pure Python — no DB, no LLM.
+Pure-Python logic — no DB, no LLM. TestFetchAtomsByTripDbWrapper is the one
+exception: it exercises the async DB-wiring layer (fetch_atoms_by_trip/
+_row_to_atom) with a mocked asyncpg pool, per the pool.acquire() convention
+in test_aa299_atom_insert.py.
 """
 import uuid
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -11,7 +15,9 @@ from services.acp_planning.constants import THIN_TRIP_MAX_SHARE
 from services.acp_planning.models import (AtomRecord, RunwayCell, RunwayMap, Trip,
                                           compute_trips_hash)
 from services.acp_planning.quarter import (_cap_thin_trip_shares, _fuzzy_match,
-                                           approve_quarter_plan, compute_quarter_plan)
+                                           _parse_jsonb, _row_to_atom,
+                                           approve_quarter_plan, compute_quarter_plan,
+                                           fetch_atoms_by_trip)
 from services.acp_shared.atom_constants import THIN_TRIP_ATOM_MIN
 
 TENANT = uuid.UUID("00000000-0000-0000-0000-000000000001")
@@ -147,3 +153,88 @@ class TestNoLlmCost:
         src = open(mod.__file__).read()
         for banned in ("boto3", "bedrock", "anthropic", "invoke_model", "invoke_claude"):
             assert banned not in src.lower(), f"N5 must be $0 LLM — found '{banned}' in quarter.py"
+
+
+class TestParseJsonb:
+    """Real bug found live in production (AA-300): asyncpg has no jsonb
+    codec registered on this app's connections (same gap AA-314 already
+    found for src_highlights elsewhere), so tour_atoms.cooldown_until/
+    usage_log (both JSONB) arrive as raw JSON strings — e.g. '{}', '[]' —
+    not parsed dict/list. _row_to_atom() previously passed these straight
+    into AtomRecord, which pydantic correctly rejected
+    (pydantic_core.ValidationError: 'Input should be a valid dictionary
+    [type=dict_type, input_value=\\'{}\\', input_type=str]'), crashing
+    GET /admin/atoms/preview-slotgrid with a real 500 in production. Every
+    test in this suite up to this point mocked DB rows with real Python
+    {}/[] instead of the actual string shape asyncpg produces, so nothing
+    caught it — these tests exist specifically to close that mock-fidelity
+    gap, not just to re-test the fix in isolation."""
+
+    def test_string_dict_is_parsed(self):
+        assert _parse_jsonb('{"a": 1}', {}) == {"a": 1}
+
+    def test_string_list_is_parsed(self):
+        assert _parse_jsonb('["a", "b"]', []) == ["a", "b"]
+
+    def test_empty_string_uses_default(self):
+        assert _parse_jsonb("", {"fallback": True}) == {"fallback": True}
+
+    def test_already_parsed_dict_passed_through(self):
+        """Defensive — if a jsonb codec is ever registered later, asyncpg
+        would hand back a real dict/list directly; must not double-parse."""
+        assert _parse_jsonb({"a": 1}, {}) == {"a": 1}
+
+    def test_none_uses_default(self):
+        assert _parse_jsonb(None, []) == []
+
+    def test_row_to_atom_with_real_asyncpg_string_shape(self):
+        """The exact live crash, reproduced directly: a raw asyncpg Record
+        with cooldown_until/usage_log as JSON strings, not dict/list."""
+        trip_id = uuid.uuid4()
+        row = {
+            "atom_id": "atom_x", "tour_id": trip_id, "text": "some atom text",
+            "distinctiveness": "HIGH", "starred": True, "deleted": False, "weight": 1.5,
+            "cooldown_until": '{"blog": "2026-08-01"}', "usage_log": '["a", "b"]',
+        }
+        atom = _row_to_atom(row)
+        assert atom.cooldown_until == {"blog": "2026-08-01"}
+        assert atom.usage_log == ["a", "b"]
+
+    def test_row_to_atom_with_empty_jsonb_strings(self):
+        """The exact production traceback's inputs verbatim: '{}' and '[]'."""
+        trip_id = uuid.uuid4()
+        row = {
+            "atom_id": "atom_y", "tour_id": trip_id, "text": "atom text",
+            "distinctiveness": "LOW", "starred": False, "deleted": False, "weight": 1.0,
+            "cooldown_until": "{}", "usage_log": "[]",
+        }
+        atom = _row_to_atom(row)  # must not raise pydantic_core.ValidationError
+        assert atom.cooldown_until == {}
+        assert atom.usage_log == []
+
+
+class TestFetchAtomsByTripDbWrapper:
+    @pytest.mark.asyncio
+    async def test_query_returns_real_asyncpg_shaped_atoms(self):
+        """End-to-end through fetch_atoms_by_trip() with a mocked pool
+        whose rows use the real asyncpg string shape for JSONB columns —
+        the exact path that crashed in production."""
+        trip_id = uuid.uuid4()
+        conn = AsyncMock()
+        conn.fetch.return_value = [{
+            "atom_id": "atom_z", "tour_id": trip_id, "text": "text",
+            "distinctiveness": "MED", "starred": False, "deleted": False, "weight": 1.0,
+            "cooldown_until": "{}", "usage_log": "[]",
+        }]
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=conn)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        pool = MagicMock()
+        pool.acquire = MagicMock(return_value=ctx)
+
+        by_trip = await fetch_atoms_by_trip(TENANT, pool)
+
+        assert trip_id in by_trip
+        atom = by_trip[trip_id][0]
+        assert atom.cooldown_until == {}
+        assert atom.usage_log == []
