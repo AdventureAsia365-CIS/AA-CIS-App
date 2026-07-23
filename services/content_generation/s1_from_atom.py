@@ -92,7 +92,9 @@ class GroundingError(Exception):
     """
 
     def __init__(self, message: str, prompt_version: str = None, gate: dict = None, retries: int = None):
-        super().__init__(message)
+        # B042 (flake8-bugbear): pass every constructor arg to super().__init__() so
+        # pickle/copy.copy() can reconstruct this exception from .args alone, not just attrs.
+        super().__init__(message, prompt_version, gate, retries)
         self.prompt_version = prompt_version
         self.gate = gate
         self.retries = retries
