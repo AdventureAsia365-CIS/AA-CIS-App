@@ -23,11 +23,14 @@ blind Nova-judged sample). generate_draft() is a one-function seam so a future
 switch to Claude is a one-line model_tier change, not a rewrite — see
 _call_claude_satellite below, wired but not the default.
 """
+import hashlib
 import json
 import re
+import time
 
 import boto3
 import structlog
+from botocore.exceptions import ClientError
 from json_repair import repair_json
 
 from services.acp_shared.atom_constants import ATOM_DENSITY_WORDS
@@ -79,7 +82,22 @@ Output ONLY valid JSON. No preamble, no markdown, no explanation."""
 
 
 class GroundingError(Exception):
-    """Palmyra/Claude output failed the closed-world or density gate after all retries."""
+    """Palmyra/Claude output failed the closed-world or density gate after all retries.
+
+    AA-289: carries prompt_version/gate/retries when available (i.e. whenever a system
+    prompt was actually built and at least one draft was attempted) so the caller can log a
+    'gate_failed' row without recomputing the hash — None on the earlier "no curated atoms"
+    raise, where no LLM call was ever attempted and there's nothing meaningful to log against
+    a prompt_version yet.
+    """
+
+    def __init__(self, message: str, prompt_version: str = None, gate: dict = None, retries: int = None):
+        # B042 (flake8-bugbear): pass every constructor arg to super().__init__() so
+        # pickle/copy.copy() can reconstruct this exception from .args alone, not just attrs.
+        super().__init__(message, prompt_version, gate, retries)
+        self.prompt_version = prompt_version
+        self.gate = gate
+        self.retries = retries
 
 
 def _row_to_atom(r) -> dict:
@@ -165,6 +183,14 @@ def generate_draft(system_prompt: str, user_prompt: str, model_tier: str = DEFAU
     raise ValueError(f"Unknown model_tier: {model_tier!r} (expected 'palmyra' or 'claude')")
 
 
+# AA-289: acc2 Palmyra throttles on back-to-back InvokeModel calls — reproduced live twice
+# (once with zero spacing, once with a fixed 25s gap between sequential eval-script calls,
+# services/eval/regression.py). No published RPM/TPM number exists for this model. A fixed
+# sleep is not reliable; retry-with-backoff on the specific exception is.
+_PALMYRA_THROTTLE_RETRIES = 3
+_PALMYRA_THROTTLE_BACKOFF_SECONDS = 30
+
+
 def _call_palmyra(system_prompt: str, user_prompt: str, max_tokens: int) -> dict:
     """acc2-native, OpenAI-compatible response shape (choices[0].message.content) —
     verified live via ECS exec smoke test (AA-306 STEP 0), NOT Anthropic's
@@ -179,12 +205,23 @@ def _call_palmyra(system_prompt: str, user_prompt: str, max_tokens: int) -> dict
         ],
         "max_tokens": max_tokens,
     }
-    resp = client.invoke_model(
-        modelId=PALMYRA_MODEL_ID,
-        body=json.dumps(body),
-        contentType="application/json",
-        accept="application/json",
-    )
+    for attempt in range(_PALMYRA_THROTTLE_RETRIES + 1):
+        try:
+            resp = client.invoke_model(
+                modelId=PALMYRA_MODEL_ID,
+                body=json.dumps(body),
+                contentType="application/json",
+                accept="application/json",
+            )
+            break
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") != "ThrottlingException":
+                raise
+            if attempt == _PALMYRA_THROTTLE_RETRIES:
+                raise
+            wait_s = _PALMYRA_THROTTLE_BACKOFF_SECONDS * (attempt + 1)
+            logger.warning("s1_from_atom_palmyra_throttled", attempt=attempt, wait_s=wait_s)
+            time.sleep(wait_s)
     payload = json.loads(resp["body"].read())
     choice = payload["choices"][0]["message"]["content"]
     usage = payload.get("usage", {})
@@ -330,7 +367,7 @@ async def generate_s1_from_atom(
     minimal — this module only needs enough to label the output, all factual
     content comes from atoms). Raises GroundingError if the gate never passes
     within MAX_RETRIES. Returns {content, atoms_used, gate, retries, model_used,
-    input_tokens, output_tokens, atoms_available}."""
+    input_tokens, output_tokens, atoms_available, prompt_version}."""
     atoms = await fetch_curated_atoms(tour_id, pool)
     if not atoms:
         raise GroundingError(f"No curated atoms for tour {tour_id} — nothing to assemble from")
@@ -339,6 +376,11 @@ async def generate_s1_from_atom(
     system_prompt = _GROUNDING_SYSTEM_PROMPT
     if persona:
         system_prompt += _persona_block(persona)
+
+    # AA-289: hash the stable prefix (grounding rules + persona), same sha256[:8] convention as
+    # S1-old (graph.py generate_node) — NOT including build_user_prompt's atom pack, which is
+    # per-tour variable content, not the "prompt template" AA-289 means to version.
+    prompt_version = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()[:8]
 
     feedback = ""
     last_content: dict = {}
@@ -370,6 +412,7 @@ async def generate_s1_from_atom(
                 "model_used": draft["model_used"],
                 "input_tokens": draft["input_tokens"],
                 "output_tokens": draft["output_tokens"],
+                "prompt_version": prompt_version,
             }
 
         # AA-306 L6-spirit: reject is logged loudly, never silent.
@@ -384,5 +427,6 @@ async def generate_s1_from_atom(
         f"(closed_world_pass={last_gate.get('closed_world_pass')}, "
         f"density_pass={last_gate.get('density_pass')}, "
         f"words_per_citation={last_gate.get('words_per_citation')}). "
-        f"Last model_used={last_draft.get('model_used')}."
+        f"Last model_used={last_draft.get('model_used')}.",
+        prompt_version=prompt_version, gate=last_gate, retries=MAX_RETRIES,
     )

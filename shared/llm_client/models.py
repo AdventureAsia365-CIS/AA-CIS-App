@@ -25,3 +25,8 @@ class LLMResponse(BaseModel):
     fallback_used: bool = False
     # AA-296 — True khi response qua Bedrock satellite (acc1); khác fallback_used (chất lượng thấp hơn ý định)
     satellite_used: bool = False
+    # AA-288: tokens read from / written to the Bedrock prompt cache for this call. Only ever
+    # non-zero from _call_bedrock (acc2, use_cache=True) — satellite/OpenAI calls don't cache,
+    # so they keep the 0 default rather than a caller having to know which provider ran.
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0

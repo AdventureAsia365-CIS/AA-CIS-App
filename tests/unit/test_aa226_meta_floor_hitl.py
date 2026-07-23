@@ -16,7 +16,9 @@ def _meta(n):
 def _resp(payload, cost=0.004):
     return SimpleNamespace(content=json.dumps(payload), cost_usd=cost,
                            model_used="haiku", fallback_used=False,
-                           satellite_used=False)
+                           satellite_used=False,
+                           # AA-288: generate_node reads these off every resp now.
+                           cache_read_tokens=0, cache_write_tokens=0)
 
 def _state(seo=None, cur_meta=None):
     # brand_audit flags seo_meta so _should_fix + _build_fix_keys include it.

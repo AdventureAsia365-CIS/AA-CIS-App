@@ -175,6 +175,9 @@ class LLMClient:
         return LLMResponse(
             content=content, model_used=model, provider="bedrock",
             input_tokens=in_tok, output_tokens=out_tok, cost_usd=cost,
+            # AA-288: cache_read/cache_write were parsed above and logged, but discarded before
+            # this fix — the caller had no way to know a cache hit/write happened at all.
+            cache_read_tokens=cache_read, cache_write_tokens=cache_write,
         )
 
     def _call_bedrock_satellite(self, request: LLMRequest, model: str) -> LLMResponse:

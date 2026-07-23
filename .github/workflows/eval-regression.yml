@@ -1,0 +1,60 @@
+name: Prompt Regression Eval (on-demand)
+# AA-289 Part B — deliberately workflow_dispatch ONLY. No `schedule:` trigger, no push/PR
+# trigger. Every run costs real LLM money (Bedrock Haiku/GPT-4.1 for S1-old, Palmyra for
+# S1-from-atom) — see services/eval/regression.py's module docstring. Do not add a schedule
+# here without an explicit, separate decision (the issue's own warning: this waited on
+# AA-287 Budgets alarms existing first, not on them existing AND this running automatically).
+#
+# Runs INSIDE the live dev ECS task (VPC-private RDS — AA-289 STEP 0 confirmed
+# PubliclyAccessible=False, so a GitHub-hosted runner cannot reach it directly). GitHub
+# Actions here is only the trigger/orchestrator; the actual eval runs via `aws ecs
+# execute-command`, same mechanism used throughout this repo's manual verification steps.
+on:
+  workflow_dispatch:
+    inputs:
+      pipeline:
+        description: "Which pipeline to eval"
+        required: true
+        type: choice
+        options: [s1_old, s1_from_atom, both]
+        default: both
+permissions:
+  id-token: write
+  contents: read
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
+  ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
+jobs:
+  eval:
+    name: Run eval regression gate
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Install Session Manager plugin
+        run: |
+          curl -s "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb" -o session-manager-plugin.deb
+          sudo dpkg -i session-manager-plugin.deb
+      - name: Run eval via ECS exec
+        run: |
+          TASK_ARN=$(aws ecs list-tasks --cluster "$ECS_CLUSTER" --service-name "$ECS_SERVICE" \
+            --region "$AWS_REGION" --query 'taskArns[0]' --output text)
+          if [ -z "$TASK_ARN" ] || [ "$TASK_ARN" = "None" ]; then
+            echo "No running ECS task found — is the dev service scaled to 0? (cis-start required)"
+            exit 1
+          fi
+          aws ecs execute-command --cluster "$ECS_CLUSTER" --task "$TASK_ARN" --container api \
+            --interactive --region "$AWS_REGION" \
+            --command "python3 -m services.eval.regression --pipeline ${{ inputs.pipeline }} --triggered-by workflow_dispatch" \
+            | tee eval_output.txt
+          # ECS exec's own exit code doesn't propagate the remote command's exit status —
+          # grep the script's own regression_detected flag from its printed JSON instead.
+          if grep -q '"regression_detected": true' eval_output.txt; then
+            echo "::error::Prompt regression detected — see JSON output above."
+            exit 1
+          fi
