@@ -23,6 +23,7 @@ blind Nova-judged sample). generate_draft() is a one-function seam so a future
 switch to Claude is a one-line model_tier change, not a rewrite — see
 _call_claude_satellite below, wired but not the default.
 """
+import hashlib
 import json
 import re
 
@@ -79,7 +80,20 @@ Output ONLY valid JSON. No preamble, no markdown, no explanation."""
 
 
 class GroundingError(Exception):
-    """Palmyra/Claude output failed the closed-world or density gate after all retries."""
+    """Palmyra/Claude output failed the closed-world or density gate after all retries.
+
+    AA-289: carries prompt_version/gate/retries when available (i.e. whenever a system
+    prompt was actually built and at least one draft was attempted) so the caller can log a
+    'gate_failed' row without recomputing the hash — None on the earlier "no curated atoms"
+    raise, where no LLM call was ever attempted and there's nothing meaningful to log against
+    a prompt_version yet.
+    """
+
+    def __init__(self, message: str, prompt_version: str = None, gate: dict = None, retries: int = None):
+        super().__init__(message)
+        self.prompt_version = prompt_version
+        self.gate = gate
+        self.retries = retries
 
 
 def _row_to_atom(r) -> dict:
@@ -330,7 +344,7 @@ async def generate_s1_from_atom(
     minimal — this module only needs enough to label the output, all factual
     content comes from atoms). Raises GroundingError if the gate never passes
     within MAX_RETRIES. Returns {content, atoms_used, gate, retries, model_used,
-    input_tokens, output_tokens, atoms_available}."""
+    input_tokens, output_tokens, atoms_available, prompt_version}."""
     atoms = await fetch_curated_atoms(tour_id, pool)
     if not atoms:
         raise GroundingError(f"No curated atoms for tour {tour_id} — nothing to assemble from")
@@ -339,6 +353,11 @@ async def generate_s1_from_atom(
     system_prompt = _GROUNDING_SYSTEM_PROMPT
     if persona:
         system_prompt += _persona_block(persona)
+
+    # AA-289: hash the stable prefix (grounding rules + persona), same sha256[:8] convention as
+    # S1-old (graph.py generate_node) — NOT including build_user_prompt's atom pack, which is
+    # per-tour variable content, not the "prompt template" AA-289 means to version.
+    prompt_version = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()[:8]
 
     feedback = ""
     last_content: dict = {}
@@ -370,6 +389,7 @@ async def generate_s1_from_atom(
                 "model_used": draft["model_used"],
                 "input_tokens": draft["input_tokens"],
                 "output_tokens": draft["output_tokens"],
+                "prompt_version": prompt_version,
             }
 
         # AA-306 L6-spirit: reject is logged loudly, never silent.
@@ -384,5 +404,6 @@ async def generate_s1_from_atom(
         f"(closed_world_pass={last_gate.get('closed_world_pass')}, "
         f"density_pass={last_gate.get('density_pass')}, "
         f"words_per_citation={last_gate.get('words_per_citation')}). "
-        f"Last model_used={last_draft.get('model_used')}."
+        f"Last model_used={last_draft.get('model_used')}.",
+        prompt_version=prompt_version, gate=last_gate, retries=MAX_RETRIES,
     )

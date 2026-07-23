@@ -156,6 +156,12 @@ def _build_generated_metadata(result, *, brand_rule_id, brand_name, seo_mode,
     differentiation profile; for legacy/no-profile brands judge_node returns no ``judge_*`` keys,
     so ``metadata.judge`` is simply omitted (absent, not null) — no crash, no clobber of the base
     keys below.
+
+    AA-289/AA-288: prompt_version + cache_read_tokens/cache_write_tokens go here (JSONB), not a
+    new pipeline_runs column — this is the only place quality_score (score_overall, right below)
+    is already recorded per-tour, so it's the only place that can actually answer "quality by
+    prompt_version". pipeline_runs is a batch/ingestion aggregate with no per-tour quality signal
+    to join against (STEP 0 finding) — deliberately not duplicated there.
     """
     metadata = {
         "brand_rule_id":   brand_rule_id,
@@ -171,6 +177,9 @@ def _build_generated_metadata(result, *, brand_rule_id, brand_name, seo_mode,
         "batch_id":        batch_id,                       # AA-213: traceability
         "revalidate_ran":    result.get("revalidate_ran", False),
         "revalidate_passed": result.get("revalidate_passed", False),
+        "prompt_version":      result.get("prompt_version", ""),
+        "cache_read_tokens":   result.get("cache_read_tokens", 0),
+        "cache_write_tokens":  result.get("cache_write_tokens", 0),
     }
     if result.get("judge_brand_fit") is not None:
         metadata["judge"] = {

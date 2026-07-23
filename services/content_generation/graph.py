@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 import structlog
@@ -56,6 +57,9 @@ class ContentState(TypedDict):
     model_tier:             str
     fallback_used:          bool   # AA-213: True khi Sonnet T1 fell back to Haiku T2
     satellite_used:         bool   # AA-296: True khi content được viết qua Bedrock satellite (acc1)
+    prompt_version:         str    # AA-289: sha256[:8] của system prompt cuối cùng gửi cho LLM
+    cache_read_tokens:      int    # AA-288: Bedrock prompt-cache tokens read (0 nếu không cache)
+    cache_write_tokens:     int    # AA-288: Bedrock prompt-cache tokens written (0 nếu không cache)
     subtitle_focus:         str
     is_tenant_rewrite:      bool
     is_branded:             bool
@@ -211,6 +215,11 @@ def generate_node(state: ContentState) -> ContentState:
     if fw:
         system += "\n\nFORBIDDEN WORDS (never use): " + ", ".join(fw)
 
+    # AA-289: hash the exact system-prompt string sent to the LLM this call — the same string
+    # _call_bedrock's use_cache=True path marks with cache_control, so a prompt_version change
+    # here is also a cache-key change (a genuinely different prompt SHOULD miss the old cache).
+    prompt_version = hashlib.sha256(system.encode("utf-8")).hexdigest()[:8]
+
     is_branded = bool(brand_sp)
     prompt_len = len(system)
     logger.info("llm_prompt_built", prompt_len=prompt_len, is_branded=is_branded,
@@ -256,6 +265,9 @@ def generate_node(state: ContentState) -> ContentState:
                                retry_count=state.get("retry_count"))
                 return {**state, "generated": {}, "is_branded": is_branded,
                         "cost_usd": state.get("cost_usd", 0) + resp.cost_usd,
+                        "prompt_version": prompt_version,
+                        "cache_read_tokens": state.get("cache_read_tokens", 0) + resp.cache_read_tokens,
+                        "cache_write_tokens": state.get("cache_write_tokens", 0) + resp.cache_write_tokens,
                         "error": f"JSON parse error: {e}"}
         logger.info("content_generated", retry=state.get("retry_count", 0),
                     model=resp.model_used, cost=resp.cost_usd)
@@ -277,10 +289,14 @@ def generate_node(state: ContentState) -> ContentState:
             "error":      "",
             "fallback_used": resp.fallback_used,
             "satellite_used": resp.satellite_used,
+            "prompt_version": prompt_version,
+            "cache_read_tokens": state.get("cache_read_tokens", 0) + resp.cache_read_tokens,
+            "cache_write_tokens": state.get("cache_write_tokens", 0) + resp.cache_write_tokens,
         }
     except Exception as e:
         logger.error("generation_failed", error=str(e))
         return {**state, "generated": {}, "is_branded": is_branded,
+                "prompt_version": prompt_version,
                 "cost_usd": state.get("cost_usd", 0) + (resp.cost_usd if resp else 0),
                 "error": str(e)}
 

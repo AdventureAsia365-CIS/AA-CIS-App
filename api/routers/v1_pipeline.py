@@ -187,6 +187,12 @@ async def _rewrite_tour(
             # AA-296: same strip class as fallback_used above — propagate satellite_used so it
             # isn't always-False (graph declares it but _rewrite_tour rebuilds the dict).
             "satellite_used":  result.get("satellite_used", False),
+            # AA-289/AA-288: prompt_version + cache token counts, same strip class as fallback_used/
+            # satellite_used above — graph.py declares these in ContentState but _rewrite_tour
+            # rebuilds the dict from scratch, so anything not explicitly re-listed here is lost.
+            "prompt_version":      result.get("prompt_version", ""),
+            "cache_read_tokens":   result.get("cache_read_tokens", 0),
+            "cache_write_tokens":  result.get("cache_write_tokens", 0),
             # AA-215: propagate revalidate outcome for observability/persist (brand_audit_status
             # POST-fix already propagated above on line ~159).
             "revalidate_ran":    result.get("revalidate_ran", False),

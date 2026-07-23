@@ -179,7 +179,7 @@ _FAKE_LLM_OUTPUT = json.dumps({
 })
 
 
-def _fake_response() -> LLMResponse:
+def _fake_response(cache_read_tokens=0, cache_write_tokens=0) -> LLMResponse:
     return LLMResponse(
         content=_FAKE_LLM_OUTPUT,
         model_used="us.anthropic.claude-haiku-4-5-20251001-v1:0",
@@ -187,6 +187,8 @@ def _fake_response() -> LLMResponse:
         input_tokens=100,
         output_tokens=50,
         cost_usd=0.0002,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
     )
 
 
@@ -230,3 +232,87 @@ def test_generate_node_unbranded_flag_when_no_brand():
         result = generate_node(state)
 
     assert result.get("is_branded") is False
+
+
+# ── AA-289: prompt_version ────────────────────────────────────────────────────
+
+def test_generate_node_sets_prompt_version_deterministically():
+    """Same system prompt (same brand_system_prompt, same state) -> same prompt_version
+    across two separate calls — it must be a pure hash of the prompt text, not a random id."""
+    state = make_state(brand_system_prompt="You are writing for Atlas & Hearth.")
+
+    with patch("services.content_generation.graph.LLMClient") as MockClient:
+        instance = MockClient.return_value
+        instance.generate.side_effect = lambda req: _fake_response()
+        result1 = generate_node(state)
+        result2 = generate_node(state)
+
+    v1, v2 = result1.get("prompt_version"), result2.get("prompt_version")
+    assert v1 and v2, "prompt_version must be set on both calls"
+    assert v1 == v2, "identical system prompt must produce identical prompt_version"
+    assert len(v1) == 8, "prompt_version is sha256[:8]"
+
+
+def test_generate_node_prompt_version_changes_with_brand_prompt():
+    """Different brand_system_prompt -> different prompt_version (it's a hash of the actual
+    system prompt sent to the LLM, not a static/hardcoded value)."""
+    state_a = make_state(brand_system_prompt="Brand A voice.")
+    state_b = make_state(brand_system_prompt="Brand B voice, completely different.")
+
+    with patch("services.content_generation.graph.LLMClient") as MockClient:
+        instance = MockClient.return_value
+        instance.generate.side_effect = lambda req: _fake_response()
+        result_a = generate_node(state_a)
+        result_b = generate_node(state_b)
+
+    assert result_a.get("prompt_version") != result_b.get("prompt_version")
+
+
+def test_generate_node_sets_prompt_version_on_json_parse_failure():
+    """prompt_version must still be recorded even when the LLM's output fails to parse —
+    otherwise a prompt regression that breaks JSON output would be untraceable to a version."""
+    state = make_state()
+    bad_response = LLMResponse(
+        content="not valid json {{{", model_used="haiku", provider="bedrock",
+        input_tokens=10, output_tokens=5, cost_usd=0.0001,
+    )
+
+    with patch("services.content_generation.graph.LLMClient") as MockClient:
+        instance = MockClient.return_value
+        instance.generate.side_effect = lambda req: bad_response
+        result = generate_node(state)
+
+    assert result.get("prompt_version"), "prompt_version must be set even on parse failure"
+    assert result.get("generated") == {}
+
+
+# ── AA-288: cache token propagation ──────────────────────────────────────────
+
+def test_generate_node_propagates_cache_tokens_from_response():
+    state = make_state()
+
+    with patch("services.content_generation.graph.LLMClient") as MockClient:
+        instance = MockClient.return_value
+        instance.generate.side_effect = lambda req: _fake_response(
+            cache_read_tokens=1500, cache_write_tokens=0,
+        )
+        result = generate_node(state)
+
+    assert result.get("cache_read_tokens") == 1500
+    assert result.get("cache_write_tokens") == 0
+
+
+def test_generate_node_accumulates_cache_tokens_across_retries():
+    """cost_usd already accumulates across retries (state.get('cost_usd', 0) + resp.cost_usd) —
+    cache tokens must follow the same accumulation pattern, not overwrite on each retry."""
+    state = make_state(cache_read_tokens=1000, cache_write_tokens=200)
+
+    with patch("services.content_generation.graph.LLMClient") as MockClient:
+        instance = MockClient.return_value
+        instance.generate.side_effect = lambda req: _fake_response(
+            cache_read_tokens=1500, cache_write_tokens=0,
+        )
+        result = generate_node(state)
+
+    assert result.get("cache_read_tokens") == 2500  # 1000 (prior) + 1500 (this call)
+    assert result.get("cache_write_tokens") == 200  # 200 (prior) + 0 (this call)

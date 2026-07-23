@@ -28,6 +28,39 @@ def _safe_uuid(value: str) -> str:
         raise HTTPException(status_code=422, detail=f"Invalid UUID for tour_id: {value!r}")
 
 
+async def _log_run(pool, *, tour_id, prompt_version, model_tier, status, **fields) -> None:
+    """AA-289: one row per generate_s1_from_atom() attempt that actually reached the LLM
+    (i.e. prompt_version is not None — the "no curated atoms" 422 short-circuits before a
+    system prompt is even built, so there's nothing meaningful to log against a
+    prompt_version there). A gate_failed/error row is exactly the kind of regression this
+    table needs visible, not just the ones that happened to pass — never skip logging a
+    failure just because it's not a success.
+    """
+    if prompt_version is None:
+        return
+    gate = fields.get("gate") or {}
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO acp_contract.s1_from_atom_runs (
+                    tour_id, prompt_version, model_tier, model_used, status, retries,
+                    atoms_available, atoms_used_count, citation_count, word_count,
+                    words_per_citation, density_pass, closed_world_pass,
+                    input_tokens, output_tokens, error_message
+                ) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                """,
+                tour_id, prompt_version, model_tier, fields.get("model_used"), status,
+                fields.get("retries"), fields.get("atoms_available"), fields.get("atoms_used_count"),
+                gate.get("citation_count"), gate.get("word_count"), gate.get("words_per_citation"),
+                gate.get("density_pass"), gate.get("closed_world_pass"),
+                fields.get("input_tokens"), fields.get("output_tokens"), fields.get("error_message"),
+            )
+    except Exception as e:
+        # Observability write must never fail the actual generation request/response.
+        logger.warning("s1_from_atom_run_log_failed", tour_id=tour_id, error=str(e))
+
+
 @router.get("/tours/{tour_id}/atoms")
 async def preview_curated_atoms(
     tour_id: str,
@@ -71,6 +104,24 @@ async def generate(
         result = await generate_s1_from_atom(tour_id, tour, pool, model_tier=model_tier)
     except GroundingError as e:
         logger.error("s1_from_atom_generation_failed", tour_id=tour_id, error=str(e))
+        await _log_run(
+            pool, tour_id=tour_id, prompt_version=e.prompt_version, model_tier=model_tier,
+            status="gate_failed", retries=e.retries, gate=e.gate, error_message=str(e),
+        )
         raise HTTPException(status_code=422 if "No curated atoms" in str(e) else 502, detail=str(e))
+    except Exception as e:
+        logger.error("s1_from_atom_generation_error", tour_id=tour_id, error=str(e))
+        await _log_run(
+            pool, tour_id=tour_id, prompt_version=None, model_tier=model_tier,
+            status="error", error_message=str(e),
+        )
+        raise
 
+    await _log_run(
+        pool, tour_id=tour_id, prompt_version=result["prompt_version"], model_tier=model_tier,
+        status="passed", retries=result["retries"], gate=result["gate"],
+        atoms_available=result["atoms_available"], atoms_used_count=len(result["atoms_used"]),
+        model_used=result["model_used"], input_tokens=result["input_tokens"],
+        output_tokens=result["output_tokens"],
+    )
     return {"tour_id": tour_id, **result}
