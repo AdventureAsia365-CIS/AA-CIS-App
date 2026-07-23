@@ -19,6 +19,15 @@ import { test, expect } from '@playwright/test';
 // admin path. Flagging the stale admin credential as a separate, pre-
 // existing issue is out of scope for AA-300 itself.
 
+// Locator.isVisible({ timeout }) does NOT actually wait — it's a poll-once,
+// instant check; the timeout option is silently ignored. Found via a real
+// investigation in aa300-curation-redesign.spec.ts (see that file's own
+// comment) after this exact pattern below raced the page's fetch and
+// produced an unreliable result. Fixed here for the same reason.
+async function waitVisible(locator, timeout = 10000): Promise<boolean> {
+  return locator.waitFor({ state: 'visible', timeout }).then(() => true).catch(() => false);
+}
+
 async function loginAsContent(page) {
   await page.goto('/login');
   await page.fill('input[name="username"], input[type="text"]', 'content');
@@ -67,18 +76,27 @@ test.describe('AA-300 Atom Curation', () => {
     await expect(page.getByRole('heading', { name: 'Atom Curation' })).toBeVisible({ timeout: 10000 });
 
     const emptyState = page.getByText('No atoms match the current filters.');
+    // Redesign (post-PR #87) shows an explicit error box, not just a silent
+    // empty state, when the /api/admin/atoms fetch itself fails (e.g. a
+    // content-role session's known 401, AA-253) — accept that as an
+    // equally-honest fallback rather than only the empty-state text.
+    const errorBox = page.getByText(/Failed to load atoms/);
     const distinctivenessBadge = page.locator('text=/^(HIGH|MED|LOW)$/').first();
 
     // Either real atom cards show up (assert on a distinctiveness badge,
     // which is always rendered per card), or the page honestly reports an
-    // empty state — either is a valid "page works" outcome, but we prefer
-    // to prove real data renders when it's known to exist.
-    const gotAtoms = await distinctivenessBadge.isVisible({ timeout: 10000 }).catch(() => false);
+    // empty/error state — either is a valid "page works" outcome, but we
+    // prefer to prove real data renders when it's known to exist.
+    const gotAtoms = await waitVisible(distinctivenessBadge);
     if (!gotAtoms) {
-      await expect(emptyState).toBeVisible();
+      const gotEmpty = await waitVisible(emptyState, 3000);
+      const gotError = gotEmpty ? false : await waitVisible(errorBox, 3000);
+      expect(gotEmpty || gotError).toBeTruthy();
       test.info().annotations.push({
         type: 'warning',
-        description: 'No atom cards rendered — either the API call failed silently or the dev atom data is currently empty. Investigate before treating this as a full pass.',
+        description: gotError
+          ? 'API call failed (likely AA-253 401 for content-role) — page showed its error state honestly, not a redesign regression.'
+          : 'No atom cards rendered, empty state shown — dev atom data may currently be empty for this filter.',
       });
     } else {
       await expect(distinctivenessBadge).toBeVisible();

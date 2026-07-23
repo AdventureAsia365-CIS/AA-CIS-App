@@ -22,6 +22,20 @@ async function loginAsContent(page) {
   await page.waitForURL(/\/upload/, { timeout: 5000 });
 }
 
+// Locator.isVisible({ timeout }) does NOT actually wait — it's a poll-once,
+// instant check (Playwright docs: "does not wait; either returns
+// immediately or throws"); the timeout option is silently ignored. A
+// previous version of this file used that pattern for the "real data or
+// honest fallback" checks below, which raced the page's own fetch and
+// caught it mid-"Loading atoms…" almost every time (confirmed directly:
+// a debug script with proper waits showed the page correctly reaches its
+// error state within ~2s on a 401, while the old check ran essentially
+// instantly and saw neither the loading nor the settled state reliably).
+// This helper actually waits.
+async function waitVisible(locator, timeout = 10000): Promise<boolean> {
+  return locator.waitFor({ state: 'visible', timeout }).then(() => true).catch(() => false);
+}
+
 test.describe('AA-300 Curation Redesign', () => {
 
   test.beforeEach(async ({ page }) => {
@@ -41,7 +55,7 @@ test.describe('AA-300 Curation Redesign', () => {
     await expect(page.getByRole('heading', { name: 'Atom Curation' })).toBeVisible({ timeout: 10000 });
 
     const totalCard = page.getByText('Total Atoms');
-    const gotDashboard = await totalCard.isVisible({ timeout: 10000 }).catch(() => false);
+    const gotDashboard = await waitVisible(totalCard);
     if (!gotDashboard) {
       test.info().annotations.push({
         type: 'warning',
@@ -64,9 +78,9 @@ test.describe('AA-300 Curation Redesign', () => {
     const emptyState = page.getByText('No atoms match the current filters.');
     const sectionBadge = page.getByText(/^\d+ atoms$/).first();
 
-    const gotSections = await sectionBadge.isVisible({ timeout: 10000 }).catch(() => false);
+    const gotSections = await waitVisible(sectionBadge);
     if (!gotSections) {
-      const gotEmpty = await emptyState.isVisible().catch(() => false);
+      const gotEmpty = await waitVisible(emptyState, 3000);
       test.info().annotations.push({
         type: 'warning',
         description: gotEmpty
