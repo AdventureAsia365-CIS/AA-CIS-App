@@ -144,6 +144,68 @@ def test_generate_draft_routes_to_palmyra_by_default():
     assert result["output_tokens"] == 5
 
 
+def test_call_palmyra_retries_on_throttling_then_succeeds():
+    """AA-289: reproduced live twice — a fixed sleep between sequential calls was not
+    reliable, retry-with-backoff on the specific ThrottlingException is."""
+    from botocore.exceptions import ClientError
+
+    fake_payload = {
+        "choices": [{"message": {"content": "{}"}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }
+    fake_body = MagicMock()
+    fake_body.read.return_value = json.dumps(fake_payload).encode()
+    throttle_error = ClientError(
+        {"Error": {"Code": "ThrottlingException", "Message": "Too many requests"}}, "InvokeModel",
+    )
+    fake_client = MagicMock()
+    fake_client.invoke_model.side_effect = [throttle_error, throttle_error, {"body": fake_body}]
+
+    with patch("services.content_generation.s1_from_atom.boto3.client", return_value=fake_client), \
+         patch("services.content_generation.s1_from_atom.time.sleep") as mock_sleep:
+        result = generate_draft("sys", "user", model_tier="palmyra")
+
+    assert fake_client.invoke_model.call_count == 3
+    assert result["provider"] == "bedrock-acc2"
+    assert mock_sleep.call_count == 2  # backoff before attempt 2 and attempt 3
+
+
+def test_call_palmyra_reraises_non_throttling_client_error_immediately():
+    from botocore.exceptions import ClientError
+
+    other_error = ClientError(
+        {"Error": {"Code": "ValidationException", "Message": "bad request"}}, "InvokeModel",
+    )
+    fake_client = MagicMock()
+    fake_client.invoke_model.side_effect = other_error
+
+    with patch("services.content_generation.s1_from_atom.boto3.client", return_value=fake_client), \
+         patch("services.content_generation.s1_from_atom.time.sleep") as mock_sleep:
+        with pytest.raises(ClientError):
+            generate_draft("sys", "user", model_tier="palmyra")
+
+    assert fake_client.invoke_model.call_count == 1
+    mock_sleep.assert_not_called()
+
+
+def test_call_palmyra_reraises_after_exhausting_throttle_retries():
+    from botocore.exceptions import ClientError
+    from services.content_generation.s1_from_atom import _PALMYRA_THROTTLE_RETRIES
+
+    throttle_error = ClientError(
+        {"Error": {"Code": "ThrottlingException", "Message": "Too many requests"}}, "InvokeModel",
+    )
+    fake_client = MagicMock()
+    fake_client.invoke_model.side_effect = throttle_error
+
+    with patch("services.content_generation.s1_from_atom.boto3.client", return_value=fake_client), \
+         patch("services.content_generation.s1_from_atom.time.sleep"):
+        with pytest.raises(ClientError):
+            generate_draft("sys", "user", model_tier="palmyra")
+
+    assert fake_client.invoke_model.call_count == _PALMYRA_THROTTLE_RETRIES + 1
+
+
 def test_generate_draft_routes_to_claude_satellite_when_requested():
     fake_result = MagicMock()
     fake_result.text = "{}"

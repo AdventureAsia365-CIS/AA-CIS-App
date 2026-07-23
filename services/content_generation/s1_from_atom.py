@@ -26,9 +26,11 @@ _call_claude_satellite below, wired but not the default.
 import hashlib
 import json
 import re
+import time
 
 import boto3
 import structlog
+from botocore.exceptions import ClientError
 from json_repair import repair_json
 
 from services.acp_shared.atom_constants import ATOM_DENSITY_WORDS
@@ -179,6 +181,14 @@ def generate_draft(system_prompt: str, user_prompt: str, model_tier: str = DEFAU
     raise ValueError(f"Unknown model_tier: {model_tier!r} (expected 'palmyra' or 'claude')")
 
 
+# AA-289: acc2 Palmyra throttles on back-to-back InvokeModel calls — reproduced live twice
+# (once with zero spacing, once with a fixed 25s gap between sequential eval-script calls,
+# services/eval/regression.py). No published RPM/TPM number exists for this model. A fixed
+# sleep is not reliable; retry-with-backoff on the specific exception is.
+_PALMYRA_THROTTLE_RETRIES = 3
+_PALMYRA_THROTTLE_BACKOFF_SECONDS = 30
+
+
 def _call_palmyra(system_prompt: str, user_prompt: str, max_tokens: int) -> dict:
     """acc2-native, OpenAI-compatible response shape (choices[0].message.content) —
     verified live via ECS exec smoke test (AA-306 STEP 0), NOT Anthropic's
@@ -193,12 +203,23 @@ def _call_palmyra(system_prompt: str, user_prompt: str, max_tokens: int) -> dict
         ],
         "max_tokens": max_tokens,
     }
-    resp = client.invoke_model(
-        modelId=PALMYRA_MODEL_ID,
-        body=json.dumps(body),
-        contentType="application/json",
-        accept="application/json",
-    )
+    for attempt in range(_PALMYRA_THROTTLE_RETRIES + 1):
+        try:
+            resp = client.invoke_model(
+                modelId=PALMYRA_MODEL_ID,
+                body=json.dumps(body),
+                contentType="application/json",
+                accept="application/json",
+            )
+            break
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") != "ThrottlingException":
+                raise
+            if attempt == _PALMYRA_THROTTLE_RETRIES:
+                raise
+            wait_s = _PALMYRA_THROTTLE_BACKOFF_SECONDS * (attempt + 1)
+            logger.warning("s1_from_atom_palmyra_throttled", attempt=attempt, wait_s=wait_s)
+            time.sleep(wait_s)
     payload = json.loads(resp["body"].read())
     choice = payload["choices"][0]["message"]["content"]
     usage = payload.get("usage", {})

@@ -140,7 +140,13 @@ async def run_s1_from_atom_eval(pool) -> dict:
     total_cost_input_tokens = 0
     total_output_tokens = 0
 
-    for tour_id in S1_FROM_ATOM_TOUR_IDS:
+    for i, tour_id in enumerate(S1_FROM_ATOM_TOUR_IDS):
+        if i > 0:
+            # AA-306 STEP 0 (live-verified finding, not a guess): acc2 Palmyra throttles on
+            # back-to-back sequential InvokeModel calls with no gap — botocore's built-in
+            # retry alone was not enough in that verify run either. No published RPM/TPM
+            # number exists for this model; this delay is empirically what worked there.
+            await asyncio.sleep(25)
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT src_name, country FROM silver_aa_internal.raw_tours WHERE tour_id = $1::uuid",
