@@ -29,6 +29,7 @@ node_modules/
 package-lock.json
 test-results/
 playwright-report/
+tests/e2e/results/
 data/
 scripts/
 .vercel
