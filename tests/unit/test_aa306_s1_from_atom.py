@@ -23,6 +23,7 @@ ATOMS = [
     {"atom_id": "atom_bbbbbbbbbb", "text": "Watch the Taj Mahal sunrise.",
      "activity_type": "culture", "emotional_hook": "golden hour", "season_note": None},
 ]
+ATOM_TEXT = {a["atom_id"]: a["text"] for a in ATOMS}
 
 
 def _make_pool(atom_rows):
@@ -53,7 +54,7 @@ def test_check_grounding_passes_dense_grounded_content():
                            "Taj Mahal at sunrise [R:atom_bbbbbbbbbb]"],
         "aa_itineraries": "",
     }
-    gate = check_grounding(content, valid_ids)
+    gate = check_grounding(content, valid_ids, ATOM_TEXT)
     assert gate["closed_world_pass"] is True
     assert gate["density_pass"] is True
     assert gate["citation_count"] == 5  # 1 (subtitle) + 2 (summary) + 2 (highlights)
@@ -63,7 +64,7 @@ def test_check_grounding_passes_dense_grounded_content():
 def test_check_grounding_fails_on_unknown_atom_id():
     valid_ids = {"atom_aaaaaaaaaa"}
     content = {"aa_summary": "A rickshaw ride [R:atom_aaaaaaaaaa] and a made-up elephant trek [R:atom_zzzzzzzzzz]."}
-    gate = check_grounding(content, valid_ids)
+    gate = check_grounding(content, valid_ids, ATOM_TEXT)
     assert gate["closed_world_pass"] is False
     assert gate["unknown_citations"] == ["atom_zzzzzzzzzz"]
 
@@ -71,7 +72,7 @@ def test_check_grounding_fails_on_unknown_atom_id():
 def test_check_grounding_fails_on_zero_citations():
     valid_ids = {"atom_aaaaaaaaaa"}
     content = {"aa_summary": "A lovely trip with breathtaking views and unforgettable moments throughout."}
-    gate = check_grounding(content, valid_ids)
+    gate = check_grounding(content, valid_ids, ATOM_TEXT)
     assert gate["citation_count"] == 0
     assert gate["density_pass"] is False
 
@@ -81,7 +82,7 @@ def test_check_grounding_fails_below_density_threshold():
     # One citation, then >300 filler words with no further citation -> words_per_citation > 300.
     filler = " ".join(["word"] * 320)
     content = {"aa_summary": f"Opening claim [R:atom_aaaaaaaaaa]. {filler}"}
-    gate = check_grounding(content, valid_ids)
+    gate = check_grounding(content, valid_ids, ATOM_TEXT)
     assert gate["citation_count"] == 1
     assert gate["words_per_citation"] > 300
     assert gate["density_pass"] is False
@@ -94,9 +95,40 @@ def test_check_grounding_ignores_seo_fields_not_in_gated_set():
         "seo_title": "Some ungated title with no citation at all here",
         "seo_meta": "Some ungated meta description with no citation whatsoever in it.",
     }
-    gate = check_grounding(content, valid_ids)
+    gate = check_grounding(content, valid_ids, ATOM_TEXT)
     # word_count must reflect only the gated fields (aa_summary), not seo_title/seo_meta.
     assert gate["word_count"] == 2  # "Grounded" "claim" (citation tag itself isn't a word)
+
+
+# ── check_grounding: entailment (AA-325/ADR-2026-033) ───────────────────────
+
+def test_check_grounding_fails_on_fabricated_number_with_valid_tag():
+    """The AA-325 production incident this gate exists to catch: a valid citation
+    tag on a sentence that asserts a number the cited atom never states."""
+    valid_ids = {"atom_aaaaaaaaaa"}
+    content = {"aa_highlights": ["Ride an 800-year-old rickshaw through Chandni Chowk [R:atom_aaaaaaaaaa]"]}
+    gate = check_grounding(content, valid_ids, ATOM_TEXT)
+    assert gate["closed_world_pass"] is True  # tag itself is a real atom_id
+    assert gate["entailment_pass"] is False
+    assert gate["entailment_violations"][0]["novel_numbers"] == ["800"]
+
+
+def test_check_grounding_passes_when_cited_number_matches_atom():
+    valid_ids = {"atom_ccccccc0"}
+    atom_text = {"atom_ccccccc0": "The Red Fort was built starting in 1638."}
+    content = {"aa_summary": "The Red Fort construction began in 1638 [R:atom_ccccccc0]."}
+    gate = check_grounding(content, valid_ids, atom_text)
+    assert gate["entailment_pass"] is True
+    assert gate["entailment_violations"] == []
+
+
+def test_check_grounding_entailment_checks_union_of_multiple_citations():
+    valid_ids = {"atom_a1", "atom_a2"}
+    atom_text = {"atom_a1": "The temple was built in 1592.", "atom_a2": "The garden covers 3 hectares."}
+    content = {"aa_summary": "Visit the temple built in 1592 and its adjoining "
+                              "3-hectare garden [R:atom_a1][R:atom_a2]."}
+    gate = check_grounding(content, valid_ids, atom_text)
+    assert gate["entailment_pass"] is True
 
 
 # ── build_user_prompt: atom pack renders every atom, no raw-itinerary leakage ─
@@ -284,6 +316,31 @@ async def test_generate_s1_from_atom_retries_then_succeeds():
     # second call's user_prompt must carry feedback about the first failure
     second_call_user_prompt = mock_gen.call_args_list[1].args[1]
     assert "PREVIOUS ATTEMPT FEEDBACK" in second_call_user_prompt
+
+
+@pytest.mark.asyncio
+async def test_generate_s1_from_atom_retries_on_fabricated_number_then_succeeds():
+    """AA-325 regression: a fabricated measurement with a valid tag must trigger a
+    retry (not silently pass just because closed_world_pass/density_pass are green),
+    and the retry feedback must name the fabricated number."""
+    atom_rows = [_row("atom_aaaaaaaaaa", "Ride a rickshaw through Chandni Chowk.")]
+    pool, _ = _make_pool(atom_rows)
+
+    bad_content = {"aa_summary": "A rickshaw ride down the 12-kilometer stretch of Chandni Chowk [R:atom_aaaaaaaaaa]."}
+    good_content = {"aa_summary": "The trip opens with a rickshaw ride through Chandni Chowk [R:atom_aaaaaaaaaa]."}
+    bad_draft = {"text": json.dumps(bad_content), "model_used": "us.writer.palmyra-x5-v1:0",
+                 "provider": "bedrock-acc2", "input_tokens": 100, "output_tokens": 50}
+    good_draft = {"text": json.dumps(good_content), "model_used": "us.writer.palmyra-x5-v1:0",
+                  "provider": "bedrock-acc2", "input_tokens": 100, "output_tokens": 50}
+
+    with patch("services.content_generation.s1_from_atom.generate_draft",
+               side_effect=[bad_draft, good_draft]) as mock_gen:
+        result = await generate_s1_from_atom(TOUR_ID, {"name": "Delhi Tour", "country": "India"}, pool)
+
+    assert mock_gen.call_count == 2
+    assert result["retries"] == 1
+    second_call_user_prompt = mock_gen.call_args_list[1].args[1]
+    assert "12" in second_call_user_prompt  # feedback names the fabricated figure
 
 
 @pytest.mark.asyncio
