@@ -1,0 +1,662 @@
+[
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_subtitle",
+    "sentence": "A journey through ancient capitals, sacred sites, and wild landscapes [R:atom_af8135bbec][R:atom_bf430acfe9][R:atom_95989beb2b]",
+    "cited_atom_texts": [
+      "Explore Anuradhapura, Sri Lanka's ancient Buddhist capital, including its Sacred Bo Tree.",
+      "Walk the Polonnaruwa Archaeological Site, including the Gal Vihara stone statues.",
+      "Take a jeep safari in Minneriya National Park to witness wild elephants in their natural habitat."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_summary",
+    "sentence": "Begin in Negombo, where the fishing village awakens with catamarans lined along the shore [R:atom_300afd2b5f].",
+    "cited_atom_texts": [
+      "Visit Negombo Fishing Village in the morning, known for its vibrancy and lined-up catamarans."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_summary",
+    "sentence": "Travel through Sri Lanka\u2019s cultural heartland, exploring Anuradhapura\u2019s Sacred Bo Tree, the rock-cut temples of Dambulla, and the monolithic Buddha at Aukana [R:atom_af8135bbec][R:atom_c60d215194][R:atom_990427e559].",
+    "cited_atom_texts": [
+      "Explore Anuradhapura, Sri Lanka's ancient Buddhist capital, including its Sacred Bo Tree.",
+      "Visit the Dambulla Cave Temple complex en route to Kandy.",
+      "Admire a colossal Buddha statue at Aukana, carved from a single rock."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_summary",
+    "sentence": "Climb Sigiriya at dawn, passing frescoed galleries on the way to the summit [R:atom_62c6d7e62d].",
+    "cited_atom_texts": [
+      "Climb Sigiriya Lion's Rock, a UNESCO site, starting early, and examine its frescoed galleries."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_summary",
+    "sentence": "In Polonnaruwa, walk among the towering stone figures of Gal Vihara [R:atom_bf430acfe9].",
+    "cited_atom_texts": [
+      "Walk the Polonnaruwa Archaeological Site, including the Gal Vihara stone statues."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_summary",
+    "sentence": "Witness elephants up close at Pinnawela Elephant Orphanage and in Minneriya National Park [R:atom_dd4305536d][R:atom_95989beb2b].",
+    "cited_atom_texts": [
+      "At Pinnawela Elephant Orphanage, observe baby elephants being bottle-fed and bathed in the river.",
+      "Take a jeep safari in Minneriya National Park to witness wild elephants in their natural habitat."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_summary",
+    "sentence": "Continue to Kandy to visit the Temple of the Tooth and attend a traditional dance performance [R:atom_115412286c][R:atom_17df7a9aa6].",
+    "cited_atom_texts": [
+      "Visit the Temple of the Tooth Relic in Kandy.",
+      "Attend a cultural dance show in Kandy in the evening."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_summary",
+    "sentence": "Journey through tea country, from Nuwara Eliya\u2019s colonial streets to the misty train ride to Ella and the viewpoint at Lipton\u2019s Seat [R:atom_8467958b00][R:atom_ff862e9320][R:atom_31abab626c][R:atom_31abab626c].",
+    "cited_atom_texts": [
+      "Travel through tea plantations to Nuwara Eliya, often called 'Little England,' and stroll through its colonial town.",
+      "Take a scenic train ride from Nanu Oya to Ella, known as the 'train on clouds,' through tea plantations.",
+      "Reach Lipton's Seat viewpoint by tuk-tuk, passing scenic tea plantations and local life along the way.",
+      "Reach Lipton's Seat viewpoint by tuk-tuk, passing scenic tea plantations and local life along the way."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_summary",
+    "sentence": "Explore Yala and Kataragama before concluding with Galle\u2019s Dutch Fort and stilt fishermen [R:atom_be9728afb9][R:atom_9c549a8a09][R:atom_c4784fa0e2].",
+    "cited_atom_texts": [
+      "Start the day with a jeep safari in Yala National Park to spot elephants, leopards, and more.",
+      "Visit the sacred Kataragama Temple in the evening after arriving in Tissamaharama.",
+      "Visit Galle's historical Dutch Fort and observe traditional stilt fishermen."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "Day 1: Arrive in Negombo and visit the fishing village in the morning, where catamarans line the shore and daily life unfolds by the sea [R:atom_300afd2b5f].",
+    "cited_atom_texts": [
+      "Visit Negombo Fishing Village in the morning, known for its vibrancy and lined-up catamarans."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "Day 2: Travel to Anuradhapura and explore the ancient capital, including the Sacred Bo Tree, one of the world\u2019s oldest living religious monuments [R:atom_af8135bbec].",
+    "cited_atom_texts": [
+      "Explore Anuradhapura, Sri Lanka's ancient Buddhist capital, including its Sacred Bo Tree."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "Day 3: Visit Mihintale, recognized as the world\u2019s first declared sanctuary, before proceeding to the colossal rock-cut Buddha at Aukana [R:atom_7582f0eb9a][R:atom_990427e559].",
+    "cited_atom_texts": [
+      "Visit Mihintale, described as the world's first declared sanctuary.",
+      "Admire a colossal Buddha statue at Aukana, carved from a single rock."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "Day 4: Begin early with a climb up Sigiriya Lion's Rock, examining its frescoed galleries before reaching the summit [R:atom_62c6d7e62d].",
+    "cited_atom_texts": [
+      "Climb Sigiriya Lion's Rock, a UNESCO site, starting early, and examine its frescoed galleries."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "Day 5: Walk through the Polonnaruwa Archaeological Site, including the monumental Gal Vihara statues carved into the rock face [R:atom_bf430acfe9].",
+    "cited_atom_texts": [
+      "Walk the Polonnaruwa Archaeological Site, including the Gal Vihara stone statues."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "Day 6: Take a jeep safari in Minneriya National Park to observe wild elephants gathering near the reservoir [R:atom_95989beb2b].",
+    "cited_atom_texts": [
+      "Take a jeep safari in Minneriya National Park to witness wild elephants in their natural habitat."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "Day 7: Visit Pinnawela Elephant Orphanage to see baby elephants being bottle-fed and bathed in the river [R:atom_dd4305536d].",
+    "cited_atom_texts": [
+      "At Pinnawela Elephant Orphanage, observe baby elephants being bottle-fed and bathed in the river."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "Day 8: Stop at the Dambulla Cave Temple complex, entering sacred caves adorned with religious art, then continue to Kandy [R:atom_c60d215194].",
+    "cited_atom_texts": [
+      "Visit the Dambulla Cave Temple complex en route to Kandy."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "Day 9: Visit the Temple of the Tooth Relic, a major pilgrimage site in Buddhism, and attend a cultural dance show in the evening [R:atom_115412286c][R:atom_17df7a9aa6].",
+    "cited_atom_texts": [
+      "Visit the Temple of the Tooth Relic in Kandy.",
+      "Attend a cultural dance show in Kandy in the evening."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "Day 10: Stroll through the Peradeniya Botanical Gardens before traveling to Nuwara Eliya, passing through tea plantations [R:atom_4d7b83cdc3][R:atom_8467958b00].",
+    "cited_atom_texts": [
+      "Stroll through the Peradeniya Botanical Gardens before traveling on to Nuwara Eliya.",
+      "Travel through tea plantations to Nuwara Eliya, often called 'Little England,' and stroll through its colonial town."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "Day 11: Take the scenic train ride from Nanu Oya to Ella, known as the 'train on clouds,' moving through misty hills and tea estates [R:atom_ff862e9320].",
+    "cited_atom_texts": [
+      "Take a scenic train ride from Nanu Oya to Ella, known as the 'train on clouds,' through tea plantations."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "Day 12: Hike Little Adam's Peak for sweeping views of Ella\u2019s surroundings, then reach Lipton's Seat by tuk-tuk, passing working tea plantations [R:atom_c5dc90c655][R:atom_31abab626c].",
+    "cited_atom_texts": [
+      "Hike Little Adam's Peak in Ella and explore the serene surroundings.",
+      "Reach Lipton's Seat viewpoint by tuk-tuk, passing scenic tea plantations and local life along the way."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "Day 13: Stop at Ravana Falls en route to Tissamaharama [R:atom_3da8b3a98f].",
+    "cited_atom_texts": [
+      "Stop at Ravana Falls before arriving in Tissamaharama."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "Day 14: Begin with a jeep safari in Yala National Park, searching for elephants, leopards, and other wildlife [R:atom_be9728afb9].",
+    "cited_atom_texts": [
+      "Start the day with a jeep safari in Yala National Park to spot elephants, leopards, and more."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "Day 15: Visit the sacred Kataragama Temple in the evening, experiencing the atmosphere of a living pilgrimage site [R:atom_9c549a8a09].",
+    "cited_atom_texts": [
+      "Visit the sacred Kataragama Temple in the evening after arriving in Tissamaharama."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "Day 16: Visit Galle\u2019s Dutch Fort and observe traditional stilt fishermen balancing on poles offshore [R:atom_c4784fa0e2].",
+    "cited_atom_texts": [
+      "Visit Galle's historical Dutch Fort and observe traditional stilt fishermen."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_highlights",
+    "sentence": "Climb Sigiriya Lion's Rock at first light, discovering ancient frescoes en route to the summit [R:atom_62c6d7e62d]",
+    "cited_atom_texts": [
+      "Climb Sigiriya Lion's Rock, a UNESCO site, starting early, and examine its frescoed galleries."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_highlights",
+    "sentence": "Walk among the 22-meter-long reclining Buddha and other stone carvings at Gal Vihara in Polonnaruwa [R:atom_bf430acfe9]",
+    "cited_atom_texts": [
+      "Walk the Polonnaruwa Archaeological Site, including the Gal Vihara stone statues."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_highlights",
+    "sentence": "Take a jeep safari in Minneriya National Park to observe wild elephant herds in their natural habitat [R:atom_95989beb2b]",
+    "cited_atom_texts": [
+      "Take a jeep safari in Minneriya National Park to witness wild elephants in their natural habitat."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_highlights",
+    "sentence": "Ride the scenic 'train on clouds' from Nanu Oya to Ella, drifting through tea plantations and mountain mist [R:atom_ff862e9320]",
+    "cited_atom_texts": [
+      "Take a scenic train ride from Nanu Oya to Ella, known as the 'train on clouds,' through tea plantations."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_highlights",
+    "sentence": "Visit the Temple of the Tooth Relic in Kandy, a center of Buddhist veneration for centuries [R:atom_115412286c]",
+    "cited_atom_texts": [
+      "Visit the Temple of the Tooth Relic in Kandy."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_subtitle",
+    "sentence": "A journey through ancient capitals, sacred sites, and wild landscapes [R:atom_cef7525c63][R:atom_114dda222e][R:atom_b20cfd6dc8]",
+    "cited_atom_texts": [
+      "Explore Anuradhapura, Sri Lanka's ancient Buddhist capital, including its Sacred Bo Tree and monastic ruins.",
+      "Explore Polonnaruwa's archaeological treasures, including the Gal Vihara Buddha statues.",
+      "Jeep safari in Yala National Park to spot leopards, elephants, and more."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_summary",
+    "sentence": "Begin in Negombo Fishing Village, where traditional catamarans line the shore and the morning bustle offers an authentic first impression of Sri Lankan coastal life before the tourist trail begins [R:atom_79b86b7813].",
+    "cited_atom_texts": [
+      "Visit Negombo Fishing Village on arrival morning, known for its morning vibrancy and lined-up traditional catamarans."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_summary",
+    "sentence": "Explore Anuradhapura, the ancient Buddhist capital, walking among ruins of one of Asia's oldest civilisations, including the Sacred Bo Tree and monastic remains [R:atom_cef7525c63].",
+    "cited_atom_texts": [
+      "Explore Anuradhapura, Sri Lanka's ancient Buddhist capital, including its Sacred Bo Tree and monastic ruins."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_summary",
+    "sentence": "Climb Sigiriya Lion's Rock at sunrise, ascending an ancient sky fortress to discover stunning frescoes and sweeping views [R:atom_ebc7512930].",
+    "cited_atom_texts": [
+      "Start early with a climb up Sigiriya Lion's Rock, a UNESCO site featuring stunning frescoes."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_summary",
+    "sentence": "In Polonnaruwa, stand before the monumental rock-cut Buddha statues of Gal Vihara, a sight that stops you mid-step [R:atom_114dda222e].",
+    "cited_atom_texts": [
+      "Explore Polonnaruwa's archaeological treasures, including the Gal Vihara Buddha statues."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_summary",
+    "sentence": "Witness wild elephants gathering at Minneriya National Park on a safari that captures one of Sri Lanka's signature wildlife spectacles [R:atom_3c686293ac].",
+    "cited_atom_texts": [
+      "Conclude Day 3 with a safari in Minneriya National Park to witness wild elephants in their natural habitat."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_summary",
+    "sentence": "Continue to Kandy to visit the Temple of the Tooth Relic, one of Buddhism's most sacred shrines, where reverence is palpable [R:atom_e28f55f8de], and attend an evening cultural dance show featuring vivid costumes and drumming [R:atom_4b38e24e02].",
+    "cited_atom_texts": [
+      "Visit the Temple of the Tooth Relic in Kandy, one of Buddhism's most sacred shrines.",
+      "Evening cultural dance show in Kandy."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_summary",
+    "sentence": "Travel through tea country with a scenic train ride from Nanu Oya to Ella, often described as the 'train on clouds,' winding through mist-wrapped hills [R:atom_7a3e483f62].",
+    "cited_atom_texts": [
+      "Take a scenic train ride from Nanu Oya to Ella, described as the 'train on clouds,' traversing tea country."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_summary",
+    "sentence": "End with a jeep safari in Yala National Park, where the high density of leopards keeps every moment charged with possibility [R:atom_b20cfd6dc8].",
+    "cited_atom_texts": [
+      "Jeep safari in Yala National Park to spot leopards, elephants, and more."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "Day 1 begins with a visit to Negombo Fishing Village, where traditional catamarans line the shore and the morning vibrancy offers an authentic first impression of Sri Lankan coastal life [R:atom_79b86b7813].",
+    "cited_atom_texts": [
+      "Visit Negombo Fishing Village on arrival morning, known for its morning vibrancy and lined-up traditional catamarans."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "On Day 2, explore Anuradhapura, the ancient Buddhist capital, including the Sacred Bo Tree and monastic ruins [R:atom_cef7525c63], and visit Mihintale, home to the Aukana Buddha statue carved from a single rock [R:atom_1d0078d0da].",
+    "cited_atom_texts": [
+      "Explore Anuradhapura, Sri Lanka's ancient Buddhist capital, including its Sacred Bo Tree and monastic ruins.",
+      "Visit Mihintale, described as the world's first declared sanctuary, and the Aukana Buddha statue carved from a single rock."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "Day 3 starts early with a climb up Sigiriya Lion's Rock, a UNESCO site featuring stunning frescoes [R:atom_ebc7512930], followed by exploration of Polonnaruwa's archaeological treasures, including the Gal Vihara Buddha statues [R:atom_114dda222e], and concludes with a safari in Minneriya National Park to witness wild elephants in their natural habitat [R:atom_3c686293ac].",
+    "cited_atom_texts": [
+      "Start early with a climb up Sigiriya Lion's Rock, a UNESCO site featuring stunning frescoes.",
+      "Explore Polonnaruwa's archaeological treasures, including the Gal Vihara Buddha statues.",
+      "Conclude Day 3 with a safari in Minneriya National Park to witness wild elephants in their natural habitat."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "Day 4 includes an optional morning whale-watching excursion from Trincomalee [R:atom_357e975c8d], then a stop at the Dambulla Cave Temple en route to Kandy [R:atom_8f2991a840].",
+    "cited_atom_texts": [
+      "Optional morning whale-watching excursion from Trincomalee before continuing inland.",
+      "Stop at the Dambulla Cave Temple en route from Trincomalee to Kandy."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "On Day 5, visit the Temple of the Tooth Relic in Kandy, one of Buddhism's most sacred shrines [R:atom_e28f55f8de] and attend an evening cultural dance show [R:atom_4b38e24e02].",
+    "cited_atom_texts": [
+      "Visit the Temple of the Tooth Relic in Kandy, one of Buddhism's most sacred shrines.",
+      "Evening cultural dance show in Kandy."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "Day 6 includes a visit to Peradeniya Botanical Gardens [R:atom_8fa87ef845] before boarding a scenic train ride from Nanu Oya to Ella, traversing mist-wrapped tea hills [R:atom_7a3e483f62].",
+    "cited_atom_texts": [
+      "Explore the Peradeniya Botanical Gardens before heading up through tea plantations toward Nuwara Eliya.",
+      "Take a scenic train ride from Nanu Oya to Ella, described as the 'train on clouds,' traversing tea country."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "Day 7 features a tuk-tuk journey to Lipton's Seat, passing through tea plantations and local life [R:atom_f2b102ab9a], with a stop at Ravana Falls en route to Tissamaharama [R:atom_c237ce1ecd].",
+    "cited_atom_texts": [
+      "Reach Lipton's Seat viewpoint by tuk-tuk, passing through scenic tea plantations and local life.",
+      "Stop at Ravana Falls before arriving in Tissamaharama."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "Day 8 includes an evening visit to the sacred Kataragama Temple [R:atom_b3d9be073e] and a jeep safari in Yala National Park to spot leopards, elephants, and other wildlife [R:atom_b20cfd6dc8].",
+    "cited_atom_texts": [
+      "Evening visit to the sacred Kataragama Temple in Tissamaharama.",
+      "Jeep safari in Yala National Park to spot leopards, elephants, and more."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_itineraries",
+    "sentence": "Day 9 brings a visit to Galle's historical Dutch Fort and observation of traditional stilt fishermen along the coast [R:atom_19814a936b].",
+    "cited_atom_texts": [
+      "Visit Galle's historical Dutch Fort and observe traditional stilt fishermen along the coast."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_highlights",
+    "sentence": "Sunrise ascent of Sigiriya Lion's Rock, a UNESCO site with ancient frescoes and panoramic views [R:atom_ebc7512930]",
+    "cited_atom_texts": [
+      "Start early with a climb up Sigiriya Lion's Rock, a UNESCO site featuring stunning frescoes."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_highlights",
+    "sentence": "Standing before the Aukana Buddha, carved from a single unbroken rock face at Mihintale, the world's first declared sanctuary [R:atom_1d0078d0da]",
+    "cited_atom_texts": [
+      "Visit Mihintale, described as the world's first declared sanctuary, and the Aukana Buddha statue carved from a single rock."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_highlights",
+    "sentence": "Watching baby elephants splash and play during feeding and bathing at Pinnawela Elephant Orphanage [R:atom_c1d0a3942d]",
+    "cited_atom_texts": [
+      "At Pinnawela Elephant Orphanage, observe baby elephants being bottle-fed and bathed in the river."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_highlights",
+    "sentence": "Tuk-tuk ride through tea plantations to Lipton's Seat, arriving at a sweeping highland panorama [R:atom_f2b102ab9a]",
+    "cited_atom_texts": [
+      "Reach Lipton's Seat viewpoint by tuk-tuk, passing through scenic tea plantations and local life."
+    ]
+  },
+  {
+    "tour": "Classic Exploration",
+    "field": "aa_highlights",
+    "sentence": "Evening rituals at Kataragama Temple, one of Sri Lanka's most revered pilgrimage sites [R:atom_b3d9be073e]",
+    "cited_atom_texts": [
+      "Evening visit to the sacred Kataragama Temple in Tissamaharama."
+    ]
+  },
+  {
+    "tour": "A sea of coral, Prayers of Uminchu fishermen",
+    "field": "aa_subtitle",
+    "sentence": "Sail with traditional boat builders and fishers who read the sea like a map [R:atom_5dc2f5cf6b][R:atom_0b66f7bfa1]",
+    "cited_atom_texts": [
+      "Visit a manufacturing atelier of wooden sabani sailboats and speak with shipbuilders working to pass traditional building techniques to future generations, then sail out into the wide sea.",
+      "Kayak from a fishing port to an island in a shoal surrounded by reefs, learning uminchu wisdom such as reading sea depth, tides, fish species, and seasonal information."
+    ]
+  },
+  {
+    "tour": "A sea of coral, Prayers of Uminchu fishermen",
+    "field": "aa_summary",
+    "sentence": "You\u2019ll visit a working atelier where wooden sabani sailboats are crafted using methods passed down through generations, and speak with shipbuilders dedicated to keeping this knowledge alive [R:atom_5dc2f5cf6b].",
+    "cited_atom_texts": [
+      "Visit a manufacturing atelier of wooden sabani sailboats and speak with shipbuilders working to pass traditional building techniques to future generations, then sail out into the wide sea."
+    ]
+  },
+  {
+    "tour": "A sea of coral, Prayers of Uminchu fishermen",
+    "field": "aa_summary",
+    "sentence": "In quiet coastal villages, you\u2019ll walk with guides whose lives still follow the rhythms of the tides, experiencing how ocean-based customs endure in daily life [R:atom_91705a9c13].",
+    "cited_atom_texts": [
+      "Explore coastal villages where customs related to the ocean remain present in today's way of life, guided through settlements where daily rhythms still align with the sea."
+    ]
+  },
+  {
+    "tour": "A sea of coral, Prayers of Uminchu fishermen",
+    "field": "aa_summary",
+    "sentence": "The trip brings you to Cape Hedo, the northern edge of Okinawa, where sheer limestone cliffs rise above cobalt waters and the reef stretches toward Yoron Island \u2014 a vantage point few travelers ever reach [R:atom_d177b30793].",
+    "cited_atom_texts": [
+      "Stand on Cape Hedo's sheer limestone cliffs at the northern tip of Okinawa, looking out to Yoron island in the distance and down to coral reefs in cobalt blue water."
+    ]
+  },
+  {
+    "tour": "A sea of coral, Prayers of Uminchu fishermen",
+    "field": "aa_summary",
+    "sentence": "Behind these cliffs lies a sacred utaki site, believed in Ryukyu tradition as the landing place of Amamikiyo, the sea goddess who shaped the islands themselves [R:atom_f0b59064bc].",
+    "cited_atom_texts": [
+      "At Cape Hedo, a sacred utaki site stands behind the cliffs \u2014 the place in Ryukyu creation myth where the sea goddess Amamikiyo, who created the islands of Ryukyu, first landed."
+    ]
+  },
+  {
+    "tour": "A sea of coral, Prayers of Uminchu fishermen",
+    "field": "aa_summary",
+    "sentence": "You\u2019ll kayak from a working fishing port to a reef-fringed islet, learning from uminchu fishermen how to interpret sea depth, tides, and fish signs as their ancestors did [R:atom_0b66f7bfa1].",
+    "cited_atom_texts": [
+      "Kayak from a fishing port to an island in a shoal surrounded by reefs, learning uminchu wisdom such as reading sea depth, tides, fish species, and seasonal information."
+    ]
+  },
+  {
+    "tour": "A sea of coral, Prayers of Uminchu fishermen",
+    "field": "aa_summary",
+    "sentence": "And in a rare act of participation, you\u2019ll plant coral fragments alongside these fishers, then snorkel above the reef you helped restore \u2014 a moment where conservation becomes personal [R:atom_cb406749ef].",
+    "cited_atom_texts": [
+      "Join uminchu fishermen to plant coral with your own hands, then snorkel above the living reef \u2014 not just witnessing it, but having played a role in its future."
+    ]
+  },
+  {
+    "tour": "A sea of coral, Prayers of Uminchu fishermen",
+    "field": "aa_itineraries",
+    "sentence": "On one day, you visit a manufacturing atelier for wooden sabani sailboats, speaking with shipbuilders committed to passing on their craft, then sail out onto the open sea [R:atom_5dc2f5cf6b].",
+    "cited_atom_texts": [
+      "Visit a manufacturing atelier of wooden sabani sailboats and speak with shipbuilders working to pass traditional building techniques to future generations, then sail out into the wide sea."
+    ]
+  },
+  {
+    "tour": "A sea of coral, Prayers of Uminchu fishermen",
+    "field": "aa_itineraries",
+    "sentence": "Another day takes you through coastal villages where ocean-related customs remain part of everyday life, guided by locals whose routines are still set by the sea\u2019s rhythms [R:atom_91705a9c13].",
+    "cited_atom_texts": [
+      "Explore coastal villages where customs related to the ocean remain present in today's way of life, guided through settlements where daily rhythms still align with the sea."
+    ]
+  },
+  {
+    "tour": "A sea of coral, Prayers of Uminchu fishermen",
+    "field": "aa_itineraries",
+    "sentence": "You kayak from a fishing port to a reef-encircled island, learning directly from uminchu fishermen how to interpret sea depth, tides, fish species, and seasonal patterns [R:atom_0b66f7bfa1].",
+    "cited_atom_texts": [
+      "Kayak from a fishing port to an island in a shoal surrounded by reefs, learning uminchu wisdom such as reading sea depth, tides, fish species, and seasonal information."
+    ]
+  },
+  {
+    "tour": "A sea of coral, Prayers of Uminchu fishermen",
+    "field": "aa_itineraries",
+    "sentence": "You join those same fishermen in planting coral by hand, then snorkel above the reef, seeing the living results of your contribution [R:atom_cb406749ef].",
+    "cited_atom_texts": [
+      "Join uminchu fishermen to plant coral with your own hands, then snorkel above the living reef \u2014 not just witnessing it, but having played a role in its future."
+    ]
+  },
+  {
+    "tour": "A sea of coral, Prayers of Uminchu fishermen",
+    "field": "aa_itineraries",
+    "sentence": "At Cape Hedo, you stand atop limestone cliffs at the northern tip of Okinawa, facing Yoron Island across vivid blue waters and looking down on thriving coral reefs [R:atom_d177b30793].",
+    "cited_atom_texts": [
+      "Stand on Cape Hedo's sheer limestone cliffs at the northern tip of Okinawa, looking out to Yoron island in the distance and down to coral reefs in cobalt blue water."
+    ]
+  },
+  {
+    "tour": "A sea of coral, Prayers of Uminchu fishermen",
+    "field": "aa_itineraries",
+    "sentence": "Behind the cliffs, you visit a sacred utaki site \u2014 the place in Ryukyu belief where the sea goddess Amamikiyo first stepped onto the islands she created [R:atom_f0b59064bc].",
+    "cited_atom_texts": [
+      "At Cape Hedo, a sacred utaki site stands behind the cliffs \u2014 the place in Ryukyu creation myth where the sea goddess Amamikiyo, who created the islands of Ryukyu, first landed."
+    ]
+  },
+  {
+    "tour": "A sea of coral, Prayers of Uminchu fishermen",
+    "field": "aa_highlights",
+    "sentence": "Sail aboard a traditionally built sabani after meeting the artisans who keep the craft alive [R:atom_5dc2f5cf6b]",
+    "cited_atom_texts": [
+      "Visit a manufacturing atelier of wooden sabani sailboats and speak with shipbuilders working to pass traditional building techniques to future generations, then sail out into the wide sea."
+    ]
+  },
+  {
+    "tour": "A sea of coral, Prayers of Uminchu fishermen",
+    "field": "aa_highlights",
+    "sentence": "Kayak with uminchu fishermen and learn to read the sea as they have for centuries [R:atom_0b66f7bfa1]",
+    "cited_atom_texts": [
+      "Kayak from a fishing port to an island in a shoal surrounded by reefs, learning uminchu wisdom such as reading sea depth, tides, fish species, and seasonal information."
+    ]
+  },
+  {
+    "tour": "A sea of coral, Prayers of Uminchu fishermen",
+    "field": "aa_highlights",
+    "sentence": "Plant coral directly into the reef and snorkel over the living ecosystem you\u2019ve helped renew [R:atom_cb406749ef]",
+    "cited_atom_texts": [
+      "Join uminchu fishermen to plant coral with your own hands, then snorkel above the living reef \u2014 not just witnessing it, but having played a role in its future."
+    ]
+  },
+  {
+    "tour": "A sea of coral, Prayers of Uminchu fishermen",
+    "field": "aa_highlights",
+    "sentence": "Stand at Cape Hedo\u2019s cliffs, where myth and geography meet at the edge of Okinawa [R:atom_d177b30793][R:atom_f0b59064bc]",
+    "cited_atom_texts": [
+      "Stand on Cape Hedo's sheer limestone cliffs at the northern tip of Okinawa, looking out to Yoron island in the distance and down to coral reefs in cobalt blue water.",
+      "At Cape Hedo, a sacred utaki site stands behind the cliffs \u2014 the place in Ryukyu creation myth where the sea goddess Amamikiyo, who created the islands of Ryukyu, first landed."
+    ]
+  },
+  {
+    "tour": "A sea of coral, Prayers of Uminchu fishermen",
+    "field": "aa_highlights",
+    "sentence": "Walk coastal villages shaped entirely by the sea, where tradition and daily life remain intertwined [R:atom_91705a9c13]",
+    "cited_atom_texts": [
+      "Explore coastal villages where customs related to the ocean remain present in today's way of life, guided through settlements where daily rhythms still align with the sea."
+    ]
+  },
+  {
+    "tour": "Yaksa Trek BEST DEAL",
+    "field": "aa_subtitle",
+    "sentence": "A multi-day trek through the remote Yaksa region, culminating in a night under the stars [R:atom_83c773a60a]",
+    "cited_atom_texts": [
+      "Multi-day trek through the Yaksa region, with dedicated trekking days building up to a camp night."
+    ]
+  },
+  {
+    "tour": "Yaksa Trek BEST DEAL",
+    "field": "aa_summary",
+    "sentence": "This trek unfolds across the rugged Yaksa region, where each day builds toward a sustained wilderness experience and an overnight camp beneath the open sky [R:atom_83c773a60a].",
+    "cited_atom_texts": [
+      "Multi-day trek through the Yaksa region, with dedicated trekking days building up to a camp night."
+    ]
+  },
+  {
+    "tour": "Yaksa Trek BEST DEAL",
+    "field": "aa_summary",
+    "sentence": "After the ascent and time spent immersed in the backcountry, the descent leads to Thimphu, offering quiet reflection before the flight home [R:atom_5e1931b515].",
+    "cited_atom_texts": [
+      "Descent day followed by time in Thimphu before flying home."
+    ]
+  },
+  {
+    "tour": "Yaksa Trek BEST DEAL",
+    "field": "aa_itineraries",
+    "sentence": "The trek includes multiple dedicated days on foot, moving deeper into the Yaksa region with each stage, building toward the central experience of camping in the wild [R:atom_83c773a60a].",
+    "cited_atom_texts": [
+      "Multi-day trek through the Yaksa region, with dedicated trekking days building up to a camp night."
+    ]
+  },
+  {
+    "tour": "Yaksa Trek BEST DEAL",
+    "field": "aa_itineraries",
+    "sentence": "The final trekking day is a descent from the high country, after which travelers spend time in Thimphu before flying home, marking the quiet close of the journey [R:atom_5e1931b515].",
+    "cited_atom_texts": [
+      "Descent day followed by time in Thimphu before flying home."
+    ]
+  },
+  {
+    "tour": "Yaksa Trek BEST DEAL",
+    "field": "aa_highlights",
+    "sentence": "Dedicated trekking days that progressively immerse you in the remote Yaksa landscape [R:atom_83c773a60a]",
+    "cited_atom_texts": [
+      "Multi-day trek through the Yaksa region, with dedicated trekking days building up to a camp night."
+    ]
+  },
+  {
+    "tour": "Yaksa Trek BEST DEAL",
+    "field": "aa_highlights",
+    "sentence": "An overnight camp under the stars, the culmination of the trekking journey [R:atom_83c773a60a]",
+    "cited_atom_texts": [
+      "Multi-day trek through the Yaksa region, with dedicated trekking days building up to a camp night."
+    ]
+  },
+  {
+    "tour": "Yaksa Trek BEST DEAL",
+    "field": "aa_highlights",
+    "sentence": "Time in Thimphu following the descent, allowing a gradual return from wilderness to city [R:atom_5e1931b515]",
+    "cited_atom_texts": [
+      "Descent day followed by time in Thimphu before flying home."
+    ]
+  }
+]

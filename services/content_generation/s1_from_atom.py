@@ -34,6 +34,7 @@ from botocore.exceptions import ClientError
 from json_repair import repair_json
 
 from services.acp_shared.atom_constants import ATOM_DENSITY_WORDS
+from services.acp_shared.grounding import find_novel_numeric_claims
 
 logger = structlog.get_logger()
 
@@ -47,6 +48,10 @@ MAX_RETRIES = 2
 # as if no citation attempt was made there at all.
 CITE_RE = re.compile(r"\[R:([^\]]+)\]")
 _WORD_RE = re.compile(r"[A-Za-z0-9']+")
+# Sentence boundary for the per-sentence entailment check (AA-325/ADR-2026-033) --
+# splits on .!? followed by a capital/quote, same heuristic used to build the
+# real-data test fixture in tests/unit/fixtures/aa325_grounding_units.json.
+_SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'‘’“”])")
 
 # Fields that carry prose subject to the citation/density gate. seo_title/
 # seo_meta are excluded — they're short derived summaries, not new claims;
@@ -288,10 +293,35 @@ def _flatten_gated_text(content: dict) -> str:
     return "\n".join(parts)
 
 
-def check_grounding(content: dict, valid_atom_ids: set[str]) -> dict:
+def _entailment_violations(content: dict, atom_text_by_id: dict[str, str]) -> list[dict]:
+    """AA-325/ADR-2026-033: per-sentence check that a cited sentence doesn't assert
+    a number/measurement absent from the atom(s) it cites (see
+    services/acp_shared/grounding.py for why this replaces a whole-sentence
+    token-overlap ratio -- that approach was tested against real production
+    output and could not separate real violations from real good content).
+    Unknown atom_ids are skipped here, not penalized twice -- closed_world_pass
+    already catches those."""
+    violations = []
+    for field in _GATED_FIELDS:
+        val = content.get(field)
+        texts = val if isinstance(val, list) else [val] if val else []
+        for t in texts:
+            for sent in _SENT_SPLIT_RE.split(str(t)):
+                tags = CITE_RE.findall(sent)
+                if not tags:
+                    continue
+                cited_texts = [atom_text_by_id[a] for a in tags if a in atom_text_by_id]
+                novel = find_novel_numeric_claims(sent, cited_texts)
+                if novel:
+                    violations.append({"field": field, "sentence": sent.strip(), "novel_numbers": novel})
+    return violations
+
+
+def check_grounding(content: dict, valid_atom_ids: set[str], atom_text_by_id: dict[str, str]) -> dict:
     """Deterministic gate — never trusts the model's own citation claims.
     Returns {citations: [...], unknown_citations: [...], word_count, citation_count,
-    words_per_citation, density_pass, closed_world_pass}."""
+    words_per_citation, density_pass, closed_world_pass, entailment_pass,
+    entailment_violations}."""
     text = _flatten_gated_text(content)
     citations = CITE_RE.findall(text)
     unknown = sorted({c for c in citations if c not in valid_atom_ids})
@@ -308,6 +338,9 @@ def check_grounding(content: dict, valid_atom_ids: set[str]) -> dict:
     density_pass = citation_count > 0 and words_per_citation <= ATOM_DENSITY_WORDS
     closed_world_pass = len(unknown) == 0
 
+    entailment_violations = _entailment_violations(content, atom_text_by_id)
+    entailment_pass = len(entailment_violations) == 0
+
     return {
         "citations": citations,
         "unknown_citations": unknown,
@@ -316,6 +349,8 @@ def check_grounding(content: dict, valid_atom_ids: set[str]) -> dict:
         "words_per_citation": round(words_per_citation, 1) if citation_count else None,
         "density_pass": density_pass,
         "closed_world_pass": closed_world_pass,
+        "entailment_pass": entailment_pass,
+        "entailment_violations": entailment_violations,
     }
 
 
@@ -352,6 +387,16 @@ def _grounding_feedback(gate: dict) -> str:
                 f"(need <= {ATOM_DENSITY_WORDS}). Either add more citation tags to claims that "
                 f"already have one nearby, or cut ungrounded prose that has no atom behind it."
             )
+    if not gate["entailment_pass"]:
+        examples = "; ".join(
+            f"\"{v['sentence'][:100]}\" states {v['novel_numbers']} which its cited atom(s) never mention"
+            for v in gate["entailment_violations"][:3]
+        )
+        issues.append(
+            f"Some sentences state a specific number/measurement not present in the atom(s) they cite: "
+            f"{examples}. A citation tag is only valid if the atom actually supports every figure in that "
+            f"sentence — remove the invented number or cite an atom that states it."
+        )
     return " ".join(issues)
 
 
@@ -372,6 +417,7 @@ async def generate_s1_from_atom(
     if not atoms:
         raise GroundingError(f"No curated atoms for tour {tour_id} — nothing to assemble from")
     valid_atom_ids = {a["atom_id"] for a in atoms}
+    atom_text_by_id = {a["atom_id"]: a["text"] for a in atoms}
 
     system_prompt = _GROUNDING_SYSTEM_PROMPT
     if persona:
@@ -397,10 +443,10 @@ async def generate_s1_from_atom(
             feedback = f"Your last response was not valid JSON matching the required schema: {e}"
             continue
 
-        gate = check_grounding(content, valid_atom_ids)
+        gate = check_grounding(content, valid_atom_ids, atom_text_by_id)
         last_content, last_gate = content, gate
 
-        if gate["density_pass"] and gate["closed_world_pass"]:
+        if gate["density_pass"] and gate["closed_world_pass"] and gate["entailment_pass"]:
             logger.info("s1_from_atom_gate_passed", tour_id=tour_id, attempt=attempt,
                         citation_count=gate["citation_count"], words_per_citation=gate["words_per_citation"])
             return {
@@ -418,14 +464,17 @@ async def generate_s1_from_atom(
         # AA-306 L6-spirit: reject is logged loudly, never silent.
         logger.warning("s1_from_atom_gate_rejected", tour_id=tour_id, attempt=attempt,
                         closed_world_pass=gate["closed_world_pass"], density_pass=gate["density_pass"],
+                        entailment_pass=gate["entailment_pass"],
                         citation_count=gate["citation_count"], words_per_citation=gate["words_per_citation"],
-                        unknown_citations=gate["unknown_citations"])
+                        unknown_citations=gate["unknown_citations"],
+                        entailment_violations=gate["entailment_violations"])
         feedback = _grounding_feedback(gate)
 
     raise GroundingError(
         f"tour {tour_id}: grounding gate failed after {MAX_RETRIES + 1} attempts "
         f"(closed_world_pass={last_gate.get('closed_world_pass')}, "
         f"density_pass={last_gate.get('density_pass')}, "
+        f"entailment_pass={last_gate.get('entailment_pass')}, "
         f"words_per_citation={last_gate.get('words_per_citation')}). "
         f"Last model_used={last_draft.get('model_used')}.",
         prompt_version=prompt_version, gate=last_gate, retries=MAX_RETRIES,
