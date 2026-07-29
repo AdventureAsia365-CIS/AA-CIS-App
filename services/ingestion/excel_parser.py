@@ -51,6 +51,19 @@ COLUMN_MAP = {
     "seo_meta":           "seo_meta",
 }
 
+# AA_* columns are AI-rewritten OUTPUT, never a source of truth for src_* fields — they must never
+# win over (or silently stand in for) a real source column, regardless of column order in the file.
+_AA_ALIAS_COLUMNS = {"aa_name", "aa_subtitle", "aa_summary", "aa_highlights", "aa_itineraries"}
+
+# Columns that only ever appear in an exported/reviewed file (never a raw supplier upload). Presence
+# of any of these means this is not a file we should ingest as new source data. AA_ITINERARIES is
+# deliberately NOT in this set — it's handled by _AA_ALIAS_COLUMNS priority resolution below instead,
+# so a legitimate raw file carrying both SOURCE_ITINERARIES and AA_ITINERARIES still ingests correctly
+# (Nghiep decision, AA-343: reject-on-AA_ITINERARIES would make it impossible to ever ingest that
+# combination, whereas the priority fix alone already fully closes the corruption vector).
+_EXPORT_FILE_MARKERS = {"audit_status", "publish_ready", "fields_updated"}
+_EXPORT_FILE_PREFIX = "dfs_"
+
 
 class ExcelParser:
     def __init__(self, file_path: str, source_file: str = None):
@@ -65,8 +78,22 @@ class ExcelParser:
         if any(c in group_labels for c in first_cols):
             df = pd.read_excel(self.file_path, engine="openpyxl", header=1)
 
-        # Build column map — static first, LLM fallback if needed
+        # Reject exported/reviewed files outright — they carry AA_* + audit columns that must
+        # never be re-ingested as new source data (would re-corrupt src_* with AI output).
         excel_columns = [str(c).strip() for c in df.columns]
+        lower_cols = {c.lower() for c in excel_columns}
+        export_hits = sorted(
+            c for c in lower_cols
+            if c in _EXPORT_FILE_MARKERS or c.startswith(_EXPORT_FILE_PREFIX)
+        )
+        if export_hits:
+            raise ValueError(
+                f"Refusing to ingest '{self.source_file}': this looks like an exported/reviewed "
+                f"file, not a raw supplier file (found export-only column(s): {export_hits}). "
+                "Upload the original source file instead."
+            )
+
+        # Build column map — static first, LLM fallback if needed
         active_map, llm_used = build_dynamic_column_map(excel_columns, COLUMN_MAP)
 
         if llm_used:
@@ -86,15 +113,12 @@ class ExcelParser:
             if lower in active_map:
                 col_lookup[str(col)] = active_map[lower]
 
-        # Detect itineraries column for multi-row concat
-        itin_col = next(
-            (col for col, db in col_lookup.items() if db == "src_itineraries"),
-            None
-        )
-        name_col = next(
-            (col for col, db in col_lookup.items() if db == "src_name"),
-            None
-        )
+        # Detect itineraries/name columns for row-grouping. Must prefer real/source columns over
+        # AA_* aliases the same way the per-row assignment below does — otherwise an AA_ITINERARIES
+        # column that happens to sort before SOURCE_ITINERARIES in the file would drive continuation-
+        # row concat off AI output instead of the real source text.
+        itin_col = self._first_real_col(col_lookup, "src_itineraries")
+        name_col = self._first_real_col(col_lookup, "src_name")
 
         records = []
         current = None
@@ -105,8 +129,22 @@ class ExcelParser:
                 if current:
                     records.append(current)
                 current = {}
+                # Real/source columns always win — write these first, order-independent.
                 for excel_col, db_field in col_lookup.items():
+                    if str(excel_col).strip().lower() in _AA_ALIAS_COLUMNS:
+                        continue
                     current[db_field] = self._clean(row.get(excel_col))
+                # AA_* columns never seed src_* fields, even when they're the only column
+                # present for that field — flag it instead of silently borrowing AI output.
+                for excel_col, db_field in col_lookup.items():
+                    if str(excel_col).strip().lower() not in _AA_ALIAS_COLUMNS:
+                        continue
+                    if current.get(db_field) is not None:
+                        continue
+                    if self._clean(row.get(excel_col)) is not None:
+                        logger.warning("aa_alias_column_ignored",
+                                        file=self.source_file, column=excel_col, db_field=db_field)
+                    current.setdefault(db_field, None)
                 current["source_file"] = self.source_file
                 current["country"] = resolve_country(current.get("country"), self.source_file)
                 current["raw_data"] = json.dumps(row.to_dict(), default=str)
@@ -126,6 +164,14 @@ class ExcelParser:
                     records=len(records),
                     llm_used=llm_used)
         return records
+
+    @staticmethod
+    def _first_real_col(col_lookup: dict, db_field: str) -> str | None:
+        return next(
+            (col for col, db in col_lookup.items()
+             if db == db_field and str(col).strip().lower() not in _AA_ALIAS_COLUMNS),
+            None
+        )
 
     def _clean(self, value: Any) -> str | None:
         if value is None:
