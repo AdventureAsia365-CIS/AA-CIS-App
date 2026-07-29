@@ -45,6 +45,37 @@ def normalize_group_key(src_name: str, provider: str | None) -> tuple[str, str]:
     return (src_name.lower().strip(), (provider or "").lower().strip())
 
 
+def _summarize_drops(insert_failures: list[dict]) -> list[dict]:
+    """Group insert_batch failures by reason for pipeline_runs.ingest_details.drops.
+    sample_ids capped at 5/group — enough to trace back to the source file without
+    bloating the JSONB column for a large bad batch."""
+    groups: dict[str, dict] = {}
+    for f in insert_failures:
+        g = groups.setdefault(f["reason"], {"reason": f["reason"], "count": 0, "sample_ids": []})
+        g["count"] += 1
+        if len(g["sample_ids"]) < 5:
+            g["sample_ids"].append(f["identifier"])
+    return list(groups.values())
+
+
+async def _write_ingest_details(conn, batch_id: str, rows_parsed: int, rows_landed: int, drops: list[dict]):
+    """Ingest-level landed/dropped diagnostics — deliberately NOT written into
+    tours_passed/tours_failed (those carry different, already-live semantics downstream:
+    tours_passed is recomputed to published-count on export, tours_failed is incremented for
+    S1 quality failures — see migration 091)."""
+    details = {
+        "rows_parsed":  rows_parsed,
+        "rows_landed":  rows_landed,
+        "rows_dropped": sum(d["count"] for d in drops),
+        "drops":        drops,
+    }
+    await conn.execute("""
+        UPDATE shared.pipeline_runs
+        SET ingest_details = $2::jsonb
+        WHERE batch_id = $1::uuid
+    """, batch_id, json.dumps(details, default=str))
+
+
 async def process_file(s3_bucket: str, s3_key: str, seo_mode: str = "standard") -> dict:
     """Download Excel từ S3, parse, insert bronze.raw_sources → bronze.raw_tours."""
 
@@ -132,6 +163,7 @@ async def process_file(s3_bucket: str, s3_key: str, seo_mode: str = "standard") 
 
         if not records:
             await source_repo.update_status(source_id, "skipped", row_count=0)
+            await _write_ingest_details(conn, batch_id_new, rows_parsed=0, rows_landed=0, drops=[])
             return {"status": "skipped", "rows": 0, "source_id": str(source_id)}
 
         # 2. Split records: new vs duplicate (normalized dedup against raw_tours)
@@ -172,8 +204,16 @@ async def process_file(s3_bucket: str, s3_key: str, seo_mode: str = "standard") 
                 r["source_status"]   = "active"
                 new_records.append(r)
 
-        ids = await tour_repo.insert_batch(new_records)
+        ids, insert_failures = await tour_repo.insert_batch(new_records)
         await source_repo.update_status(source_id, "done", row_count=len(ids) + len(staged_ids))
+
+        drops = _summarize_drops(insert_failures)
+        if drops:
+            logger.warning("ingest_rows_dropped", batch_id=batch_id_new, source_file=s3_key,
+                            rows_dropped=len(insert_failures), drops=drops)
+        await _write_ingest_details(conn, batch_id_new,
+                                     rows_parsed=len(records), rows_landed=len(ids), drops=drops)
+
         logger.info("inserted", count=len(ids), staged=len(staged_ids), source_id=source_id)
 
         batch_id = batch_id_new
@@ -185,12 +225,24 @@ async def process_file(s3_bucket: str, s3_key: str, seo_mode: str = "standard") 
             "tours_staged":  len(staged_ids),
             "staged_ids":    staged_ids,
             "source_id":     batch_id,
+            "rows_dropped":  len(insert_failures),
         }
 
     except Exception as e:
         if "source_id" in dir():
             await source_repo.update_status(source_id, "failed", error=str(e))
         logger.error("processing_failed", error=str(e))
+        if "batch_id_new" in dir():
+            try:
+                await conn.execute("""
+                    UPDATE shared.pipeline_runs
+                    SET status = 'ingest_failed',
+                        completed_at = NOW(),
+                        error_message = $2
+                    WHERE batch_id = $1::uuid
+                """, batch_id_new, str(e)[:2000])
+            except Exception as mark_err:
+                logger.error("pipeline_runs_fail_mark_failed", batch_id=batch_id_new, error=str(mark_err))
         raise
 
     finally:

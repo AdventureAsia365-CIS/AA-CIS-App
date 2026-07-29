@@ -62,7 +62,7 @@ async def test_process_file_does_not_start_step_functions_execution(tmp_path):
             mock_source_repo_cls.return_value = mock_source_repo
 
             mock_tour_repo = MagicMock()
-            mock_tour_repo.insert_batch = AsyncMock(return_value=["tour-id-1"])
+            mock_tour_repo.insert_batch = AsyncMock(return_value=(["tour-id-1"], []))
             mock_tour_repo_cls.return_value = mock_tour_repo
 
             result = await handler.process_file("aa-cis-bronze", "raw-inbox/Horizon/file.xlsx")
