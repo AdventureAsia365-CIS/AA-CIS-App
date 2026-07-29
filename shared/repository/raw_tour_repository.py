@@ -128,10 +128,23 @@ class RawTourRepository:
         )
         return row["cnt"]
 
-    async def insert_batch(self, records: list) -> list:
-        """Insert nhiều tours cùng lúc, return list tour_id."""
-        ids = []
+    async def insert_batch(self, records: list) -> tuple:
+        """Insert nhiều tours cùng lúc. Trước đây một record lỗi (VD: giá trị vượt độ dài cột)
+        làm insert_batch raise và bỏ luôn mọi record CÒN LẠI trong batch mà không ghi lại lý do
+        (AA-343 P1.3 — 14/30 row biến mất, error_message=NULL). Giờ mỗi record cô lập: lỗi của
+        một record không chặn các record sau nó, và lý do lỗi được giữ lại để insert_details ghi
+        vào pipeline_runs.ingest_details thay vì mất im lặng.
+
+        Return (ids, failures) — failures: [{"identifier": tour_id_external hoặc src_name, "reason": str}].
+        """
+        ids: list = []
+        failures: list[dict] = []
         for record in records:
-            tour_id = await self.insert(record)
-            ids.append(tour_id)
-        return ids
+            try:
+                tour_id = await self.insert(record)
+                ids.append(tour_id)
+            except Exception as e:
+                identifier = record.get("tour_id_external") or record.get("src_name") or "unknown"
+                logger.warning("raw_tour_insert_failed", identifier=identifier, error=str(e))
+                failures.append({"identifier": identifier, "reason": str(e)})
+        return ids, failures
