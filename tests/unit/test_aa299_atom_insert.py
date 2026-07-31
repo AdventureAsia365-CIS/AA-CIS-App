@@ -64,6 +64,7 @@ ONE_ATOM = [{
     "visual_potential": 3,
     "persona_fit": ["adventurer"],
     "season_note": "dry season only",
+    "itinerary_day": 1,
 }]
 
 
@@ -93,7 +94,7 @@ async def test_decompose_inline_inserts_atom_with_correct_fields():
 
     sql, atom_id, tour_id, owner_scope, text, activity_type, emotional_hook, \
         visual_potential, persona_fit, season_note, starred, deleted, weight, \
-        source_hash = insert_calls[0].args
+        source_hash, itinerary_day = insert_calls[0].args
 
     assert re.match(r"^atom_[0-9a-f]{10}$", atom_id)
     assert tour_id == TOUR_ID
@@ -108,11 +109,38 @@ async def test_decompose_inline_inserts_atom_with_correct_fields():
     assert deleted is False
     assert weight == 1.0
     assert source_hash == expected_hash
+    assert itinerary_day == 1
 
     # distinctiveness/media/usage_log/cooldown_until/human_seam_notes must NOT
     # be set explicitly — they stay at migration-079 DB defaults.
     assert "distinctiveness" not in sql
     assert "media" not in sql
+
+
+@pytest.mark.asyncio
+async def test_decompose_inline_itinerary_day_null_when_model_omits_it():
+    """AA-352: model returning no itinerary_day key (or explicit null) at all
+    must persist as NULL, never guessed/defaulted to a number."""
+    row = _row()
+    atom_without_day = [{
+        "text": "General trip-wide note with no specific day",
+        "activity_type": "other",
+        "emotional_hook": None,
+        "visual_potential": 1,
+        "persona_fit": [],
+        "season_note": None,
+        # itinerary_day deliberately absent
+    }]
+    conn = _fake_conn(latest_source_hash=None)
+    pool = _make_pool(conn)
+
+    with patch("api.routers.v1_atoms.invoke_claude", return_value=_fake_llm_result(atom_without_day)):
+        result = await v1_atoms._decompose_inline([row], pool)
+
+    assert result["succeeded"] == 1
+    insert_calls = _insert_calls(conn)
+    itinerary_day = insert_calls[0].args[-1]
+    assert itinerary_day is None
 
 
 @pytest.mark.asyncio
