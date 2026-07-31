@@ -157,6 +157,16 @@ cis-status # check NAT instance state
 - No static AWS keys — GitHub Actions OIDC only
 - Vercel: auto-deploys on main push (CIS Admin)
 
+## CI/CD — solo-operator mode (since 31/07/2026, S131)
+- Auto-merge is enabled on PRs once all 5 required CI checks pass (Lint, Security Audit,
+  Unit Tests, Integration Tests, Docker Build Check). No manual merge click required.
+- This is a deliberate simplification for a single-operator team. When a second engineer
+  joins, RE-ENABLE human-only merge review: go to repo Settings → General → Pull Requests,
+  disable "Allow auto-merge", and require at least 1 approving review in branch protection
+  (currently NOT required — only status checks gate merge).
+- deploy-prod.yml was removed same session — see .github/workflows/DELETED-deploy-prod.md
+  for rollback instructions when a real prod environment exists.
+
 ## TESTING
 pytest tests/ -v
 104 integration tests + 23 E2E Playwright tests baseline
