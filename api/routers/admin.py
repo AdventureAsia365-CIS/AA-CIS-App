@@ -14,6 +14,14 @@ from fastapi import APIRouter, File, Header, HTTPException, Query, Request, Uplo
 from pydantic import BaseModel
 
 from services.notifications import NotificationService, EventType
+from services.acp_planning.quarter import (
+    QuarterPlanVersionNotFoundError,
+    QuarterPlanVersionNotPendingError,
+    approve_quarter_plan_version,
+    plan_quarter,
+    save_quarter_plan_version,
+)
+from services.acp_planning.runway import runway_map
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
@@ -1217,3 +1225,134 @@ async def mark_read(
             notif_id,
         )
     return {"id": notif_id, "is_read": True}
+
+
+# ── POST /admin/quarter-plan — N5 Gate B persist: compute + save pending version ──
+
+
+class CreateQuarterPlanRequest(BaseModel):
+    tenant_id: UUID
+    year: int
+    quarter: int
+    markets: list[str]
+    capacity_posts_per_week: int
+    specials: list[str] = []
+
+
+@router.post("/quarter-plan", summary="Compute a quarter plan and persist it as a pending version (AA-320)")
+async def create_quarter_plan(
+    body: CreateQuarterPlanRequest,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+
+    runway = await runway_map(body.tenant_id, body.year, body.markets, pool)
+    plan = await plan_quarter(
+        body.tenant_id, body.year, body.quarter, body.markets,
+        body.capacity_posts_per_week, body.specials, runway, pool,
+    )
+    version_id = await save_quarter_plan_version(plan, pool, source="standard")
+
+    return {
+        "version_id": str(version_id),
+        "approval_status": "pending",
+        "plan": plan.model_dump(mode="json"),
+    }
+
+
+# ── GET /admin/quarter-plan/{tenant_id}/{year}/{quarter} — latest version for review ──
+
+
+@router.get("/quarter-plan/{tenant_id}/{year}/{quarter}",
+            summary="Get the latest quarter plan version (pending or approved) for review (AA-320)")
+async def get_quarter_plan(
+    tenant_id: UUID,
+    year: int,
+    quarter: int,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT qpv.version_id, qpv.version_no, qpv.payload, qpv.source,
+                   qpv.approval_status, qpv.approved_by, qpv.approved_at, qpv.created_at
+            FROM acp_shared.quarter_plan qp
+            JOIN acp_shared.quarter_plan_version qpv ON qpv.plan_id = qp.plan_id
+            WHERE qp.tenant_id = $1 AND qp.year = $2 AND qp.quarter = $3
+            ORDER BY qpv.version_no DESC
+            LIMIT 1
+            """,
+            tenant_id, year, quarter,
+        )
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No quarter plan for tenant={tenant_id} year={year} quarter={quarter}",
+        )
+
+    payload = row["payload"]
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+
+    return {
+        "version_id": str(row["version_id"]),
+        "version_no": row["version_no"],
+        "source": row["source"],
+        "approval_status": row["approval_status"],
+        "approved_by": row["approved_by"],
+        "approved_at": row["approved_at"].isoformat() if row["approved_at"] else None,
+        "created_at": row["created_at"].isoformat(),
+        "plan": payload,
+    }
+
+
+# ── POST /admin/quarter-plan/{version_id}/approve — Gate B human approval ──────
+
+
+class ApproveQuarterPlanRequest(BaseModel):
+    approved_by: str
+
+
+@router.post("/quarter-plan/{version_id}/approve", summary="Gate B — human approval of a quarter plan version (AA-320)")
+async def approve_quarter_plan_endpoint(
+    version_id: UUID,
+    body: ApproveQuarterPlanRequest,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+
+    try:
+        await approve_quarter_plan_version(version_id, body.approved_by, pool)
+    except QuarterPlanVersionNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except QuarterPlanVersionNotPendingError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT version_id, plan_id, version_no, source,
+                   approval_status, approved_by, approved_at, created_at
+            FROM acp_shared.quarter_plan_version
+            WHERE version_id = $1
+            """,
+            version_id,
+        )
+
+    return {
+        "version_id": str(row["version_id"]),
+        "plan_id": str(row["plan_id"]),
+        "version_no": row["version_no"],
+        "source": row["source"],
+        "approval_status": row["approval_status"],
+        "approved_by": row["approved_by"],
+        "approved_at": row["approved_at"].isoformat() if row["approved_at"] else None,
+        "created_at": row["created_at"].isoformat(),
+    }
