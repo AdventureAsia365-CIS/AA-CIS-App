@@ -114,13 +114,19 @@ Respond with ONLY a JSON object matching this exact contract:
       "emotional_hook": "string or null",
       "visual_potential": 1,
       "persona_fit": ["string", "..."],
-      "season_note": "string or null"
+      "season_note": "string or null",
+      "itinerary_day": 1
     }
   ]
 }
 
 visual_potential is an integer 1-3 (3 = strong photo/video potential). No prose outside the \
 JSON object.
+
+itinerary_day is the day number in the source itinerary this atom belongs to (e.g. "DAY 01" -> 1, \
+"Day 12" -> 12). Return null if the source text has no clear day label for this moment, or the \
+atom isn't tied to one specific day (e.g. general trip-wide information). Never guess a day number \
+without clear support in the source text.
 
 If the itinerary is thin, return FEW atoms. Never pad. Returning 3 honest atoms beats 10 \
 invented ones."""
@@ -235,13 +241,13 @@ async def _decompose_inline(rows: list, pool) -> dict:
                             INSERT INTO acp_contract.tour_atoms
                                 (atom_id, tour_id, owner_scope, text, activity_type, emotional_hook,
                                  visual_potential, persona_fit, season_note, starred, deleted, weight,
-                                 source_hash, created_at, updated_at)
+                                 source_hash, itinerary_day, created_at, updated_at)
                             VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13,
-                                    now(), now())
+                                    $14, now(), now())
                         """, atom_id, tour_id, "platform", atom.get("text"), atom.get("activity_type"),
                             atom.get("emotional_hook"), atom.get("visual_potential", 1),
                             json.dumps(atom.get("persona_fit") or []), atom.get("season_note"),
-                            False, False, 1.0, source_hash)
+                            False, False, 1.0, source_hash, atom.get("itinerary_day"))
                 else:
                     # AA-299 (migration 085): a genuine zero-atom result (never-pad,
                     # thin source) must still leave ONE row behind, or the next
