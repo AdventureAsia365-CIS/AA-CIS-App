@@ -150,8 +150,9 @@ cis-status # check NAT instance state
 
 ## CI/CD
 - ADR-2026-023 (trunk-based, effective 09/07/2026): `develop` branch removed. Feature/fix branch → PR →
-  CI required → merge straight to `main` (human-only). Push to main auto-triggers deploy (paths-filter,
-  single pipeline — no more separate Dev/Prod workflows).
+  CI required → merge to main via PR — auto-merge enabled once CI passes (see "CI/CD — solo-operator
+  mode" section below); human-only merge was the original design, now relaxed for solo-operator use.
+  Push to main auto-triggers deploy (paths-filter, single pipeline — no more separate Dev/Prod workflows).
 - Image tag: always :latest (never commit hash)
 - Lint: flake8 (120 char limit, 2 spaces before inline comment)
 - No static AWS keys — GitHub Actions OIDC only
