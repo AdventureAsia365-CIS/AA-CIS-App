@@ -233,7 +233,137 @@ def approve_quarter_plan(plan: QuarterPlan, approved_by: str) -> QuarterPlan:
     return plan
 
 
+class QuarterPlanVersionNotFoundError(Exception):
+    """Raised by approve_quarter_plan_version — version_id has no matching
+    acp_shared.quarter_plan_version row."""
+
+
+class QuarterPlanVersionNotPendingError(Exception):
+    """Raised by approve_quarter_plan_version — version_id exists but is not
+    in 'pending' status (already approved/rejected). Approval must never
+    silently no-op (AA-320)."""
+
+
+async def save_quarter_plan_version(plan: QuarterPlan, pool, source: str = "standard") -> UUID:
+    """AA-320 Gate B persist — DB-backed counterpart to compute_quarter_plan().
+    Creates acp_shared.quarter_plan on first call for (tenant_id, year, quarter),
+    reuses it on every later call. Always appends a new quarter_plan_version
+    (never overwrites — re-planning a quarter keeps every prior version
+    queryable) with approval_status='pending'. Does not touch
+    current_version_id — that only moves on approve_quarter_plan_version()."""
+    payload = json.dumps(plan.model_dump(mode="json"))
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                INSERT INTO acp_shared.quarter_plan (tenant_id, year, quarter)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (tenant_id, year, quarter) DO NOTHING
+                """,
+                plan.tenant_id, plan.year, plan.quarter,
+            )
+            plan_id = await conn.fetchval(
+                """
+                SELECT plan_id FROM acp_shared.quarter_plan
+                WHERE tenant_id = $1 AND year = $2 AND quarter = $3
+                """,
+                plan.tenant_id, plan.year, plan.quarter,
+            )
+            next_version_no = await conn.fetchval(
+                """
+                SELECT COALESCE(MAX(version_no), 0) + 1
+                FROM acp_shared.quarter_plan_version
+                WHERE plan_id = $1
+                """,
+                plan_id,
+            )
+            version_id = await conn.fetchval(
+                """
+                INSERT INTO acp_shared.quarter_plan_version
+                    (plan_id, version_no, payload, source, approval_status)
+                VALUES ($1, $2, $3::jsonb, $4, 'pending')
+                RETURNING version_id
+                """,
+                plan_id, next_version_no, payload, source,
+            )
+    return version_id
+
+
+async def approve_quarter_plan_version(version_id: UUID, approved_by: str, pool) -> None:
+    """AA-320 Gate B persist — fully separate DB-backed approval path. Does
+    NOT call approve_quarter_plan() (the in-memory Gate B function above);
+    that function has its own callers (e.g. admin_atoms.py's preview-slotgrid
+    demo) and stays untouched. Raises rather than no-ops on a bad version_id
+    or a non-pending version, since a silent no-op here would let a caller
+    believe an approval happened when it didn't."""
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                SELECT plan_id, approval_status
+                FROM acp_shared.quarter_plan_version
+                WHERE version_id = $1
+                FOR UPDATE
+                """,
+                version_id,
+            )
+            if row is None:
+                raise QuarterPlanVersionNotFoundError(
+                    f"quarter_plan_version {version_id} not found")
+            if row["approval_status"] != "pending":
+                raise QuarterPlanVersionNotPendingError(
+                    f"quarter_plan_version {version_id} is '{row['approval_status']}', "
+                    "not 'pending' — cannot approve")
+
+            await conn.execute(
+                """
+                UPDATE acp_shared.quarter_plan_version
+                SET approval_status = 'approved', approved_by = $2, approved_at = now()
+                WHERE version_id = $1
+                """,
+                version_id, approved_by,
+            )
+            await conn.execute(
+                """
+                UPDATE acp_shared.quarter_plan
+                SET current_version_id = $2
+                WHERE plan_id = $1
+                """,
+                row["plan_id"], version_id,
+            )
+
+
+async def fetch_approved_quarter_plan(
+    tenant_id: UUID, year: int, quarter: int, pool,
+) -> Optional[QuarterPlan]:
+    """AA-320 Gate B persist — reads the tenant/year/quarter's current
+    (approved) version's payload back into a QuarterPlan, with .approved
+    forced True so it satisfies compute_slot_grid()'s existing Gate B check
+    (allocator.py) unchanged. Returns None (never raises) when no plan or no
+    approved version exists yet — the caller decides the error response."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT qpv.payload, qpv.approved_by
+            FROM acp_shared.quarter_plan qp
+            JOIN acp_shared.quarter_plan_version qpv ON qpv.version_id = qp.current_version_id
+            WHERE qp.tenant_id = $1 AND qp.year = $2 AND qp.quarter = $3
+              AND qpv.approval_status = 'approved'
+            """,
+            tenant_id, year, quarter,
+        )
+    if row is None:
+        return None
+    payload = _parse_jsonb(row["payload"], {})
+    plan = QuarterPlan(**payload)
+    plan.approved = True
+    plan.approved_by = row["approved_by"]
+    return plan
+
+
 __all__ = [
     "compute_quarter_plan", "fetch_atoms_by_trip", "plan_quarter",
-    "approve_quarter_plan",
+    "approve_quarter_plan", "save_quarter_plan_version",
+    "approve_quarter_plan_version", "fetch_approved_quarter_plan",
+    "QuarterPlanVersionNotFoundError", "QuarterPlanVersionNotPendingError",
 ]

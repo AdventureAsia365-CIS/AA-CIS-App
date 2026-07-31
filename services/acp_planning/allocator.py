@@ -207,4 +207,29 @@ async def allocate_month(
     )
 
 
-__all__ = ["compute_slot_grid", "allocate_month"]
+async def allocate_month_from_db(
+    tenant_id: UUID, year: int, month: int, channels: list[str],
+    capacity_posts_per_week: int, runway: RunwayMap, primary_market: str, pool,
+) -> SlotGrid:
+    """AA-320 Gate B persist — DB-backed wrapper around allocate_month().
+    allocate_month() itself is left untouched (its existing signature/body)
+    so admin_atoms.py's preview-slotgrid endpoint, which calls it directly
+    with its own in-memory-approved plan, keeps working unchanged. This
+    wrapper fetches the Gate-B-approved QuarterPlan from
+    acp_shared.quarter_plan_version instead of taking one as a caller-
+    supplied param, and raises QuarterPlanNotApprovedError up front (same
+    error type compute_slot_grid already raises) if none is approved yet."""
+    from .quarter import fetch_approved_quarter_plan
+    quarter = (month - 1) // 3 + 1
+    quarter_plan = await fetch_approved_quarter_plan(tenant_id, year, quarter, pool)
+    if quarter_plan is None:
+        raise QuarterPlanNotApprovedError(
+            f"No approved quarter plan for tenant={tenant_id} year={year} quarter={quarter} — "
+            "Gate B: quarter plan must be approved by a human (Ms. Thu) before allocation — never auto.")
+    return await allocate_month(
+        tenant_id, year, month, channels, capacity_posts_per_week,
+        quarter_plan, runway, primary_market, pool,
+    )
+
+
+__all__ = ["compute_slot_grid", "allocate_month", "allocate_month_from_db"]
