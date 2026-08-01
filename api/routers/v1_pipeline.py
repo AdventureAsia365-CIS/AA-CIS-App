@@ -197,6 +197,9 @@ async def _rewrite_tour(
             # POST-fix already propagated above on line ~159).
             "revalidate_ran":    result.get("revalidate_ran", False),
             "revalidate_passed": result.get("revalidate_passed", False),
+            # AA-353: same strip class as judge_*/fallback_used above — propagate the itinerary
+            # per-day ratio records so _build_generated_metadata can persist metadata.itinerary_compression.
+            "itinerary_day_ratios": result.get("itinerary_day_ratios", []),
             "status": "success" if result.get("generated") and len(result.get("generated", {})) > 0 else "failed",
         }
 

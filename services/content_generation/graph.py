@@ -8,7 +8,7 @@ from langgraph.graph import StateGraph, END
 
 from shared.llm_client.client import LLMClient
 from shared.llm_client.models import LLMRequest
-from .prompts import SYSTEM_PROMPT, build_rewrite_prompt
+from .prompts import SYSTEM_PROMPT, build_rewrite_prompt, parse_source_day_word_counts
 from .brand_audit_node import brand_audit_node
 from .flag_fix_node import flag_fix_node
 from .judge_node import judge_node
@@ -18,6 +18,150 @@ logger = structlog.get_logger()
 
 MAX_RETRIES = 3
 MIN_QUALITY = 7.0
+
+# AA-353: hard clamp on actual/source word-count ratio per day, checked AFTER the model returns
+# its structured itineraries array (the prompt's own 0.7x-1.3x guidance is a softer target the
+# model aims for; this is the line that triggers a real fix).
+ITINERARY_CLAMP_MIN = 0.6
+ITINERARY_CLAMP_MAX = 1.5
+
+_ITINERARY_NUDGE_SYSTEM_PROMPT = """You are a travel content editor for Adventure Asia, fixing the
+LENGTH of ONE day of a tour itinerary that was written too short or too long relative to its
+source detail. Rewrite ONLY this one day, in the same brand voice (calm, factual, editorial — not
+salesy, not generic).
+
+Rules that still apply:
+- The day title MUST name the place and/or the primary activity — never generic
+  ("Free Day", "Arrival Day", "Departure", "Transfer", "Exploration").
+- Preserve all factual details (named places, activities) from the source day below.
+- Do not invent activities not present in the source day.
+- NEVER invent meal names (breakfast, lunch, dinner) or clock-times unless they appear
+  explicitly in the source day.
+
+Return JSON ONLY, no markdown, no preamble: {"title": "...", "body": "..."}"""
+
+
+def _nudge_itinerary_day(client: LLMClient, source_day_text: str, current_title: str,
+                          current_body: str, target_word_count: int):
+    """AA-353: single targeted rewrite of one day that clamped outside [ITINERARY_CLAMP_MIN,
+    ITINERARY_CLAMP_MAX] of its source word count. Exactly one attempt — the caller does not
+    retry this, even if the result is still outside clamp (flagged instead, see generate_node).
+    """
+    user_prompt = f"""SOURCE (this day only, from the original tour itinerary):
+{source_day_text}
+
+CURRENT DRAFT (too short or too long relative to the source above):
+Title: {current_title}
+Body: {current_body}
+
+TARGET LENGTH: approximately {target_word_count} words for the body.
+
+Rewrite this one day's title and body to hit the target length while staying factual and
+on-brand."""
+    request = LLMRequest(
+        system_prompt=_ITINERARY_NUDGE_SYSTEM_PROMPT,
+        user_prompt=user_prompt,
+        model_tier="haiku",
+    )
+    resp = client.generate(request)
+    raw = resp.content.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.strip()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        salvaged = repair_json(raw, return_objects=True)
+        parsed = salvaged if isinstance(salvaged, dict) else {}
+    new_title = parsed.get("title") or current_title
+    new_body = parsed.get("body") or current_body
+    return new_title, new_body, resp
+
+
+def _process_itineraries(generated: dict, tour: dict, client: LLMClient) -> dict:
+    """AA-353: validate the model's structured ``itineraries`` array against its own PER-DAY
+    SOURCE LENGTH target, auto-nudge (once, non-repeating) any day outside the hard clamp, then
+    serialize the array back to the pre-existing canonical "Day N — Title\\nBody" string format —
+    so every downstream reader (validate_node, judge_node, brand_audit_node, flag_fix_node,
+    generated_content.aa_itineraries) sees exactly the string shape it already expects. No
+    downstream code changes needed (confirmed by reading all of them — see implementation notes).
+
+    Mutates ``generated["itineraries"]`` in place (array -> string). No-ops (leaves the field
+    untouched, logs a warning) if the model didn't return the array contract at all — old string
+    behavior, not a crash.
+
+    Returns {"day_ratios": [...], "extra_cost_usd": float, "extra_cache_read_tokens": int,
+    "extra_cache_write_tokens": int} for the caller to fold into generate_node's own totals and
+    metadata (AA-353 STEP 0: generated_content.metadata JSONB, same place as AA-213's
+    fallback_used/score_overall/batch_id).
+    """
+    itineraries = generated.get("itineraries")
+    empty_result = {"day_ratios": [], "extra_cost_usd": 0.0,
+                     "extra_cache_read_tokens": 0, "extra_cache_write_tokens": 0}
+    if not isinstance(itineraries, list):
+        if itineraries:
+            logger.warning("itinerary_contract_not_array", value_type=type(itineraries).__name__)
+        return empty_result
+
+    itineraries_raw = tour.get("itineraries") or tour.get("itinerary") or ""
+    source = parse_source_day_word_counts(itineraries_raw, tour.get("duration"))
+    source_by_day = source["day_word_counts"]
+    source_text_by_day = source["day_text"]
+    source_ordered = sorted(source_by_day.items())  # [(day_num, words), ...]
+
+    day_ratios = []
+    extra_cost = 0.0
+    extra_read = 0
+    extra_write = 0
+
+    for position, day_item in enumerate(itineraries):
+        if not isinstance(day_item, dict):
+            continue
+        day_num = day_item.get("day")
+        title = str(day_item.get("title") or "")
+        body = str(day_item.get("body") or "")
+
+        source_words = source_by_day.get(day_num)
+        source_text = source_text_by_day.get(day_num)
+        if source_words is None and position < len(source_ordered):
+            # AA-353: model's day numbering didn't line up with the source parse — fall back to
+            # positional matching (i-th returned day vs i-th source day) rather than dropping the
+            # ratio check for that day entirely.
+            source_words = source_ordered[position][1]
+            source_text = source_text_by_day.get(source_ordered[position][0])
+
+        actual_words = len(body.split())
+        record = {"day": day_num, "source_words": source_words, "actual_words": actual_words,
+                   "nudged": False}
+
+        if source_words:
+            ratio = actual_words / source_words
+            record["ratio"] = round(ratio, 3)
+            if ratio < ITINERARY_CLAMP_MIN or ratio > ITINERARY_CLAMP_MAX:
+                new_title, new_body, resp = _nudge_itinerary_day(
+                    client, source_text or itineraries_raw, title, body, source_words,
+                )
+                extra_cost += resp.cost_usd
+                extra_read += resp.cache_read_tokens
+                extra_write += resp.cache_write_tokens
+                title, body = new_title, new_body
+                day_item["title"], day_item["body"] = new_title, new_body
+                actual_words_after = len(body.split())
+                record["nudged"] = True
+                record["actual_words_after_nudge"] = actual_words_after
+                record["ratio_after_nudge"] = round(actual_words_after / source_words, 3)
+                logger.info("itinerary_day_nudged", day=day_num, ratio_before=record["ratio"],
+                            ratio_after=record["ratio_after_nudge"])
+        day_ratios.append(record)
+
+    generated["itineraries"] = "\n\n".join(
+        f"Day {d.get('day')} — {d.get('title') or ''}\n{d.get('body') or ''}".strip()
+        for d in itineraries if isinstance(d, dict)
+    )
+    return {"day_ratios": day_ratios, "extra_cost_usd": extra_cost,
+            "extra_cache_read_tokens": extra_read, "extra_cache_write_tokens": extra_write}
 # AA-216: structural failure (empty/missing field) caps quality below the gate regardless of
 # other sub-scores. Empty content scores brand/quality=10 (no rule to violate) which the
 # 4-bucket average can't pull under 7 — mirror judge's _MISSION_ABSENT_CAP pattern.
@@ -89,6 +233,10 @@ class ContentState(TypedDict):
     # fix_pass_applied; revalidate_passed phan anh ket qua re-validate+re-judge tren content da sua.
     revalidate_ran:         bool
     revalidate_passed:      bool
+    # AA-353: per-day actual/source word-count ratios from the structured itineraries array,
+    # set by generate_node's _process_itineraries. Must be declared here or LangGraph strips it
+    # from node_output before _rewrite_tour ever sees it (same gotcha as judge_score, AA-209).
+    itinerary_day_ratios:   list
 
 # code → (dimension, deduction)
 _FAILURE_MAP: dict[str, tuple[str, float]] = {
@@ -280,18 +428,24 @@ def generate_node(state: ContentState) -> ContentState:
         ]
         if isinstance(generated, dict):
             generated["seo_keywords_used"] = _kws_norm
+        # AA-353: clamp/nudge the structured itineraries array against its own per-day source
+        # length target, then serialize back to the plain string every downstream node expects.
+        _itin_result = _process_itineraries(generated, state.get("tour", {}), client)
         return {
             **state,
             "generated":  generated,
-            "cost_usd":   state.get("cost_usd", 0) + resp.cost_usd,
+            "cost_usd":   state.get("cost_usd", 0) + resp.cost_usd + _itin_result["extra_cost_usd"],
             "model_used": resp.model_used,
             "is_branded": is_branded,
             "error":      "",
             "fallback_used": resp.fallback_used,
             "satellite_used": resp.satellite_used,
             "prompt_version": prompt_version,
-            "cache_read_tokens": state.get("cache_read_tokens", 0) + resp.cache_read_tokens,
-            "cache_write_tokens": state.get("cache_write_tokens", 0) + resp.cache_write_tokens,
+            "cache_read_tokens": (state.get("cache_read_tokens", 0) + resp.cache_read_tokens
+                                   + _itin_result["extra_cache_read_tokens"]),
+            "cache_write_tokens": (state.get("cache_write_tokens", 0) + resp.cache_write_tokens
+                                    + _itin_result["extra_cache_write_tokens"]),
+            "itinerary_day_ratios": _itin_result["day_ratios"],
         }
     except Exception as e:
         logger.error("generation_failed", error=str(e))

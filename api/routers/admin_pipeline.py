@@ -162,6 +162,13 @@ def _build_generated_metadata(result, *, brand_rule_id, brand_name, seo_mode,
     is already recorded per-tour, so it's the only place that can actually answer "quality by
     prompt_version". pipeline_runs is a batch/ingestion aggregate with no per-tour quality signal
     to join against (STEP 0 finding) — deliberately not duplicated there.
+
+    AA-353: same reasoning for ``itinerary_compression`` — per-day actual/source ratio + nudge
+    outcome, keyed by this same result dict. shared.pipeline_runs.ingest_details (migration 091)
+    was considered and rejected: that column is deliberately scoped to ingest-level diagnostics
+    (091's own comment), not per-tour quality signals — reusing it would recreate the exact
+    collision 091 was written to avoid. Omitted (not null) when itineraries wasn't the structured
+    array contract (empty list) — no crash, no clobber, mirrors the ``judge`` guard below.
     """
     metadata = {
         "brand_rule_id":   brand_rule_id,
@@ -188,6 +195,26 @@ def _build_generated_metadata(result, *, brand_rule_id, brand_name, seo_mode,
             "mission_present": result.get("judge_mission_present"),
             "feedback":        result.get("judge_feedback"),
             "judge_score":     result.get("judge_score"),
+        }
+    _day_ratios = result.get("itinerary_day_ratios") or []
+    if _day_ratios:
+        from services.content_generation.graph import ITINERARY_CLAMP_MIN, ITINERARY_CLAMP_MAX
+        _violations = [
+            d for d in _day_ratios
+            if d.get("ratio") is not None and not (
+                ITINERARY_CLAMP_MIN <= d["ratio"] <= ITINERARY_CLAMP_MAX
+            )
+        ]
+        metadata["itinerary_compression"] = {
+            "day_ratios":          _day_ratios,
+            "nudged_day_count":    sum(1 for d in _day_ratios if d.get("nudged")),
+            "violation_day_count": len(_violations),
+            "still_violating_after_nudge": [
+                d["day"] for d in _violations
+                if d.get("ratio_after_nudge") is not None and not (
+                    ITINERARY_CLAMP_MIN <= d["ratio_after_nudge"] <= ITINERARY_CLAMP_MAX
+                )
+            ],
         }
     return metadata
 
