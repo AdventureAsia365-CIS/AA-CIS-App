@@ -11,8 +11,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from services.content_generation.s1_from_atom import (
-    DEFAULT_PERSONA, GroundingError, _GROUNDING_SYSTEM_PROMPT, _persona_block,
-    build_user_prompt, check_grounding, generate_draft, generate_s1_from_atom,
+    DEFAULT_PERSONA, GroundingError, _GROUNDING_SYSTEM_PROMPT, _build_atom_pack, _persona_block,
+    _row_to_atom, build_user_prompt, check_grounding, fetch_curated_atoms, generate_draft,
+    generate_s1_from_atom,
 )
 
 TOUR_ID = "11111111-1111-1111-1111-111111111111"
@@ -37,9 +38,9 @@ def _make_pool(atom_rows):
     return pool, conn
 
 
-def _row(atom_id, text, activity_type="culture", hook=None, season=None):
+def _row(atom_id, text, activity_type="culture", hook=None, season=None, itinerary_day=None):
     return {"atom_id": atom_id, "text": text, "activity_type": activity_type,
-            "emotional_hook": hook, "season_note": season}
+            "emotional_hook": hook, "season_note": season, "itinerary_day": itinerary_day}
 
 
 # ── check_grounding: density + closed-world gate ────────────────────────────
@@ -144,6 +145,92 @@ def test_build_user_prompt_includes_feedback_when_given():
     prompt = build_user_prompt({"name": "Delhi Tour", "country": "India"}, ATOMS, feedback="fix citations")
     assert "PREVIOUS ATTEMPT FEEDBACK" in prompt
     assert "fix citations" in prompt
+
+
+# ── AA-355: fetch_curated_atoms selects + orders by itinerary_day ───────────
+
+@pytest.mark.asyncio
+async def test_fetch_curated_atoms_selects_and_orders_by_itinerary_day():
+    pool, conn = _make_pool([_row("atom_aaaaaaaaaa", "text", itinerary_day=1)])
+    await fetch_curated_atoms(TOUR_ID, pool)
+    query = conn.fetch.call_args[0][0]
+    assert "itinerary_day" in query
+    assert "ORDER BY itinerary_day NULLS LAST, created_at" in query
+
+
+def test_row_to_atom_carries_itinerary_day_through():
+    row = _row("atom_aaaaaaaaaa", "text", itinerary_day=3)
+    assert _row_to_atom(row)["itinerary_day"] == 3
+
+
+def test_row_to_atom_itinerary_day_defaults_none_when_absent():
+    # Plain dict with no "itinerary_day" key at all (pre-AA-355 row shape) — .get()
+    # must not KeyError.
+    row = {"atom_id": "atom_aaaaaaaaaa", "text": "text"}
+    assert _row_to_atom(row)["itinerary_day"] is None
+
+
+# ── AA-355: _build_atom_pack groups atoms into DAY N sections ──────────────
+
+def test_build_atom_pack_groups_dated_atoms_under_day_headers_ascending():
+    atoms = [
+        _row_to_atom(_row("atom_bbbbbbbbbb", "Day 2 activity.", itinerary_day=2)),
+        _row_to_atom(_row("atom_aaaaaaaaaa", "Day 1 activity.", itinerary_day=1)),
+    ]
+    pack = _build_atom_pack(atoms)
+    assert pack.index("DAY 1:") < pack.index("atom_aaaaaaaaaa")
+    assert pack.index("DAY 2:") < pack.index("atom_bbbbbbbbbb")
+    assert pack.index("DAY 1:") < pack.index("DAY 2:")
+
+
+def test_build_atom_pack_multiple_atoms_same_day_share_one_header():
+    atoms = [
+        _row_to_atom(_row("atom_aaaaaaaaaa", "Morning activity.", itinerary_day=1)),
+        _row_to_atom(_row("atom_bbbbbbbbbb", "Afternoon activity.", itinerary_day=1)),
+    ]
+    pack = _build_atom_pack(atoms)
+    assert pack.count("DAY 1:") == 1
+    assert "atom_aaaaaaaaaa" in pack and "atom_bbbbbbbbbb" in pack
+
+
+def test_build_atom_pack_undated_atoms_go_to_separate_section_not_a_day():
+    atoms = [
+        _row_to_atom(_row("atom_aaaaaaaaaa", "Dated activity.", itinerary_day=1)),
+        _row_to_atom(_row("atom_bbbbbbbbbb", "Undated activity.", itinerary_day=None)),
+    ]
+    pack = _build_atom_pack(atoms)
+    assert "UNDATED" in pack
+    assert "DAY 1:" in pack
+    # the undated atom must not appear inside the DAY 1 block
+    day1_section = pack.split("UNDATED")[0]
+    assert "atom_bbbbbbbbbb" not in day1_section
+
+
+def test_build_atom_pack_all_undated_reproduces_flat_pre_aa355_shape():
+    # ATOMS fixture has no itinerary_day key at all -> every atom falls back to
+    # itinerary_day=None via _row_to_atom's .get(), landing in one UNDATED block.
+    atoms = [_row_to_atom(a) for a in ATOMS]
+    pack = _build_atom_pack(atoms)
+    assert "DAY " not in pack
+    assert "UNDATED" in pack
+    assert "atom_aaaaaaaaaa" in pack and "atom_bbbbbbbbbb" in pack
+
+
+# ── AA-355: build_user_prompt derives the day-count instruction from atoms ─
+
+def test_build_user_prompt_states_exact_day_count_when_atoms_are_dated():
+    atoms = [
+        _row_to_atom(_row("atom_aaaaaaaaaa", "text", itinerary_day=1)),
+        _row_to_atom(_row("atom_bbbbbbbbbb", "text", itinerary_day=2)),
+    ]
+    prompt = build_user_prompt({"name": "Tour", "country": "Laos"}, atoms)
+    assert "exactly 2 day-block(s)" in prompt
+    assert "DAY 1 to DAY 2" in prompt
+
+
+def test_build_user_prompt_falls_back_to_undated_instruction_when_no_day_data():
+    prompt = build_user_prompt({"name": "Delhi Tour", "country": "India"}, ATOMS)
+    assert "No atom in this pack carries a known source day" in prompt
 
 
 # ── persona layer: additive only, base grounding prompt untouched ───────────
