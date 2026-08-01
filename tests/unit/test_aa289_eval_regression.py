@@ -4,16 +4,18 @@ No live DB / no live Bedrock / no live S3: _detect_regression is pure, _download
 is exercised against a real in-memory openpyxl workbook (same shape as the real fixture) so a
 column-name drift in the fixture would actually be caught, not just mocked away.
 """
+import asyncio
 import io
 import json
-from unittest.mock import MagicMock, patch
+from decimal import Decimal
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import openpyxl
 
 from services.eval.regression import (
     S1_OLD_REGRESSION_THRESHOLD, _detect_regression, _detect_itinerary_regression,
-    _download_golden_tours, _itinerary_compression_summary, _load_itinerary_baseline,
-    _write_itinerary_baseline,
+    _download_golden_tours, _get_baseline, _itinerary_compression_summary,
+    _load_itinerary_baseline, _write_itinerary_baseline,
 )
 
 
@@ -243,6 +245,47 @@ def test_detect_itinerary_regression_improved_not_flagged(tmp_path):
     with patch("services.eval.regression.ITINERARY_BASELINE_PATH", str(baseline_path)):
         _write_itinerary_baseline({"long_worst_ratio": 0.4, "other_worst_ratio": 0.5})
         assert _detect_itinerary_regression({"long_worst_ratio": 0.65, "other_worst_ratio": 0.7}) is False
+
+
+# ── _get_baseline: Decimal -> float normalization (crash repro) ─────────────
+
+def test_get_baseline_converts_decimal_avg_quality_score_to_float():
+    """Reproduces a real crash hit during AA-353's live VERIFY: Postgres NUMERIC comes back as
+    decimal.Decimal via asyncpg, while every current-run avg_quality_score is a plain float
+    (round(sum(...)/len(...), 3)) — mixing them in _detect_regression's subtraction raised
+    TypeError on the actual 20-tour golden-dataset run once a real baseline row existed.
+    _get_baseline must hand back a float, not a Decimal, so this can never recur."""
+    fake_conn = MagicMock()
+    fake_conn.fetchrow = AsyncMock(return_value={
+        "prompt_version": "abc123", "avg_quality_score": Decimal("9.900"),
+        "avg_words_per_citation": Decimal("14.500"), "gate_pass_count": 4,
+    })
+    baseline = asyncio.run(_get_baseline(fake_conn, "s1_old", "def456"))
+    assert isinstance(baseline["avg_quality_score"], float)
+    assert baseline["avg_quality_score"] == 9.9
+    assert isinstance(baseline["avg_words_per_citation"], float)
+
+
+def test_get_baseline_returns_none_when_no_prior_row():
+    fake_conn = MagicMock()
+    fake_conn.fetchrow = AsyncMock(return_value=None)
+    baseline = asyncio.run(_get_baseline(fake_conn, "s1_old", "def456"))
+    assert baseline is None
+
+
+def test_get_baseline_output_feeds_detect_regression_without_crash():
+    """End-to-end repro: the exact TypeError seen live only fires when a Decimal baseline meets
+    a float current score inside _detect_regression's subtraction — this proves the fixed
+    _get_baseline output no longer triggers it, using the same threshold-crossing values that
+    would previously have raised."""
+    fake_conn = MagicMock()
+    fake_conn.fetchrow = AsyncMock(return_value={
+        "prompt_version": "abc123", "avg_quality_score": Decimal("8.500"),
+        "avg_words_per_citation": None, "gate_pass_count": None,
+    })
+    baseline = asyncio.run(_get_baseline(fake_conn, "s1_old", "def456"))
+    current = {"avg_quality_score": 6.5}  # 2.0 drop, over threshold
+    assert _detect_regression("s1_old", current, baseline) is True
 
 
 def test_detect_itinerary_regression_none_bucket_in_either_run_skipped(tmp_path):

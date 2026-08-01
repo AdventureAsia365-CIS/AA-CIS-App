@@ -277,7 +277,14 @@ async def run_s1_from_atom_eval(pool) -> dict:
 
 
 async def _get_baseline(conn, pipeline: str, current_prompt_version: str):
-    return await conn.fetchrow(
+    """Returns a plain dict (not an asyncpg.Record) so avg_quality_score can be normalized to a
+    Python float right here, at the read point — Postgres NUMERIC comes back as decimal.Decimal,
+    while every place that computes a CURRENT avg_quality_score (run_s1_old_eval, this module's
+    own round(sum(...)/len(...), 3)) produces a plain float. Mixing the two in an arithmetic
+    comparison (_detect_regression's s1_old branch) raises TypeError — fixed at the source instead
+    of only at that one call site, since any other future consumer of this baseline would hit the
+    same mismatch otherwise."""
+    row = await conn.fetchrow(
         """
         SELECT prompt_version, avg_quality_score, avg_words_per_citation, gate_pass_count
         FROM shared.prompt_eval_runs
@@ -286,6 +293,14 @@ async def _get_baseline(conn, pipeline: str, current_prompt_version: str):
         """,
         pipeline, current_prompt_version,
     )
+    if row is None:
+        return None
+    baseline = dict(row)
+    if baseline["avg_quality_score"] is not None:
+        baseline["avg_quality_score"] = float(baseline["avg_quality_score"])
+    if baseline["avg_words_per_citation"] is not None:
+        baseline["avg_words_per_citation"] = float(baseline["avg_words_per_citation"])
+    return baseline
 
 
 def _detect_regression(pipeline: str, current: dict, baseline) -> bool:
