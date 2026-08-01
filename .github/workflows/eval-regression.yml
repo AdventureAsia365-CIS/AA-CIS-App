@@ -18,6 +18,11 @@ on:
         type: choice
         options: [s1_old, s1_from_atom, both]
         default: both
+      capture_itinerary_baseline:
+        description: "AA-353: write this run's worst-day-ratio numbers as the new committed baseline instead of comparing against it (intentional re-baseline only, not routine runs)"
+        required: false
+        type: boolean
+        default: false
 permissions:
   id-token: write
   contents: read
@@ -48,13 +53,24 @@ jobs:
             echo "No running ECS task found — is the dev service scaled to 0? (cis-start required)"
             exit 1
           fi
+          CAPTURE_FLAG=""
+          if [ "${{ inputs.capture_itinerary_baseline }}" = "true" ]; then
+            CAPTURE_FLAG="--capture-itinerary-baseline"
+          fi
           aws ecs execute-command --cluster "$ECS_CLUSTER" --task "$TASK_ARN" --container api \
             --interactive --region "$AWS_REGION" \
-            --command "python3 -m services.eval.regression --pipeline ${{ inputs.pipeline }} --triggered-by workflow_dispatch" \
+            --command "python3 -m services.eval.regression --pipeline ${{ inputs.pipeline }} --triggered-by workflow_dispatch $CAPTURE_FLAG" \
             | tee eval_output.txt
           # ECS exec's own exit code doesn't propagate the remote command's exit status —
-          # grep the script's own regression_detected flag from its printed JSON instead.
+          # grep the script's own regression_detected flags from its printed JSON instead.
           if grep -q '"regression_detected": true' eval_output.txt; then
             echo "::error::Prompt regression detected — see JSON output above."
             exit 1
+          fi
+          if grep -q '"itinerary_regression_detected": true' eval_output.txt; then
+            echo "::error::AA-353 itinerary compression regressed vs committed baseline — see itinerary_compression in the JSON output above."
+            exit 1
+          fi
+          if [ "${{ inputs.capture_itinerary_baseline }}" = "true" ]; then
+            echo "::notice::capture_itinerary_baseline=true — this run wrote the baseline INSIDE the ECS container filesystem only (not persisted). Copy the itinerary_compression block from the JSON output above into services/eval/baselines/itinerary_compression_baseline.json and commit it manually — this workflow does not write back to the repo."
           fi

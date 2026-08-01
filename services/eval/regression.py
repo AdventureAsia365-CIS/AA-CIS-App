@@ -51,6 +51,19 @@ S1_OLD_REGRESSION_THRESHOLD = 1.0
 # S1-from-atom has no judge/quality_score (STEP 0 finding) — regression there is defined as a
 # hard correctness signal instead of a soft numeric drift on a 4-tour sample: any tour that
 # used to pass the grounding gate now failing it, or the gate pass rate dropping at all.
+# AA-353: >=9 days is AA-339's own "dài-dày" (long-dense) threshold, quoted directly from that
+# issue's Lane A description ("Tour dài (>9-10 ngày, chi tiết)"). AA-339 also used a human
+# categorical medium/thin split on a dedicated 30-tour set that is not in this repo and can't be
+# reconstructed from a formula — its own word-count-based "rich" heuristic
+# (words>=400 OR (days>=4 AND words_per_day>=35)) was flagged in that same issue as suspect and
+# never confirmed. Rather than invent a new boundary, this uses 2 buckets only: "long"
+# (AA-339-sourced) and "other" — see docs/implementation-notes/AA-353.md "Should know".
+ITINERARY_LONG_TOUR_DAY_THRESHOLD = 9
+
+ITINERARY_BASELINE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "baselines", "itinerary_compression_baseline.json",
+)
+
 S1_FROM_ATOM_TOUR_IDS = [
     "c410a272-cac2-486d-9911-a5a73f5365d2",   # Classic Exploration, 21 atoms
     "cc2eca43-5422-4783-8a60-53cf0aef3003",   # Classic Exploration, 18 atoms
@@ -86,6 +99,68 @@ def _download_golden_tours() -> list[dict]:
             "_tour_id":    rec.get("tour_id"),  # golden-set id, not a real raw_tours UUID
         })
     return tours
+
+
+def _itinerary_compression_summary(results: list[dict]) -> dict:
+    """AA-353: worst (most-compressed) per-day actual/source word-count ratio across a run,
+    grouped by ITINERARY_LONG_TOUR_DAY_THRESHOLD. "Worst" = min ratio, matching AA-339/AA-346's
+    own framing (the failure mode this guards is COMPRESSION, not padding — over-length days are
+    not what AA-353 was written to catch)."""
+    buckets = {"long": [], "other": []}
+    total_days = 0
+    nudged_days = 0
+    for r in results:
+        day_ratios = r.get("itinerary_day_ratios") or []
+        if not day_ratios:
+            continue
+        bucket = "long" if len(day_ratios) >= ITINERARY_LONG_TOUR_DAY_THRESHOLD else "other"
+        ratios = [d["ratio"] for d in day_ratios if d.get("ratio") is not None]
+        if ratios:
+            buckets[bucket].append(min(ratios))
+        total_days += len(day_ratios)
+        nudged_days += sum(1 for d in day_ratios if d.get("nudged"))
+
+    return {
+        "long_worst_ratio":  round(min(buckets["long"]), 3) if buckets["long"] else None,
+        "long_tour_count":   len(buckets["long"]),
+        "other_worst_ratio": round(min(buckets["other"]), 3) if buckets["other"] else None,
+        "other_tour_count":  len(buckets["other"]),
+        "total_day_count":   total_days,
+        "nudged_day_count":  nudged_days,
+        "nudge_rate":        round(nudged_days / total_days, 3) if total_days else None,
+    }
+
+
+def _load_itinerary_baseline():
+    if not os.path.exists(ITINERARY_BASELINE_PATH):
+        return None
+    with open(ITINERARY_BASELINE_PATH) as f:
+        return json.load(f)
+
+
+def _write_itinerary_baseline(summary: dict) -> None:
+    os.makedirs(os.path.dirname(ITINERARY_BASELINE_PATH), exist_ok=True)
+    with open(ITINERARY_BASELINE_PATH, "w") as f:
+        json.dump(summary, f, indent=2, sort_keys=True)
+        f.write("\n")
+
+
+def _detect_itinerary_regression(current_summary: dict) -> bool:
+    """AA-353: current run's worst-day-ratio (per bucket) must not be LOWER (more compressed)
+    than the committed baseline file — AA-353's whole point is to IMPROVE this number, not just
+    hold it steady, per the issue's own explicit instruction. No baseline captured yet, or a
+    bucket that's empty in both runs (None vs None), is never a regression."""
+    baseline = _load_itinerary_baseline()
+    if baseline is None:
+        return False
+    for bucket in ("long", "other"):
+        cur = current_summary.get(f"{bucket}_worst_ratio")
+        base = baseline.get(f"{bucket}_worst_ratio")
+        if cur is None or base is None:
+            continue
+        if cur < base:
+            return True
+    return False
 
 
 async def run_s1_old_eval() -> dict:
@@ -124,9 +199,14 @@ async def run_s1_old_eval() -> dict:
             "failed_count": len(results) - len(scored),
             "per_tour": [
                 {"name": r.get("src_name"), "quality_score": r.get("quality_score"),
-                 "status": r.get("status")}
+                 "status": r.get("status"),
+                 "itinerary_day_count": len(r.get("itinerary_day_ratios") or [])}
                 for r in results
             ],
+            # AA-353: worst-day-ratio regression signal — see _itinerary_compression_summary and
+            # _detect_itinerary_regression (compared against ITINERARY_BASELINE_PATH, separate
+            # from this table's own prompt_version-based regression check above).
+            "itinerary_compression": _itinerary_compression_summary(results),
         },
     }
 
@@ -239,7 +319,8 @@ async def _write_eval_run(conn, result: dict, baseline, regression: bool, trigge
     )
 
 
-async def run_eval(pipeline: str, triggered_by: str = "manual") -> dict:
+async def run_eval(pipeline: str, triggered_by: str = "manual",
+                    capture_itinerary_baseline: bool = False) -> dict:
     pool = await asyncpg.create_pool(os.environ["DATABASE_URL"], min_size=1, max_size=2)
     try:
         if pipeline == "s1_old":
@@ -256,6 +337,17 @@ async def run_eval(pipeline: str, triggered_by: str = "manual") -> dict:
 
         result["baseline"] = dict(baseline) if baseline else None
         result["regression_detected"] = regression
+
+        # AA-353: separate from the prompt_version-keyed regression check above — a file-committed
+        # baseline (not a DB row), only meaningful for s1_old (only pipeline with itineraries).
+        if pipeline == "s1_old":
+            itin_summary = result["details"]["itinerary_compression"]
+            if capture_itinerary_baseline:
+                _write_itinerary_baseline(itin_summary)
+                result["itinerary_baseline_captured"] = True
+                result["itinerary_regression_detected"] = False
+            else:
+                result["itinerary_regression_detected"] = _detect_itinerary_regression(itin_summary)
         return result
     finally:
         await pool.close()
@@ -265,14 +357,25 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="AA-289 on-demand prompt regression eval gate")
     parser.add_argument("--pipeline", choices=["s1_old", "s1_from_atom", "both"], required=True)
     parser.add_argument("--triggered-by", default="manual")
+    parser.add_argument(
+        "--capture-itinerary-baseline", action="store_true",
+        help="AA-353: write this run's worst-day-ratio numbers as the new committed baseline "
+             "(eval/baselines/itinerary_compression_baseline.json) instead of comparing against "
+             "it. Only applies to --pipeline s1_old/both. Use for an intentional, reviewed "
+             "re-baseline — not routine runs.",
+    )
     args = parser.parse_args()
 
     pipelines = ["s1_old", "s1_from_atom"] if args.pipeline == "both" else [args.pipeline]
     any_regression = False
     for p in pipelines:
-        result = asyncio.run(run_eval(p, triggered_by=args.triggered_by))
+        result = asyncio.run(run_eval(
+            p, triggered_by=args.triggered_by,
+            capture_itinerary_baseline=args.capture_itinerary_baseline,
+        ))
         print(json.dumps(result, indent=2, default=str))
         any_regression = any_regression or result["regression_detected"]
+        any_regression = any_regression or result.get("itinerary_regression_detected", False)
 
     return 1 if any_regression else 0
 

@@ -5,12 +5,15 @@ is exercised against a real in-memory openpyxl workbook (same shape as the real 
 column-name drift in the fixture would actually be caught, not just mocked away.
 """
 import io
+import json
 from unittest.mock import MagicMock, patch
 
 import openpyxl
 
 from services.eval.regression import (
-    S1_OLD_REGRESSION_THRESHOLD, _detect_regression, _download_golden_tours,
+    S1_OLD_REGRESSION_THRESHOLD, _detect_regression, _detect_itinerary_regression,
+    _download_golden_tours, _itinerary_compression_summary, _load_itinerary_baseline,
+    _write_itinerary_baseline,
 )
 
 
@@ -148,3 +151,105 @@ def test_download_golden_tours_skips_blank_trailing_rows():
         tours = _download_golden_tours()
 
     assert len(tours) == 1
+
+
+# ── AA-353: _itinerary_compression_summary — bucketing + worst-ratio ────────
+
+def _tour_result(day_ratios):
+    return {"itinerary_day_ratios": day_ratios}
+
+
+def test_itinerary_compression_summary_buckets_by_day_count():
+    """A 10-day tour goes in "long" (>= ITINERARY_LONG_TOUR_DAY_THRESHOLD=9), a 3-day tour in
+    "other" — worst_ratio per bucket is the MIN ratio (most compressed), not an average."""
+    long_tour = _tour_result([{"ratio": r} for r in [0.9, 0.5, 1.1]] + [{"ratio": 0.8}] * 7)  # 10 days
+    other_tour = _tour_result([{"ratio": 0.95}, {"ratio": 1.05}, {"ratio": 0.85}])  # 3 days
+
+    summary = _itinerary_compression_summary([long_tour, other_tour])
+
+    assert summary["long_tour_count"] == 1
+    assert summary["long_worst_ratio"] == 0.5
+    assert summary["other_tour_count"] == 1
+    assert summary["other_worst_ratio"] == 0.85
+    assert summary["total_day_count"] == 13
+
+
+def test_itinerary_compression_summary_empty_bucket_is_none_not_zero():
+    """No long tour in the sample -> long_worst_ratio must be None, not 0 or 1.0 — a silent 0/1.0
+    would be misread as either total failure or perfect compliance."""
+    other_tour = _tour_result([{"ratio": 0.9}])
+    summary = _itinerary_compression_summary([other_tour])
+    assert summary["long_worst_ratio"] is None
+    assert summary["long_tour_count"] == 0
+
+
+def test_itinerary_compression_summary_nudge_rate():
+    tour = _tour_result([
+        {"ratio": 0.9, "nudged": False}, {"ratio": 0.3, "nudged": True},
+        {"ratio": 1.0, "nudged": False}, {"ratio": 0.2, "nudged": True},
+    ])
+    summary = _itinerary_compression_summary([tour])
+    assert summary["nudged_day_count"] == 2
+    assert summary["total_day_count"] == 4
+    assert summary["nudge_rate"] == 0.5
+
+
+def test_itinerary_compression_summary_ignores_tours_with_no_ratios():
+    """A tour whose itinerary wasn't the structured-array contract (empty itinerary_day_ratios,
+    e.g. legacy string fallback) must not be counted at all — not as a 0-day tour, not as a
+    spurious perfect-ratio tour."""
+    summary = _itinerary_compression_summary([_tour_result([]), {}])
+    assert summary["long_tour_count"] == 0
+    assert summary["other_tour_count"] == 0
+    assert summary["total_day_count"] == 0
+    assert summary["nudge_rate"] is None
+
+
+# ── AA-353: baseline file read/write/compare ─────────────────────────────────
+
+def test_write_then_load_itinerary_baseline_roundtrip(tmp_path):
+    baseline_path = tmp_path / "itinerary_compression_baseline.json"
+    summary = {"long_worst_ratio": 0.55, "other_worst_ratio": 0.7}
+
+    with patch("services.eval.regression.ITINERARY_BASELINE_PATH", str(baseline_path)):
+        _write_itinerary_baseline(summary)
+        loaded = _load_itinerary_baseline()
+
+    assert loaded == summary
+    assert json.loads(baseline_path.read_text()) == summary
+
+
+def test_load_itinerary_baseline_missing_file_returns_none(tmp_path):
+    missing_path = tmp_path / "does_not_exist.json"
+    with patch("services.eval.regression.ITINERARY_BASELINE_PATH", str(missing_path)):
+        assert _load_itinerary_baseline() is None
+
+
+def test_detect_itinerary_regression_no_baseline_never_flags(tmp_path):
+    missing_path = tmp_path / "does_not_exist.json"
+    with patch("services.eval.regression.ITINERARY_BASELINE_PATH", str(missing_path)):
+        assert _detect_itinerary_regression({"long_worst_ratio": 0.2}) is False
+
+
+def test_detect_itinerary_regression_worse_than_baseline_flags(tmp_path):
+    baseline_path = tmp_path / "b.json"
+    with patch("services.eval.regression.ITINERARY_BASELINE_PATH", str(baseline_path)):
+        _write_itinerary_baseline({"long_worst_ratio": 0.6, "other_worst_ratio": 0.7})
+        assert _detect_itinerary_regression({"long_worst_ratio": 0.5, "other_worst_ratio": 0.7}) is True
+
+
+def test_detect_itinerary_regression_improved_not_flagged(tmp_path):
+    baseline_path = tmp_path / "b.json"
+    with patch("services.eval.regression.ITINERARY_BASELINE_PATH", str(baseline_path)):
+        _write_itinerary_baseline({"long_worst_ratio": 0.4, "other_worst_ratio": 0.5})
+        assert _detect_itinerary_regression({"long_worst_ratio": 0.65, "other_worst_ratio": 0.7}) is False
+
+
+def test_detect_itinerary_regression_none_bucket_in_either_run_skipped(tmp_path):
+    """A bucket with no tours in EITHER the baseline or the current run (None vs None, or
+    None vs a real number) must not trip the regression check — e.g. the golden-20 fixture may
+    have zero "long" tours in a given run (AA-339's own caveat, see implementation notes)."""
+    baseline_path = tmp_path / "b.json"
+    with patch("services.eval.regression.ITINERARY_BASELINE_PATH", str(baseline_path)):
+        _write_itinerary_baseline({"long_worst_ratio": None, "other_worst_ratio": 0.7})
+        assert _detect_itinerary_regression({"long_worst_ratio": 0.1, "other_worst_ratio": 0.75}) is False
