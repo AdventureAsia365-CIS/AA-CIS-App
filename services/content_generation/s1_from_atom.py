@@ -112,6 +112,7 @@ def _row_to_atom(r) -> dict:
         "activity_type": r.get("activity_type"),
         "emotional_hook": r.get("emotional_hook"),
         "season_note": r.get("season_note"),
+        "itinerary_day": r.get("itinerary_day"),
     }
 
 
@@ -119,14 +120,19 @@ async def fetch_curated_atoms(tour_id: str, pool) -> list[dict]:
     """The curated set for a tour is NOT deleted AND NOT is_empty_marker (migration
     085) — the same filter admin_atoms.py's list/summary endpoints use. There is no
     separate "curated=true" column; `starred` is a weighting signal for the N6
-    allocator (services/acp_planning/allocator.py), not a membership filter here."""
+    allocator (services/acp_planning/allocator.py), not a membership filter here.
+
+    AA-355: itinerary_day (migration 093, AA-352) is now selected and used to
+    order/group the atom pack by day — NULLS LAST puts atoms decomposed before
+    migration 093 (or ones the model couldn't place) after every dated atom,
+    so they still land in the pack (never dropped) but outside any DAY group."""
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT atom_id, text, activity_type, emotional_hook, season_note
+            SELECT atom_id, text, activity_type, emotional_hook, season_note, itinerary_day
             FROM acp_contract.tour_atoms
             WHERE tour_id = $1::uuid AND NOT deleted AND NOT is_empty_marker
-            ORDER BY created_at
+            ORDER BY itinerary_day NULLS LAST, created_at
             """,
             tour_id,
         )
@@ -134,8 +140,25 @@ async def fetch_curated_atoms(tour_id: str, pool) -> list[dict]:
 
 
 def _build_atom_pack(atoms: list[dict]) -> str:
-    lines = []
+    """AA-355: atoms with a non-null itinerary_day are grouped under "DAY N"
+    headers (ascending) — this is the model's ONLY day-boundary signal, so the
+    number of DAY groups shown must equal the number of day-blocks the model
+    writes in aa_itineraries (see build_user_prompt). Atoms with itinerary_day
+    None (pre-migration-093 atoms, or ones the extractor couldn't place) are
+    listed under a separate UNDATED section — still available to cite for
+    aa_summary/aa_highlights, but explicitly not to be assigned an invented
+    day. A tour with zero dated atoms produces only the UNDATED section,
+    reproducing the pre-AA-355 flat/narrative behavior exactly."""
+    dated: dict[int, list[dict]] = {}
+    undated: list[dict] = []
     for a in atoms:
+        day = a.get("itinerary_day")
+        if day is None:
+            undated.append(a)
+        else:
+            dated.setdefault(day, []).append(a)
+
+    def _atom_line(a: dict) -> str:
         detail = f"[{a['atom_id']}] {a['text']}"
         extras = []
         if a.get("activity_type"):
@@ -146,13 +169,47 @@ def _build_atom_pack(atoms: list[dict]) -> str:
             extras.append(f"season={a['season_note']}")
         if extras:
             detail += f" ({', '.join(extras)})"
-        lines.append(detail)
-    return "\n".join(lines)
+        return detail
+
+    sections = []
+    for day in sorted(dated):
+        lines = "\n".join(_atom_line(a) for a in dated[day])
+        sections.append(f"DAY {day}:\n{lines}")
+    if undated:
+        lines = "\n".join(_atom_line(a) for a in undated)
+        sections.append(
+            "UNDATED (no source day identified for these — do not assign them to a day; "
+            f"use only for aa_summary/aa_highlights, never invent a day for them):\n{lines}"
+        )
+    return "\n\n".join(sections)
 
 
 def build_user_prompt(tour: dict, atoms: list[dict], feedback: str = "") -> str:
     atom_pack = _build_atom_pack(atoms)
     feedback_block = f"\n\nPREVIOUS ATTEMPT FEEDBACK — fix these before continuing:\n{feedback}" if feedback else ""
+
+    # AA-355: day-count instruction is derived straight from the DAY groups actually
+    # present in the atom pack (not a source-side day count the model has no way to
+    # verify) — the model's only obligation is internal consistency with what it was
+    # shown. Zero dated atoms (tour has no day-tagged atoms at all, e.g. pre-migration-093
+    # curation) falls back to the original undated instruction rather than claiming a
+    # day count of zero.
+    day_numbers = sorted({a["itinerary_day"] for a in atoms if a.get("itinerary_day") is not None})
+    if day_numbers:
+        day_instruction = (
+            f"The ATOM PACK below is grouped into {len(day_numbers)} DAY group(s) "
+            f"(DAY {min(day_numbers)} to DAY {max(day_numbers)}). aa_itineraries MUST contain exactly "
+            f"{len(day_numbers)} day-block(s), one per DAY group shown, in the same order — do not merge, "
+            "split, skip, or add day-blocks beyond what the DAY groups show. Atoms in the UNDATED section "
+            "(if present) are supplementary context only — never turn them into an extra day-block."
+        )
+    else:
+        day_instruction = (
+            "No atom in this pack carries a known source day — write aa_itineraries as day-by-day prose "
+            "inferred from atom order and content, without fabricating specific day numbers the atoms "
+            "don't support."
+        )
+
     return f"""Assemble a tour page for this trip using ONLY the atoms below.
 
 TOUR: {tour.get('name', '')}
@@ -161,6 +218,8 @@ COUNTRY: {tour.get('country', '')}
 ATOM PACK ({len(atoms)} atoms — the ONLY facts you may use):
 {atom_pack}
 {feedback_block}
+
+DAY STRUCTURE: {day_instruction}
 
 OUTPUT JSON FORMAT:
 {{
