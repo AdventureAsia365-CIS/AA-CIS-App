@@ -227,7 +227,11 @@ OUTPUT JSON FORMAT:
   "aa_subtitle": "Concrete subtitle built from atom content, with citation tag(s)",
   "aa_summary": "Editorial prose assembled from atoms, each concrete-claim sentence cited [R:atom_xxx]",
   "aa_highlights": ["Specific highlight built from one or more atoms, cited [R:atom_xxx]", "..."],
-  "aa_itineraries": "Day-by-day prose from atoms describing that day's activities, cited [R:atom_xxx] per claim"
+  "aa_itineraries": [
+    {{"day": "day number matching a DAY group above, or null if this pack has no DAY groups",
+     "title": "Short day title built from atom content",
+     "prose": "Prose describing that day's activities, cited [R:atom_xxx] per claim"}}
+  ]
 }}"""
 
 
@@ -341,11 +345,37 @@ DEFAULT_PERSONA = (
 
 # ── Grounding / density gate ─────────────────────────────────────────────────
 
+def _itinerary_prose_texts(val) -> list[str]:
+    """AA-356: aa_itineraries is a list of {day, title, prose} dicts (AA-355's
+    day-block format) or, as a fallback if the model doesn't comply, a flat
+    string (the pre-AA-355 shape). Either way, returns only the prose-bearing
+    text — `day` is structural metadata (which DAY group a block belongs to),
+    never a factual claim, and must never reach the citation/density/
+    entailment gates as if it were prose. This is the fix for AA-356: the day
+    number itself was being flattened into gated text and then flagged by
+    find_novel_numeric_claims() as an ungrounded number — grounding.py itself
+    (ADR-2026-033) is untouched, this only fixes what gets fed into it."""
+    if isinstance(val, list):
+        texts = []
+        for block in val:
+            if isinstance(block, dict):
+                if block.get("title"):
+                    texts.append(str(block["title"]))
+                if block.get("prose"):
+                    texts.append(str(block["prose"]))
+            elif block:
+                texts.append(str(block))
+        return texts
+    return [str(val)] if val else []
+
+
 def _flatten_gated_text(content: dict) -> str:
     parts = []
     for field in _GATED_FIELDS:
         val = content.get(field)
-        if isinstance(val, list):
+        if field == "aa_itineraries":
+            parts.extend(_itinerary_prose_texts(val))
+        elif isinstance(val, list):
             parts.extend(str(v) for v in val)
         elif val:
             parts.append(str(val))
@@ -363,7 +393,10 @@ def _entailment_violations(content: dict, atom_text_by_id: dict[str, str]) -> li
     violations = []
     for field in _GATED_FIELDS:
         val = content.get(field)
-        texts = val if isinstance(val, list) else [val] if val else []
+        if field == "aa_itineraries":
+            texts = _itinerary_prose_texts(val)
+        else:
+            texts = val if isinstance(val, list) else [val] if val else []
         for t in texts:
             for sent in _SENT_SPLIT_RE.split(str(t)):
                 tags = CITE_RE.findall(sent)

@@ -11,9 +11,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from services.content_generation.s1_from_atom import (
-    DEFAULT_PERSONA, GroundingError, _GROUNDING_SYSTEM_PROMPT, _build_atom_pack, _persona_block,
-    _row_to_atom, build_user_prompt, check_grounding, fetch_curated_atoms, generate_draft,
-    generate_s1_from_atom,
+    DEFAULT_PERSONA, GroundingError, _GROUNDING_SYSTEM_PROMPT, _build_atom_pack, _entailment_violations,
+    _flatten_gated_text, _itinerary_prose_texts, _persona_block, _row_to_atom, build_user_prompt,
+    check_grounding, fetch_curated_atoms, generate_draft, generate_s1_from_atom,
 )
 
 TOUR_ID = "11111111-1111-1111-1111-111111111111"
@@ -132,6 +132,106 @@ def test_check_grounding_entailment_checks_union_of_multiple_citations():
     assert gate["entailment_pass"] is True
 
 
+# ── AA-356: aa_itineraries day-block array — day is structural, not a claim ─
+
+def test_itinerary_prose_texts_extracts_title_and_prose_excludes_day():
+    val = [{"day": 1, "title": "Bolaven Plateau", "prose": "Cycle through the plateau."}]
+    texts = _itinerary_prose_texts(val)
+    assert texts == ["Bolaven Plateau", "Cycle through the plateau."]
+    assert not any("1" in t for t in texts)  # the bare day number never appears
+
+
+def test_itinerary_prose_texts_handles_multiple_day_blocks():
+    val = [
+        {"day": 1, "title": "Day one", "prose": "First day prose."},
+        {"day": 2, "title": "Day two", "prose": "Second day prose."},
+    ]
+    texts = _itinerary_prose_texts(val)
+    assert texts == ["Day one", "First day prose.", "Day two", "Second day prose."]
+
+
+def test_itinerary_prose_texts_falls_back_to_flat_string():
+    # Legacy shape / a model that ignores the array instruction — must not crash.
+    assert _itinerary_prose_texts("Flat day-by-day prose, no structure.") == \
+        ["Flat day-by-day prose, no structure."]
+
+
+def test_itinerary_prose_texts_empty_or_none_returns_empty_list():
+    assert _itinerary_prose_texts(None) == []
+    assert _itinerary_prose_texts("") == []
+    assert _itinerary_prose_texts([]) == []
+
+
+def test_flatten_gated_text_excludes_bare_day_number_from_itinerary_array():
+    content = {"aa_itineraries": [{"day": 3, "title": "T", "prose": "P."}]}
+    flat = _flatten_gated_text(content)
+    assert "3" not in flat  # the reported bug: day int leaking into gated text
+    assert "T" in flat and "P." in flat
+
+
+def test_check_grounding_does_not_flag_bare_day_number_as_novel_claim():
+    # Reproduces the exact AA-356 bug shape: aa_itineraries as day-block array,
+    # a cited sentence whose only "number" is the structural day field itself.
+    valid_ids = {"atom_x1"}
+    atom_text = {"atom_x1": "Cycle through the Bolaven Plateau to Paksong."}
+    content = {
+        "aa_itineraries": [
+            {"day": 1, "title": "Bolaven Plateau",
+             "prose": "The trip opens on the Bolaven Plateau [R:atom_x1]."},
+        ],
+    }
+    gate = check_grounding(content, valid_ids, atom_text)
+    assert gate["entailment_pass"] is True
+    assert gate["entailment_violations"] == []
+
+
+def test_check_grounding_still_catches_real_fabrication_inside_day_block_prose():
+    # Safety-net regression: a REAL fabricated number inside prose (not the day
+    # field) must still be caught — AA-356 must not weaken ADR-2026-033's
+    # actual fabrication detection, only stop it from misreading structure.
+    valid_ids = {"atom_x1"}
+    atom_text = {"atom_x1": "Visit a hillside temple."}
+    content = {
+        "aa_itineraries": [
+            {"day": 1, "title": "Hillside Temple",
+             "prose": "Visit the 800-year-old hillside temple [R:atom_x1]."},
+        ],
+    }
+    gate = check_grounding(content, valid_ids, atom_text)
+    assert gate["entailment_pass"] is False
+    assert gate["entailment_violations"][0]["novel_numbers"] == ["800"]
+
+
+def test_check_grounding_still_catches_real_fabrication_in_day_block_title():
+    # Entailment only examines CITED sentences (by design — uncited text isn't
+    # checked at all, since there's nothing to validate it against), so the
+    # fabricated number must sit in the same cited sentence as the tag.
+    valid_ids = {"atom_x1"}
+    atom_text = {"atom_x1": "Visit the waterfall."}
+    content = {
+        "aa_itineraries": [
+            {"day": 1, "title": "The 22-Meter Waterfall [R:atom_x1]",
+             "prose": "Visit the waterfall."},
+        ],
+    }
+    gate = check_grounding(content, valid_ids, atom_text)
+    assert gate["entailment_pass"] is False
+    assert "22" in gate["entailment_violations"][0]["novel_numbers"]
+
+
+def test_entailment_violations_direct_call_matches_check_grounding_behavior():
+    atom_text = {"atom_x1": "Visit a hillside temple."}
+    content = {
+        "aa_itineraries": [
+            {"day": 1, "title": "T", "prose": "The 800-year-old temple [R:atom_x1]."},
+        ],
+    }
+    violations = _entailment_violations(content, atom_text)
+    assert len(violations) == 1
+    assert violations[0]["field"] == "aa_itineraries"
+    assert violations[0]["novel_numbers"] == ["800"]
+
+
 # ── build_user_prompt: atom pack renders every atom, no raw-itinerary leakage ─
 
 def test_build_user_prompt_includes_all_atom_ids_and_no_feedback_block_by_default():
@@ -226,6 +326,16 @@ def test_build_user_prompt_states_exact_day_count_when_atoms_are_dated():
     prompt = build_user_prompt({"name": "Tour", "country": "Laos"}, atoms)
     assert "exactly 2 day-block(s)" in prompt
     assert "DAY 1 to DAY 2" in prompt
+
+
+def test_build_user_prompt_output_format_declares_day_block_array():
+    # AA-356: OUTPUT JSON FORMAT must describe the array-of-{day,title,prose}
+    # shape the model already produces once given day structure — not the
+    # old flat-string example that contradicted DAY STRUCTURE.
+    prompt = build_user_prompt({"name": "Delhi Tour", "country": "India"}, ATOMS)
+    assert '"day":' in prompt
+    assert '"title":' in prompt
+    assert '"prose":' in prompt
 
 
 def test_build_user_prompt_falls_back_to_undated_instruction_when_no_day_data():
