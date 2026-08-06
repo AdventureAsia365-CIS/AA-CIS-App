@@ -35,6 +35,8 @@ import asyncio
 import httpx
 import structlog
 
+from services.acp_produce.models import SERPProfile
+
 logger = structlog.get_logger()
 
 BASE = "https://api.dataforseo.com/v3"
@@ -166,3 +168,90 @@ async def parse_top_pages(login: str, password: str, keyword: str, market: str, 
             *[_crawl_and_parse_one(client, login, password, url, deadline) for url in urls]
         )
     return [r for r in results if r]
+
+
+# ---------------------------------------------------------------- C2 SERP profile (AA-369)
+#
+# A second, independent `serp/google/organic/live/advanced` call from
+# `_top_ranking_urls()`'s (P0-2, above) — deliberate, not an oversight: P0-2
+# is tested production code (test_aa298_dataforseo.py) and this function does
+# not touch it, to avoid risking a regression in already-verified behavior
+# for the sake of saving one cheap SERP call per slot (AA-298.md already
+# established DataForSEO cost is never the real blocker here). See AA-369.md
+# Tradeoffs.
+#
+# word_count_range is deliberately left unset (B13, tracked as AA-327) — see
+# services.acp_produce.models.SERPProfile docstring for why this function
+# does not fix it.
+
+def _parse_serp_items(items: list[dict], keyword: str, market: str,
+                       competitor_domains: list[str] | None = None) -> SERPProfile:
+    """Pure parse, no I/O — ported from aamc/dataforseo.py::serp_read()'s item
+    classification (commercial vs. informational title heuristics), minus
+    the file-cache/requests plumbing that module doesn't need here."""
+    prof = SERPProfile(keyword=keyword, location=market)
+    domains: list[str] = []
+    paa: list[str] = []
+    related: list[str] = []
+    commercial_hits = 0
+    info_hits = 0
+
+    for it in items:
+        t = it.get("type")
+        if t == "organic":
+            dom = it.get("domain", "")
+            domains.append(dom)
+            title = (it.get("title") or "").lower()
+            if any(w in title for w in ("tour", "price", "book", "package", "deal")):
+                commercial_hits += 1
+            if any(w in title for w in ("guide", "how", "what", "best time", "tips")):
+                info_hits += 1
+        elif t == "people_also_ask":
+            for q in it.get("items", []) or []:
+                if q.get("title"):
+                    paa.append(q["title"])
+        elif t == "related_searches":
+            related.extend(it.get("items", []) or [])
+
+    prof.top10_domains = domains[:10]
+    prof.paa_questions = paa
+    prof.related_searches = [r for r in related if isinstance(r, str)][:10]
+    if competitor_domains:
+        prof.competitor_present = any(any(c in d for c in competitor_domains) for d in domains)
+    if commercial_hits > info_hits + 1:
+        prof.intent_verdict = "commercial"
+    elif info_hits > commercial_hits + 1:
+        prof.intent_verdict = "informational"
+    elif domains:
+        prof.intent_verdict = "mixed"
+    prof.confidence = "dfs"
+    return prof
+
+
+async def fetch_serp_profile(
+    login: str, password: str, keyword: str, market: str,
+    competitor_domains: list[str] | None = None,
+) -> SERPProfile:
+    """C2. Offline/no-credentials, unsupported market, or API failure all
+    degrade to a heuristic (everything-unknown) SERPProfile — never a
+    fabricated one (same truth-domain rule as KeywordRecord, P0-2 doc)."""
+    prof = SERPProfile(keyword=keyword, location=market)
+    if not (login and password):
+        return prof
+    loc = LOCATION_CODES.get(market.upper())
+    if not loc:
+        return prof
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                f"{BASE}/serp/google/organic/live/advanced",
+                auth=(login, password),
+                json=[{"keyword": keyword, "location_code": loc, "language_code": "en", "depth": 10}],
+                timeout=30,
+            )
+            r.raise_for_status()
+            items = r.json()["tasks"][0]["result"][0]["items"] or []
+    except (httpx.HTTPError, KeyError, IndexError, TypeError) as e:
+        logger.warning("fetch_serp_profile_failed", keyword=keyword, error=str(e))
+        return prof
+    return _parse_serp_items(items, keyword, market, competitor_domains)
