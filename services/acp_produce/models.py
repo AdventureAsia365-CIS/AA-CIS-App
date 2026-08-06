@@ -34,13 +34,29 @@ class GateResult(BaseModel):
     violations: list[str] = Field(default_factory=list)
 
 
+class FAQItem(BaseModel):
+    """E4 output (AA-371) — one answered FAQ pair. `question`/`source_id` are
+    carried through from `FAQCandidate` (AA-369) verbatim, never
+    model-invented; `answer` is the one LLM-written part."""
+    question: str
+    answer: str
+    source_id: str
+
+
 class Piece(BaseModel):
     piece_id: str
     body_tagged: str
+    channel: Literal["blog", "facebook", "tiktok"] = "blog"
     status: str = "in_progress"  # in_progress | passed | held
     gate_ledger: list[GateResult] = Field(default_factory=list)
     repair_count: int = 0
     held_reason: Optional[str] = None
+    # E4 (AA-371) output — Pydantic-only, deliberately NOT a DB column
+    # (acp_deliver.pieces has no slot for either; body_tagged already carries
+    # the human-readable rendering, these are computed sidecars for whatever
+    # future export/publish path needs structured Q/A or schema.org markup).
+    faq_items: list[FAQItem] = Field(default_factory=list)
+    faq_jsonld: Optional[dict] = None
 
 
 # ---------------------------------------------------------------- AA-369 C1/C2/C3
