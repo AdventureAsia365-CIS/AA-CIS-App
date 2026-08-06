@@ -105,3 +105,16 @@ class Brief(BaseModel):
     cta_target: str
     language: str = "en"
     internal_links: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------- AA-370 E1 outline
+
+class OutlineSection(BaseModel):
+    """E1 output. One per `Brief.required_h2s` entry — `atom_ids` is read
+    straight off `Brief.atoms_by_section[title]` (empty list if that section
+    picked up no atoms; AA-370 STEP 0 flagged a pre-existing AA-369 overflow
+    quirk where atoms beyond `len(required_h2s)` all land on the LAST
+    section instead of being spread out — left as-is here, see AA-370.md)."""
+    title: str
+    atom_ids: list[str] = Field(default_factory=list)
+    goal: str
