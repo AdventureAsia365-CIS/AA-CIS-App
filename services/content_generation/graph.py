@@ -13,71 +13,15 @@ from .brand_audit_node import brand_audit_node
 from .flag_fix_node import flag_fix_node
 from .judge_node import judge_node
 from .seo_meta_utils import SEO_META_MIN, SEO_META_MAX, meta_complete_sentence, SEO_META_FORBIDDEN
+from .itinerary_utils import (
+    ITINERARY_CLAMP_MIN, ITINERARY_CLAMP_MAX, nudge_itinerary_day,
+    generated_day_word_counts,
+)
 
 logger = structlog.get_logger()
 
 MAX_RETRIES = 3
 MIN_QUALITY = 7.0
-
-# AA-353: hard clamp on actual/source word-count ratio per day, checked AFTER the model returns
-# its structured itineraries array (the prompt's own 0.7x-1.3x guidance is a softer target the
-# model aims for; this is the line that triggers a real fix).
-ITINERARY_CLAMP_MIN = 0.6
-ITINERARY_CLAMP_MAX = 1.5
-
-_ITINERARY_NUDGE_SYSTEM_PROMPT = """You are a travel content editor for Adventure Asia, fixing the
-LENGTH of ONE day of a tour itinerary that was written too short or too long relative to its
-source detail. Rewrite ONLY this one day, in the same brand voice (calm, factual, editorial — not
-salesy, not generic).
-
-Rules that still apply:
-- The day title MUST name the place and/or the primary activity — never generic
-  ("Free Day", "Arrival Day", "Departure", "Transfer", "Exploration").
-- Preserve all factual details (named places, activities) from the source day below.
-- Do not invent activities not present in the source day.
-- NEVER invent meal names (breakfast, lunch, dinner) or clock-times unless they appear
-  explicitly in the source day.
-
-Return JSON ONLY, no markdown, no preamble: {"title": "...", "body": "..."}"""
-
-
-def _nudge_itinerary_day(client: LLMClient, source_day_text: str, current_title: str,
-                          current_body: str, target_word_count: int):
-    """AA-353: single targeted rewrite of one day that clamped outside [ITINERARY_CLAMP_MIN,
-    ITINERARY_CLAMP_MAX] of its source word count. Exactly one attempt — the caller does not
-    retry this, even if the result is still outside clamp (flagged instead, see generate_node).
-    """
-    user_prompt = f"""SOURCE (this day only, from the original tour itinerary):
-{source_day_text}
-
-CURRENT DRAFT (too short or too long relative to the source above):
-Title: {current_title}
-Body: {current_body}
-
-TARGET LENGTH: approximately {target_word_count} words for the body.
-
-Rewrite this one day's title and body to hit the target length while staying factual and
-on-brand."""
-    request = LLMRequest(
-        system_prompt=_ITINERARY_NUDGE_SYSTEM_PROMPT,
-        user_prompt=user_prompt,
-        model_tier="haiku",
-    )
-    resp = client.generate(request)
-    raw = resp.content.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-        raw = raw.strip()
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        salvaged = repair_json(raw, return_objects=True)
-        parsed = salvaged if isinstance(salvaged, dict) else {}
-    new_title = parsed.get("title") or current_title
-    new_body = parsed.get("body") or current_body
-    return new_title, new_body, resp
 
 
 def _process_itineraries(generated: dict, tour: dict, client: LLMClient) -> dict:
@@ -140,7 +84,7 @@ def _process_itineraries(generated: dict, tour: dict, client: LLMClient) -> dict
             ratio = actual_words / source_words
             record["ratio"] = round(ratio, 3)
             if ratio < ITINERARY_CLAMP_MIN or ratio > ITINERARY_CLAMP_MAX:
-                new_title, new_body, resp = _nudge_itinerary_day(
+                new_title, new_body, resp = nudge_itinerary_day(
                     client, source_text or itineraries_raw, title, body, source_words,
                 )
                 extra_cost += resp.cost_usd
@@ -254,6 +198,14 @@ _FAILURE_MAP: dict[str, tuple[str, float]] = {
     "META_TOO_SHORT":            ("seo",       0.5),
     "ITINERARY_STRUCTURE_WEAK":  ("structure", 1.0),
     "DFS_INTENT_UNDERUSED":      ("seo",       1.0),
+    # AA-329a: source day dropped entirely from the output — same deduction as
+    # ITINERARY_STRUCTURE_WEAK (task explicitly said not to invent a new number).
+    "ITINERARY_DAY_COUNT_MISMATCH": ("structure", 1.0),
+    # AA-329c: AA-353's own one-shot nudge already ran and the day is STILL outside clamp —
+    # heavier than the other structure codes since content this far off is reaching gold today
+    # (still confirmed to never alone drop quality_score below MIN_QUALITY — see AA-329
+    # implementation notes — so it can't divert the run away from flag_fix_node).
+    "ITINERARY_STILL_COMPRESSED":   ("structure", 1.5),
 }
 
 # AA-240: canonical validate-node forbidden list (single source; validate_node + review-queue
@@ -274,6 +226,8 @@ _CODE_FIELD_MAP = {
     "HIGHLIGHTS_TOO_FEW":        "aa_highlights",
     "HIGHLIGHTS_TOO_GENERIC":    "aa_highlights",
     "ITINERARY_STRUCTURE_WEAK":  "aa_itineraries",
+    "ITINERARY_DAY_COUNT_MISMATCH": "aa_itineraries",
+    "ITINERARY_STILL_COMPRESSED":   "aa_itineraries",
     "SEO_TITLE_TOO_LONG":        "seo_title",
     "SEO_META_TOO_LONG":         "seo_meta",
     "META_TOO_SHORT":            "seo_meta",
@@ -651,6 +605,51 @@ def validate_node(state: ContentState) -> ContentState:
         issues.append("Itinerary lacks day structure or is too short")
         fired.append("ITINERARY_STRUCTURE_WEAK")
         score -= 1.0
+
+    # AA-329(a)/(c): compare against the SOURCE itinerary's own day markers/lengths, computed
+    # FRESH every call (not from state["itinerary_day_ratios"], which only reflects generate_node's
+    # one-shot AA-353 nudge and would go stale once flag_fix_node repairs a day — see AA-329
+    # implementation notes). Skipped entirely when the source has no reliable day markers
+    # (parse_source_day_word_counts fell back to an even split) — nothing trustworthy to compare.
+    _src_raw = tour.get('itineraries') or tour.get('itinerary') or ""
+    _src_parsed = parse_source_day_word_counts(_src_raw, tour.get('duration'))
+    if not _src_parsed["used_fallback"]:
+        _source_day_words = _src_parsed["day_word_counts"]
+        _source_days = set(_source_day_words)
+        _generated_day_words = generated_day_word_counts(itinerary)
+        _generated_days = set(_generated_day_words)
+
+        # AA-329a: whole days present in the source but absent from the output.
+        _missing_days = sorted(_source_days - _generated_days)
+        if _missing_days:
+            issues.append(
+                f"Itinerary missing {len(_missing_days)} day(s) vs source "
+                f"({len(_source_days)} source days -> {len(_generated_days)} output days): "
+                f"day {'/'.join(str(d) for d in _missing_days)}"
+            )
+            fired.append("ITINERARY_DAY_COUNT_MISMATCH")
+            score -= 1.0
+
+        # AA-329c: days present in both, but the output is still outside the AA-353 clamp
+        # relative to its own source day — i.e. generate_node's one-shot nudge (_process_itineraries)
+        # already ran on this content and didn't bring the day back in range.
+        _still_compressed = []
+        for _day in sorted(_source_days & _generated_days):
+            _src_words = _source_day_words[_day]
+            _gen_words = _generated_day_words[_day]
+            if not _src_words:
+                continue
+            _ratio = _gen_words / _src_words
+            if not (ITINERARY_CLAMP_MIN <= _ratio <= ITINERARY_CLAMP_MAX):
+                _still_compressed.append((_day, _gen_words, _src_words, round(_ratio, 3)))
+        if _still_compressed:
+            _detail = "; ".join(
+                f"day {d}: {gw} words vs source {sw} words (ratio {r})"
+                for d, gw, sw, r in _still_compressed
+            )
+            issues.append(f"Itinerary still compressed/expanded vs source after nudge — {_detail}")
+            fired.append("ITINERARY_STILL_COMPRESSED")
+            score -= 1.5
 
     # DFS_INTENT_UNDERUSED: if SEO keywords exist, at least one should appear in title+meta
     # B1: handle both flat {"top_keywords": [...]} and nested {"keywords": {"top_keywords": [...]}}

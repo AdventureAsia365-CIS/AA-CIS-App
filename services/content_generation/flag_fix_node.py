@@ -12,6 +12,11 @@ from shared.secrets import get_database_url
 from shared.llm_client.client import LLMClient
 from shared.llm_client.models import LLMRequest
 from .seo_meta_utils import (best_meta_candidate, meta_in_band, SEO_META_FORBIDDEN, SEO_META_MIN, SEO_META_MAX)
+from .prompts import parse_source_day_word_counts
+from .itinerary_utils import (
+    ITINERARY_CLAMP_MIN, ITINERARY_CLAMP_MAX, nudge_itinerary_day,
+    parse_canonical_itinerary_days, serialize_itinerary_days,
+)
 
 logger = structlog.get_logger()
 
@@ -31,6 +36,8 @@ STAGE2_FIX_MAPPING = {
     "ITINERARY_STRUCTURE_WEAK":     "itineraries",
     "ITINERARY_MEAL_TIME_INVENTED": "itineraries",
     "ITINERARY_DAY_TITLE_GENERIC":  "itineraries",
+    "ITINERARY_STILL_COMPRESSED":   "itineraries",  # AA-329c: dedicated per-day repair, see below
+
     "SEO_TITLE_WEAK":               "seo_title",
     "SEO_TITLE_WRONG_ACTIVITY":     "seo_title",
     "META_INCOMPLETE_SENTENCE":     "seo_meta",
@@ -46,9 +53,12 @@ STAGE2_FIX_MAPPING = {
 
 # AA-204: deterministic SEO length/sentence codes raised by validate_node. These must drive a
 # repair pass independently of the (non-deterministic) brand_audit "flagged" status.
+# AA-329c: ITINERARY_STILL_COMPRESSED added here too — same reasoning (deterministic, validate_node-
+# raised, must force a fix pass regardless of what the LLM brand audit thinks of the content).
 _DETERMINISTIC_SEO_CODES = {
     "SEO_META_TOO_LONG", "META_TOO_SHORT", "META_INCOMPLETE_SENTENCE",
     "BRAND_SEO_META_VIOLATION",  # AA-238: forbidden meta forces a repair pass
+    "ITINERARY_STILL_COMPRESSED",  # AA-329c
 }
 
 
@@ -124,6 +134,67 @@ def _rerepair_meta(post: str, tour: dict, content: dict, model_tier: str, intent
         return post
 
 
+def _repair_still_compressed_days(state: dict, itinerary_text: str):
+    """AA-329c: dedicated per-day repair for ITINERARY_STILL_COMPRESSED — reuses AA-353's own
+    nudge_itinerary_day with the correct target_word_count per violating day, instead of routing
+    "itineraries" through the generic FIX_SYSTEM prompt below (which has no idea what any day's
+    target length is). One extra attempt per violating day (same single-shot budget AA-353 already
+    uses for its own nudge). Deterministic accept/reject guard, mirrors seo_meta's
+    best_meta_candidate/meta_in_band: a day is only overwritten if the new attempt actually lands
+    in [ITINERARY_CLAMP_MIN, ITINERARY_CLAMP_MAX] — otherwise the pre-fix day is kept untouched
+    rather than being overwritten with something no better (or worse).
+
+    Returns (new_itinerary_text, extra_cost_usd, applied: bool). applied=False when there was
+    nothing to repair (no still-violating day, or a violating day couldn't be matched back to
+    source text) — new_itinerary_text is the unchanged input in that case.
+    """
+    days = parse_canonical_itinerary_days(itinerary_text)
+    if not days:
+        return itinerary_text, 0.0, False
+
+    tour = state.get("tour", {})
+    itineraries_raw = tour.get("itineraries") or tour.get("itinerary") or ""
+    source = parse_source_day_word_counts(itineraries_raw, tour.get("duration"))
+    source_words_by_day = source["day_word_counts"]
+    source_text_by_day = source["day_text"]
+
+    still_violating = []
+    for day_num, day in days.items():
+        src_words = source_words_by_day.get(day_num)
+        if not src_words:
+            continue
+        ratio = len(day["body"].split()) / src_words
+        if not (ITINERARY_CLAMP_MIN <= ratio <= ITINERARY_CLAMP_MAX):
+            still_violating.append(day_num)
+
+    if not still_violating:
+        return itinerary_text, 0.0, False
+
+    client = LLMClient()
+    extra_cost = 0.0
+    applied = False
+    for day_num in sorted(still_violating):
+        target_words = source_words_by_day.get(day_num)
+        source_text = source_text_by_day.get(day_num)
+        if not target_words or not source_text:
+            continue
+        new_title, new_body, resp = nudge_itinerary_day(
+            client, source_text, days[day_num]["title"], days[day_num]["body"], target_words,
+        )
+        extra_cost += resp.cost_usd
+        new_ratio = len(new_body.split()) / target_words
+        if ITINERARY_CLAMP_MIN <= new_ratio <= ITINERARY_CLAMP_MAX:
+            days[day_num] = {"title": new_title, "body": new_body}
+            applied = True
+            logger.info("itinerary_day_repaired", day=day_num, new_ratio=round(new_ratio, 3))
+        else:
+            logger.warning("itinerary_day_repair_still_out_of_clamp", day=day_num,
+                            new_ratio=round(new_ratio, 3))
+    if not applied:
+        return itinerary_text, extra_cost, False
+    return serialize_itinerary_days(days), extra_cost, True
+
+
 def flag_fix_node(state: dict) -> dict:
     """AA-134: Fix only the flagged fields identified by brand_audit_node."""
     # AA-204: run if brand-flagged OR a deterministic SEO length/sentence code fired.
@@ -145,7 +216,44 @@ def flag_fix_node(state: dict) -> dict:
                 "fix_pass_fields":  [],
             }
 
-        current_content = state.get("generated", {})
+        current_content = dict(state.get("generated", {}))
+        extra_cost = 0.0
+        applied_fields: set = set()
+
+        # AA-329c: ITINERARY_STILL_COMPRESSED gets the dedicated per-day repair above instead of
+        # the generic FIX_SYSTEM prompt below — pull "itineraries" out of fix_keys so the generic
+        # call (if still needed for other fields) doesn't also try to rewrite it in the same pass.
+        if "ITINERARY_STILL_COMPRESSED" in (state.get("failure_codes") or []) and "itineraries" in fix_keys:
+            fix_keys = fix_keys - {"itineraries"}
+            new_itinerary, itin_cost, itin_applied = _repair_still_compressed_days(
+                state, current_content.get("itineraries", ""),
+            )
+            extra_cost += itin_cost
+            if itin_applied:
+                current_content["itineraries"] = new_itinerary
+                applied_fields.add("itineraries")
+
+        if not fix_keys:
+            # Nothing left for the generic FIX_SYSTEM pass — either the itinerary repair above was
+            # the only thing needed, or it ran and found nothing to change.
+            if not applied_fields:
+                return {
+                    **state,
+                    "fix_pass_applied": False,
+                    "fix_pass_fields":  [],
+                }
+            logger.info("flag_fix_done", fixed_keys=sorted(applied_fields), cost=extra_cost)
+            lessons = state.get("lessons_extracted", [])
+            if lessons:
+                _write_lessons_safe(lessons, state)
+            return {
+                **state,
+                "generated":        current_content,
+                "cost_usd":         state.get("cost_usd", 0) + extra_cost,
+                "fix_pass_applied": True,
+                "fix_pass_fields":  sorted(applied_fields),
+            }
+
         issues_text = "\n".join(state.get("brand_audit_issues", []))
         fields_display = "\n".join(
             f"- {k}: {json.dumps(current_content.get(k))}"
@@ -247,12 +355,13 @@ Keep all other fields unchanged."""
         if lessons:
             _write_lessons_safe(lessons, state)
 
+        applied_fields |= fix_keys
         return {
             **state,
             "generated":       new_generated,
-            "cost_usd":        state.get("cost_usd", 0) + resp.cost_usd,
+            "cost_usd":        state.get("cost_usd", 0) + resp.cost_usd + extra_cost,
             "fix_pass_applied": True,
-            "fix_pass_fields":  list(fix_keys),
+            "fix_pass_fields":  sorted(applied_fields),
             # AA-226: meta unrecoverable below floor -> force HITL; revalidate keeps this
             # as manual_check (passed=False) so the export gate blocks it from gold.
             **({"brand_audit_status": "manual_check"} if _meta_floor_failed else {}),
