@@ -25,6 +25,20 @@ Fixes applied during the port (see docs/implementation-notes/AA-301.md):
        AA-251) fed with the atom's own activity_type + the trip's
        destination — see make_slot() for the coverage/tradeoff notes.
 
+  AA-377 — slot_id was uuid.uuid4().hex[:10], a fresh id every allocate_month() call, so
+       persisting a slot or retrying an allocation always produced a NEW row instead of
+       resuming the one already there. make_slot() now derives slot_id deterministically
+       from (tenant_id, week, trip_id, channel) via _deterministic_slot_id() — see that
+       function's docstring. reactive_hold slots (no trip_id) keep a random id (see AA-377.md
+       Tradeoffs — nothing meaningful to key on, and de-duplicating them isn't the bug this
+       fixes).
+  AA-378 — allocate_month()'s in-memory SlotGrid now has a real persistence layer:
+       create_weekly_produce_run()/persist_slot_grid()/fetch_due_slots()/mark_slot_status()/
+       allocate_and_persist_week() (bottom of this file) write to the new
+       acp_shared.acp_v2_runs/acp_v2_slots tables (migration 096) instead of the S1-S4
+       acp_shared.acp_runs table — see docs/implementation-notes/AA-377.md for why a
+       separate table.
+
 Also implements (not bug fixes, new requirements):
   - Atom floor (AA-300): a trip+channel whose live atom pool cannot cover
     its planned slots without repeating gets its slots dropped (not
@@ -43,6 +57,8 @@ Also implements (not bug fixes, new requirements):
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from datetime import date
 from typing import Optional
@@ -53,6 +69,18 @@ from services.seo_intelligence.seed_builder import build_seed
 from .constants import FRAMEWORK_TABLE, SLOT_MIX
 from .models import (AtomRecord, QuarterPlan, QuarterPlanNotApprovedError,
                      RunwayMap, Slot, SlotGrid, Trip)
+
+
+def _deterministic_slot_id(tenant_id: UUID, week: int, trip_id: Optional[UUID], channel: str) -> str:
+    """AA-377 fix — was uuid.uuid4().hex[:10] (a new id every allocate_month() call, so
+    persisting or retrying a slot always produced a fresh row instead of resuming the same
+    one). Hashes the 4 fields that actually identify 'this slot' within one weekly allocation:
+    re-allocating the same (tenant, week, trip, channel) now always yields the same slot_id,
+    which is what makes persist_slot_grid()'s `ON CONFLICT (slot_id) DO NOTHING` an idempotent
+    no-op on retry instead of a duplicate row / duplicate content. Not used for reactive_hold
+    slots (trip_id is always None there) — see module docstring / AA-377.md Tradeoffs."""
+    raw = f"{tenant_id}|{week}|{trip_id}|{channel}"
+    return f"slot_{hashlib.sha256(raw.encode()).hexdigest()[:20]}"
 
 
 def _add_note(notes: list[str], message: str) -> None:
@@ -182,7 +210,7 @@ def compute_slot_grid(
             tour_name=t.name,
         ) or None
         return Slot(
-            slot_id=f"slot_{uuid.uuid4().hex[:10]}", week=week, channel=channel, kind=kind,
+            slot_id=_deterministic_slot_id(tenant_id, week, trip_id, channel), week=week, channel=channel, kind=kind,
             trip_id=trip_id, atom_ids=[a.atom_id for a in chosen],
             funnel_stage=stage, framework=fw, cta_target=cta,
             topic_hint=top_atom.text[:80],
@@ -260,4 +288,127 @@ async def allocate_month_from_db(
     )
 
 
-__all__ = ["compute_slot_grid", "allocate_month", "allocate_month_from_db"]
+def _row_to_slot(payload) -> Slot:
+    data = json.loads(payload) if isinstance(payload, str) else payload
+    return Slot(**data)
+
+
+async def create_weekly_produce_run(pool, tenant_id: str, year: int, week: int) -> str:
+    """AA-378 — creates (or reuses) the N7 weekly acp_shared.acp_v2_runs row for
+    (tenant_id, year, week). `week` is the SlotGrid's own week-of-month numbering (1-4, see
+    compute_slot_grid()'s `weeks = [1, 2, 3, 4]`), not an ISO week. Calling this twice for the
+    same (tenant, year, week) returns the SAME run_id (ON CONFLICT DO NOTHING + re-select) — a
+    retry of whatever eventually triggers this weekly must resume the same run, never fork a
+    second one silently."""
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                INSERT INTO acp_shared.acp_v2_runs (tenant_id, year, week)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (tenant_id, year, week) DO NOTHING
+                """,
+                tenant_id, year, week,
+            )
+            run_id = await conn.fetchval(
+                """
+                SELECT run_id FROM acp_shared.acp_v2_runs
+                WHERE tenant_id = $1 AND year = $2 AND week = $3
+                """,
+                tenant_id, year, week,
+            )
+    return str(run_id)
+
+
+async def persist_slot_grid(pool, run_id: str, tenant_id: str, week: int, slot_grid: SlotGrid) -> list[Slot]:
+    """AA-377 — writes every non-reactive_hold slot in `slot_grid` whose `Slot.week == week`
+    into acp_shared.acp_v2_slots, status='due'. reactive_hold slots are never persisted (see
+    module docstring / AA-377.md Tradeoffs — they carry no trip_id to key a deterministic id
+    on, and de-duplicating empty placeholders isn't the bug AA-377 names). `ON CONFLICT
+    (slot_id) DO NOTHING` — re-running allocation for a slot that's already persisted is a
+    no-op, not a duplicate. Returns the Slot objects in scope for this week (whether newly
+    inserted or already existing), same shape fetch_due_slots() returns, so a caller doesn't
+    need a second read to get them."""
+    candidates = [s for s in slot_grid.slots if s.kind != "reactive_hold" and s.week == week]
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for s in candidates:
+                await conn.execute(
+                    """
+                    INSERT INTO acp_shared.acp_v2_slots
+                        (slot_id, run_id, tenant_id, week, channel, kind, tour_id, payload)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+                    ON CONFLICT (slot_id) DO NOTHING
+                    """,
+                    s.slot_id, run_id, tenant_id, week, s.channel, s.kind,
+                    str(s.trip_id) if s.trip_id else None,
+                    json.dumps(s.model_dump(mode="json")),
+                )
+    return candidates
+
+
+async def fetch_due_slots(pool, run_id: str) -> list[Slot]:
+    """AA-377 — reads back status='due' acp_shared.acp_v2_slots rows for `run_id`,
+    reconstructed as real Slot objects from the `payload` JSONB snapshot persist_slot_grid()
+    wrote — lets a caller (slot_runner.py) get real Slots for a run without ever re-calling
+    allocate_month()."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT payload FROM acp_shared.acp_v2_slots
+            WHERE run_id = $1 AND status = 'due'
+            ORDER BY due_at
+            """,
+            run_id,
+        )
+    return [_row_to_slot(r["payload"]) for r in rows]
+
+
+async def mark_slot_status(pool, slot_id: str, status: str, reason: Optional[str] = None) -> None:
+    """AA-377 — flips a persisted slot's status. 'produced' sets produced_at; 'skipped' sets
+    skipped_reason (`reason` is ignored for any other status). Raises ValueError on an
+    unrecognized status rather than silently writing a value the table's own CHECK constraint
+    would reject anyway with a less useful error. Not called by slot_runner.py itself in this
+    issue — see docs/implementation-notes/AA-377.md "Not done"."""
+    if status not in ("due", "produced", "skipped"):
+        raise ValueError(f"mark_slot_status: unrecognized status {status!r}")
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE acp_shared.acp_v2_slots
+            SET status = $2,
+                produced_at = CASE WHEN $2 = 'produced' THEN now() ELSE produced_at END,
+                skipped_reason = CASE WHEN $2 = 'skipped' THEN $3 ELSE skipped_reason END,
+                updated_at = now()
+            WHERE slot_id = $1
+            """,
+            slot_id, status, reason,
+        )
+
+
+async def allocate_and_persist_week(
+    tenant_id: UUID, year: int, month: int, week: int, channels: list[str],
+    capacity_posts_per_week: int, quarter_plan: QuarterPlan, runway: RunwayMap,
+    primary_market: str, pool,
+) -> tuple[str, list[Slot]]:
+    """AA-377 + AA-378 combined flow: create/reuse this week's acp_v2_runs row -> run the
+    existing, unmodified allocate_month() for `month` -> persist only this week's slice
+    (`Slot.week == week`) into acp_v2_slots -> return (run_id, due_slots). This is the
+    function a future weekly trigger (explicitly NOT built in this issue — no router, no
+    cron/EventBridge, see AA-377.md) would call. allocate_month() itself is untouched — still
+    computes the whole month's grid; this is the new layer on top that persists one week's
+    slice of it under a stable run_id."""
+    run_id = await create_weekly_produce_run(pool, str(tenant_id), year, week)
+    slot_grid = await allocate_month(
+        tenant_id, year, month, channels, capacity_posts_per_week, quarter_plan, runway,
+        primary_market, pool,
+    )
+    slots = await persist_slot_grid(pool, run_id, str(tenant_id), week, slot_grid)
+    return run_id, slots
+
+
+__all__ = [
+    "compute_slot_grid", "allocate_month", "allocate_month_from_db",
+    "create_weekly_produce_run", "persist_slot_grid", "fetch_due_slots",
+    "mark_slot_status", "allocate_and_persist_week",
+]
