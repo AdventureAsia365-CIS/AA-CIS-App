@@ -149,3 +149,62 @@ def test_run_gates_on_real_fabrication_tour_then_repairs_it():
 
     assert result.status == "passed"
     assert result.repair_count == 1
+
+
+# ── run_gates: AA-376 is_repairable filter + repair_fn failure safety net ──
+
+def _fake_gate_always_fails(gate_name: str):
+    def _gate(body: str) -> GateResult:
+        return GateResult(gate=gate_name, passed=False, violations=[f"{gate_name} always fails"])
+    return _gate
+
+
+def test_run_gates_is_repairable_false_holds_immediately_without_calling_repair_fn():
+    """AA-376: a caller-supplied `is_repairable` predicate can veto repair
+    entirely for a given failure (e.g. pipeline.py's F6 external-state
+    filter) — must hold on round 1, repair_fn never called, repair_count
+    stays 0."""
+    piece = Piece(piece_id="p4", body_tagged="anything")
+    repair_fn = MagicMock()
+
+    result = run_gates(
+        piece, [_fake_gate_always_fails("F6_route_to_sellable")], repair_fn,
+        max_repairs=3, is_repairable=lambda r: False,
+    )
+
+    assert result.status == "held"
+    assert result.repair_count == 0
+    repair_fn.assert_not_called()
+
+
+def test_run_gates_is_repairable_only_vetoes_the_matched_gate():
+    """A predicate that only vetoes one specific gate must still allow normal
+    repair for every other gate."""
+    piece = Piece(piece_id="p5", body_tagged="no markers at all")
+    repair_fn = MagicMock(return_value="GROUNDED now")
+
+    result = run_gates(
+        piece, [_fake_gate_f1_grounded_marker], repair_fn, max_repairs=3,
+        is_repairable=lambda r: r.gate != "F6_route_to_sellable",
+    )
+
+    assert result.status == "passed"
+    repair_fn.assert_called_once()
+
+
+def test_run_gates_repair_fn_exception_holds_without_incrementing_repair_count():
+    """AA-376: if repair_fn itself raises (e.g. RepairFailed after exhausted
+    Sonnet retries), run_gates() must hold VISIBLY with the ORIGINAL
+    failure's reason rather than propagate the exception and crash the
+    whole slot-production run over one piece."""
+    piece = Piece(piece_id="p6", body_tagged="no markers at all")
+    repair_fn = MagicMock(side_effect=RuntimeError("Sonnet invoke failed after 3 attempts"))
+
+    result = run_gates(
+        piece, [_fake_gate_f1_grounded_marker], repair_fn, max_repairs=3,
+    )
+
+    assert result.status == "held"
+    assert result.repair_count == 0
+    assert "F1_grounding" in result.held_reason
+    repair_fn.assert_called_once()
