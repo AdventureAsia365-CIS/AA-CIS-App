@@ -46,6 +46,7 @@ class AtomRecord(BaseModel):
     atom_id: str
     trip_id: UUID
     text: str
+    activity_type: Optional[str] = None  # AA-379 — decompose enum (trek|bike|food|culture|stay|transit|other)
     distinctiveness: Distinctiveness = "LOW"
     starred: bool = False
     deleted: bool = False

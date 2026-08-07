@@ -538,6 +538,7 @@ class TestPreviewSlotgrid:
         # of the actual string shape asyncpg produces).
         base = {
             "atom_id": atom_id, "tour_id": trip_id, "text": f"{atom_id} text content here",
+            "activity_type": "trek",
             "distinctiveness": "HIGH", "starred": False, "deleted": False, "weight": 1.0,
             "cooldown_until": "{}", "usage_log": "[]",
         }

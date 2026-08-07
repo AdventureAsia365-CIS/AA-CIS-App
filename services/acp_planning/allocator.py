@@ -16,6 +16,14 @@ Fixes applied during the port (see docs/implementation-notes/AA-301.md):
        derived from that specific slot's own top chosen atom — since B7
        guarantees no atom repeats within the month for the same trip+channel,
        keyword_seed is naturally distinct slot-to-slot.
+  AA-379 — B6's "derived from the top chosen atom" was chosen[0].text[:60], a
+       raw char-index slice of a full sentence, not a real keyword — live
+       verify (AA-375) showed DataForSEO finding no data for the resulting
+       gibberish and the topic being demand-rejected. keyword_seed is now
+       built via seed_builder.build_seed() (the "{activity} in {country}"
+       convention already proven against real DataForSEO traffic, AA-197/
+       AA-251) fed with the atom's own activity_type + the trip's
+       destination — see make_slot() for the coverage/tradeoff notes.
 
 Also implements (not bug fixes, new requirements):
   - Atom floor (AA-300): a trip+channel whose live atom pool cannot cover
@@ -39,6 +47,8 @@ import uuid
 from datetime import date
 from typing import Optional
 from uuid import UUID
+
+from services.seo_intelligence.seed_builder import build_seed
 
 from .constants import FRAMEWORK_TABLE, SLOT_MIX
 from .models import (AtomRecord, QuarterPlan, QuarterPlanNotApprovedError,
@@ -153,12 +163,30 @@ def compute_slot_grid(
         fw_key = (stage, "blog") if channel == "blog" else ("ANY", channel)
         fw = FRAMEWORK_TABLE.get(fw_key, {"framework": "hub"})["framework"]
         cta = t.trip_url if t.url_alive else None
+        top_atom = chosen[0]
+        # AA-379 — keyword_seed was chosen[0].text[:60], an arbitrary char-index slice of a
+        # full sentence (not a real keyword phrase); DataForSEO's exact-match search-volume
+        # lookup legitimately found no data for it, and C3's demand-law gate then rejected the
+        # topic. Reuses seed_builder.build_seed() — the one proven "{activity} in {country}"
+        # convention already validated against real DataForSEO traffic (AA-197/AA-251) — fed
+        # with the atom's own activity_type (the decompose LLM contract's required enum,
+        # verified 100%-filled live for every atom that can actually reach a slot) instead of
+        # raw_tours.activities. Falls back to build_seed()'s own tour_name+destination chain
+        # when activity_type is absent (legacy atoms). Known tradeoff: activity_type is only 7
+        # coarse buckets, so two slots of the same trip that land on the same activity_type in
+        # the same month can still produce an identical keyword_seed — narrower than pre-B6's
+        # trip-wide sharing, but not zero. Flagged for Nghiep, not solved here.
+        keyword_seed = build_seed(
+            country_raw=t.destination or "",
+            activities=[top_atom.activity_type] if top_atom.activity_type else None,
+            tour_name=t.name,
+        ) or None
         return Slot(
             slot_id=f"slot_{uuid.uuid4().hex[:10]}", week=week, channel=channel, kind=kind,
             trip_id=trip_id, atom_ids=[a.atom_id for a in chosen],
             funnel_stage=stage, framework=fw, cta_target=cta,
-            topic_hint=chosen[0].text[:80],
-            keyword_seed=chosen[0].text[:60],  # B6 fix — per-slot, from this slot's own top atom
+            topic_hint=top_atom.text[:80],
+            keyword_seed=keyword_seed,
         )
 
     i = 0
