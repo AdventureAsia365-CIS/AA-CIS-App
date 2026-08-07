@@ -24,9 +24,17 @@ def _trip(**over):
     return Trip(**base)
 
 
+_ACTIVITY_TYPES = ["trek", "bike", "food", "culture", "stay", "transit", "other"]
+
+
 def _atoms(trip_id, n, distinctiveness="HIGH"):
+    # AA-379 — activity_type cycles through the real 7-value decompose enum, matching
+    # production (100% of live atoms have it set — it's a required field of the decompose
+    # LLM contract). keyword_seed is now derived from it, so an all-None fixture would no
+    # longer reflect real atom shape.
     return [AtomRecord(atom_id=f"atom_{i}_{uuid.uuid4().hex[:6]}", trip_id=trip_id,
                        text=f"atom text number {i} about limestone cliffs and rice terraces",
+                       activity_type=_ACTIVITY_TYPES[i % len(_ACTIVITY_TYPES)],
                        distinctiveness=distinctiveness) for i in range(n)]
 
 

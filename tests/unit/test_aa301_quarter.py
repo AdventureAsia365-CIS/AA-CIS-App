@@ -193,18 +193,21 @@ class TestParseJsonb:
         trip_id = uuid.uuid4()
         row = {
             "atom_id": "atom_x", "tour_id": trip_id, "text": "some atom text",
+            "activity_type": "trek",
             "distinctiveness": "HIGH", "starred": True, "deleted": False, "weight": 1.5,
             "cooldown_until": '{"blog": "2026-08-01"}', "usage_log": '["a", "b"]',
         }
         atom = _row_to_atom(row)
         assert atom.cooldown_until == {"blog": "2026-08-01"}
         assert atom.usage_log == ["a", "b"]
+        assert atom.activity_type == "trek"
 
     def test_row_to_atom_with_empty_jsonb_strings(self):
         """The exact production traceback's inputs verbatim: '{}' and '[]'."""
         trip_id = uuid.uuid4()
         row = {
             "atom_id": "atom_y", "tour_id": trip_id, "text": "atom text",
+            "activity_type": None,
             "distinctiveness": "LOW", "starred": False, "deleted": False, "weight": 1.0,
             "cooldown_until": "{}", "usage_log": "[]",
         }
@@ -223,6 +226,7 @@ class TestFetchAtomsByTripDbWrapper:
         conn = AsyncMock()
         conn.fetch.return_value = [{
             "atom_id": "atom_z", "tour_id": trip_id, "text": "text",
+            "activity_type": "food",
             "distinctiveness": "MED", "starred": False, "deleted": False, "weight": 1.0,
             "cooldown_until": "{}", "usage_log": "[]",
         }]

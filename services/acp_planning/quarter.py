@@ -171,7 +171,7 @@ def compute_quarter_plan(
 
 
 _ATOM_ROW_QUERY = """
-    SELECT ta.atom_id, ta.tour_id, ta.text, ta.distinctiveness, ta.starred,
+    SELECT ta.atom_id, ta.tour_id, ta.text, ta.activity_type, ta.distinctiveness, ta.starred,
            ta.deleted, ta.weight, ta.cooldown_until, ta.usage_log
     FROM acp_contract.tour_atoms ta
     JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = ta.tour_id
@@ -192,6 +192,7 @@ def _parse_jsonb(value, default):
 def _row_to_atom(row) -> AtomRecord:
     return AtomRecord(
         atom_id=row["atom_id"], trip_id=row["tour_id"], text=row["text"],
+        activity_type=row["activity_type"],
         distinctiveness=row["distinctiveness"] or "LOW", starred=row["starred"],
         deleted=row["deleted"], weight=float(row["weight"]),
         cooldown_until=_parse_jsonb(row["cooldown_until"], {}),
