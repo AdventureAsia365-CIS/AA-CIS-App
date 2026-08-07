@@ -42,9 +42,13 @@ import json
 import re
 from typing import Callable
 
+import structlog
+
 from services.acp_produce.judge_client import invoke_judge, parse_judge_json
 from services.acp_produce.models import REPAIR_TOTAL_MAX, Brief, GateResult, Piece
 from services.acp_shared.grounding import find_novel_numeric_claims
+
+logger = structlog.get_logger()
 
 TAG_RE = re.compile(r"\[(?:R|F):([^\]]+)\]")
 # Same sentence-boundary heuristic used to build the real-data test fixture
@@ -506,6 +510,7 @@ def run_gates(
     gate_fns: list[Callable[[str], GateResult]],
     repair_fn: Callable[[str, list[str]], str],
     max_repairs: int = REPAIR_TOTAL_MAX,
+    is_repairable: Callable[[GateResult], bool] = lambda result: True,
 ) -> Piece:
     """P0-3 fix: after EVERY repair, re-run the ENTIRE gate stack, not just the
     gate that just failed. The aamc/gates.py bug this replaces re-checked only
@@ -516,7 +521,25 @@ def run_gates(
     is in what gets VALIDATED afterward, not in trying to fix everything at
     once. `piece.gate_ledger` after return is always the ledger from the
     round that decided the outcome (all-pass or held), not a stale one from a
-    superseded gate."""
+    superseded gate.
+
+    `is_repairable` (AA-376): an optional predicate over the first failing
+    `GateResult`, defaulting to always-True so every existing caller/test is
+    unaffected. This orchestrator stays gate-agnostic on purpose (the same
+    reason F8's rubric routing and F9's blog/social routing live in
+    `pipeline.py`'s closures, not here) — the one real caller
+    (`pipeline.py::run_piece_through_produce_gates()`) supplies a real
+    predicate that holds immediately (without spending a repair round or a
+    Sonnet call) on F6 violations that are external caller/DB state
+    ("no cta_target", "url_alive not True") rather than something a
+    body_tagged rewrite could ever fix.
+
+    A `repair_fn` that raises is treated the same as "repair could not fix
+    this" (L6: hold visible with the ORIGINAL failure's reason, never crash
+    the whole slot-production run over one piece's repair infra failure) —
+    `piece.repair_count` is only incremented on a repair_fn call that
+    actually returns, matching the aamc/ prototype's own repair() (which
+    only incremented its own counter after a successful LLM call)."""
     while True:
         piece.gate_ledger = []
         first_failure: GateResult | None = None
@@ -530,10 +553,17 @@ def run_gates(
             piece.status = "passed"
             return piece
 
+        if not is_repairable(first_failure):
+            return _hold(piece, first_failure)
+
         if piece.repair_count >= max_repairs:
             return _hold(piece, first_failure)
 
-        piece.body_tagged = repair_fn(piece.body_tagged, first_failure.violations)
+        try:
+            piece.body_tagged = repair_fn(piece.body_tagged, first_failure.violations)
+        except Exception as e:
+            logger.warning("gate_repair_fn_failed", gate=first_failure.gate, error=str(e))
+            return _hold(piece, first_failure)
         piece.repair_count += 1
 
 

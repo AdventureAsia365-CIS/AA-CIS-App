@@ -36,14 +36,22 @@ the caller's `framework` argument for those channels — an adapted-channel
 routes to `gate_brand_seo_audit()` (blog) or `gate_brand_seo_audit_social()`
 (facebook/tiktok, AA-372) by the same `channel`.
 
-No repair loop: `run_gates()` (gates.py) is reused for its tested gate-stack
-orchestration, but called with `max_repairs=0` — repair requires a real
-`repair_fn` (an LLM rewrite call), which is E1-E5 generation infra that does
-not exist yet (same "no C3/E1-E5" boundary above). `max_repairs=0` makes
-`run_gates()` hold on the FIRST gate failure without ever invoking
-`repair_fn` (`piece.repair_count(0) >= max_repairs(0)` is already true) —
-`_repair_not_available()` below exists only so a violated invariant fails
-loudly instead of silently.
+Repair loop (AA-376, wired real): `run_gates()` (gates.py) is called with
+`repair_fn=repair_piece` (`services.acp_produce.repair`, E5 — Sonnet rewrite
+call, ported from the aamc/ prototype's own E5) and
+`max_repairs=REPAIR_TOTAL_MAX` (models.py, ADR-2026-029's already-decided
+budget of 3 repair ROUNDS, imported rather than re-hardcoded). A piece
+failing any gate now gets up to `REPAIR_TOTAL_MAX` repair rounds — each round
+re-runs the ENTIRE gate stack (P0-3, gates.py's own docstring) — before
+holding. `is_repairable=_is_f6_content_fixable` (below) filters OUT F6
+violations that are external caller/DB state ("no cta_target", "url_alive
+not True" — `acp_deliver.tenant_tour_pages` row/`Brief.cta_target`, neither
+of which `body_tagged` text can ever fix) so `run_gates()` holds those
+immediately instead of burning a repair round + a Sonnet call on a violation
+`repair_piece()` cannot possibly resolve. The `output_rules` pre-check above
+stays OUTSIDE this repair loop entirely — it runs before `run_gates()` is
+even called and short-circuits straight to `held` on failure; that gap is
+tracked separately (AA-381), not touched here.
 
 `gate_fns` normalization (the gap AA-364.md D5 flagged): none of the real
 gate functions match `run_gates()`'s `Callable[[str], GateResult]` signature
@@ -77,21 +85,29 @@ from services.acp_produce.gates import (gate_banned_patterns, gate_brand_seo_aud
                                           gate_route_to_sellable, gate_structural_variance,
                                           run_gates)
 from services.acp_produce.metrics import emit_piece_metrics
-from services.acp_produce.models import Brief, GateResult, Piece
+from services.acp_produce.models import REPAIR_TOTAL_MAX, Brief, GateResult, Piece
+from services.acp_produce.repair import repair_piece
 from services.acp_produce.rule_adapter import apply_output_rules_to_piece
 
+# F6's two external-state violations (Brief.cta_target missing / no confirming
+# acp_deliver.tenant_tour_pages row — see gate_route_to_sellable(), gates.py)
+# can never be fixed by rewriting body_tagged. The third F6 sub-check ("CTA
+# {target} not present in body") stays repairable (a literal-string content
+# fix) — matched separately below, never lumped in with these two.
+_F6_NON_CONTENT_FIXABLE_MARKERS = ("no cta target", "url_alive is not true")
 
-def _repair_not_available(body_tagged: str, violations: list[str]) -> str:  # pragma: no cover
-    """Must never actually be called — see module docstring "No repair loop".
-    `run_gates()` is invoked with max_repairs=0, so `piece.repair_count(0) >=
-    max_repairs(0)` is already true on the first failure and `_hold()` runs
-    before `repair_fn` is ever reached. This exists only so a future change
-    that accidentally raises max_repairs above 0 fails loudly instead of
-    silently calling a repair path that assumes E1-E5 generation exists."""
-    raise NotImplementedError(
-        "Repair requires E1-E5 generation infra, not yet built (AA-364 scope "
-        "boundary, 05/08/2026) — run_piece_through_produce_gates() must only "
-        "ever call run_gates() with max_repairs=0, which never reaches here."
+
+def _is_f6_content_fixable(result: GateResult) -> bool:
+    """AA-376 `is_repairable` filter passed to `run_gates()`: True for every
+    gate except F6, and for F6 only when none of its violations are the
+    external-state kind above — inspecting individual violation strings
+    (not just `result.gate`) because a real F6 failure can carry the
+    repairable "CTA not present in body" violation alongside an unrelated
+    non-repairable one on the same round."""
+    if result.gate != "F6_route_to_sellable":
+        return True
+    return not any(
+        marker in v.lower() for v in result.violations for marker in _F6_NON_CONTENT_FIXABLE_MARKERS
     )
 
 
@@ -116,6 +132,19 @@ async def run_piece_through_produce_gates(
     `acp_deliver.pieces`, and emits CloudWatch metrics at the gate-pass
     moment. Returns the mutated `piece` (status is "passed" or "held" on
     return, never "in_progress").
+
+    Repair (AA-376): a gate failure now gets up to `REPAIR_TOTAL_MAX` (3,
+    ADR-2026-029) repair rounds via `repair_piece()` (E5, real Sonnet
+    rewrite call) before holding — `run_gates()`'s own P0-3 fix re-runs the
+    ENTIRE stack after each round, so a repair that fixes one gate but
+    regresses an earlier one gets caught, not shipped. F6 violations that
+    are external caller/DB state ("no cta_target", "url_alive not True") are
+    filtered out by `_is_f6_content_fixable` and hold immediately instead —
+    no amount of rewriting `body_tagged` fixes a missing `tenant_tour_pages`
+    row, so attempting repair there would only waste a round + a Sonnet
+    call. `output_rules` above stays outside this repair loop entirely
+    (short-circuits to `held` before `run_gates()` is even called) — that
+    gap is AA-381, not this issue's scope.
 
     `channel`/`slot_id`/`tenant_id` are NOT fields on `Piece` — same
     observation atom_usage.py's own docstring already made ("Piece has no
@@ -175,7 +204,7 @@ async def run_piece_through_produce_gates(
             return result
 
         run_gates(piece, [_f1, _f2, _f3, _f4, _f6, _f7, _f8, _f9],
-                  _repair_not_available, max_repairs=0)
+                  repair_piece, max_repairs=REPAIR_TOTAL_MAX, is_repairable=_is_f6_content_fixable)
         piece.gate_ledger = [rule_result] + piece.gate_ledger
         audit = audit_holder["audit"]
 

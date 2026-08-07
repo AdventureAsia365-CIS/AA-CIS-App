@@ -215,13 +215,23 @@ async def test_piece_failing_f1_grounding_holds_with_grounding_reason():
     fake_cw = MagicMock()
     fake_bedrock = MagicMock()
 
+    # AA-376: F1 is repairable (not F6), so run_gates() now attempts
+    # repair_piece() before holding. repair_piece is mocked to raise here --
+    # this test is about the hold-on-gate-failure contract, not repair
+    # mechanics (those have their own dedicated tests, test_aa298_gates.py
+    # and test_aa376_repair.py) -- and gates.py::run_gates()'s own
+    # except-Exception safety net means a raising repair_fn still holds
+    # immediately with repair_count unchanged, same observable result as
+    # the pre-AA-376 max_repairs=0 path.
     with patch("services.acp_produce.judge_client.boto3.client",
-               side_effect=_boto3_router(fake_bedrock, fake_cw)):
+               side_effect=_boto3_router(fake_bedrock, fake_cw)), \
+         patch("services.acp_produce.pipeline.repair_piece",
+               side_effect=RuntimeError("repair infra not available in this test")):
         result = await run_piece_through_produce_gates(piece, db=db, **COMMON_KWARGS)
 
     assert result.status == "held"
     assert "F1_grounding" in result.held_reason
-    assert result.repair_count == 0  # no repair attempted — max_repairs=0
+    assert result.repair_count == 0  # repair_fn raised -- never incremented (see gates.py::run_gates())
 
 
 # ── brand_seo_audit persisted in its own column (D4) ──
@@ -239,8 +249,15 @@ async def test_brand_seo_audit_persisted_in_its_own_column_when_f9_flags():
     fake_bedrock = MagicMock()
     fake_bedrock.invoke_model.side_effect = [_passing_framework_response(), flagged_response]
 
+    # AA-376: F9 is repairable, so run_gates() would otherwise attempt a
+    # second round (consuming a 3rd invoke_model call this side_effect list
+    # doesn't have). repair_piece raises here for the same reason as the F1
+    # test above -- this test is about the persisted-audit contract on a
+    # held piece, not repair mechanics.
     with patch("services.acp_produce.judge_client.boto3.client",
-               side_effect=_boto3_router(fake_bedrock, MagicMock())):
+               side_effect=_boto3_router(fake_bedrock, MagicMock())), \
+         patch("services.acp_produce.pipeline.repair_piece",
+               side_effect=RuntimeError("repair infra not available in this test")):
         result = await run_piece_through_produce_gates(piece, db=db, **COMMON_KWARGS)
 
     assert result.status == "held"
@@ -358,3 +375,120 @@ async def test_tiktok_piece_routes_f9_to_social_rubric_not_blog():
 
     audit = next(g for g in result.gate_ledger if g.gate == "F9_brand_seo_audit_social")
     assert audit.passed is True
+
+
+# ── AA-376: repair_fn wiring — F9-only repair success, F6 filter, max_repairs exhaustion ──
+
+@pytest.mark.asyncio
+async def test_facebook_piece_fails_only_f9_then_repair_round_passes():
+    """Closest unit-level proxy to the real AA-375 live-verify finding: a
+    facebook piece failing ONLY F9 (passes output_rules/F1/F2/F3/F6/F7/F8)
+    should reach status=passed after exactly one repair round, without ever
+    regenerating the piece from scratch (E1-E4 are not called here at all —
+    repair_piece() rewrites body_tagged in place)."""
+    piece = _piece(
+        "Ride the tuk-tuk through old town at sunrise [R:atom_1].\nHASHTAGS: #travel #asia",
+        piece_id="p1#facebook", channel="facebook",
+    )
+    db = _make_db(rules=[])
+    flagged_f9 = _bedrock_response({
+        "status": "flagged", "brand_fit": 0, "human_read": 1, "cta_clear": 1,
+        "failure_codes": ["GENERIC_AI_WORDING"], "notes": "sounds generic",
+    })
+    passing_f9 = _bedrock_response({
+        "status": "pass", "brand_fit": 1, "human_read": 1, "cta_clear": 1,
+        "failure_codes": [], "notes": "clean",
+    })
+    fake_bedrock = MagicMock()
+    fake_bedrock.invoke_model.side_effect = [
+        _passing_framework_response(), flagged_f9,      # round 1: F8 pass, F9 flagged
+        _passing_framework_response(), passing_f9,       # round 2 (post-repair): F8 pass, F9 pass
+    ]
+
+    repaired_body = "Ride the tuk-tuk through old town at golden hour [R:atom_1].\nHASHTAGS: #travel #asia"
+    original_body = piece.body_tagged
+    with patch("services.acp_produce.judge_client.boto3.client",
+               side_effect=_boto3_router(fake_bedrock, MagicMock())), \
+         patch("services.acp_produce.pipeline.repair_piece", return_value=repaired_body) as mock_repair:
+        result = await run_piece_through_produce_gates(piece, db=db, **FACEBOOK_KWARGS)
+
+    assert result.status == "passed"
+    assert result.repair_count == 1
+    mock_repair.assert_called_once()
+    call_args = mock_repair.call_args.args
+    assert call_args[0] == original_body  # body BEFORE repair (round 1's version)
+    assert any("GENERIC_AI_WORDING" in v or "flagged" in v for v in call_args[1])
+    assert result.body_tagged == repaired_body
+    assert fake_bedrock.invoke_model.call_count == 4  # F8+F9 x2 rounds, no E1-E4 regeneration
+
+
+@pytest.mark.asyncio
+async def test_f6_no_cta_target_holds_immediately_no_repair_attempted():
+    """AA-376 F6 filter: 'no cta_target' is external Brief state, not a
+    content problem repair_piece() could ever fix — must hold on round 1,
+    repair_piece never called, no wasted Sonnet call/round."""
+    piece = _piece(
+        "The rickshaw ride opens the trip [R:atom_1] and it is wonderful indeed.\n\n"
+        "Book it at https://example.com/trip."
+    )
+    db = _make_db(rules=[], url_alive=True)
+    # cta_target="" (falsy, but Brief.cta_target is a required str -- brief=None
+    # would instead fail-closed on F4, which runs BEFORE F6 in gate_fns order)
+    no_cta_brief = _passing_brief().model_copy(update={"cta_target": ""})
+    no_cta_kwargs = {**COMMON_KWARGS, "brief": no_cta_brief}
+    fake_bedrock = MagicMock()
+
+    with patch("services.acp_produce.judge_client.boto3.client",
+               side_effect=_boto3_router(fake_bedrock, MagicMock())), \
+         patch("services.acp_produce.pipeline.repair_piece") as mock_repair:
+        result = await run_piece_through_produce_gates(piece, db=db, **no_cta_kwargs)
+
+    assert result.status == "held"
+    assert "F6_route_to_sellable" in result.held_reason
+    assert result.repair_count == 0
+    mock_repair.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_f6_url_not_alive_holds_immediately_no_repair_attempted():
+    """AA-376 F6 filter: 'url_alive not True' (no confirming
+    acp_deliver.tenant_tour_pages row) is DB state, not content -- same
+    no-repair-attempt guarantee as the no-cta_target case above."""
+    piece = _piece(
+        "The rickshaw ride opens the trip [R:atom_1] and it is wonderful indeed.\n\n"
+        "Book it at https://example.com/trip."
+    )
+    db = _make_db(rules=[], url_alive=False)
+    fake_bedrock = MagicMock()
+
+    with patch("services.acp_produce.judge_client.boto3.client",
+               side_effect=_boto3_router(fake_bedrock, MagicMock())), \
+         patch("services.acp_produce.pipeline.repair_piece") as mock_repair:
+        result = await run_piece_through_produce_gates(piece, db=db, **COMMON_KWARGS)
+
+    assert result.status == "held"
+    assert "F6_route_to_sellable" in result.held_reason
+    assert result.repair_count == 0
+    mock_repair.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_piece_that_never_repairs_holds_after_max_repairs_rounds():
+    """max_repairs=REPAIR_TOTAL_MAX (3) must terminate -- a repair_fn that
+    never actually fixes the violation holds after exactly 3 rounds, never
+    loops forever."""
+    from services.acp_produce.models import REPAIR_TOTAL_MAX
+    piece = _piece("A made-up elephant trek happens here [R:atom_fake999].")
+    db = _make_db(rules=[])
+    fake_bedrock = MagicMock()
+
+    with patch("services.acp_produce.judge_client.boto3.client",
+               side_effect=_boto3_router(fake_bedrock, MagicMock())), \
+         patch("services.acp_produce.pipeline.repair_piece",
+               return_value=piece.body_tagged) as mock_repair:  # never actually fixes it
+        result = await run_piece_through_produce_gates(piece, db=db, **COMMON_KWARGS)
+
+    assert result.status == "held"
+    assert result.repair_count == REPAIR_TOTAL_MAX
+    assert mock_repair.call_count == REPAIR_TOTAL_MAX
+    assert "F1_grounding" in result.held_reason
