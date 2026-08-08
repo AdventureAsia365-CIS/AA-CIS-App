@@ -42,12 +42,26 @@ def _make_request(pool):
 def _catalog_row(**over):
     base = {
         "tour_id": uuid.UUID(TOUR_A), "name": "Sapa Valley Trek", "destination": "Vietnam",
-        "duration_raw": "4 days 3 nights", "period": "Mar-May,Sep-Nov",
+        "duration_raw": "4 days 3 nights", "period": "Mar-May,Sep-Nov", "price_raw": "US$350",
         "trip_url": None, "url_alive": None,
         "total_atoms": 12, "high_atoms_count": 4, "has_image": True,
     }
     base.update(over)
     return base
+
+
+async def _list_catalog(request, **over):
+    """list_catalog() called directly (bypassing FastAPI dependency
+    injection), so every Query(...) param needs an explicit value — this
+    wrapper carries the full default kwarg set so each test only overrides
+    what it cares about, rather than repeating all 9 params everywhere."""
+    kwargs = dict(
+        destination=None, duration_min=None, duration_max=None, period_month=None,
+        min_atoms=None, min_price=None, max_price=None, limit=50, offset=0,
+        x_admin_secret=_TEST_SECRET,
+    )
+    kwargs.update(over)
+    return await admin_marketplace.list_catalog(request, **kwargs)
 
 
 class TestAuthGate:
@@ -69,11 +83,7 @@ class TestListCatalog:
         pool = _make_pool(conn)
         request = _make_request(pool)
 
-        await admin_marketplace.list_catalog(
-            request, destination="Vietnam", duration_min=None, duration_max=None,
-            period_month=None, min_atoms=None, limit=50, offset=0,
-            x_admin_secret=_TEST_SECRET,
-        )
+        await _list_catalog(request, destination="Vietnam")
         query, *params = conn.fetch.call_args[0]
         assert "vtr.destination ILIKE" in query
         assert "%Vietnam%" in params
@@ -85,11 +95,7 @@ class TestListCatalog:
         pool = _make_pool(conn)
         request = _make_request(pool)
 
-        await admin_marketplace.list_catalog(
-            request, destination=None, duration_min=None, duration_max=None,
-            period_month=None, min_atoms=8, limit=50, offset=0,
-            x_admin_secret=_TEST_SECRET,
-        )
+        await _list_catalog(request, min_atoms=8)
         query, *params = conn.fetch.call_args[0]
         assert "COALESCE(ac.atom_count, 0) >=" in query
         assert 8 in params
@@ -107,11 +113,7 @@ class TestListCatalog:
         pool = _make_pool(conn)
         request = _make_request(pool)
 
-        result = await admin_marketplace.list_catalog(
-            request, destination=None, duration_min=3, duration_max=5,
-            period_month=None, min_atoms=None, limit=50, offset=0,
-            x_admin_secret=_TEST_SECRET,
-        )
+        result = await _list_catalog(request, duration_min=3, duration_max=5)
         assert result["total"] == 1
         assert result["tours"][0]["tour_id"] == TOUR_A
 
@@ -125,11 +127,7 @@ class TestListCatalog:
         pool = _make_pool(conn)
         request = _make_request(pool)
 
-        result = await admin_marketplace.list_catalog(
-            request, destination=None, duration_min=None, duration_max=None,
-            period_month=4, min_atoms=None, limit=50, offset=0,
-            x_admin_secret=_TEST_SECRET,
-        )
+        result = await _list_catalog(request, period_month=4)
         assert result["total"] == 1
         assert result["tours"][0]["tour_id"] == TOUR_A
 
@@ -140,11 +138,7 @@ class TestListCatalog:
         pool = _make_pool(conn)
         request = _make_request(pool)
 
-        result = await admin_marketplace.list_catalog(
-            request, destination=None, duration_min=None, duration_max=None,
-            period_month=None, min_atoms=None, limit=50, offset=0,
-            x_admin_secret=_TEST_SECRET,
-        )
+        result = await _list_catalog(request)
         tour = result["tours"][0]
         assert tour["total_atoms"] == 12
         assert tour["high_atoms_count"] == 4
@@ -157,14 +151,59 @@ class TestListCatalog:
         pool = _make_pool(conn)
         request = _make_request(pool)
 
-        result = await admin_marketplace.list_catalog(
-            request, destination=None, duration_min=None, duration_max=None,
-            period_month=None, min_atoms=None, limit=2, offset=0,
-            x_admin_secret=_TEST_SECRET,
-        )
+        result = await _list_catalog(request, limit=2)
         assert result["total"] == 5
         assert result["count"] == 2
         assert len(result["tours"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_price_usd_and_price_available_computed_from_price_raw(self):
+        conn = AsyncMock()
+        conn.fetch.return_value = [
+            _catalog_row(tour_id=uuid.UUID(TOUR_A), price_raw="US$2,590"),
+            _catalog_row(tour_id=uuid.UUID(TOUR_B), price_raw="On request"),
+        ]
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await _list_catalog(request)
+        by_id = {t["tour_id"]: t for t in result["tours"]}
+        assert by_id[TOUR_A]["price_usd"] == 2590.0
+        assert by_id[TOUR_A]["price_available"] is True
+        assert by_id[TOUR_B]["price_usd"] is None
+        assert by_id[TOUR_B]["price_available"] is False
+        assert "price_raw" not in by_id[TOUR_A]  # internal-only, not leaked to the response
+
+    @pytest.mark.asyncio
+    async def test_price_filter_never_drops_unavailable_tours(self):
+        """AA-330 Phần B commercial-decision D2 — a tour with no parseable
+        price must appear in EVERY price-filtered result, not be hidden."""
+        conn = AsyncMock()
+        conn.fetch.return_value = [
+            _catalog_row(tour_id=uuid.UUID(TOUR_A), price_raw="US$2,590"),
+            _catalog_row(tour_id=uuid.UUID(TOUR_B), price_raw="On request"),
+        ]
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await _list_catalog(request, min_price=10000, max_price=20000)
+        by_id = {t["tour_id"] for t in result["tours"]}
+        assert TOUR_A not in by_id  # 2590 is outside [10000, 20000]
+        assert TOUR_B in by_id  # price_available=false — filter is a no-op for it
+
+    @pytest.mark.asyncio
+    async def test_price_filter_narrows_available_tours(self):
+        conn = AsyncMock()
+        conn.fetch.return_value = [
+            _catalog_row(tour_id=uuid.UUID(TOUR_A), price_raw="US$100"),
+            _catalog_row(tour_id=uuid.UUID(TOUR_B), price_raw="US$5,000"),
+        ]
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await _list_catalog(request, min_price=50, max_price=1000)
+        by_id = {t["tour_id"] for t in result["tours"]}
+        assert by_id == {TOUR_A}
 
 
 class TestSavePortfolio:
@@ -243,3 +282,105 @@ class TestSavePortfolio:
 
         insert_query = conn.fetchrow.call_args[0][0]
         assert "'draft'" in insert_query
+
+    @pytest.mark.asyncio
+    async def test_posts_per_week_computes_real_runway_months(self):
+        """87 atoms @ 3/week -> 7 months, matching the issue's own example
+        table (same case unit-tested directly against runway_months() in
+        test_aa330_marketplace_estimates.py — here we check the wiring)."""
+        conn = AsyncMock()
+        conn.fetchval.return_value = 87
+        conn.fetchrow.return_value = {
+            "portfolio_id": uuid.uuid4(), "tour_ids": [uuid.UUID(TOUR_A)],
+            "filters_used": "{}",
+            "atom_snapshot": '{"total_atoms": 87, "runway_months": 7, "posts_per_week": 3.0}',
+            "status": "draft", "created_at": "2026-08-08T00:00:00", "finalized_at": None,
+        }
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        body = admin_marketplace.SavePortfolioRequest(tour_ids=[TOUR_A], posts_per_week=3.0)
+        result = await admin_marketplace.save_portfolio(body, request, x_admin_secret=_TEST_SECRET)
+
+        import json
+        snapshot_sent = json.loads(conn.fetchrow.call_args[0][3])
+        assert snapshot_sent == {"total_atoms": 87, "runway_months": 7, "posts_per_week": 3.0}
+        assert result["atom_snapshot"]["runway_months"] == 7
+
+    @pytest.mark.asyncio
+    async def test_no_posts_per_week_leaves_runway_null(self):
+        conn = AsyncMock()
+        conn.fetchval.return_value = 87
+        conn.fetchrow.return_value = {
+            "portfolio_id": uuid.uuid4(), "tour_ids": [uuid.UUID(TOUR_A)],
+            "filters_used": "{}",
+            "atom_snapshot": '{"total_atoms": 87, "runway_months": null, "posts_per_week": null}',
+            "status": "draft", "created_at": "2026-08-08T00:00:00", "finalized_at": None,
+        }
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        body = admin_marketplace.SavePortfolioRequest(tour_ids=[TOUR_A])
+        await admin_marketplace.save_portfolio(body, request, x_admin_secret=_TEST_SECRET)
+
+        import json
+        snapshot_sent = json.loads(conn.fetchrow.call_args[0][3])
+        assert snapshot_sent["runway_months"] is None
+
+
+class TestFinalizePortfolio:
+    @pytest.mark.asyncio
+    async def test_finalize_draft_succeeds(self):
+        portfolio_id = str(uuid.uuid4())
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [
+            {"status": "draft"},
+            {
+                "portfolio_id": uuid.UUID(portfolio_id), "tour_ids": [uuid.UUID(TOUR_A)],
+                "filters_used": "{}",
+                "atom_snapshot": '{"total_atoms": 5, "runway_months": null, "posts_per_week": null}',
+                "status": "finalized", "created_at": "2026-08-08T00:00:00", "finalized_at": "2026-08-08T01:00:00",
+            },
+        ]
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await admin_marketplace.finalize_portfolio(portfolio_id, request, x_admin_secret=_TEST_SECRET)
+        assert result["status"] == "finalized"
+        assert result["finalized_at"] == "2026-08-08T01:00:00"
+        update_query = conn.fetchrow.call_args_list[1][0][0]
+        assert "SET status = 'finalized', finalized_at = now()" in update_query
+
+    @pytest.mark.asyncio
+    async def test_finalize_already_finalized_rejected(self):
+        portfolio_id = str(uuid.uuid4())
+        conn = AsyncMock()
+        conn.fetchrow.return_value = {"status": "finalized"}
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        with pytest.raises(HTTPException) as exc:
+            await admin_marketplace.finalize_portfolio(portfolio_id, request, x_admin_secret=_TEST_SECRET)
+        assert exc.value.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_finalize_not_found_rejected(self):
+        portfolio_id = str(uuid.uuid4())
+        conn = AsyncMock()
+        conn.fetchrow.return_value = None
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        with pytest.raises(HTTPException) as exc:
+            await admin_marketplace.finalize_portfolio(portfolio_id, request, x_admin_secret=_TEST_SECRET)
+        assert exc.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_finalize_invalid_uuid_rejected(self):
+        conn = AsyncMock()
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        with pytest.raises(HTTPException) as exc:
+            await admin_marketplace.finalize_portfolio("not-a-uuid", request, x_admin_secret=_TEST_SECRET)
+        assert exc.value.status_code == 400
