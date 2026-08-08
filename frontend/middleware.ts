@@ -55,6 +55,12 @@ const PUBLIC_PATHS = ["/login", "/tenant-login"];
 const PROTECTED_ROUTES: { prefix: string; roles: string[] }[] = [
   // Admin-only (was ADMIN_PATHS)
   { prefix: "/admin/tenants", roles: ["admin"] },
+  // AA-384: real page shipped but never added here — same #4/#5 fail-closed gap this file's own
+  // header documents (a listed page with no PROTECTED_ROUTES entry falls into the `!route` branch
+  // and redirects to /login even with a valid admin session). Admin-only, matching /admin/tenants
+  // — Marketplace builds the portfolio that directly feeds tenant onboarding (seed-atoms), same
+  // commercial sensitivity, not a general staff/reviewer page.
+  { prefix: "/admin/marketplace", roles: ["admin"] },
   // Internal staff pages (was INTERNAL_PATHS) — admin/reviewer get real JWT
   // verification; content is the known-limitation carve-out described above.
   { prefix: "/admin/dashboard", roles: ["admin", "reviewer", "content"] },
