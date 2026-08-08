@@ -1,10 +1,28 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 29/06/2026 (S84) | ECS api:340 | main 38caa5f (Deploy Prod #137) | Vercel Prod Ready
+# Updated: 08/08/2026 (AA-384) | main f521972 + AA-384 branch | latest migration: 099
+# NOTE: ECS task def / Deploy Prod # / Vercel Prod hash below are UNVERIFIED as of this update
+# (AWS was stopped, not re-checked live this session) — reconfirm at next live session, don't
+# trust the stale numbers below without a fresh `aws ecs describe-services` / gh run check.
 
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway owq9as3wjl)
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel — AA-103 production)
-- ECS task def: api:340 (FE-only S84, ECS khong dung — :340 tu deploy khac, can xac minh) | Deploy Prod #137 | main 38caa5f | Vercel Prod 38caa5f Ready
+- ECS task def: api:340 (unverified, see header note) | main 38caa5f pre-AA-384 | Vercel Prod hash unverified
+- AA-384 (this session): product-direction correction on AA-309/AA-330's posts_per_week/Mirror
+  (posts_per_week is now a free tenant choice, migration 099 — see DB SCHEMA below; Mirror is
+  purely informational, no upsell language — see api/routers/admin.py get_tenant_mirror()). Real
+  Marketplace UI now lives in THIS repo
+  (frontend/app/admin/marketplace) — the AA-ACP-App copy (src/app/(admin)/workspace/marketplace)
+  is abandoned, 0 traffic since 09/07/2026, not touched. Repo policy: AA-ACP-App is abandoned
+  outright — any new ACP-facing UI work goes into AA-CIS-App, never AA-ACP-App.
+- AA-330 (Marketplace catalog/portfolio) + AA-309 (N1 tenant onboarding: seed/angle/Mirror/Gate A)
+  SHIPPED (merged main, PR #119) — then AA-384 corrected their posts_per_week/Mirror direction
+  (see below). AA-330/AA-309 themselves are NOT reopened by AA-384.
+- N7 (content production pipeline: DataForSEO keyword/SERP → Brief → Outline/Draft → Adapt(FB/
+  TikTok)/FAQ → F2-F9 gates+repair → Slot scheduling, services/acp_produce/*, migration 096) —
+  DONE (AA-368 through AA-380).
+- N8 (weekly flywheel delivery: assemble_packet, ready/delivered lifecycle, usage_log,
+  services/acp_deliver/*, migration 094) — DONE (AA-367, AA-372).
 - AA-241 [AA-234 Phần C] SHIPPED Prod (S84): Review Queue UI full 11-field edit + fail markers + revalidate gate + reviewer audit. AA-234 epic DONE. AA-242 (Regenerate) tach doc lap Backlog.
   /admin/review-queue now returns full editable gc fields + audit columns (human_edited/reviewed_by/
   edited_at/revalidate_passed) + a `failures` array re-derived on CURRENT content via
@@ -53,15 +71,40 @@
 - AI: AWS Bedrock (us-west-1), LangGraph orchestration
 - Infra: ECS Fargate, RDS PostgreSQL 15, S3, Lambda, Step Functions
 
+## FRONTEND ROUTES (frontend/app/, real as of AA-384)
+Admin (frontend/app/admin/*, gated by requireAdmin() in frontend/app/api/admin/[...path]/route.ts):
+  /admin/dashboard, /admin/upload (S0), /admin/s1-rewrite, /admin/pipeline/{s1,s2,s3,s4-blog,
+  s4-social}, /admin/master-content, /admin/curation (+/preview), /admin/review, /admin/brand,
+  /admin/tenants, /admin/marketplace (AA-384 — catalog/portfolio/finalize UI, real repo), /admin/
+  run-health, /admin/settings.
+  Shared components: frontend/app/admin/_components/{AdminSidebar,adminUi}.tsx — adminUi.tsx is
+  the design-token source of truth (A colors, serif/mono/sans, Card/Btn/Badge/TH/TD/LoadingScreen).
+  New admin pages should reuse these, not invent new styling.
+Content-team-facing (frontend/app/(internal)/*): /catalog, /upload, /brand, /review — older
+  route-group split from /admin/*, still live, not part of AA-384's scope.
+Tenant portal (frontend/app/(tenant)/portal/*): tenant-facing pipeline view, separate auth
+  (/tenant-login).
+API proxy convention: every /admin/* page calls same-origin /api/admin/[...path] (never the ECS
+  API URL directly from the client) — that route attaches X-Admin-Secret + x-admin-user-id server-
+  side after requireAdmin() verification. New admin pages MUST follow this, not fetch API_URL
+  client-side.
+
 ## DB SCHEMA (Medallion)
 shared.*              → tenants, pipeline_runs, membership_plans, tenant_brand_rules
 silver_aa_internal.*  → raw_tours, generated_content, seo_context
 gold_aa_internal.*    → published_tours
+acp_shared.*          → marketplace_portfolios (097), tenant_atom_state + tenant_onboarding (098,
+                        N1 Gate A), acp_quota_ledger, audit_log
+acp_contract.*        → tour_atoms (079, platform-owned, owner_scope='platform'), v_trip_registry
+acp_produce.* / acp_deliver.* → N7 production pipeline / N8 weekly flywheel delivery state
 
 silver_{tenant_slug}.* → per B2B tenant (same structure)
 gold_{tenant_slug}.*
 
-### Key columns (verified 11/05/2026):
+### Key columns (verified 11/05/2026, tenants.posts_per_week added AA-384 08/08/2026):
+tenants:             tenant_id, name, slug, plan_tier(enum), posts_per_week(int, 1-14, migration
+                    099 — AA-384: free tenant choice, NOT derived from plan_tier anymore),
+                    rate_limit_rpm, is_active, country
 raw_tours:          tour_id, tenant_id, src_name, country, duration, price_raw,
                     src_itineraries, src_highlights, src_summary, pipeline_status(enum)
 generated_content:  tour_id, aa_name, aa_subtitle, aa_summary, aa_description,
@@ -74,6 +117,26 @@ seo_context:        tour_id, keyword_search, top_keywords(jsonb), keyword_ideas(
                     provider(enum), fetched_at
 pipeline_runs:      id, tenant_id, batch_id, status, cost_usd, llm_model,
                     tours_total, tours_passed, started_at, completed_at
+
+## MIGRATIONS + APPROVAL GATES (stable conventions)
+- Migrations are plain numbered .sql files in api/migrations/ (099 latest as of AA-384), applied
+  against RDS via the global S3-mediated ECS exec pattern (see ~/.claude/CLAUDE.md) — no ORM
+  auto-migrate, no psql direct connect (ECS container has neither). Each file self-registers into
+  shared.schema_versions (version, applied_at, description) with ON CONFLICT DO NOTHING, so re-runs
+  are safe no-ops.
+- Two named approval gates in this codebase, same UI pattern (row-locked approve, reject re-
+  approval), different subject:
+  - **Gate A** (AA-309, acp_shared.tenant_onboarding) — a NEW TENANT's onboarding, approved once,
+    flips shared.tenants.is_active true. POST /admin/tenants/{id}/gate-a/approve.
+  - **Gate B** (AA-320, services/acp_planning/quarter.py) — a QUARTER PLAN VERSION, REQUIRED before
+    it becomes allocatable, never auto-approved. Gate A's approval code explicitly mirrors Gate B's
+    pattern (same row-lock/reject-re-approval shape) — they are two instances of one convention,
+    not unrelated code.
+- PR auto-merge: repo has allow_auto_merge=true, branch protection requires 5 status checks (Lint,
+  Security Audit, Unit Tests, Integration Tests, Docker Build Check) and 0 required reviews
+  (verified live 08/08/2026) — see "CI/CD — solo-operator mode" below. A PR still needs
+  `gh pr merge --auto --squash` run explicitly; it is not automatic on open. A PR carrying a
+  migration should NOT be auto-merged regardless of CI outcome — schema changes get a manual look.
 
 ## CRITICAL RULES
 - raw_tours PK = tour_id (NOT id)
@@ -172,24 +235,16 @@ cis-status # check NAT instance state
 pytest tests/ -v
 104 integration tests + 23 E2E Playwright tests baseline
 
-## ACTIVE WORK — 23/05/2026
-### AA-103 COMPLETE ✅ (Session 31)
-All CIS admin pages merged to main, Vercel production deployed.
+## ACTIVE WORK — 08/08/2026 (AA-384)
+AA-103 (all CIS admin pages live on Vercel prod) has been done since Session 31 — see FRONTEND
+ROUTES above for the real, current route list instead of a page-by-page table here (this section
+was stale from 23/05/2026 until AA-384's CLAUDE.md sync; don't let it go stale again — update it
+per-session, not the LIVE STATE bullets which are meant to stay append-only history).
 
-| Page | URL | Status |
-|------|-----|--------|
-| Upload (S0) | /admin/upload | ✅ Live |
-| S1 Rewrite | /admin/pipeline/s1 | ✅ Live |
-| Master Content | /admin/master-content | ✅ Live |
-| Dashboard | /admin/dashboard | ✅ Live |
-| Tenants | /admin/tenants | ✅ Live |
-
-Route conflict fix: (admin) route group → admin/ real directory (Session 31 commit 5b6face)
-
-### Next Priority
-1. Manual UAT all pages on production (ECS + RDS must be running)
-2. WordPress Docker UAT setup (docker/wordpress-uat + ngrok + Secrets Manager)
-3. Verify aa_internal tenant UUID in DB (Gate 1 hardcodes this)
+Open thread as of AA-384: the AA-384 Linear issue itself is deliberately left NOT Done by that
+session — a product-direction change (posts_per_week/Mirror wording) needs Nghiep's explicit
+confirmation, not an agent auto-closing it. Check AA-384's Linear status before assuming it's
+settled.
 
 ## Implementation Notes Pattern
 For every Linear issue involving code changes, maintain a parallel notes file

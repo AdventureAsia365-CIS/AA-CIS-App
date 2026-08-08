@@ -63,10 +63,26 @@ class TestConstants:
     def test_assigned_angles_has_7_entries(self):
         assert len(admin.ASSIGNED_ANGLES) == 7
 
-    def test_posts_per_week_matches_confirmed_decision(self):
-        assert admin.POSTS_PER_WEEK_BY_PLAN_TIER == {
-            "starter": 1, "growth": 3, "business": 5, "enterprise": 7, "internal": 7,
-        }
+
+class TestCreateTenantPostsPerWeek:
+    """AA-384: posts_per_week is now a free, caller-supplied value (1-14), not derived from
+    plan_tier — POSTS_PER_WEEK_BY_PLAN_TIER was removed entirely."""
+
+    def test_posts_per_week_required(self):
+        with pytest.raises(Exception):
+            admin.CreateTenantRequest(name="Test Agency", slug="test-agency")
+
+    def test_posts_per_week_out_of_range_rejected(self):
+        with pytest.raises(Exception):
+            admin.CreateTenantRequest(name="Test Agency", slug="test-agency", posts_per_week=15)
+        with pytest.raises(Exception):
+            admin.CreateTenantRequest(name="Test Agency", slug="test-agency", posts_per_week=0)
+
+    def test_posts_per_week_need_not_match_any_tier(self):
+        """The whole point of AA-384: 4 doesn't match any old tier value (1/3/5/7) and must still
+        be accepted."""
+        body = admin.CreateTenantRequest(name="Test Agency", slug="test-agency", posts_per_week=4)
+        assert body.posts_per_week == 4
 
 
 class TestCreateTenantIsInactive:
@@ -79,12 +95,14 @@ class TestCreateTenantIsInactive:
         pool = _make_pool(conn)
         request = _make_request(pool)
 
-        body = admin.CreateTenantRequest(name="Test Agency", slug="test-agency")
+        body = admin.CreateTenantRequest(name="Test Agency", slug="test-agency", posts_per_week=4)
         result = await admin.create_tenant(body, request, x_admin_secret=_TEST_SECRET)
 
         assert result.is_active is False
+        assert result.posts_per_week == 4
         insert_args = conn.fetchval.call_args_list[1][0]
-        assert "VALUES ($1, $2, $3::plan_tier_enum, $4, $5, false)" in insert_args[0]
+        assert "VALUES ($1, $2, $3::plan_tier_enum, $4, $5, $6, false)" in insert_args[0]
+        assert insert_args[4] == 4  # posts_per_week bound param
 
 
 class TestSeedAtoms:
@@ -234,7 +252,7 @@ class TestMirror:
     @pytest.mark.asyncio
     async def test_no_seeded_rows_404(self):
         conn = AsyncMock()
-        conn.fetchrow.return_value = {"tenant_id": TENANT_ID, "plan_tier": "growth"}
+        conn.fetchrow.return_value = {"tenant_id": TENANT_ID, "plan_tier": "growth", "posts_per_week": 3}
         conn.fetch.return_value = []
         pool = _make_pool(conn)
         request = _make_request(pool)
@@ -249,7 +267,7 @@ class TestMirror:
         response -- proves the endpoint re-counts live rather than reading any
         marketplace_portfolios.atom_snapshot value (never queried at all here)."""
         conn = AsyncMock()
-        conn.fetchrow.return_value = {"tenant_id": TENANT_ID, "plan_tier": "growth"}
+        conn.fetchrow.return_value = {"tenant_id": TENANT_ID, "plan_tier": "growth", "posts_per_week": 3}
         conn.fetch.return_value = [
             {"tour_id": TOUR_A, "assigned_angle": "culinary_people"},
             {"tour_id": TOUR_B, "assigned_angle": "culinary_people"},
@@ -261,17 +279,17 @@ class TestMirror:
         result = await admin.get_tenant_mirror(TENANT_ID, request, x_admin_secret=_TEST_SECRET)
 
         assert result["atom_count"] == 87
-        assert result["posts_per_week"] == 3  # growth tier
-        assert result["runway_months"] == 7  # matches runway_months(87, 3)
+        assert result["posts_per_week"] == 3  # tenant's own stored value, not a tier lookup
+        assert result["runway_months"] == 7  # matches runway_months(87, 3) -- formula unchanged
         assert "marketplace_portfolios" not in str(conn.fetch.call_args) + str(conn.fetchval.call_args)
 
     @pytest.mark.asyncio
-    async def test_upsell_matches_issue_worked_example(self):
-        """87 atoms / 12 tours @growth(3/week) -> 7 months. Issue's own example:
-        'muốn 5 bài/tuần -> license thêm ~8 tour' -- verifies the endpoint
-        reproduces that exact number, not an invented one."""
+    async def test_response_has_no_upsell_language(self):
+        """AA-384: Mirror is purely informational now -- no 'upsell_suggestion' key at all, and no
+        plan_tier-vs-posts_per_week coupling. A posts_per_week value that matches NO old tier
+        (4) must still work fine, since it no longer comes from a tier lookup."""
         conn = AsyncMock()
-        conn.fetchrow.return_value = {"tenant_id": TENANT_ID, "plan_tier": "growth"}
+        conn.fetchrow.return_value = {"tenant_id": TENANT_ID, "plan_tier": "growth", "posts_per_week": 4}
         conn.fetch.return_value = [{"tour_id": uuid.uuid4(), "assigned_angle": "culinary_people"} for _ in range(12)]
         conn.fetchval.return_value = 87
         pool = _make_pool(conn)
@@ -279,22 +297,28 @@ class TestMirror:
 
         result = await admin.get_tenant_mirror(TENANT_ID, request, x_admin_secret=_TEST_SECRET)
 
-        assert result["upsell_suggestion"]["next_plan_tier"] == "business"
-        assert result["upsell_suggestion"]["next_posts_per_week"] == 5
-        assert result["upsell_suggestion"]["additional_atoms_needed"] == 53
-        assert result["upsell_suggestion"]["additional_tours_needed_estimate"] == 8
+        assert "upsell_suggestion" not in result
+        assert result["posts_per_week"] == 4
+        assert result["runway_months"] == 87 // (4 * 4)
+        assert "message" in result
+        for banned in ("upgrade", "nâng cấp", "mua thêm", "hết hàng"):
+            assert banned not in result["message"].lower()
 
     @pytest.mark.asyncio
-    async def test_no_upsell_at_top_tier(self):
+    async def test_message_present_at_any_plan_tier(self):
+        """No tier-based branch left at all -- 'enterprise' (the old top tier) behaves identically
+        to any other plan_tier now; only posts_per_week/atom_count drive the message."""
         conn = AsyncMock()
-        conn.fetchrow.return_value = {"tenant_id": TENANT_ID, "plan_tier": "enterprise"}
+        conn.fetchrow.return_value = {"tenant_id": TENANT_ID, "plan_tier": "enterprise", "posts_per_week": 7}
         conn.fetch.return_value = [{"tour_id": TOUR_A, "assigned_angle": None}]
         conn.fetchval.return_value = 30
         pool = _make_pool(conn)
         request = _make_request(pool)
 
         result = await admin.get_tenant_mirror(TENANT_ID, request, x_admin_secret=_TEST_SECRET)
-        assert result["upsell_suggestion"] is None
+        assert "upsell_suggestion" not in result
+        assert result["runway_months"] == 1  # floor(30 / (7*4))
+        assert "message" in result
 
 
 class TestGateAApprove:

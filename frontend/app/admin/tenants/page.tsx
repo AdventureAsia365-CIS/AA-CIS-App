@@ -4,7 +4,7 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   Users, Plus, Key, RefreshCw, ChevronDown, ChevronUp,
-  AlertCircle, Loader2, CheckCircle, Eye, EyeOff, Copy, X, Trash2, Globe,
+  AlertCircle, Loader2, CheckCircle, Eye, EyeOff, Copy, X, Trash2, Globe, Sparkles,
 } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
 import {
@@ -28,6 +28,7 @@ interface Tenant {
   name: string;
   slug: string;
   plan_tier: string;
+  posts_per_week: number;
   country: string | null;
   rate_limit_rpm: number;
   is_active: boolean;
@@ -103,6 +104,9 @@ function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
   const [name, setName]   = useState("");
   const [slug, setSlug]   = useState("");
   const [plan, setPlan]   = useState("starter");
+  // AA-384: posts_per_week is a free tenant choice now, not implied by plan — caller states its
+  // own posting cadence at creation (1-14, no default that matches a tier).
+  const [postsPerWeek, setPostsPerWeek] = useState("3");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -110,11 +114,15 @@ function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
 
   async function submit() {
     if (!name.trim() || !slug.trim()) { setError("Name and slug are required"); return; }
+    const ppw = Number(postsPerWeek);
+    if (!Number.isInteger(ppw) || ppw < 1 || ppw > 14) {
+      setError("Bài/tuần phải là số nguyên từ 1 đến 14"); return;
+    }
     setLoading(true); setError("");
     try {
       const res = await fetch("/api/admin/tenants", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim(), slug: slug.trim(), plan_tier: plan }),
+        body: JSON.stringify({ name: name.trim(), slug: slug.trim(), plan_tier: plan, posts_per_week: ppw }),
       });
       const data = await res.json();
       if (!res.ok) { setError(data.detail ?? "Failed to create tenant"); return; }
@@ -152,6 +160,16 @@ function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
               }}>{p}</button>
             ))}
           </div>
+        </div>
+        <div style={{ marginBottom: 24 }}>
+          <label style={{ fontSize: 11, fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.1em", display: "block", marginBottom: 8 }}>
+            Bài/tuần (nhịp đăng nội dung)
+          </label>
+          <input type="number" min={1} max={14} value={postsPerWeek} onChange={e => setPostsPerWeek(e.target.value)}
+            style={{ width: 100, padding: "10px 12px", background: A.bg, border: `1px solid ${A.line}`, borderRadius: 8, color: A.body, fontSize: 13, outline: "none", fontFamily: sans }} />
+          <p style={{ fontSize: 11, color: A.muted2, margin: "6px 0 0" }}>
+            Tenant tự chọn tự do, không giới hạn theo plan (1–14 bài/tuần).
+          </p>
         </div>
         {error && (
           <div style={{ marginBottom: 14, padding: "9px 12px", background: A.redSoft, border: `1px solid ${A.redBorder}`, borderRadius: 8, fontSize: 12, color: A.red }}>
@@ -353,6 +371,78 @@ function ApiTabContent({ usage }: { usage: TenantDetails["api_usage"] }) {
     </div>
   );
 }
+// ─── Mirror tab (AA-384: info-only wording, no upsell) ────────────────────────
+
+interface MirrorData {
+  tenant_id: string;
+  plan_tier: string;
+  posts_per_week: number;
+  tour_count: number;
+  atom_count: number;
+  runway_months: number | null;
+  message: string;
+  assigned_angle: string | null;
+  assigned_angle_label: string | null;
+}
+
+function MirrorTabContent({ tenantId }: { tenantId: string }) {
+  const [data, setData]       = useState<MirrorData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [notSeeded, setNotSeeded] = useState(false);
+  const [error, setError]     = useState("");
+
+  useEffect(() => {
+    setLoading(true); setError(""); setNotSeeded(false);
+    fetch(`/api/admin/tenants/${tenantId}/mirror`)
+      .then(async r => {
+        if (r.status === 404) { setNotSeeded(true); return null; }
+        if (!r.ok) throw new Error();
+        return r.json();
+      })
+      .then(d => d && setData(d))
+      .catch(() => setError("Failed to load Mirror"))
+      .finally(() => setLoading(false));
+  }, [tenantId]);
+
+  if (loading) return <div style={{ padding: "12px 0", fontSize: 12, color: A.muted }}>Loading…</div>;
+  if (notSeeded) {
+    return (
+      <div style={{ padding: "20px 0", textAlign: "center", fontSize: 12, color: A.muted }}>
+        Chưa seed atom cho tenant này — chạy Seed Atoms (Marketplace → finalize portfolio) trước.
+      </div>
+    );
+  }
+  if (error || !data) return <div style={{ padding: "12px 0", fontSize: 12, color: A.red }}>{error || "Failed to load Mirror"}</div>;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
+        {([
+          ["Bài/tuần", `${data.posts_per_week}`],
+          ["Tour", `${data.tour_count}`],
+          ["Atom (thật)", `${data.atom_count}`],
+          ["Runway", data.runway_months != null ? `~${data.runway_months} tháng` : "—"],
+        ] as [string, string][]).map(([l, v]) => (
+          <div key={l} style={{ minWidth: 90 }}>
+            <div style={{ fontSize: 10, color: A.muted2, marginBottom: 2 }}>{l}</div>
+            <div style={{ fontFamily: serif, fontSize: 18, fontWeight: 500, color: A.ink }}>{v}</div>
+          </div>
+        ))}
+      </div>
+      {/* AA-384: purely informational — no upsell/urgency framing */}
+      <div style={{ padding: "10px 14px", background: "#fff", border: `1px solid ${A.line}`, borderRadius: 8, fontSize: 13, color: A.body, display: "flex", alignItems: "flex-start", gap: 8 }}>
+        <Sparkles size={14} color={A.gold} style={{ flexShrink: 0, marginTop: 1 }} />
+        {data.message}
+      </div>
+      {data.assigned_angle_label && (
+        <div style={{ fontSize: 11.5, color: A.muted2 }}>
+          Góc nội dung: <strong style={{ color: A.body }}>{data.assigned_angle_label}</strong>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BrandTabContent({ rules }: { rules: TenantDetails["brand_rules"] }) {
   if (!rules.system_prompt && !rules.style_guide && rules.forbidden_words.length === 0) {
     return <div style={{ padding: "20px 0", textAlign: "center", fontSize: 12, color: A.muted }}>No brand rules configured</div>;
@@ -424,7 +514,7 @@ function ActivityTabContent({ items }: { items: RewriteActivityItem[] }) {
 
 // ─── Tenant Detail Panel ──────────────────────────────────────────────────────
 
-type DTab = "tours" | "pipeline" | "activity" | "api" | "brand";
+type DTab = "tours" | "pipeline" | "activity" | "mirror" | "api" | "brand";
 
 function TenantDetail({ tenantId, planTier }: { tenantId: string; planTier: string }) {
   const isInternal = planTier === "internal";
@@ -467,6 +557,7 @@ function TenantDetail({ tenantId, planTier }: { tenantId: string; planTier: stri
       ? [{ key: "pipeline" as DTab, label: `Pipeline (${data.pipeline_runs.length})` }]
       : [{ key: "activity" as DTab, label: `Activity (${activity.length})` }]
     ),
+    { key: "mirror", label: "Mirror" },
     { key: "api",   label: "API Usage" },
     { key: "brand", label: "Brand" },
   ];
@@ -501,6 +592,7 @@ function TenantDetail({ tenantId, planTier }: { tenantId: string; planTier: stri
       {tab === "tours"    && <ToursTabContent    tours={data.rewritten_tours} toursView={data.summary.tours_view} />}
       {tab === "pipeline" && <PipelineTabContent runs={data.pipeline_runs}    pipelineNote={data.summary.pipeline_note} />}
       {tab === "activity" && <ActivityTabContent items={activity} />}
+      {tab === "mirror"   && <MirrorTabContent   tenantId={tenantId} />}
       {tab === "api"      && <ApiTabContent      usage={data.api_usage} />}
       {tab === "brand"    && <BrandTabContent    rules={data.brand_rules} />}
     </div>
@@ -564,6 +656,9 @@ function TenantRow({ tenant, onRotateKey, onDeleted }: {
         {/* Plan */}
         <td style={TD}>
           <Badge color={PLAN_BADGE[tenant.plan_tier] ?? "gray"}>{tenant.plan_tier}</Badge>
+          <div style={{ fontSize: 10.5, color: A.muted2, marginTop: 4 }}>
+            {tenant.posts_per_week != null ? `${tenant.posts_per_week} bài/tuần` : "—"}
+          </div>
         </td>
 
         {/* Lifecycle stats */}

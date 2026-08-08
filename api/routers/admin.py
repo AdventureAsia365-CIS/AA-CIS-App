@@ -11,7 +11,7 @@ from typing import Optional
 import asyncpg
 import boto3
 from fastapi import APIRouter, File, Header, HTTPException, Query, Request, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from services.notifications import NotificationService, EventType
 from services.acp_planning.quarter import (
@@ -22,8 +22,7 @@ from services.acp_planning.quarter import (
     save_quarter_plan_version,
 )
 from services.acp_planning.runway import runway_map
-from services.acp_shared.marketplace_estimates import (POSTS_PER_WEEK_BY_PLAN_TIER,
-                                                        runway_months)
+from services.acp_shared.marketplace_estimates import runway_months
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
@@ -55,10 +54,6 @@ ASSIGNED_ANGLES = {
     "wellness_spiritual": "Tâm linh & Chữa lành",
 }
 
-# Ordered ascending by posts_per_week -- used by GET .../mirror to find "the next tier up" for its
-# upsell suggestion. 'internal' deliberately excluded: not a purchasable customer upgrade path.
-_PLAN_TIER_UPGRADE_ORDER = ["starter", "growth", "business", "enterprise"]
-
 # ── Auth guard ────────────────────────────────────────────────────────────────
 
 
@@ -75,6 +70,11 @@ class CreateTenantRequest(BaseModel):
     name: str
     slug: str
     plan_tier: str = "starter"
+    # AA-384: caller-chosen posting cadence, no longer implied by plan_tier (was
+    # POSTS_PER_WEEK_BY_PLAN_TIER, removed). Required, no default -- every tenant states its own
+    # cadence at creation. 1-14 is the validation range confirmed in the AA-384 build task (a
+    # generous ceiling, not a real technical limit).
+    posts_per_week: int = Field(..., ge=1, le=14)
 
 
 class CreateTenantResponse(BaseModel):
@@ -82,6 +82,7 @@ class CreateTenantResponse(BaseModel):
     name: str
     slug: str
     plan_tier: str
+    posts_per_week: int
     api_key: str
     rate_limit_rpm: int
     is_active: bool
@@ -130,10 +131,11 @@ async def create_tenant(
 
         async with conn.transaction():
             tenant_id = await conn.fetchval("""
-                INSERT INTO shared.tenants (name, slug, plan_tier, api_key_hash, rate_limit_rpm, is_active)
-                VALUES ($1, $2, $3::plan_tier_enum, $4, $5, false)
+                INSERT INTO shared.tenants
+                    (name, slug, plan_tier, posts_per_week, api_key_hash, rate_limit_rpm, is_active)
+                VALUES ($1, $2, $3::plan_tier_enum, $4, $5, $6, false)
                 RETURNING tenant_id
-            """, body.name, body.slug, body.plan_tier, key_hash, rpm)
+            """, body.name, body.slug, body.plan_tier, body.posts_per_week, key_hash, rpm)
 
             # Quota ledger — default limits per plan
             plan_limits = PLAN_LIMITS.get(body.plan_tier, PLAN_LIMITS["starter"])
@@ -171,7 +173,7 @@ async def create_tenant(
                     (tenant_id, actor, action, resource_type, resource_id, details)
                 VALUES ($1, 'admin_api', 'agency.onboard', 'tenant', $2, $3::jsonb)
             """, str(tenant_id), str(tenant_id), json.dumps({
-                "name": body.name, "plan_tier": body.plan_tier,
+                "name": body.name, "plan_tier": body.plan_tier, "posts_per_week": body.posts_per_week,
             }))
 
     return CreateTenantResponse(
@@ -179,6 +181,7 @@ async def create_tenant(
         name=body.name,
         slug=body.slug,
         plan_tier=body.plan_tier,
+        posts_per_week=body.posts_per_week,
         api_key=plaintext,
         rate_limit_rpm=rpm,
         is_active=False,
@@ -199,7 +202,7 @@ async def list_tenants(
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT
-                t.tenant_id, t.name, t.slug, t.plan_tier::text,
+                t.tenant_id, t.name, t.slug, t.plan_tier::text, t.posts_per_week,
                 t.country, t.rate_limit_rpm, t.is_active, t.created_at,
                 COALESCE(u.api_calls_used, 0)          AS api_calls_used,
                 COALESCE(u.quota_tours_pct, 0)         AS quota_tours_pct,
@@ -224,7 +227,7 @@ async def list_tenants(
             LEFT JOIN gold_aa_internal.published_tours pt
                 ON pt.tenant_id = t.tenant_id
             WHERE t.is_active = true
-            GROUP BY t.tenant_id, t.name, t.slug, t.plan_tier, t.country,
+            GROUP BY t.tenant_id, t.name, t.slug, t.plan_tier, t.posts_per_week, t.country,
                      t.rate_limit_rpm, t.is_active, t.created_at,
                      u.api_calls_used, u.quota_tours_pct, u.quota_calls_pct,
                      u.tours_overage, u.overage_usd, u.llm_cost_usd,
@@ -238,6 +241,7 @@ async def list_tenants(
                 "name":           r["name"],
                 "slug":           r["slug"],
                 "plan_tier":      str(r["plan_tier"]),
+                "posts_per_week": r["posts_per_week"],
                 "country":        r["country"],
                 "rate_limit_rpm": r["rate_limit_rpm"],
                 "is_active":      r["is_active"],
@@ -941,24 +945,30 @@ async def assign_tenant_angle(
 
 # ── GET /admin/tenants/{id}/mirror — N1 steps 4+5 ────────────────────────────
 
-@router.get("/tenants/{tenant_id}/mirror", summary="N1 steps 4+5 — Mirror: real atom count, runway, upsell")
+@router.get("/tenants/{tenant_id}/mirror", summary="N1 steps 4+5 — Mirror: real atom count + runway info")
 async def get_tenant_mirror(
     tenant_id: UUID,
     request: Request,
     x_admin_secret: str = Header(None),
 ):
-    """Never reads acp_shared.marketplace_portfolios.atom_snapshot (that's a Marketplace-time
+    """AA-384 product-direction change: this endpoint is now PURELY INFORMATIONAL — no upsell
+    language, no "next plan tier" suggestion. Pre-paying-customer stage, >700-tour catalog: atom
+    scarcity is not a real concern yet, so a tier-upgrade nudge here would be selling against a
+    limit that doesn't actually bind. posts_per_week now comes straight from shared.tenants
+    (tenant's own free choice at creation, migration 099) — no plan_tier lookup at all.
+
+    Still never reads acp_shared.marketplace_portfolios.atom_snapshot (that's a Marketplace-time
     snapshot that can go stale — atoms starred/deleted/added before onboarding actually happens).
     Always a FRESH COUNT(*) against acp_contract.tour_atoms for this tenant's seeded tour_ids, and
-    always calls runway_months() directly (services.acp_shared.marketplace_estimates, AA-330 Phần B)
-    — no re-derived formula. posts_per_week is fixed by plan_tier (AA-309 build task decision 1),
-    never tenant-chosen."""
+    still calls runway_months() directly (services.acp_shared.marketplace_estimates, AA-330 Phần B)
+    with the UNCHANGED formula — AA-384 only changes how the result is presented, not computed."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
 
     async with pool.acquire() as conn:
         tenant = await conn.fetchrow(
-            "SELECT tenant_id, plan_tier::text AS plan_tier FROM shared.tenants WHERE tenant_id = $1",
+            "SELECT tenant_id, plan_tier::text AS plan_tier, posts_per_week "
+            "FROM shared.tenants WHERE tenant_id = $1",
             tenant_id,
         )
         if not tenant:
@@ -985,32 +995,15 @@ async def get_tenant_mirror(
         )
 
     plan_tier = tenant["plan_tier"]
-    posts_per_week = POSTS_PER_WEEK_BY_PLAN_TIER.get(plan_tier)
-    months = runway_months(atom_count, posts_per_week) if posts_per_week else None
+    posts_per_week = tenant["posts_per_week"]
+    months = runway_months(atom_count, posts_per_week)
 
-    upsell = None
-    if plan_tier in _PLAN_TIER_UPGRADE_ORDER and months and months > 0:
-        idx = _PLAN_TIER_UPGRADE_ORDER.index(plan_tier)
-        if idx + 1 < len(_PLAN_TIER_UPGRADE_ORDER):
-            next_tier = _PLAN_TIER_UPGRADE_ORDER[idx + 1]
-            next_posts_per_week = POSTS_PER_WEEK_BY_PLAN_TIER[next_tier]
-            # Atoms needed to sustain the SAME runway at the faster cadence — same "want more
-            # posts/week -> need more atoms" framing as the issue's own worked example (12 tour ->
-            # 87 atom -> ~7 tháng @3/week -> "muốn 5 bài/tuần -> license thêm ~8 tour"; verified
-            # this reproduces that exact "~8 tour" figure when run on those numbers).
-            atoms_needed = next_posts_per_week * 4 * months
-            additional_atoms = max(0, atoms_needed - atom_count)
-            if additional_atoms > 0 and len(tour_ids) > 0:
-                atoms_per_tour = atom_count / len(tour_ids)
-                additional_tours = -(-additional_atoms // atoms_per_tour) if atoms_per_tour > 0 else None
-                upsell = {
-                    "next_plan_tier": next_tier,
-                    "next_posts_per_week": next_posts_per_week,
-                    "additional_atoms_needed": additional_atoms,
-                    "additional_tours_needed_estimate": (
-                        int(additional_tours) if additional_tours is not None else None
-                    ),
-                }
+    message = (
+        f"Với nhịp đang chọn ({posts_per_week} bài/tuần), nội dung hiện có đủ dùng khoảng "
+        f"{months} tháng."
+        if months is not None
+        else "Không thể ước tính thời lượng nội dung với nhịp bài hiện tại."
+    )
 
     return {
         "tenant_id": str(tenant_id),
@@ -1019,9 +1012,9 @@ async def get_tenant_mirror(
         "tour_count": len(tour_ids),
         "atom_count": atom_count,
         "runway_months": months,
+        "message": message,
         "assigned_angle": assigned_angle,
         "assigned_angle_label": ASSIGNED_ANGLES.get(assigned_angle) if assigned_angle else None,
-        "upsell_suggestion": upsell,
     }
 
 
