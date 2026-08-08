@@ -14,6 +14,23 @@ from typing import Optional
 
 WEEKS_PER_MONTH = 4  # same convention as services.acp_planning.allocator's weeks=[1,2,3,4]
 
+# AA-309 [N1] commercial-decision (Nghiep, confirmed before build, 08/08/2026): posts_per_week for
+# the Mirror's runway_months() call is FIXED per plan_tier -- never tenant-chosen, never a manual
+# Ms. Thu entry at Gate A. Keys match shared.tenants.plan_tier_enum's real values (migration 002/003:
+# 'internal', 'starter', 'growth', 'business', 'enterprise') -- note api/routers/admin.py's own
+# PLAN_LIMITS dict has no 'enterprise' entry (create_tenant()/update_tenant() both currently reject
+# plan_tier='enterprise' with 400, even though the DB enum allows it) -- a pre-existing gap, not
+# introduced or fixed here, out of scope for N1.
+# This is a commercial decision that may change later -- kept as a plain, easily-editable constant,
+# never inlined into Mirror's own logic.
+POSTS_PER_WEEK_BY_PLAN_TIER = {
+    "starter": 1,
+    "growth": 3,
+    "business": 5,
+    "enterprise": 7,
+    "internal": 7,
+}
+
 
 def runway_months(atom_count: int, posts_per_week: float) -> Optional[int]:
     """AA-330 Phần B, commercial-decision D1 (Nghiep, confirmed before build) — floor(atom_count
@@ -269,4 +286,7 @@ def parse_price(price_raw: Optional[str]) -> Optional[float]:
     return usd
 
 
-__all__ = ["runway_months", "parse_price", "FX_RATES_TO_USD", "WEEKS_PER_MONTH", "MIN_PLAUSIBLE_PRICE_USD"]
+__all__ = [
+    "runway_months", "parse_price", "FX_RATES_TO_USD", "WEEKS_PER_MONTH",
+    "MIN_PLAUSIBLE_PRICE_USD", "POSTS_PER_WEEK_BY_PLAN_TIER",
+]
