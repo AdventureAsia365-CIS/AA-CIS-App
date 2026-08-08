@@ -22,6 +22,8 @@ from services.acp_planning.quarter import (
     save_quarter_plan_version,
 )
 from services.acp_planning.runway import runway_map
+from services.acp_shared.marketplace_estimates import (POSTS_PER_WEEK_BY_PLAN_TIER,
+                                                        runway_months)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
@@ -32,6 +34,30 @@ PLAN_LIMITS = {
     "business": {"rpm": 1000, "tours_per_month": 2000},
     "internal": {"rpm": 60,   "tours_per_month": 999999},
 }
+
+# AA-309 [N1] commercial-decision (Nghiep, confirmed before build, 08/08/2026) — fixed vocabulary
+# for tenant_atom_state.assigned_angle (migration 098). 7 angles: the 3 illustrative examples from
+# AA-309's original description (culinary_people/physical_terrain/culture_craft) plus 4 more, sized
+# to give headroom above AA-332's own cited ceiling of ~3-5 tenants per (destination, source market)
+# before a new destination must open -- some destinations won't fit every angle equally well (a
+# luxury_leisure framing may not suit a budget trekking country), so slack beyond the exact tenant
+# ceiling matters. Each is a generic narrative lens applicable across destinations, not tied to one
+# country, so the same underlying atom facts can genuinely read differently depending which angle a
+# tenant is assigned. Mirrors migration 098's own CHECK constraint — keep both in sync if this list
+# ever changes.
+ASSIGNED_ANGLES = {
+    "culinary_people":    "Ẩm thực & Con người",
+    "physical_terrain":   "Thể lực & Địa hình",
+    "culture_craft":      "Văn hoá & Thủ công",
+    "nature_wildlife":    "Thiên nhiên & Hoang dã",
+    "luxury_leisure":     "Sang trọng & Nghỉ dưỡng",
+    "family_group":       "Gia đình & Trải nghiệm nhóm",
+    "wellness_spiritual": "Tâm linh & Chữa lành",
+}
+
+# Ordered ascending by posts_per_week -- used by GET .../mirror to find "the next tier up" for its
+# upsell suggestion. 'internal' deliberately excluded: not a purchasable customer upgrade path.
+_PLAN_TIER_UPGRADE_ORDER = ["starter", "growth", "business", "enterprise"]
 
 # ── Auth guard ────────────────────────────────────────────────────────────────
 
@@ -58,6 +84,7 @@ class CreateTenantResponse(BaseModel):
     plan_tier: str
     api_key: str
     rate_limit_rpm: int
+    is_active: bool
     message: str
 
 
@@ -76,6 +103,14 @@ async def create_tenant(
     request: Request,
     x_admin_secret: str = Header(None),
 ):
+    """AA-309 [N1] change: `is_active` now starts `false` (was `true`) -- a new tenant stays
+    inactive until Gate A approval (`POST /tenants/{id}/gate-a/approve`) flips it, so nothing can
+    run production for a tenant that hasn't been reviewed. This function itself never touched
+    silver_aa_internal.raw_tours (no code to remove here) -- that "tenant brings its own tours"
+    assumption lives only in list_tenants()/get_tenant_details() below, the old ACP v1 shape N1
+    deliberately does not extend: a new tenant's tours come from acp_shared.tenant_atom_state
+    (seeded from a finalized acp_shared.marketplace_portfolios row via POST .../seed-atoms), never
+    from rows the tenant uploads under its own tenant_id."""
     verify_admin_secret(x_admin_secret)
 
     if body.plan_tier not in PLAN_LIMITS:
@@ -96,7 +131,7 @@ async def create_tenant(
         async with conn.transaction():
             tenant_id = await conn.fetchval("""
                 INSERT INTO shared.tenants (name, slug, plan_tier, api_key_hash, rate_limit_rpm, is_active)
-                VALUES ($1, $2, $3::plan_tier_enum, $4, $5, true)
+                VALUES ($1, $2, $3::plan_tier_enum, $4, $5, false)
                 RETURNING tenant_id
             """, body.name, body.slug, body.plan_tier, key_hash, rpm)
 
@@ -117,9 +152,17 @@ async def create_tenant(
                 tenant_id,
             )
             if not has_rules:
+                # AA-309 [N1] live-verify fix (08/08/2026): shared.tenant_brand_rules.brand_name is
+                # TEXT NOT NULL with no column default (confirmed live, information_schema) -- this
+                # bare INSERT has always violated that constraint, discovered only by actually
+                # running create_tenant() against the real dev DB (not visible from reading the code
+                # or the schema in isolation). Pre-existing bug in AA-63's own code, not introduced
+                # by N1 -- fixed here because N1 categorically depends on create_tenant() succeeding.
+                # body.name is a real, already-available value (not a placeholder) -- overwritten
+                # later by the real brand-brief upload flow (upload_brand_brief()) if one happens.
                 await conn.execute(
-                    "INSERT INTO shared.tenant_brand_rules (tenant_id) VALUES ($1)",
-                    tenant_id,
+                    "INSERT INTO shared.tenant_brand_rules (tenant_id, brand_name) VALUES ($1, $2)",
+                    tenant_id, body.name,
                 )
 
             # Onboarding audit trail
@@ -138,7 +181,9 @@ async def create_tenant(
         plan_tier=body.plan_tier,
         api_key=plaintext,
         rate_limit_rpm=rpm,
-        message="Store this API key securely — it will not be shown again.",
+        is_active=False,
+        message="Store this API key securely — it will not be shown again. "
+                "Tenant is inactive until Gate A approval (POST /tenants/{tenant_id}/gate-a/approve).",
     )
 
 # ── GET /admin/tenants — List all tenants + usage ────────────────────────────
@@ -763,6 +808,345 @@ async def offboard_tenant(
         "status": "offboarded",
         "api_key": "REVOKED",
         "note": f"S3 prefix acp-cis-bronze-867490540162/{tenant_id}/ must be deleted after 14 days.",
+    }
+
+
+# ── POST /admin/tenants/{id}/seed-atoms — N1 step 2 ──────────────────────────
+
+class SeedAtomsRequest(BaseModel):
+    portfolio_id: UUID
+
+
+@router.post("/tenants/{tenant_id}/seed-atoms", summary="N1 step 2 — seed tenant_atom_state from a finalized portfolio")
+async def seed_tenant_atoms(
+    tenant_id: UUID,
+    body: SeedAtomsRequest,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    """AA-309 [N1] — deliberately a SEPARATE step from create_tenant() (Nghiep, confirmed before
+    build): a tenant can be retried here without recreating the tenant row if seeding fails.
+    Idempotent re-run with the SAME portfolio_id is a safe no-op (ON CONFLICT DO NOTHING on both
+    inserts); a second call with a DIFFERENT portfolio_id is rejected (409) rather than silently
+    mixing two portfolios' tour lists into one tenant's atom state."""
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        tenant = await conn.fetchval("SELECT tenant_id FROM shared.tenants WHERE tenant_id = $1", tenant_id)
+        if not tenant:
+            raise HTTPException(status_code=404, detail=f"Tenant {tenant_id} not found")
+
+        portfolio = await conn.fetchrow(
+            "SELECT portfolio_id, tour_ids, status FROM acp_shared.marketplace_portfolios WHERE portfolio_id = $1",
+            body.portfolio_id,
+        )
+        if not portfolio:
+            raise HTTPException(status_code=404, detail=f"Portfolio {body.portfolio_id} not found")
+        if portfolio["status"] != "finalized":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Portfolio {body.portfolio_id} is '{portfolio['status']}', not 'finalized'",
+            )
+
+        existing_onboarding = await conn.fetchrow(
+            "SELECT portfolio_id FROM acp_shared.tenant_onboarding WHERE tenant_id = $1", tenant_id,
+        )
+        if existing_onboarding and existing_onboarding["portfolio_id"] != body.portfolio_id:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Tenant {tenant_id} already seeded from portfolio "
+                    f"{existing_onboarding['portfolio_id']} — cannot reseed from a different portfolio"
+                ),
+            )
+
+        async with conn.transaction():
+            await conn.execute(
+                """
+                INSERT INTO acp_shared.tenant_atom_state (tenant_id, tour_id)
+                SELECT $1, unnest($2::uuid[])
+                ON CONFLICT (tenant_id, tour_id) DO NOTHING
+                """,
+                tenant_id, portfolio["tour_ids"],
+            )
+            await conn.execute(
+                """
+                INSERT INTO acp_shared.tenant_onboarding (tenant_id, portfolio_id)
+                VALUES ($1, $2)
+                ON CONFLICT (tenant_id) DO NOTHING
+                """,
+                tenant_id, body.portfolio_id,
+            )
+
+        seeded_count = await conn.fetchval(
+            "SELECT count(*) FROM acp_shared.tenant_atom_state WHERE tenant_id = $1", tenant_id,
+        )
+
+    return {
+        "tenant_id": str(tenant_id),
+        "portfolio_id": str(body.portfolio_id),
+        "seeded_tour_count": seeded_count,
+    }
+
+
+# ── PATCH /admin/tenants/{id}/angle — N1 step 3 ──────────────────────────────
+
+class AssignAngleRequest(BaseModel):
+    assigned_angle: str
+
+
+@router.patch("/tenants/{tenant_id}/angle", summary="N1 step 3 — assign the tenant's anti-cannibalization angle")
+async def assign_tenant_angle(
+    tenant_id: UUID,
+    body: AssignAngleRequest,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    """Applies to every tenant_atom_state row for this tenant at once (same value on every row —
+    AA-309 build task decision: angle is a per-TENANT decision, denormalized onto the per-tour
+    table rather than a separate 1-row-per-tenant table). Validated against the fixed
+    ASSIGNED_ANGLES vocabulary — never free text."""
+    verify_admin_secret(x_admin_secret)
+    if body.assigned_angle not in ASSIGNED_ANGLES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"assigned_angle must be one of {list(ASSIGNED_ANGLES.keys())}",
+        )
+
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE acp_shared.tenant_atom_state
+            SET assigned_angle = $2, updated_at = now()
+            WHERE tenant_id = $1
+            """,
+            tenant_id, body.assigned_angle,
+        )
+    updated = int(result.split()[-1])
+    if updated == 0:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No tenant_atom_state rows for tenant {tenant_id} — run seed-atoms first",
+        )
+
+    return {
+        "tenant_id": str(tenant_id),
+        "assigned_angle": body.assigned_angle,
+        "assigned_angle_label": ASSIGNED_ANGLES[body.assigned_angle],
+        "tour_rows_updated": updated,
+    }
+
+
+# ── GET /admin/tenants/{id}/mirror — N1 steps 4+5 ────────────────────────────
+
+@router.get("/tenants/{tenant_id}/mirror", summary="N1 steps 4+5 — Mirror: real atom count, runway, upsell")
+async def get_tenant_mirror(
+    tenant_id: UUID,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    """Never reads acp_shared.marketplace_portfolios.atom_snapshot (that's a Marketplace-time
+    snapshot that can go stale — atoms starred/deleted/added before onboarding actually happens).
+    Always a FRESH COUNT(*) against acp_contract.tour_atoms for this tenant's seeded tour_ids, and
+    always calls runway_months() directly (services.acp_shared.marketplace_estimates, AA-330 Phần B)
+    — no re-derived formula. posts_per_week is fixed by plan_tier (AA-309 build task decision 1),
+    never tenant-chosen."""
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        tenant = await conn.fetchrow(
+            "SELECT tenant_id, plan_tier::text AS plan_tier FROM shared.tenants WHERE tenant_id = $1",
+            tenant_id,
+        )
+        if not tenant:
+            raise HTTPException(status_code=404, detail=f"Tenant {tenant_id} not found")
+
+        state_rows = await conn.fetch(
+            "SELECT tour_id, assigned_angle FROM acp_shared.tenant_atom_state WHERE tenant_id = $1",
+            tenant_id,
+        )
+        if not state_rows:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No tenant_atom_state rows for tenant {tenant_id} — run seed-atoms first",
+            )
+        tour_ids = [r["tour_id"] for r in state_rows]
+        assigned_angle = state_rows[0]["assigned_angle"]
+
+        atom_count = await conn.fetchval(
+            """
+            SELECT count(*) FROM acp_contract.tour_atoms
+            WHERE tour_id = ANY($1) AND NOT deleted AND NOT is_empty_marker
+            """,
+            tour_ids,
+        )
+
+    plan_tier = tenant["plan_tier"]
+    posts_per_week = POSTS_PER_WEEK_BY_PLAN_TIER.get(plan_tier)
+    months = runway_months(atom_count, posts_per_week) if posts_per_week else None
+
+    upsell = None
+    if plan_tier in _PLAN_TIER_UPGRADE_ORDER and months and months > 0:
+        idx = _PLAN_TIER_UPGRADE_ORDER.index(plan_tier)
+        if idx + 1 < len(_PLAN_TIER_UPGRADE_ORDER):
+            next_tier = _PLAN_TIER_UPGRADE_ORDER[idx + 1]
+            next_posts_per_week = POSTS_PER_WEEK_BY_PLAN_TIER[next_tier]
+            # Atoms needed to sustain the SAME runway at the faster cadence — same "want more
+            # posts/week -> need more atoms" framing as the issue's own worked example (12 tour ->
+            # 87 atom -> ~7 tháng @3/week -> "muốn 5 bài/tuần -> license thêm ~8 tour"; verified
+            # this reproduces that exact "~8 tour" figure when run on those numbers).
+            atoms_needed = next_posts_per_week * 4 * months
+            additional_atoms = max(0, atoms_needed - atom_count)
+            if additional_atoms > 0 and len(tour_ids) > 0:
+                atoms_per_tour = atom_count / len(tour_ids)
+                additional_tours = -(-additional_atoms // atoms_per_tour) if atoms_per_tour > 0 else None
+                upsell = {
+                    "next_plan_tier": next_tier,
+                    "next_posts_per_week": next_posts_per_week,
+                    "additional_atoms_needed": additional_atoms,
+                    "additional_tours_needed_estimate": (
+                        int(additional_tours) if additional_tours is not None else None
+                    ),
+                }
+
+    return {
+        "tenant_id": str(tenant_id),
+        "plan_tier": plan_tier,
+        "posts_per_week": posts_per_week,
+        "tour_count": len(tour_ids),
+        "atom_count": atom_count,
+        "runway_months": months,
+        "assigned_angle": assigned_angle,
+        "assigned_angle_label": ASSIGNED_ANGLES.get(assigned_angle) if assigned_angle else None,
+        "upsell_suggestion": upsell,
+    }
+
+
+# ── POST /admin/tenants/{id}/gate-a/approve — N1 step 6 ──────────────────────
+
+class GateAApproveRequest(BaseModel):
+    approved_by: str
+
+
+@router.post("/tenants/{tenant_id}/gate-a/approve", summary="N1 step 6 — Gate A approval, tenant becomes active")
+async def approve_gate_a(
+    tenant_id: UUID,
+    body: GateAApproveRequest,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    """Mirrors acp_shared.quarter_plan_version's real approve pattern (AA-320) exactly:
+    SELECT...FOR UPDATE row lock, reject a non-'pending' status (409, never a silent no-op on a
+    second approve call), UPDATE approval_status/approved_by/approved_at. Only on success does
+    shared.tenants.is_active flip to true — never earlier. Requires assigned_angle to already be
+    set (step 3 must precede step 6, per the 6-step spec) — rejects an incomplete onboarding rather
+    than approving a tenant with no angle assigned."""
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT approval_status FROM acp_shared.tenant_onboarding WHERE tenant_id = $1 FOR UPDATE",
+                tenant_id,
+            )
+            if row is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No tenant_onboarding row for tenant {tenant_id} — run seed-atoms first",
+                )
+            if row["approval_status"] != "pending":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Tenant {tenant_id} onboarding is '{row['approval_status']}', "
+                        "not 'pending' — cannot approve"
+                    ),
+                )
+
+            has_angle = await conn.fetchval(
+                """
+                SELECT 1 FROM acp_shared.tenant_atom_state
+                WHERE tenant_id = $1 AND assigned_angle IS NOT NULL LIMIT 1
+                """,
+                tenant_id,
+            )
+            if not has_angle:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Tenant {tenant_id} has no assigned_angle yet — run PATCH .../angle first",
+                )
+
+            await conn.execute(
+                """
+                UPDATE acp_shared.tenant_onboarding
+                SET approval_status = 'approved', approved_by = $2, approved_at = now()
+                WHERE tenant_id = $1
+                """,
+                tenant_id, body.approved_by,
+            )
+            await conn.execute(
+                "UPDATE shared.tenants SET is_active = true, updated_at = now() WHERE tenant_id = $1",
+                tenant_id,
+            )
+
+        result = await conn.fetchrow(
+            """
+            SELECT tenant_id, portfolio_id, approval_status, approved_by, approved_at, created_at
+            FROM acp_shared.tenant_onboarding WHERE tenant_id = $1
+            """,
+            tenant_id,
+        )
+
+    return {
+        "tenant_id": str(result["tenant_id"]),
+        "portfolio_id": str(result["portfolio_id"]),
+        "approval_status": result["approval_status"],
+        "approved_by": result["approved_by"],
+        "approved_at": result["approved_at"].isoformat() if result["approved_at"] else None,
+        "created_at": result["created_at"].isoformat(),
+        "tenant_is_active": True,
+    }
+
+
+# ── GET /admin/tenants/{id}/gate-a/status — review before approval ──────────
+
+@router.get("/tenants/{tenant_id}/gate-a/status", summary="N1 — Gate A approval status")
+async def get_gate_a_status(
+    tenant_id: UUID,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT to_.tenant_id, to_.portfolio_id, to_.approval_status, to_.approved_by,
+                   to_.approved_at, to_.created_at, t.is_active
+            FROM acp_shared.tenant_onboarding to_
+            JOIN shared.tenants t ON t.tenant_id = to_.tenant_id
+            WHERE to_.tenant_id = $1
+            """,
+            tenant_id,
+        )
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No tenant_onboarding row for tenant {tenant_id} — run seed-atoms first",
+        )
+
+    return {
+        "tenant_id": str(row["tenant_id"]),
+        "portfolio_id": str(row["portfolio_id"]),
+        "approval_status": row["approval_status"],
+        "approved_by": row["approved_by"],
+        "approved_at": row["approved_at"].isoformat() if row["approved_at"] else None,
+        "created_at": row["created_at"].isoformat(),
+        "tenant_is_active": row["is_active"],
     }
 
 
