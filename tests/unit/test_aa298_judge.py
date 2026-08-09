@@ -42,9 +42,15 @@ def test_invoke_judge_calls_nova_pro_model_id():
 
 
 def test_invoke_judge_never_the_writer_model_id():
-    """Direct assertion the checklist asks for: judge model != writer model."""
-    from services.content_generation.s1_from_atom import PALMYRA_MODEL_ID
-    assert NOVA_PRO_MODEL_ID != PALMYRA_MODEL_ID
+    """Direct assertion the checklist asks for: judge model != writer model.
+
+    AA-392 (09/08/2026): S1-from-atom's writer moved off Palmyra X5
+    (us.writer.palmyra-x5-v1:0, permanently rejected — AA-337's 1 req/min
+    channel throttle) onto the same Bedrock satellite Sonnet inference
+    profile N7's own writer uses. Checked against that real profile now,
+    not the removed Palmyra constant."""
+    from shared.llm_client.bedrock_satellite import INFERENCE_PROFILE_SONNET
+    assert NOVA_PRO_MODEL_ID != INFERENCE_PROFILE_SONNET
 
 
 def test_gate_framework_context_isolation_no_generation_prompt_in_judge_payload():
