@@ -353,86 +353,18 @@ def test_persona_block_is_additive_not_a_replacement():
 
 # ── generate_draft seam: routes on model_tier ────────────────────────────────
 
-def test_generate_draft_routes_to_palmyra_by_default():
-    fake_payload = {
-        "choices": [{"message": {"content": "{}"}}],
-        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
-    }
-    fake_body = MagicMock()
-    fake_body.read.return_value = json.dumps(fake_payload).encode()
-    fake_client = MagicMock()
-    fake_client.invoke_model.return_value = {"body": fake_body}
+def test_generate_draft_routes_to_claude_satellite_by_default():
+    fake_result = MagicMock()
+    fake_result.text = "{}"
+    fake_result.model_used = "sonnet-4-6"
+    fake_result.usage = {"input_tokens": 20, "output_tokens": 8}
 
-    with patch("services.content_generation.s1_from_atom.boto3.client", return_value=fake_client) as mock_boto:
-        result = generate_draft("sys", "user", model_tier="palmyra")
+    with patch("shared.llm_client.bedrock_satellite.invoke_claude", return_value=fake_result) as mock_invoke:
+        result = generate_draft("sys", "user")  # DEFAULT_MODEL_TIER, no explicit model_tier
 
-    mock_boto.assert_called_once_with("bedrock-runtime", region_name="us-west-1")
-    assert result["provider"] == "bedrock-acc2"
-    assert result["model_used"] == "us.writer.palmyra-x5-v1:0"
-    assert result["input_tokens"] == 10
-    assert result["output_tokens"] == 5
-
-
-def test_call_palmyra_retries_on_throttling_then_succeeds():
-    """AA-289: reproduced live twice — a fixed sleep between sequential calls was not
-    reliable, retry-with-backoff on the specific ThrottlingException is."""
-    from botocore.exceptions import ClientError
-
-    fake_payload = {
-        "choices": [{"message": {"content": "{}"}}],
-        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
-    }
-    fake_body = MagicMock()
-    fake_body.read.return_value = json.dumps(fake_payload).encode()
-    throttle_error = ClientError(
-        {"Error": {"Code": "ThrottlingException", "Message": "Too many requests"}}, "InvokeModel",
-    )
-    fake_client = MagicMock()
-    fake_client.invoke_model.side_effect = [throttle_error, throttle_error, {"body": fake_body}]
-
-    with patch("services.content_generation.s1_from_atom.boto3.client", return_value=fake_client), \
-         patch("services.content_generation.s1_from_atom.time.sleep") as mock_sleep:
-        result = generate_draft("sys", "user", model_tier="palmyra")
-
-    assert fake_client.invoke_model.call_count == 3
-    assert result["provider"] == "bedrock-acc2"
-    assert mock_sleep.call_count == 2  # backoff before attempt 2 and attempt 3
-
-
-def test_call_palmyra_reraises_non_throttling_client_error_immediately():
-    from botocore.exceptions import ClientError
-
-    other_error = ClientError(
-        {"Error": {"Code": "ValidationException", "Message": "bad request"}}, "InvokeModel",
-    )
-    fake_client = MagicMock()
-    fake_client.invoke_model.side_effect = other_error
-
-    with patch("services.content_generation.s1_from_atom.boto3.client", return_value=fake_client), \
-         patch("services.content_generation.s1_from_atom.time.sleep") as mock_sleep:
-        with pytest.raises(ClientError):
-            generate_draft("sys", "user", model_tier="palmyra")
-
-    assert fake_client.invoke_model.call_count == 1
-    mock_sleep.assert_not_called()
-
-
-def test_call_palmyra_reraises_after_exhausting_throttle_retries():
-    from botocore.exceptions import ClientError
-    from services.content_generation.s1_from_atom import _PALMYRA_THROTTLE_RETRIES
-
-    throttle_error = ClientError(
-        {"Error": {"Code": "ThrottlingException", "Message": "Too many requests"}}, "InvokeModel",
-    )
-    fake_client = MagicMock()
-    fake_client.invoke_model.side_effect = throttle_error
-
-    with patch("services.content_generation.s1_from_atom.boto3.client", return_value=fake_client), \
-         patch("services.content_generation.s1_from_atom.time.sleep"):
-        with pytest.raises(ClientError):
-            generate_draft("sys", "user", model_tier="palmyra")
-
-    assert fake_client.invoke_model.call_count == _PALMYRA_THROTTLE_RETRIES + 1
+    mock_invoke.assert_called_once()
+    assert result["provider"] == "bedrock-satellite"
+    assert result["model_used"] == "satellite-sonnet-4-6"
 
 
 def test_generate_draft_routes_to_claude_satellite_when_requested():
@@ -447,6 +379,14 @@ def test_generate_draft_routes_to_claude_satellite_when_requested():
     mock_invoke.assert_called_once()
     assert result["provider"] == "bedrock-satellite"
     assert result["model_used"] == "satellite-sonnet-4-6"
+
+
+def test_generate_draft_rejects_palmyra_permanently():
+    """AA-392: Palmyra X5 is permanently rejected (AA-337's measured 1 req/min
+    channel-program throttle) — this must raise loudly, never silently route
+    anywhere, so a stale caller-supplied model_tier="palmyra" can't slip back in."""
+    with pytest.raises(ValueError, match="permanently rejected"):
+        generate_draft("sys", "user", model_tier="palmyra")
 
 
 def test_generate_draft_rejects_unknown_tier():
@@ -476,7 +416,7 @@ async def test_generate_s1_from_atom_succeeds_first_try():
         "aa_highlights": ["Rickshaw ride through Chandni Chowk [R:atom_aaaaaaaaaa]"],
         "aa_itineraries": "",
     }
-    fake_draft = {"text": json.dumps(good_content), "model_used": "us.writer.palmyra-x5-v1:0",
+    fake_draft = {"text": json.dumps(good_content), "model_used": "satellite-sonnet-4-6",
                   "provider": "bedrock-acc2", "input_tokens": 100, "output_tokens": 50}
 
     with patch("services.content_generation.s1_from_atom.generate_draft", return_value=fake_draft) as mock_gen:
@@ -499,9 +439,9 @@ async def test_generate_s1_from_atom_retries_then_succeeds():
     good_content = {
         "aa_summary": "The trip opens with a rickshaw ride through Chandni Chowk [R:atom_aaaaaaaaaa].",
     }
-    bad_draft = {"text": json.dumps(bad_content), "model_used": "us.writer.palmyra-x5-v1:0",
+    bad_draft = {"text": json.dumps(bad_content), "model_used": "satellite-sonnet-4-6",
                  "provider": "bedrock-acc2", "input_tokens": 100, "output_tokens": 50}
-    good_draft = {"text": json.dumps(good_content), "model_used": "us.writer.palmyra-x5-v1:0",
+    good_draft = {"text": json.dumps(good_content), "model_used": "satellite-sonnet-4-6",
                   "provider": "bedrock-acc2", "input_tokens": 100, "output_tokens": 50}
 
     with patch("services.content_generation.s1_from_atom.generate_draft",
@@ -525,9 +465,9 @@ async def test_generate_s1_from_atom_retries_on_fabricated_number_then_succeeds(
 
     bad_content = {"aa_summary": "A rickshaw ride down the 12-kilometer stretch of Chandni Chowk [R:atom_aaaaaaaaaa]."}
     good_content = {"aa_summary": "The trip opens with a rickshaw ride through Chandni Chowk [R:atom_aaaaaaaaaa]."}
-    bad_draft = {"text": json.dumps(bad_content), "model_used": "us.writer.palmyra-x5-v1:0",
+    bad_draft = {"text": json.dumps(bad_content), "model_used": "satellite-sonnet-4-6",
                  "provider": "bedrock-acc2", "input_tokens": 100, "output_tokens": 50}
-    good_draft = {"text": json.dumps(good_content), "model_used": "us.writer.palmyra-x5-v1:0",
+    good_draft = {"text": json.dumps(good_content), "model_used": "satellite-sonnet-4-6",
                   "provider": "bedrock-acc2", "input_tokens": 100, "output_tokens": 50}
 
     with patch("services.content_generation.s1_from_atom.generate_draft",
@@ -546,7 +486,7 @@ async def test_generate_s1_from_atom_exhausts_retries_raises_grounding_error():
     pool, _ = _make_pool(atom_rows)
 
     bad_content = {"aa_summary": "A wonderful trip with breathtaking views and no citations at all here."}
-    bad_draft = {"text": json.dumps(bad_content), "model_used": "us.writer.palmyra-x5-v1:0",
+    bad_draft = {"text": json.dumps(bad_content), "model_used": "satellite-sonnet-4-6",
                  "provider": "bedrock-acc2", "input_tokens": 100, "output_tokens": 50}
 
     with patch("services.content_generation.s1_from_atom.generate_draft", return_value=bad_draft) as mock_gen:
@@ -563,9 +503,9 @@ async def test_generate_s1_from_atom_recovers_from_malformed_json():
     pool, _ = _make_pool(atom_rows)
 
     good_content = {"aa_summary": "The trip opens with a rickshaw ride through Chandni Chowk [R:atom_aaaaaaaaaa]."}
-    malformed_draft = {"text": "not json at all {{{", "model_used": "us.writer.palmyra-x5-v1:0",
+    malformed_draft = {"text": "not json at all {{{", "model_used": "satellite-sonnet-4-6",
                         "provider": "bedrock-acc2", "input_tokens": 100, "output_tokens": 50}
-    good_draft = {"text": json.dumps(good_content), "model_used": "us.writer.palmyra-x5-v1:0",
+    good_draft = {"text": json.dumps(good_content), "model_used": "satellite-sonnet-4-6",
                   "provider": "bedrock-acc2", "input_tokens": 100, "output_tokens": 50}
 
     with patch("services.content_generation.s1_from_atom.generate_draft",
@@ -583,7 +523,7 @@ async def test_generate_s1_from_atom_sets_prompt_version_on_success():
     atom_rows = [_row("atom_aaaaaaaaaa", "Ride a rickshaw through Chandni Chowk.")]
     pool, _ = _make_pool(atom_rows)
     good_content = {"aa_summary": "A rickshaw ride through Chandni Chowk [R:atom_aaaaaaaaaa]."}
-    good_draft = {"text": json.dumps(good_content), "model_used": "us.writer.palmyra-x5-v1:0",
+    good_draft = {"text": json.dumps(good_content), "model_used": "satellite-sonnet-4-6",
                   "provider": "bedrock-acc2", "input_tokens": 100, "output_tokens": 50}
 
     with patch("services.content_generation.s1_from_atom.generate_draft", return_value=good_draft):
@@ -598,7 +538,7 @@ async def test_generate_s1_from_atom_prompt_version_changes_with_persona():
     persona is a genuinely different prompt template and must hash differently."""
     atom_rows = [_row("atom_aaaaaaaaaa", "Ride a rickshaw through Chandni Chowk.")]
     good_content = {"aa_summary": "A rickshaw ride through Chandni Chowk [R:atom_aaaaaaaaaa]."}
-    good_draft = {"text": json.dumps(good_content), "model_used": "us.writer.palmyra-x5-v1:0",
+    good_draft = {"text": json.dumps(good_content), "model_used": "satellite-sonnet-4-6",
                   "provider": "bedrock-acc2", "input_tokens": 100, "output_tokens": 50}
 
     pool_a, _ = _make_pool(atom_rows)
@@ -619,7 +559,7 @@ async def test_generate_s1_from_atom_grounding_error_carries_prompt_version_on_g
     atom_rows = [_row("atom_aaaaaaaaaa", "Ride a rickshaw through Chandni Chowk.")]
     pool, _ = _make_pool(atom_rows)
     bad_content = {"aa_summary": "A wonderful trip with breathtaking views and no citations at all here."}
-    bad_draft = {"text": json.dumps(bad_content), "model_used": "us.writer.palmyra-x5-v1:0",
+    bad_draft = {"text": json.dumps(bad_content), "model_used": "satellite-sonnet-4-6",
                  "provider": "bedrock-acc2", "input_tokens": 100, "output_tokens": 50}
 
     with patch("services.content_generation.s1_from_atom.generate_draft", return_value=bad_draft):

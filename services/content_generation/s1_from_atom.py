@@ -14,23 +14,24 @@ general. Density gate (F2, services/acp_shared/atom_constants.ATOM_DENSITY_WORDS
 >=1 citation per 300 words of generated prose, checked deterministically, not by
 asking the model to self-report.
 
-Writer model (ADR-2026-031/032, AA-308 Phần A bake-off evidence): Palmyra X5,
-acc2-native (us.writer.palmyra-x5-v1:0), NOT the acc1 Claude satellite S1 old's
-generate_node can fall back to — acc1 Claude calls are real billed money post
-Activate-credits-rejection, and T1 acc2-native is the tier policy's preferred
-writer once it clears a quality bar (Palmyra did, 14/20 vs Claude's 6/20 on a
-blind Nova-judged sample). generate_draft() is a one-function seam so a future
-switch to Claude is a one-line model_tier change, not a rewrite — see
-_call_claude_satellite below, wired but not the default.
+Writer model (AA-392, 09/08/2026 — supersedes AA-306's original Palmyra X5
+choice): Bedrock satellite acc1 Sonnet (shared/llm_client/bedrock_satellite.py,
+model="sonnet"), the exact same writer N7 Produce uses (services/acp_produce/
+generation.py, AA-370/AA-334). Palmyra X5 (acc2-native,
+us.writer.palmyra-x5-v1:0) is permanently rejected for this module — AA-337
+measured it hard-capped at 1 req/min (channel-program limit, not adjustable),
+the same throughput wall that made N7 abandon it (AA-334, Cancelled
+06/08/2026, direct Nghiep sign-off) before this module's own AA-391 live
+verify run hit the identical throttle. Palmyra must never appear anywhere in
+this module again. generate_draft() is a one-function seam
+(_call_claude_satellite below) — a future writer swap is a one-line
+model_tier change, not a rewrite.
 """
 import hashlib
 import json
 import re
-import time
 
-import boto3
 import structlog
-from botocore.exceptions import ClientError
 from json_repair import repair_json
 
 from services.acp_shared.atom_constants import ATOM_DENSITY_WORDS
@@ -39,8 +40,7 @@ from services.acp_shared.grounding import find_novel_numeric_claims
 logger = structlog.get_logger()
 
 AWS_REGION = "us-west-1"
-PALMYRA_MODEL_ID = "us.writer.palmyra-x5-v1:0"
-DEFAULT_MODEL_TIER = "palmyra"
+DEFAULT_MODEL_TIER = "claude"
 MAX_RETRIES = 2
 # Captures whatever token follows "[R:" verbatim, not just a well-formed atom_id
 # shape — a hallucinated/malformed reference must still surface as an "unknown
@@ -87,7 +87,7 @@ Output ONLY valid JSON. No preamble, no markdown, no explanation."""
 
 
 class GroundingError(Exception):
-    """Palmyra/Claude output failed the closed-world or density gate after all retries.
+    """Claude output failed the closed-world or density gate after all retries.
 
     AA-289: carries prompt_version/gate/retries when available (i.e. whenever a system
     prompt was actually built and at least one draft was attempted) so the caller can log a
@@ -240,76 +240,26 @@ OUTPUT JSON FORMAT:
 def generate_draft(system_prompt: str, user_prompt: str, model_tier: str = DEFAULT_MODEL_TIER,
                     max_tokens: int = 4096) -> dict:
     """Single seam every caller in this module goes through. Swapping the writer
-    model (e.g. Palmyra -> Claude satellite if a future verify run shows Palmyra
-    output is not good enough) is changing the model_tier argument at the call
-    site — no other code in this file needs to change. Returns
+    model is changing the model_tier argument at the call site — no other code
+    in this file needs to change. Returns
     {text, model_used, provider, input_tokens, output_tokens}."""
     if model_tier == "palmyra":
-        return _call_palmyra(system_prompt, user_prompt, max_tokens)
+        raise ValueError(
+            "model_tier='palmyra' is permanently rejected (AA-392, 09/08/2026) — Palmyra X5's "
+            "1 req/min channel-program throttle (AA-337) makes it unusable here, the same reason "
+            "N7 dropped it (AA-334). Use model_tier='claude'."
+        )
     if model_tier == "claude":
         return _call_claude_satellite(system_prompt, user_prompt, max_tokens)
-    raise ValueError(f"Unknown model_tier: {model_tier!r} (expected 'palmyra' or 'claude')")
-
-
-# AA-289: acc2 Palmyra throttles on back-to-back InvokeModel calls — reproduced live twice
-# (once with zero spacing, once with a fixed 25s gap between sequential eval-script calls,
-# services/eval/regression.py). No published RPM/TPM number exists for this model. A fixed
-# sleep is not reliable; retry-with-backoff on the specific exception is.
-_PALMYRA_THROTTLE_RETRIES = 3
-_PALMYRA_THROTTLE_BACKOFF_SECONDS = 30
-
-
-def _call_palmyra(system_prompt: str, user_prompt: str, max_tokens: int) -> dict:
-    """acc2-native, OpenAI-compatible response shape (choices[0].message.content) —
-    verified live via ECS exec smoke test (AA-306 STEP 0), NOT Anthropic's
-    content[0].text shape _call_claude_satellite below uses. No cross-account
-    AssumeRole — aa-cis-dev-ecs-task-role's existing bedrock:InvokeModel
-    (Resource "*") already covers acc2 models."""
-    client = boto3.client("bedrock-runtime", region_name=AWS_REGION)
-    body = {
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "max_tokens": max_tokens,
-    }
-    for attempt in range(_PALMYRA_THROTTLE_RETRIES + 1):
-        try:
-            resp = client.invoke_model(
-                modelId=PALMYRA_MODEL_ID,
-                body=json.dumps(body),
-                contentType="application/json",
-                accept="application/json",
-            )
-            break
-        except ClientError as e:
-            if e.response.get("Error", {}).get("Code") != "ThrottlingException":
-                raise
-            if attempt == _PALMYRA_THROTTLE_RETRIES:
-                raise
-            wait_s = _PALMYRA_THROTTLE_BACKOFF_SECONDS * (attempt + 1)
-            logger.warning("s1_from_atom_palmyra_throttled", attempt=attempt, wait_s=wait_s)
-            time.sleep(wait_s)
-    payload = json.loads(resp["body"].read())
-    choice = payload["choices"][0]["message"]["content"]
-    usage = payload.get("usage", {})
-    logger.info("s1_from_atom_llm_success", provider="bedrock-acc2", model=PALMYRA_MODEL_ID,
-                in_tokens=usage.get("prompt_tokens", 0), out_tokens=usage.get("completion_tokens", 0))
-    return {
-        "text": choice,
-        "model_used": PALMYRA_MODEL_ID,
-        "provider": "bedrock-acc2",
-        "input_tokens": usage.get("prompt_tokens", 0),
-        "output_tokens": usage.get("completion_tokens", 0),
-    }
+    raise ValueError(f"Unknown model_tier: {model_tier!r} (expected 'claude')")
 
 
 def _call_claude_satellite(system_prompt: str, user_prompt: str, max_tokens: int) -> dict:
-    """T2 — acc1 Claude satellite (AA-296). Wired so the seam is real, but NOT the
-    default model_tier: ADR-2026-031/032 gate this behind a quality bar Palmyra
-    already cleared (AA-308 Phần A), and acc1 calls are real billed money post
-    Activate-credits-rejection (ADR-2026-032) — switching this in as the default
-    needs separate sign-off, not a silent fallback from this module."""
+    """AA-392 default writer — acc1 Claude Sonnet via the AA-296 Bedrock satellite,
+    the same `invoke_claude()` call N7's own writer uses (services/acp_produce/
+    generation.py). Real billed money post Activate-credits-rejection
+    (ADR-2026-032) — accepted cost, same as N7's own AA-334 sign-off (06/08/2026)
+    to move off Palmyra."""
     from shared.llm_client.bedrock_satellite import invoke_claude, BedrockUnavailable
     try:
         result = invoke_claude(user_prompt, model="sonnet", max_tokens=max_tokens, system=system_prompt)

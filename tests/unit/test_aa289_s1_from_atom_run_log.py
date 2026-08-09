@@ -47,14 +47,14 @@ async def test_generate_logs_passed_row_on_success():
         "gate": {"citation_count": 3, "word_count": 90, "words_per_citation": 30.0,
                   "density_pass": True, "closed_world_pass": True},
         "retries": 0,
-        "model_used": "us.writer.palmyra-x5-v1:0",
+        "model_used": "satellite-sonnet-4-6",
         "input_tokens": 100,
         "output_tokens": 50,
         "prompt_version": "abcd1234",
     }
 
     with patch("api.routers.v1_s1_from_atom.generate_s1_from_atom", AsyncMock(return_value=fake_result)):
-        await generate(TOUR_ID, _make_request(pool), model_tier="palmyra", tenant={})
+        await generate(TOUR_ID, _make_request(pool), model_tier="claude", tenant={})
 
     calls = _insert_calls(conn)
     assert len(calls) == 1
@@ -62,7 +62,7 @@ async def test_generate_logs_passed_row_on_success():
     # (query, tour_id, prompt_version, model_tier, model_used, status, ...)
     assert args[1] == TOUR_ID
     assert args[2] == "abcd1234"
-    assert args[3] == "palmyra"
+    assert args[3] == "claude"
     assert args[5] == "passed"
 
 
@@ -77,7 +77,7 @@ async def test_generate_logs_gate_failed_row_when_grounding_error_has_prompt_ver
 
     with patch("api.routers.v1_s1_from_atom.generate_s1_from_atom", AsyncMock(side_effect=err)):
         with pytest.raises(HTTPException) as exc_info:
-            await generate(TOUR_ID, _make_request(pool), model_tier="palmyra", tenant={})
+            await generate(TOUR_ID, _make_request(pool), model_tier="claude", tenant={})
 
     assert exc_info.value.status_code == 502
     calls = _insert_calls(conn)
@@ -100,7 +100,7 @@ async def test_generate_skips_log_when_no_curated_atoms():
 
     with patch("api.routers.v1_s1_from_atom.generate_s1_from_atom", AsyncMock(side_effect=err)):
         with pytest.raises(HTTPException) as exc_info:
-            await generate(TOUR_ID, _make_request(pool), model_tier="palmyra", tenant={})
+            await generate(TOUR_ID, _make_request(pool), model_tier="claude", tenant={})
 
     assert exc_info.value.status_code == 422
     assert _insert_calls(conn) == []
@@ -121,14 +121,14 @@ async def test_generate_log_failure_does_not_break_the_response():
         "gate": {"citation_count": 3, "word_count": 90, "words_per_citation": 30.0,
                   "density_pass": True, "closed_world_pass": True},
         "retries": 0,
-        "model_used": "us.writer.palmyra-x5-v1:0",
+        "model_used": "satellite-sonnet-4-6",
         "input_tokens": 100,
         "output_tokens": 50,
         "prompt_version": "abcd1234",
     }
 
     with patch("api.routers.v1_s1_from_atom.generate_s1_from_atom", AsyncMock(return_value=fake_result)):
-        response = await generate(TOUR_ID, _make_request(pool), model_tier="palmyra", tenant={})
+        response = await generate(TOUR_ID, _make_request(pool), model_tier="claude", tenant={})
 
     assert response["tour_id"] == TOUR_ID
     assert response["content"] == {"aa_summary": "grounded text"}
