@@ -1,16 +1,34 @@
 "use client";
 // app/admin/tenants/page.tsx — AA-159: lifecycle stats + country + count fix
+// AA-389: N1 onboarding UI (seed-atoms / angle assign / Gate A approve+status) added as a new
+// "Onboarding" tab — see OnboardingTabContent below.
 
 import { useState, useEffect, useCallback } from "react";
 import {
   Users, Plus, Key, RefreshCw, ChevronDown, ChevronUp,
-  AlertCircle, Loader2, CheckCircle, Eye, EyeOff, Copy, X, Trash2, Globe, Sparkles,
+  AlertCircle, Loader2, CheckCircle, CheckCircle2, Eye, EyeOff, Copy, X, Trash2, Globe, Sparkles,
+  Lock,
 } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
 import {
   A, serif, mono, sans,
   Card, SLabel, Btn, Badge, LoadingScreen, TH, TD,
 } from "../_components/adminUi";
+
+// AA-309 fixed vocabulary (api/routers/admin.py::ASSIGNED_ANGLES) — mirrored here, not free text.
+const ASSIGNED_ANGLES: Record<string, string> = {
+  culinary_people:    "Ẩm thực & Con người",
+  physical_terrain:   "Thể lực & Địa hình",
+  culture_craft:       "Văn hoá & Thủ công",
+  nature_wildlife:     "Thiên nhiên & Hoang dã",
+  luxury_leisure:      "Sang trọng & Nghỉ dưỡng",
+  family_group:        "Gia đình & Trải nghiệm nhóm",
+  wellness_spiritual:  "Tâm linh & Chữa lành",
+};
+
+function getCookie(name: string): string {
+  return document.cookie.split(";").find(c => c.trim().startsWith(`${name}=`))?.split("=")[1] ?? "";
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -371,6 +389,232 @@ function ApiTabContent({ usage }: { usage: TenantDetails["api_usage"] }) {
     </div>
   );
 }
+// ─── Onboarding tab (AA-389: N1 seed-atoms / angle assign / Gate A) ───────────
+// Flow order matches AA-309's 6-step spec exactly: seed-atoms -> angle assign -> Mirror (own
+// tab, untouched) -> gate-a approve. Gate A is REQUIRED/NEVER-auto (same pattern as Gate B,
+// AA-388): approved_by is read from the cis_user cookie (no free-text input, no default), the
+// Approve button only ever calls the real endpoint on an explicit click, and it's disabled until
+// assigned_angle is already set (backend rejects it anyway — this just avoids a round-trip).
+
+interface GateAStatus {
+  tenant_id: string;
+  portfolio_id: string;
+  approval_status: "pending" | "approved";
+  approved_by: string | null;
+  approved_at: string | null;
+  created_at: string;
+  tenant_is_active: boolean;
+}
+
+interface AngleInfo {
+  assigned_angle: string | null;
+  assigned_angle_label: string | null;
+}
+
+function StepHeader({ n, label, done, locked }: { n: number; label: string; done: boolean; locked: boolean }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+      <span style={{
+        width: 20, height: 20, borderRadius: "50%", flexShrink: 0,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        fontSize: 11, fontWeight: 700,
+        background: done ? "#D1FAE5" : locked ? A.line2 : A.redSoft,
+        color: done ? "#22C55E" : locked ? A.muted2 : A.red,
+      }}>
+        {done ? <CheckCircle2 size={12} /> : locked ? <Lock size={10} /> : n}
+      </span>
+      <span style={{ fontSize: 13, fontWeight: 700, color: locked ? A.muted2 : A.ink }}>{label}</span>
+    </div>
+  );
+}
+
+function OnboardingTabContent({ tenantId, onGateAApproved }: { tenantId: string; onGateAApproved: () => void }) {
+  const [loading, setLoading]         = useState(true);
+  const [seeded, setSeeded]           = useState(false);
+  const [portfolioId, setPortfolioId] = useState("");
+  const [seededCount, setSeededCount] = useState<number | null>(null);
+  const [seeding, setSeeding]         = useState(false);
+  const [seedError, setSeedError]     = useState("");
+
+  const [angleInfo, setAngleInfo]     = useState<AngleInfo | null>(null);
+  const [assigning, setAssigning]     = useState(false);
+  const [assignError, setAssignError] = useState("");
+
+  const [gateA, setGateA]             = useState<GateAStatus | null>(null);
+  const [approving, setApproving]     = useState(false);
+  const [approveError, setApproveError] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const statusRes = await fetch(`/api/admin/tenants/${tenantId}/gate-a/status`);
+      if (statusRes.status === 404) {
+        setSeeded(false); setGateA(null); setAngleInfo(null);
+        return;
+      }
+      if (!statusRes.ok) return;
+      const status: GateAStatus = await statusRes.json();
+      setSeeded(true);
+      setGateA(status);
+      setPortfolioId(status.portfolio_id);
+
+      const mirrorRes = await fetch(`/api/admin/tenants/${tenantId}/mirror`);
+      if (mirrorRes.ok) {
+        const m = await mirrorRes.json();
+        setAngleInfo({ assigned_angle: m.assigned_angle, assigned_angle_label: m.assigned_angle_label });
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [tenantId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  async function submitSeed() {
+    if (!portfolioId.trim()) { setSeedError("Portfolio ID is required"); return; }
+    setSeeding(true); setSeedError("");
+    try {
+      const res = await fetch(`/api/admin/tenants/${tenantId}/seed-atoms`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ portfolio_id: portfolioId.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setSeedError(data.detail ?? "Failed to seed atoms"); return; }
+      setSeededCount(data.seeded_tour_count);
+      await load();
+    } catch { setSeedError("Connection error"); } finally { setSeeding(false); }
+  }
+
+  async function assignAngle(angle: string) {
+    setAssigning(true); setAssignError("");
+    try {
+      const res = await fetch(`/api/admin/tenants/${tenantId}/angle`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ assigned_angle: angle }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setAssignError(data.detail ?? "Failed to assign angle"); return; }
+      setAngleInfo({ assigned_angle: data.assigned_angle, assigned_angle_label: data.assigned_angle_label });
+    } catch { setAssignError("Connection error"); } finally { setAssigning(false); }
+  }
+
+  async function approveGateA() {
+    const approvedBy = getCookie("cis_user") ? decodeURIComponent(getCookie("cis_user")) : "";
+    if (!approvedBy) { setApproveError("No admin identity found — cannot approve without approved_by."); return; }
+    setApproving(true); setApproveError("");
+    try {
+      const res = await fetch(`/api/admin/tenants/${tenantId}/gate-a/approve`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approved_by: approvedBy }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setApproveError(data.detail ?? "Failed to approve Gate A"); return; }
+      setGateA(s => s ? {
+        ...s,
+        approval_status: data.approval_status,
+        approved_by: data.approved_by,
+        approved_at: data.approved_at,
+        tenant_is_active: true,
+      } : s);
+      onGateAApproved();
+    } catch { setApproveError("Connection error"); } finally { setApproving(false); }
+  }
+
+  if (loading) return <div style={{ padding: "12px 0", fontSize: 12, color: A.muted }}>Loading…</div>;
+
+  const angleAssigned = !!angleInfo?.assigned_angle;
+  const approved      = gateA?.approval_status === "approved";
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* Step 1 — Seed Atoms */}
+      <div style={{ padding: "12px 14px", background: "#fff", border: `1px solid ${A.line}`, borderRadius: 8 }}>
+        <StepHeader n={1} label="Seed Atoms từ Marketplace portfolio" done={seeded} locked={false} />
+        {seeded ? (
+          <div style={{ fontSize: 12, color: A.muted }}>
+            Đã seed từ portfolio <code style={{ fontFamily: mono, color: A.body }}>{portfolioId}</code>
+            {seededCount != null && <> — {seededCount} tour</>}
+          </div>
+        ) : (
+          <>
+            <div style={{ fontSize: 11.5, color: A.muted2, marginBottom: 8 }}>
+              Copy portfolio_id từ Marketplace sau khi finalize.
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input value={portfolioId} onChange={e => setPortfolioId(e.target.value)}
+                placeholder="portfolio_id (UUID)"
+                style={{ flex: 1, padding: "8px 10px", background: A.bg, border: `1px solid ${A.line}`, borderRadius: 6, color: A.body, fontSize: 12, fontFamily: mono, outline: "none" }} />
+              <Btn size="sm" variant="primary" disabled={seeding} onClick={submitSeed}>
+                {seeding ? <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} /> : "Seed"}
+              </Btn>
+            </div>
+            {seedError && <div style={{ marginTop: 8, fontSize: 11.5, color: A.red }}>{seedError}</div>}
+          </>
+        )}
+      </div>
+
+      {/* Step 2 — Angle assign */}
+      <div style={{
+        padding: "12px 14px", background: seeded ? "#fff" : A.bg, border: `1px solid ${A.line}`,
+        borderRadius: 8, opacity: seeded ? 1 : 0.6,
+      }}>
+        <StepHeader n={2} label="Gán góc nội dung (angle)" done={angleAssigned} locked={!seeded} />
+        {seeded && (
+          <>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+              {Object.entries(ASSIGNED_ANGLES).map(([key, label]) => (
+                <button key={key} onClick={() => assignAngle(key)} disabled={assigning}
+                  style={{
+                    padding: "6px 10px", borderRadius: 6, cursor: assigning ? "default" : "pointer",
+                    fontSize: 11.5, fontFamily: sans,
+                    border: `1px solid ${angleInfo?.assigned_angle === key ? A.red : A.line}`,
+                    background: angleInfo?.assigned_angle === key ? A.redTint : A.bg,
+                    color: angleInfo?.assigned_angle === key ? A.red : A.muted,
+                    fontWeight: angleInfo?.assigned_angle === key ? 700 : 400,
+                  }}>{label}</button>
+              ))}
+            </div>
+            {assignError && <div style={{ fontSize: 11.5, color: A.red }}>{assignError}</div>}
+          </>
+        )}
+      </div>
+
+      {/* Step 3 — Mirror pointer (Mirror tab itself untouched) */}
+      <div style={{ fontSize: 11.5, color: A.muted2, fontStyle: "italic" }}>
+        Xem tab Mirror để biết atom count / runway trước khi Approve.
+      </div>
+
+      {/* Step 4 — Gate A approve */}
+      <div style={{
+        padding: "12px 14px", background: angleAssigned ? "#fff" : A.bg, border: `1px solid ${A.line}`,
+        borderRadius: 8, opacity: angleAssigned ? 1 : 0.6,
+      }}>
+        <StepHeader n={4} label="Gate A — duyệt kích hoạt tenant" done={approved} locked={!angleAssigned} />
+        {angleAssigned && gateA && (
+          approved ? (
+            <div style={{ fontSize: 12, color: A.muted, display: "flex", alignItems: "center", gap: 6 }}>
+              <CheckCircle2 size={14} color="#22C55E" />
+              Approved by {gateA.approved_by} at {gateA.approved_at ? new Date(gateA.approved_at).toLocaleString() : "—"}
+            </div>
+          ) : (
+            <>
+              <div style={{ fontSize: 11.5, color: A.muted2, marginBottom: 8 }}>
+                Gate A là bắt buộc, không auto-approve — tenant chỉ chuyển active sau khi bấm nút này.
+              </div>
+              <Btn variant="primary" size="sm" disabled={approving} onClick={approveGateA}>
+                {approving
+                  ? <><Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} /> Approving…</>
+                  : <><CheckCircle2 size={12} /> Approve Gate A</>}
+              </Btn>
+              {approveError && <div style={{ marginTop: 8, fontSize: 11.5, color: A.red }}>{approveError}</div>}
+            </>
+          )
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Mirror tab (AA-384: info-only wording, no upsell) ────────────────────────
 
 interface MirrorData {
@@ -514,13 +758,16 @@ function ActivityTabContent({ items }: { items: RewriteActivityItem[] }) {
 
 // ─── Tenant Detail Panel ──────────────────────────────────────────────────────
 
-type DTab = "tours" | "pipeline" | "activity" | "mirror" | "api" | "brand";
+type DTab = "onboarding" | "tours" | "pipeline" | "activity" | "mirror" | "api" | "brand";
 
-function TenantDetail({ tenantId, planTier }: { tenantId: string; planTier: string }) {
+function TenantDetail({ tenantId, planTier, isActive, onGateAApproved }: {
+  tenantId: string; planTier: string; isActive: boolean; onGateAApproved: () => void;
+}) {
   const isInternal = planTier === "internal";
   const [data, setData]         = useState<TenantDetails | null>(null);
   const [loading, setLoading]   = useState(true);
-  const [tab, setTab]           = useState<DTab>("tours");
+  // AA-389: a not-yet-active tenant is still mid-onboarding — land there by default instead of Tours.
+  const [tab, setTab]           = useState<DTab>(isActive ? "tours" : "onboarding");
   const [activity, setActivity] = useState<RewriteActivityItem[]>([]);
 
   useEffect(() => {
@@ -552,6 +799,7 @@ function TenantDetail({ tenantId, planTier }: { tenantId: string; planTier: stri
 
   const s = data.summary;
   const TABS: { key: DTab; label: string }[] = [
+    { key: "onboarding", label: "Onboarding" },
     { key: "tours",   label: `Tours (${data.rewritten_tours.length})` },
     ...(isInternal
       ? [{ key: "pipeline" as DTab, label: `Pipeline (${data.pipeline_runs.length})` }]
@@ -589,6 +837,7 @@ function TenantDetail({ tenantId, planTier }: { tenantId: string; planTier: stri
           }}>{t.label}</button>
         ))}
       </div>
+      {tab === "onboarding" && <OnboardingTabContent tenantId={tenantId} onGateAApproved={onGateAApproved} />}
       {tab === "tours"    && <ToursTabContent    tours={data.rewritten_tours} toursView={data.summary.tours_view} />}
       {tab === "pipeline" && <PipelineTabContent runs={data.pipeline_runs}    pipelineNote={data.summary.pipeline_note} />}
       {tab === "activity" && <ActivityTabContent items={activity} />}
@@ -614,10 +863,17 @@ function TenantRow({ tenant, onRotateKey, onDeleted }: {
   async function toggle() {
     setToggling(true);
     try {
-      await fetch(`/api/admin/tenants/${tenant.tenant_id}`, {
+      const res = await fetch(`/api/admin/tenants/${tenant.tenant_id}`, {
         method: "PATCH", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ is_active: !isActive }),
       });
+      if (!res.ok) {
+        // AA-389: backend now rejects activating a tenant that hasn't cleared Gate A —
+        // surface that instead of silently flipping the UI as if it had succeeded.
+        const body = await res.json().catch(() => ({}));
+        alert(body.detail ?? "Failed to update tenant status");
+        return;
+      }
       setIsActive(!isActive);
     } finally { setToggling(false); }
   }
@@ -714,7 +970,10 @@ function TenantRow({ tenant, onRotateKey, onDeleted }: {
       {expanded && (
         <tr>
           <td colSpan={7} style={{ padding: "0 16px 14px", background: A.bg }}>
-            <TenantDetail tenantId={tenant.tenant_id} planTier={tenant.plan_tier} />
+            <TenantDetail
+              tenantId={tenant.tenant_id} planTier={tenant.plan_tier} isActive={isActive}
+              onGateAApproved={() => setIsActive(true)}
+            />
           </td>
         </tr>
       )}
