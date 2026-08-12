@@ -15,8 +15,9 @@ Wiring (AA-376): this is the `repair_fn: Callable[[str, list[str]], str]`
 never had a real implementation for — `pipeline.py` previously passed
 `_repair_not_available()` with `max_repairs=0`, so this path was never
 reachable (see pipeline.py's pre-AA-376 docstring in git history). Model is
-Bedrock satellite acc1 Sonnet, same `invoke_claude(..., model="sonnet")` call
-as E2/E3 (generation.py/adapt.py) — CHỐT per AA-334 (Palmyra Cancelled, see
+Bedrock satellite acc3 Sonnet (AA-397, acc1 fallback under it), same
+`invoke_claude(..., model="sonnet")` call as E2/E3 (generation.py/adapt.py) —
+CHỐT per AA-334 (Palmyra Cancelled, see
 generation.py's own docstring). Palmyra must never appear anywhere in this
 module.
 
@@ -77,7 +78,7 @@ def repair_piece(body_tagged: str, violations: list[str]) -> str:
     last_err: BedrockUnavailable | None = None
     for attempt in range(1, _MAX_INVOKE_ATTEMPTS + 1):
         try:
-            result = invoke_claude(prompt, model="sonnet", max_tokens=_MAX_TOKENS, system=_REPAIR_SYSTEM_PROMPT)
+            result = invoke_claude(prompt, model="sonnet", max_tokens=_MAX_TOKENS, system=_REPAIR_SYSTEM_PROMPT, account="acc3")
         except BedrockUnavailable as e:
             last_err = e
             logger.warning("e5_repair_sonnet_retry", attempt=attempt,

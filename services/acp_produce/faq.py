@@ -8,8 +8,8 @@ here:
   paired each researched PAA question with a real `source_id` atom
   (`FAQCandidate.question` / `.source_id`) before this module ever runs.
   `answer_faq()` never asks the model to invent a question.
-- Model is Bedrock satellite acc1 Sonnet, same `invoke_claude(...,
-  model="sonnet")` call as E2/E3 — CHỐT, not a proposal (AA-334 Cancelled).
+- Model is Bedrock satellite acc3 Sonnet (AA-397, acc1 fallback under it), same
+  `invoke_claude(..., model="sonnet")` call as E2/E3 — CHỐT, not a proposal (AA-334 Cancelled).
   Palmyra must never appear anywhere in this module.
 - Candidates are answered in batches of 2-3/call (`generation.py::
   _batch_sections`, reused directly rather than re-implemented — same
@@ -118,7 +118,7 @@ def _invoke_sonnet_with_retry(prompt: str, max_tokens: int) -> BedrockInvokeResu
     last_err: Optional[BedrockUnavailable] = None
     for attempt in range(1, _MAX_INVOKE_ATTEMPTS + 1):
         try:
-            return invoke_claude(prompt, model="sonnet", max_tokens=max_tokens, system=_FAQ_SYSTEM_PROMPT)
+            return invoke_claude(prompt, model="sonnet", max_tokens=max_tokens, system=_FAQ_SYSTEM_PROMPT, account="acc3")
         except BedrockUnavailable as e:
             last_err = e
             logger.warning("e4_faq_sonnet_retry", attempt=attempt, max_attempts=_MAX_INVOKE_ATTEMPTS, error=str(e))

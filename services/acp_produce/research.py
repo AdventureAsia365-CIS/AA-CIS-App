@@ -189,7 +189,7 @@ def build_gap_statement(top_pages: list[dict], atoms: list[dict], keyword: str) 
         "If our atoms already cover everything relevant, say so plainly."
     )
     try:
-        result = invoke_claude(prompt, model="haiku", max_tokens=300, system=_GAP_SYSTEM_PROMPT)
+        result = invoke_claude(prompt, model="haiku", max_tokens=300, system=_GAP_SYSTEM_PROMPT, account="acc3")
         return result.text.strip() or None
     except BedrockUnavailable as e:
         logger.warning("build_gap_statement_bedrock_unavailable", keyword=keyword, error=str(e))
