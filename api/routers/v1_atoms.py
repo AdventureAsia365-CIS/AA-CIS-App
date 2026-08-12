@@ -13,14 +13,19 @@ POST /v1/atoms/decompose
        Either path only SUBMITS/RUNS the extraction — parsing the atom output
        into acp_contract.tour_atoms itself is a separate, later piece of work.
 
-Requires BEDROCK_BATCH_ROLE_ARN (account 1 role, accounts/acc1-bedrock
-Terraform — applied 2026-07-17). NOTE: production boto3 (requirements.txt,
-1.34.69) does not yet have create_model_invocation_job — the >=100 Batch path's
-Bedrock call will fail with an SDK-level error (unknown operation) until
-the production SDK is upgraded. Verified working in isolation via a
-separate venv (boto3 1.43.49), not yet through this service. The <100 inline
-path does NOT depend on this — invoke_claude() only needs invoke_model,
-already present in the pinned boto3.
+AA-399: >=100 Batch path tries acc3 first (aa3-bedrock-batch-inference-role,
+accounts/acc3-bedrock/batch.tf), falls back to acc1
+(aa-bedrock-batch-inference-role, accounts/acc1-bedrock) if acc3 AssumeRole or
+CreateModelInvocationJob fails — same acc3-primary/acc1-fallback shape as the
+interactive invoke_claude() tiers (shared/llm_client/client.py). Requires
+BOTH accounts' Terraform applied; either alone still works (the loop just
+falls through). NOTE: production boto3 (requirements.txt, 1.34.69) does not
+yet have create_model_invocation_job — the >=100 Batch path's Bedrock call
+will fail with an SDK-level error (unknown operation) until the production
+SDK is upgraded. Verified working in isolation via a separate venv (boto3
+1.43.49), not yet through this service. The <100 inline path does NOT depend
+on this — invoke_claude() only needs invoke_model, already present in the
+pinned boto3.
 """
 import asyncio
 import hashlib
@@ -53,16 +58,29 @@ BRONZE_BUCKET = os.environ.get("BRONZE_BUCKET", "aa-cis-bronze-005097885195")
 # is why the S108b test job (rlp2kr2537zm) failed GetObject validation.
 BRONZE_BUCKET_OWNER_ACCOUNT_ID = os.environ.get("BRONZE_BUCKET_OWNER_ACCOUNT_ID", "005097885195")
 
-# Terraform accounts/acc1-bedrock (feat/aa-302-bedrock-batch-iam-acc1) đã
-# apply — role thật, account 1.
-BEDROCK_BATCH_ROLE_ARN = os.environ.get(
-    "BEDROCK_BATCH_ROLE_ARN", "arn:aws:iam::867490540162:role/aa-bedrock-batch-inference-role"
-)
-
-# Cùng inference profile satellite AA-296 đã xác nhận hoạt động
-# (shared/llm_client/bedrock_satellite.py) — dùng Sonnet cho tác vụ extract
-# atom (cần đọc hiểu itinerary dài, không phải tác vụ rẻ/đơn giản).
-BATCH_MODEL_ID = "arn:aws:bedrock:us-west-1:867490540162:inference-profile/global.anthropic.claude-sonnet-4-6"
+# AA-399: acc3 là Batch account chính, acc1 là fallback — cùng thứ tự
+# acc3-primary/acc1-fallback đã dùng cho interactive invoke_claude() (client.py).
+# role_arn = accounts/acc{1,3}-bedrock's *-bedrock-batch-inference-role (Bedrock
+# tự AssumeRole role này để chạy job — khác với AA3-Bedrock-Invoker/AA-Bedrock-
+# Invoker, role caller AssumeRole để gọi CreateModelInvocationJob).
+# model_id = cùng inference profile satellite AA-296/397 đã xác nhận hoạt động
+# (shared/llm_client/bedrock_satellite.py) — Sonnet cho tác vụ extract atom
+# (cần đọc hiểu itinerary dài, không phải tác vụ rẻ/đơn giản).
+_BATCH_ACCOUNTS = {
+    "acc3": {
+        "role_arn": os.environ.get(
+            "BEDROCK_BATCH_ROLE_ARN_ACC3", "arn:aws:iam::786888028788:role/aa3-bedrock-batch-inference-role"
+        ),
+        "model_id": "arn:aws:bedrock:us-west-1:786888028788:inference-profile/global.anthropic.claude-sonnet-4-6",
+    },
+    "acc1": {
+        "role_arn": os.environ.get(
+            "BEDROCK_BATCH_ROLE_ARN", "arn:aws:iam::867490540162:role/aa-bedrock-batch-inference-role"
+        ),
+        "model_id": "arn:aws:bedrock:us-west-1:867490540162:inference-profile/global.anthropic.claude-sonnet-4-6",
+    },
+}
+_BATCH_ACCOUNT_ORDER = ["acc3", "acc1"]
 ANTHROPIC_VERSION = "bedrock-2023-05-31"
 
 
@@ -405,87 +423,82 @@ async def decompose(
 
     tour_ids_json = json.dumps([str(r["id"]) for r in rows])
 
-    if not BEDROCK_BATCH_ROLE_ARN:
-        logger.warning("atom_decompose_role_not_configured", job_id=job_id)
-        async with pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO acp_contract.atom_decompose_jobs
-                    (job_id, tour_ids, status, input_s3_uri, output_s3_uri, error_message)
-                VALUES ($1, $2::jsonb, 'failed', $3, $4, $5)
-            """, job_id, tour_ids_json, input_s3_uri, output_s3_uri,
-                "BEDROCK_BATCH_ROLE_ARN not configured — accounts/acc1-bedrock Terraform not applied yet")
-        raise HTTPException(
-            503,
-            "BEDROCK_BATCH_ROLE_ARN chưa cấu hình — Terraform accounts/acc1-bedrock chưa được apply "
-            "(xem AA-302). JSONL đã build và upload S3 thành công tại " + input_s3_uri + ".",
-        )
+    # AA-399: thử acc3 trước, acc1 fallback — chỉ ghi failed/raise sau khi CẢ 2
+    # account đều thất bại (AssumeRole hoặc CreateModelInvocationJob). job_arn
+    # tự chứa account id (arn:...:<account>:model-invocation-job/...) nên một
+    # poller sau này (chưa xây — xem docstring module) tra được account đúng
+    # từ job_arn, không cần cột account riêng trong acp_contract.atom_decompose_jobs.
+    job_arn = None
+    bedrock_job_name = job_id.replace("_", "-")
+    attempt_errors: list[str] = []
+    for account in _BATCH_ACCOUNT_ORDER:
+        cfg = _BATCH_ACCOUNTS[account]
+        try:
+            # ECS task role (acc2) không có quyền gọi CreateModelInvocationJob
+            # trực tiếp — client "bedrock" (control-plane) phải qua cùng
+            # AssumeRole satellite chain AA-296/397 dùng cho "bedrock-runtime",
+            # không phải boto3.client("bedrock", ...) mặc định (identity acc2).
+            bedrock = get_satellite_client("bedrock", account=account)
+        except BedrockUnavailable as e:
+            logger.warning("atom_decompose_satellite_assume_role_failed",
+                           job_id=job_id, account=account, error=str(e))
+            attempt_errors.append(f"[{account}] AssumeRole failed: {e}")
+            continue
 
-    try:
-        # ECS task role (acc2) không có quyền gọi CreateModelInvocationJob trên
-        # acc1 trực tiếp — client "bedrock" (control-plane) phải qua cùng
-        # AssumeRole satellite chain AA-296 dùng cho "bedrock-runtime", không
-        # phải boto3.client("bedrock", ...) mặc định (chạy bằng identity acc2).
-        bedrock = get_satellite_client("bedrock")
-    except BedrockUnavailable as e:
-        logger.error("atom_decompose_satellite_assume_role_failed", job_id=job_id, error=str(e))
-        async with pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO acp_contract.atom_decompose_jobs
-                    (job_id, tour_ids, status, input_s3_uri, output_s3_uri, error_message)
-                VALUES ($1, $2::jsonb, 'failed', $3, $4, $5)
-            """, job_id, tour_ids_json, input_s3_uri, output_s3_uri, f"AssumeRole to satellite failed: {e}")
-        raise HTTPException(
-            503,
-            f"Không AssumeRole được vào satellite Bedrock (acc1): {e}. JSONL đã build và upload S3 "
-            "thành công tại " + input_s3_uri + ".",
-        )
+        try:
+            # Bedrock jobName regex forbids "_" ([a-zA-Z0-9]{1,63}(-*[a-zA-Z0-9\+\-\.]){0,63}) —
+            # job_id itself stays untouched (DB key + log field), only the value
+            # passed to Bedrock is sanitized.
+            create_resp = bedrock.create_model_invocation_job(
+                jobName=bedrock_job_name,
+                roleArn=cfg["role_arn"],
+                modelId=cfg["model_id"],
+                inputDataConfig={
+                    "s3InputDataConfig": {
+                        "s3InputFormat": "JSONL",
+                        "s3Uri": input_s3_uri,
+                        "s3BucketOwner": BRONZE_BUCKET_OWNER_ACCOUNT_ID,
+                    },
+                },
+                outputDataConfig={
+                    "s3OutputDataConfig": {
+                        "s3Uri": output_s3_uri,
+                        "s3BucketOwner": BRONZE_BUCKET_OWNER_ACCOUNT_ID,
+                    },
+                },
+            )
+            # AA-305: jobArn was never captured before this fix — without it the
+            # poller has no way to call GetModelInvocationJob later (jobIdentifier
+            # must be the full ARN, a bare job name is rejected; verified live
+            # against atomjob_cf3d9066e0).
+            job_arn = create_resp["jobArn"]
+            logger.info("atom_decompose_batch_submitted_account", job_id=job_id, account=account)
+            break
+        except ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code", "Unknown")
+            error_message = e.response.get("Error", {}).get("Message", str(e))
+            logger.warning(
+                "atom_decompose_batch_submit_failed_account",
+                job_id=job_id, account=account, error_code=error_code, error_message=error_message,
+            )
+            attempt_errors.append(f"[{account}] {error_code}: {error_message}")
+            continue
 
-    try:
-        # Bedrock jobName regex forbids "_" ([a-zA-Z0-9]{1,63}(-*[a-zA-Z0-9\+\-\.]){0,63}) —
-        # job_id itself stays untouched (DB key + log field), only the value
-        # passed to Bedrock is sanitized.
-        bedrock_job_name = job_id.replace("_", "-")
-        create_resp = bedrock.create_model_invocation_job(
-            jobName=bedrock_job_name,
-            roleArn=BEDROCK_BATCH_ROLE_ARN,
-            modelId=BATCH_MODEL_ID,
-            inputDataConfig={
-                "s3InputDataConfig": {
-                    "s3InputFormat": "JSONL",
-                    "s3Uri": input_s3_uri,
-                    "s3BucketOwner": BRONZE_BUCKET_OWNER_ACCOUNT_ID,
-                },
-            },
-            outputDataConfig={
-                "s3OutputDataConfig": {
-                    "s3Uri": output_s3_uri,
-                    "s3BucketOwner": BRONZE_BUCKET_OWNER_ACCOUNT_ID,
-                },
-            },
-        )
-        # AA-305: jobArn was never captured before this fix — without it the
-        # poller has no way to call GetModelInvocationJob later (jobIdentifier
-        # must be the full ARN, a bare job name is rejected; verified live
-        # against atomjob_cf3d9066e0).
-        job_arn = create_resp["jobArn"]
-    except ClientError as e:
-        error_code = e.response.get("Error", {}).get("Code", "Unknown")
-        error_message = e.response.get("Error", {}).get("Message", str(e))
-        logger.error(
-            "atom_decompose_batch_submit_failed",
-            job_id=job_id, error_code=error_code, error_message=error_message,
-        )
+    if job_arn is None:
+        combined_error = " | ".join(attempt_errors)
+        logger.error("atom_decompose_batch_submit_failed_all_accounts", job_id=job_id, error=combined_error)
         async with pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO acp_contract.atom_decompose_jobs
                     (job_id, tour_ids, status, input_s3_uri, output_s3_uri, error_message)
                 VALUES ($1, $2::jsonb, 'failed', $3, $4, $5)
-            """, job_id, tour_ids_json, input_s3_uri, output_s3_uri, f"{error_code}: {error_message}")
+            """, job_id, tour_ids_json, input_s3_uri, output_s3_uri, combined_error)
         raise HTTPException(
             502,
-            f"Bedrock Batch submit failed ({error_code}): {error_message}. Nếu error_code là "
+            f"Bedrock Batch submit failed trên cả acc3 và acc1: {combined_error}. Nếu error_code là "
             "AccessDeniedException/ValidationException liên quan tới roleArn, khả năng cao do "
-            "accounts/acc1-bedrock Terraform chưa apply — không phải lỗi code.",
+            "accounts/acc3-bedrock hoặc accounts/acc1-bedrock Terraform chưa apply — không phải lỗi code. "
+            "JSONL đã build và upload S3 thành công tại " + input_s3_uri + ".",
         )
 
     async with pool.acquire() as conn:
