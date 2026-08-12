@@ -85,14 +85,16 @@ class LLMClient:
                 logger.info("t1_5a_satellite_used", model=BEDROCK_SONNET, account="acc3", reason="acc2 T1 failed")
                 return resp
             except Exception as e:
-                logger.warning("t1_5a_satellite_failed_trying_t1_5b", model=BEDROCK_SONNET, account="acc3", error=str(e))
+                logger.warning("t1_5a_satellite_failed_trying_t1_5b", model=BEDROCK_SONNET,
+                               account="acc3", error=str(e))
 
             # T1.5b: Claude Sonnet qua satellite acc1 — AA-296, nay là fallback dưới acc3
             try:
                 resp = self._call_bedrock_satellite(request, model=BEDROCK_SONNET, account="acc1")
                 resp.fallback_used = False
                 resp.satellite_account = "acc1"
-                logger.info("t1_5b_satellite_used", model=BEDROCK_SONNET, account="acc1", reason="acc2 T1 + acc3 T1.5a failed")
+                logger.info("t1_5b_satellite_used", model=BEDROCK_SONNET,
+                           account="acc1", reason="acc2 T1 + acc3 T1.5a failed")
                 return resp
             except Exception as e:
                 logger.warning("t1_5b_satellite_failed_trying_t2", model=BEDROCK_SONNET, account="acc1", error=str(e))
@@ -121,7 +123,8 @@ class LLMClient:
             resp = self._call_bedrock_satellite(request, model=BEDROCK_HAIKU, account="acc1")
             resp.fallback_used = tier == "sonnet"
             resp.satellite_account = "acc1"
-            logger.info("t2_5b_satellite_used", model=BEDROCK_HAIKU, account="acc1", reason="acc2 T2 + acc3 T2.5a failed")
+            logger.info("t2_5b_satellite_used", model=BEDROCK_HAIKU,
+                       account="acc1", reason="acc2 T2 + acc3 T2.5a failed")
             return resp
         except Exception as e:
             logger.warning("t2_5b_satellite_failed_trying_t3", model=BEDROCK_HAIKU, account="acc1", error=str(e))

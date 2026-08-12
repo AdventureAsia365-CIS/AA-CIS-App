@@ -78,7 +78,9 @@ def repair_piece(body_tagged: str, violations: list[str]) -> str:
     last_err: BedrockUnavailable | None = None
     for attempt in range(1, _MAX_INVOKE_ATTEMPTS + 1):
         try:
-            result = invoke_claude(prompt, model="sonnet", max_tokens=_MAX_TOKENS, system=_REPAIR_SYSTEM_PROMPT, account="acc3")
+            result = invoke_claude(
+                prompt, model="sonnet", max_tokens=_MAX_TOKENS, system=_REPAIR_SYSTEM_PROMPT, account="acc3"
+            )
         except BedrockUnavailable as e:
             last_err = e
             logger.warning("e5_repair_sonnet_retry", attempt=attempt,

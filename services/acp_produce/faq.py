@@ -118,7 +118,9 @@ def _invoke_sonnet_with_retry(prompt: str, max_tokens: int) -> BedrockInvokeResu
     last_err: Optional[BedrockUnavailable] = None
     for attempt in range(1, _MAX_INVOKE_ATTEMPTS + 1):
         try:
-            return invoke_claude(prompt, model="sonnet", max_tokens=max_tokens, system=_FAQ_SYSTEM_PROMPT, account="acc3")
+            return invoke_claude(
+                prompt, model="sonnet", max_tokens=max_tokens, system=_FAQ_SYSTEM_PROMPT, account="acc3"
+            )
         except BedrockUnavailable as e:
             last_err = e
             logger.warning("e4_faq_sonnet_retry", attempt=attempt, max_attempts=_MAX_INVOKE_ATTEMPTS, error=str(e))

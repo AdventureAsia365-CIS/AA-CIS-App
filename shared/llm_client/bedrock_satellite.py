@@ -128,7 +128,10 @@ _INFERENCE_PROFILES = {
     "acc1": {"sonnet": INFERENCE_PROFILE_SONNET, "haiku": INFERENCE_PROFILE_HAIKU},
     "acc3": {
         "sonnet": "arn:aws:bedrock:us-west-1:786888028788:inference-profile/global.anthropic.claude-sonnet-4-6",
-        "haiku": "arn:aws:bedrock:us-west-1:786888028788:inference-profile/global.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "haiku": (
+            "arn:aws:bedrock:us-west-1:786888028788:inference-profile/"
+            "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+        ),
     },
 }
 

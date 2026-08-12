@@ -145,7 +145,9 @@ def _invoke_channel_with_retry(blog_body: str, cited_atom_text: dict[str, str], 
     last_err: Exception | None = None
     for attempt in range(1, _MAX_INVOKE_ATTEMPTS + 1):
         try:
-            result: BedrockInvokeResult = invoke_claude(prompt, model="sonnet", max_tokens=_MAX_TOKENS, system=system, account="acc3")
+            result: BedrockInvokeResult = invoke_claude(
+                prompt, model="sonnet", max_tokens=_MAX_TOKENS, system=system, account="acc3"
+            )
         except BedrockUnavailable as e:
             last_err = e
             logger.warning("e3_adapt_sonnet_retry", channel=channel, attempt=attempt,
