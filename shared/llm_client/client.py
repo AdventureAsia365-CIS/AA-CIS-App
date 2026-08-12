@@ -29,10 +29,15 @@ COST_TABLE = {
 
 class LLMClient:
     """
-    Fallback chain:
-    T1: Claude Sonnet 4.5 (AWS Bedrock) + prompt caching
-    T2: Claude Haiku 4.5  (AWS Bedrock) + prompt caching
-    T3: GPT-4.1           (OpenAI)
+    Fallback chain (AA-397/398 — acc3 satellite thêm vào làm satellite chính,
+    acc1 lùi xuống fallback; native T1/T2 trên acc2 KHÔNG đổi):
+    T1:    Claude Sonnet 4.5 (Bedrock, acc2 native) + prompt caching
+    T1.5a: Claude Sonnet     (Bedrock satellite, acc3 — AA-397)
+    T1.5b: Claude Sonnet     (Bedrock satellite, acc1 — AA-296, nay là fallback)
+    T2:    Claude Haiku 4.5  (Bedrock, acc2 native) + prompt caching
+    T2.5a: Claude Haiku      (Bedrock satellite, acc3 — AA-397)
+    T2.5b: Claude Haiku      (Bedrock satellite, acc1 — AA-296, nay là fallback)
+    T3:    GPT-4.1           (OpenAI)
     """
 
     def __init__(self):
@@ -72,15 +77,25 @@ class LLMClient:
                 else:
                     logger.warning("t1_failed_trying_t2", model=BEDROCK_SONNET, error=str(e))
 
-            # T1.5: Claude Sonnet qua satellite (acc1) — AA-296, khi acc2 không có Anthropic
+            # T1.5a: Claude Sonnet qua satellite acc3 — AA-397, satellite chính
             try:
-                resp = self._call_bedrock_satellite(request, model=BEDROCK_SONNET)
+                resp = self._call_bedrock_satellite(request, model=BEDROCK_SONNET, account="acc3")
                 resp.fallback_used = False    # KHÔNG phải fallback — vẫn đúng Sonnet, đúng ý định
-                resp.satellite_used = True    # NHƯNG đánh dấu rõ đây là qua satellite acc1
-                logger.info("t1_5_satellite_used", model=BEDROCK_SONNET, reason="acc2 T1 failed")
+                resp.satellite_account = "acc3"
+                logger.info("t1_5a_satellite_used", model=BEDROCK_SONNET, account="acc3", reason="acc2 T1 failed")
                 return resp
             except Exception as e:
-                logger.warning("t1_5_satellite_failed_trying_t2", model=BEDROCK_SONNET, error=str(e))
+                logger.warning("t1_5a_satellite_failed_trying_t1_5b", model=BEDROCK_SONNET, account="acc3", error=str(e))
+
+            # T1.5b: Claude Sonnet qua satellite acc1 — AA-296, nay là fallback dưới acc3
+            try:
+                resp = self._call_bedrock_satellite(request, model=BEDROCK_SONNET, account="acc1")
+                resp.fallback_used = False
+                resp.satellite_account = "acc1"
+                logger.info("t1_5b_satellite_used", model=BEDROCK_SONNET, account="acc1", reason="acc2 T1 + acc3 T1.5a failed")
+                return resp
+            except Exception as e:
+                logger.warning("t1_5b_satellite_failed_trying_t2", model=BEDROCK_SONNET, account="acc1", error=str(e))
 
         # T2: Claude Haiku — fast / default tier, or Sonnet fallback
         try:
@@ -88,18 +103,28 @@ class LLMClient:
             resp.fallback_used = tier == "sonnet"  # only a fallback when Sonnet was intended
             return resp
         except Exception as e:
-            logger.warning("t2_failed_trying_t3", model=BEDROCK_HAIKU, error=str(e))
+            logger.warning("t2_failed_trying_t2_5a", model=BEDROCK_HAIKU, error=str(e))
 
-        # T2.5: Claude Haiku qua satellite (acc1) — AA-296 follow-up
+        # T2.5a: Claude Haiku qua satellite acc3 — AA-397, satellite chính
         try:
-            resp = self._call_bedrock_satellite(request, model=BEDROCK_HAIKU)
+            resp = self._call_bedrock_satellite(request, model=BEDROCK_HAIKU, account="acc3")
             # giữ đúng logic gốc T2: chỉ coi là fallback nếu ý định ban đầu là sonnet
             resp.fallback_used = tier == "sonnet"
-            resp.satellite_used = True
-            logger.info("t2_5_satellite_used", model=BEDROCK_HAIKU, reason="acc2 T2 failed")
+            resp.satellite_account = "acc3"
+            logger.info("t2_5a_satellite_used", model=BEDROCK_HAIKU, account="acc3", reason="acc2 T2 failed")
             return resp
         except Exception as e:
-            logger.warning("t2_5_satellite_failed_trying_t3", model=BEDROCK_HAIKU, error=str(e))
+            logger.warning("t2_5a_satellite_failed_trying_t2_5b", model=BEDROCK_HAIKU, account="acc3", error=str(e))
+
+        # T2.5b: Claude Haiku qua satellite acc1 — AA-296, nay là fallback dưới acc3
+        try:
+            resp = self._call_bedrock_satellite(request, model=BEDROCK_HAIKU, account="acc1")
+            resp.fallback_used = tier == "sonnet"
+            resp.satellite_account = "acc1"
+            logger.info("t2_5b_satellite_used", model=BEDROCK_HAIKU, account="acc1", reason="acc2 T2 + acc3 T2.5a failed")
+            return resp
+        except Exception as e:
+            logger.warning("t2_5b_satellite_failed_trying_t3", model=BEDROCK_HAIKU, account="acc1", error=str(e))
 
         # T3: GPT-4.1 — last resort for all tiers
         try:
@@ -180,10 +205,11 @@ class LLMClient:
             cache_read_tokens=cache_read, cache_write_tokens=cache_write,
         )
 
-    def _call_bedrock_satellite(self, request: LLMRequest, model: str) -> LLMResponse:
-        """AA-296 — gọi Claude qua acc1 (satellite), dùng khi acc2 không có Anthropic
-        model (TrueIDC channel-program org chặn). Xem shared/llm_client/bedrock_satellite.py
-        cho chi tiết AssumeRole chain + bug 2-dạng-ARN đã fix trong IAM policy.
+    def _call_bedrock_satellite(self, request: LLMRequest, model: str, account: str = "acc1") -> LLMResponse:
+        """AA-296/397 — gọi Claude qua satellite account chỉ định (acc1 hoặc acc3),
+        dùng khi acc2 không có Anthropic model (TrueIDC channel-program org chặn).
+        Xem shared/llm_client/bedrock_satellite.py cho chi tiết AssumeRole chain +
+        bug 2-dạng-ARN đã fix trong IAM policy.
 
         request.system_prompt được forward qua tham số system= của invoke_claude()
         (Anthropic Messages API "system" field riêng, không nối vào user prompt) —
@@ -197,6 +223,7 @@ class LLMClient:
                 model=model_key,
                 max_tokens=request.max_tokens,
                 system=request.system_prompt,
+                account=account,
             )
         except BedrockUnavailable as e:
             raise RuntimeError(f"Satellite Bedrock failed: {e}") from e

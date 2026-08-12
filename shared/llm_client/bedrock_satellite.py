@@ -55,12 +55,37 @@ STEP 0 verified (16/07/2026):
 TODO còn lại trước khi coi AA-296 hoàn tất production-ready:
 [x] AssumeRole chain verify thật (qua S3, qua terminal độc lập)
 [x] Invoke Sonnet 4.6 + Haiku 4.5 thành công (terminal độc lập)
-[ ] Cache SessionToken theo TTL trong code thật (không AssumeRole mỗi request)
+[x] Cache SessionToken theo TTL trong code thật (không AssumeRole mỗi request)
 [ ] CloudWatch metric t3_fallback_used khi rơi về GPT-4.1
 [ ] Unit test: mock STS + Bedrock, verify fallback path khi satellite lỗi
-[ ] Tích hợp vào S1 rewrite node thật (services/content_generation/ hoặc
+[x] Tích hợp vào S1 rewrite node thật (services/content_generation/ hoặc
     tương đương) — file này mới chỉ là client, chưa gọi từ pipeline
 [ ] Update skill aa-ecosys-repos / ai-nghiep với bài học "2-dạng ARN" này
+
+═══════════════════════════════════════════════════════════════════════════
+AA-397/AA-398 — acc3 (786888028788) thêm vào làm satellite chính, acc1 lùi
+xuống fallback (2026-08-12):
+
+- Cả session cache VÀ hàm public đều nhận tham số `account: str` ("acc1" |
+  "acc3", mặc định "acc1" — giữ nguyên hành vi cũ cho caller chưa cập nhật,
+  vd api/routers/v1_atoms.py's Batch control-plane client, xem dưới).
+- acc3's role `AA3-Bedrock-Invoker` CHỈ có `bedrock:InvokeModel` +
+  `InvokeModelWithResponseStream` (accounts/aa365/bedrock_satellite_assume.tf
+  + accounts/acc3-bedrock/main.tf, AA-CIS-Infra, cả 2 đã apply thật) — KHÔNG
+  có Batch permissions (CreateModelInvocationJob/PassRole), quyết định rõ
+  trong AA-CIS-Infra's docs/implementation-notes/AA-397.md Bước 1 Decisions.
+  ⇒ get_satellite_client("bedrock", account="acc3") cho Batch control-plane
+  (AA-302, api/routers/v1_atoms.py) SẼ AccessDenied — cố ý KHÔNG đổi call đó
+  sang acc3, giữ default account="acc1".
+- Invoke-model test thật (qua ECS exec, đúng chain production) xác nhận cả 2
+  model pass trên acc3 sau khi Nghiep enable AWS Marketplace subscription cho
+  Haiku 4.5 (Sonnet 4.6 đã có access từ trước) — xem AA-CIS-App's
+  docs/implementation-notes/AA-397.md.
+- Thêm log phân loại AccessDeniedException riêng trong invoke_claude() (không
+  đổi luồng try/except gốc) — để phân biệt "model access chưa enable trên
+  account này" (transient, có thể tự khắc phục qua Marketplace) khỏi lỗi khác
+  (network, IAM sai, model id sai...) khi đọc CloudWatch log sau này.
+═══════════════════════════════════════════════════════════════════════════
 """
 from __future__ import annotations
 
@@ -70,25 +95,50 @@ from dataclasses import dataclass
 from typing import Optional
 
 import boto3
+import structlog
 from botocore.exceptions import ClientError
+
+logger = structlog.get_logger()
 
 # ---------------------------------------------------------------- config
 ACC1_ROLE_ARN = "arn:aws:iam::867490540162:role/AA-Bedrock-Invoker"
 ACC1_EXTERNAL_ID = "aa296-satellite-bedrock"
 ACC1_REGION = "us-west-1"
 
+ACC3_ROLE_ARN = "arn:aws:iam::786888028788:role/AA3-Bedrock-Invoker"
+ACC3_EXTERNAL_ID = "aa296-satellite-bedrock-acc3"
+ACC3_REGION = "us-west-1"
+
+# AA-397 — 1 entry per satellite account, session cache + invoke_claude() đều
+# tra cứu qua dict này (thêm account mới chỉ cần thêm 1 entry, không sửa logic).
+_SATELLITE_ACCOUNTS = {
+    "acc1": {"role_arn": ACC1_ROLE_ARN, "external_id": ACC1_EXTERNAL_ID, "region": ACC1_REGION},
+    "acc3": {"role_arn": ACC3_ROLE_ARN, "external_id": ACC3_EXTERNAL_ID, "region": ACC3_REGION},
+}
+
+# Giữ tên cũ (không xoá — vẫn export, phòng import khác trong repo) trỏ về acc1,
+# đồng thời thêm bảng tra cứu account-aware cho account mới.
 INFERENCE_PROFILE_SONNET = "arn:aws:bedrock:us-west-1:867490540162:inference-profile/global.anthropic.claude-sonnet-4-6"
 INFERENCE_PROFILE_HAIKU = (
     "arn:aws:bedrock:us-west-1:867490540162:inference-profile/"
     "global.anthropic.claude-haiku-4-5-20251001-v1:0"
 )
 
+_INFERENCE_PROFILES = {
+    "acc1": {"sonnet": INFERENCE_PROFILE_SONNET, "haiku": INFERENCE_PROFILE_HAIKU},
+    "acc3": {
+        "sonnet": "arn:aws:bedrock:us-west-1:786888028788:inference-profile/global.anthropic.claude-sonnet-4-6",
+        "haiku": "arn:aws:bedrock:us-west-1:786888028788:inference-profile/global.anthropic.claude-haiku-4-5-20251001-v1:0",
+    },
+}
+
 ANTHROPIC_VERSION = "bedrock-2023-05-31"
 
 # session cache — tránh gọi AssumeRole mỗi request (STS session mặc định 1h,
-# nhưng role có MaxSessionDuration=3600s — xem Console AA-Bedrock-Invoker)
-_cached_session: Optional[boto3.Session] = None
-_cached_session_expiry: float = 0.0
+# nhưng role có MaxSessionDuration=3600s — xem Console AA-Bedrock-Invoker).
+# AA-397: keyed theo account, mỗi account giữ session/expiry riêng.
+_cached_sessions: dict[str, boto3.Session] = {}
+_cached_session_expiry: dict[str, float] = {}
 _SESSION_REFRESH_MARGIN_SECONDS = 300  # refresh 5 phút trước khi hết hạn thật
 
 
@@ -107,44 +157,53 @@ class BedrockInvokeResult:
     usage: dict
 
 
-def _get_satellite_session() -> boto3.Session:
-    """STS AssumeRole vào acc1, cache theo TTL."""
-    global _cached_session, _cached_session_expiry
+def _get_satellite_session(account: str = "acc1") -> boto3.Session:
+    """STS AssumeRole vào satellite account chỉ định, cache theo TTL (AA-397:
+    cache riêng từng account, không dùng chung 1 session global nữa)."""
+    if account not in _SATELLITE_ACCOUNTS:
+        raise ValueError(f"Unknown satellite account: {account!r} (valid: {list(_SATELLITE_ACCOUNTS)})")
+    cfg = _SATELLITE_ACCOUNTS[account]
+
     now = time.time()
-    if _cached_session is not None and now < _cached_session_expiry:
-        return _cached_session
+    cached = _cached_sessions.get(account)
+    if cached is not None and now < _cached_session_expiry.get(account, 0.0):
+        return cached
 
     sts = boto3.client("sts")  # dùng identity ECS task role hiện tại (acc2)
     try:
         resp = sts.assume_role(
-            RoleArn=ACC1_ROLE_ARN,
-            RoleSessionName=f"aa-cis-ecs-{int(now)}",
-            ExternalId=ACC1_EXTERNAL_ID,
+            RoleArn=cfg["role_arn"],
+            RoleSessionName=f"aa-cis-ecs-{account}-{int(now)}",
+            ExternalId=cfg["external_id"],
             DurationSeconds=3600,
         )
     except ClientError as e:
-        raise BedrockUnavailable(f"AssumeRole to satellite failed: {e}") from e
+        raise BedrockUnavailable(f"AssumeRole to satellite ({account}) failed: {e}") from e
 
     creds = resp["Credentials"]
-    _cached_session = boto3.Session(
+    session = boto3.Session(
         aws_access_key_id=creds["AccessKeyId"],
         aws_secret_access_key=creds["SecretAccessKey"],
         aws_session_token=creds["SessionToken"],
-        region_name=ACC1_REGION,
+        region_name=cfg["region"],
     )
-    _cached_session_expiry = creds["Expiration"].timestamp() - _SESSION_REFRESH_MARGIN_SECONDS
-    return _cached_session
+    _cached_sessions[account] = session
+    _cached_session_expiry[account] = creds["Expiration"].timestamp() - _SESSION_REFRESH_MARGIN_SECONDS
+    return session
 
 
-def get_satellite_client(service_name: str = "bedrock-runtime"):
-    """Client boto3 bất kỳ (satellite acc1) qua session AssumeRole dùng chung
-    (cache TTL) — service_name mặc định "bedrock-runtime" (InvokeModel, như
-    invoke_claude() đang dùng) hoặc "bedrock" (control-plane, vd
-    CreateModelInvocationJob cho Batch API, AA-302). Không đổi hành vi
-    invoke_claude() hiện có — đây là entry point mới, tái sử dụng cùng
-    _get_satellite_session() để tránh trùng lặp logic STS assume-role."""
-    session = _get_satellite_session()
-    return session.client(service_name, region_name=ACC1_REGION)
+def get_satellite_client(service_name: str = "bedrock-runtime", account: str = "acc1"):
+    """Client boto3 bất kỳ (satellite, account chỉ định qua tham số `account`)
+    qua session AssumeRole dùng chung (cache TTL) — service_name mặc định
+    "bedrock-runtime" (InvokeModel, như invoke_claude() đang dùng) hoặc
+    "bedrock" (control-plane, vd CreateModelInvocationJob cho Batch API,
+    AA-302). `account` mặc định "acc1" — GIỮ NGUYÊN hành vi cũ cho caller
+    chưa cập nhật. AA-397: acc3's role KHÔNG có Batch permissions (chỉ
+    InvokeModel/InvokeModelWithResponseStream) — KHÔNG gọi account="acc3" cho
+    service_name="bedrock" (control-plane), sẽ AccessDenied."""
+    session = _get_satellite_session(account)
+    region = _SATELLITE_ACCOUNTS[account]["region"]
+    return session.client(service_name, region_name=region)
 
 
 def invoke_claude(
@@ -152,9 +211,12 @@ def invoke_claude(
     model: str = "sonnet",
     max_tokens: int = 4096,
     system: Optional[str] = None,
+    account: str = "acc1",
 ) -> BedrockInvokeResult:
     """
     model: "sonnet" (editorial, S1 rewrite) | "haiku" (schema/fast tasks)
+    account: "acc1" | "acc3" (AA-397, mặc định "acc1" — GIỮ NGUYÊN hành vi cũ
+      cho caller chưa cập nhật tham số này).
     system: system prompt riêng (brand rules, JSON-schema instructions...).
       QUAN TRỌNG — AA-296 review (16/07/2026): field này BẮT BUỘC phải truyền
       khi gọi từ pipeline S1 rewrite thật. _call_bedrock (acc2, T1) gửi
@@ -169,13 +231,16 @@ def invoke_claude(
     chịu trách nhiệm bắt exception này và gọi fallback GPT-4.1 hiện có
     (KHÔNG sửa code GPT-4.1 đang chạy, chỉ thêm nhánh gọi hàm này trước).
     """
-    inference_profile = INFERENCE_PROFILE_SONNET if model == "sonnet" else INFERENCE_PROFILE_HAIKU
+    if account not in _SATELLITE_ACCOUNTS:
+        raise ValueError(f"Unknown satellite account: {account!r} (valid: {list(_SATELLITE_ACCOUNTS)})")
+    inference_profile = _INFERENCE_PROFILES[account][model]
     model_label = "sonnet-4-6" if model == "sonnet" else "haiku-4-5"
+    region = _SATELLITE_ACCOUNTS[account]["region"]
 
     t0 = time.time()
     try:
-        session = _get_satellite_session()
-        bedrock_rt = session.client("bedrock-runtime", region_name=ACC1_REGION)
+        session = _get_satellite_session(account)
+        bedrock_rt = session.client("bedrock-runtime", region_name=region)
 
         body_dict = {
             "anthropic_version": ANTHROPIC_VERSION,
@@ -206,5 +271,18 @@ def invoke_claude(
         raise  # đã đúng loại exception, propagate thẳng
     except Exception as e:
         latency_ms = (time.time() - t0) * 1000
+        # AA-397: chỉ thêm log phân loại, KHÔNG đổi luồng try/except gốc — vẫn
+        # luôn raise BedrockUnavailable ở dưới bất kể loại lỗi nào. Mục đích là
+        # phân biệt "model access chưa enable trên account này" (thường tự hết
+        # sau khi Marketplace subscription active — xem AA-397) khỏi lỗi khác
+        # (network, IAM sai, model id sai...) khi đọc CloudWatch sau này.
+        if "AccessDeniedException" in type(e).__name__:
+            logger.warning("satellite_access_denied", account=account, model=model_label,
+                           latency_ms=round(latency_ms, 1), error=str(e))
+        else:
+            logger.warning("satellite_invoke_failed", account=account, model=model_label,
+                           latency_ms=round(latency_ms, 1), error_type=type(e).__name__, error=str(e))
         # TODO: emit CloudWatch metric t3_fallback_used=1 ở đây trước khi raise
-        raise BedrockUnavailable(f"Satellite Bedrock invoke failed ({model_label}): {type(e).__name__}: {e}") from e
+        raise BedrockUnavailable(
+            f"Satellite Bedrock invoke failed ({model_label}, account={account}): {type(e).__name__}: {e}"
+        ) from e
