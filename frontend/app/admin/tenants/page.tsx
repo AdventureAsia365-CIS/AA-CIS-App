@@ -62,6 +62,26 @@ interface Tenant {
 
 interface NewApiKey { tenant_id: string; tenant_name: string; api_key: string; }
 
+// AA-389 (reopened): a newly-created tenant is is_active=false until Gate A approves it, so it
+// never appears in the `tenants` list above — this is its real onboarding progress instead of a
+// guess from is_active alone.
+interface PendingOnboarding {
+  seeded: boolean;
+  seeded_tour_count: number;
+  angle_assigned: boolean;
+  gate_a_status: "not_started" | "pending" | "approved";
+}
+interface PendingTenant {
+  tenant_id: string;
+  name: string;
+  slug: string;
+  plan_tier: string;
+  posts_per_week: number;
+  country: string | null;
+  created_at: string;
+  onboarding: PendingOnboarding;
+}
+
 const PLAN_OPTIONS = ["starter", "growth", "business"];
 const PLAN_BADGE: Record<string, "blue" | "purple" | "green" | "red" | "gold"> = {
   starter: "blue", growth: "purple", business: "green", internal: "gold",
@@ -848,6 +868,85 @@ function TenantDetail({ tenantId, planTier, isActive, onGateAApproved }: {
   );
 }
 
+// ─── Pending onboarding section (AA-389 reopened) ─────────────────────────────
+// Newly-created tenants (is_active=false, pre-Gate A) are invisible in the active-tenants table
+// below by design (that table's own query filters is_active=true) — this section is the only
+// place in the UI they can be found and clicked back into. No activate shortcut lives here: the
+// only action is "Continue onboarding", which opens the same TenantDetail/Onboarding tab flow
+// used everywhere else, so Gate A stays the single approval path (see update_tenant() guard).
+
+function pendingStep(o: PendingOnboarding): { n: number; label: string } {
+  if (!o.seeded)         return { n: 1, label: "seed atoms pending" };
+  if (!o.angle_assigned) return { n: 2, label: "angle pending" };
+  if (o.gate_a_status !== "approved") return { n: 3, label: "Gate A pending approval" };
+  return { n: 3, label: "Gate A approved" };
+}
+
+function PendingTenantCard({ tenant, onGateAApproved }: {
+  tenant: PendingTenant; onGateAApproved: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const step = pendingStep(tenant.onboarding);
+
+  return (
+    <div style={{ background: "#fff", border: `1px solid ${A.line}`, borderRadius: 10, padding: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <div>
+          <div style={{ fontWeight: 600, color: A.ink, fontSize: 13 }}>{tenant.name}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 3 }}>
+            <code style={{ fontSize: 10.5, color: A.muted, fontFamily: mono }}>{tenant.slug}</code>
+            <Badge color={PLAN_BADGE[tenant.plan_tier] ?? "gray"}>{tenant.plan_tier}</Badge>
+            <span style={{ fontSize: 10.5, color: A.muted2, fontFamily: mono }}>{fmtD(tenant.created_at)}</span>
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{
+            fontSize: 10.5, fontWeight: 700, padding: "3px 10px", borderRadius: 20,
+            background: A.redSoft, color: A.red, whiteSpace: "nowrap",
+          }}>
+            Step {step.n} of 3 · {step.label}
+          </span>
+          <Btn variant="primary" size="sm" onClick={() => setExpanded(!expanded)}>
+            {expanded ? <>Hide <ChevronUp size={12} /></> : <>Continue onboarding <ChevronDown size={12} /></>}
+          </Btn>
+        </div>
+      </div>
+      {expanded && (
+        <TenantDetail
+          tenantId={tenant.tenant_id} planTier={tenant.plan_tier} isActive={false}
+          onGateAApproved={onGateAApproved}
+        />
+      )}
+    </div>
+  );
+}
+
+function PendingOnboardingSection({ pending, onGateAApproved }: {
+  pending: PendingTenant[]; onGateAApproved: () => void;
+}) {
+  if (pending.length === 0) return null;
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <h2 style={{ fontFamily: serif, fontSize: 15, fontWeight: 500, color: A.ink, margin: 0 }}>
+          Pending onboarding
+        </h2>
+        <span style={{
+          fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 20,
+          background: A.redSoft, color: A.red,
+        }}>
+          {pending.length}
+        </span>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {pending.map(t => (
+          <PendingTenantCard key={t.tenant_id} tenant={t} onGateAApproved={onGateAApproved} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ─── Tenant Row ───────────────────────────────────────────────────────────────
 
 function TenantRow({ tenant, onRotateKey, onDeleted }: {
@@ -985,6 +1084,7 @@ function TenantRow({ tenant, onRotateKey, onDeleted }: {
 
 export default function TenantsPage() {
   const [tenants, setTenants]       = useState<Tenant[]>([]);
+  const [pendingTenants, setPendingTenants] = useState<PendingTenant[]>([]);
   const [loading, setLoading]       = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [newKey, setNewKey]         = useState<NewApiKey | null>(null);
@@ -997,6 +1097,7 @@ export default function TenantsPage() {
       if (!res.ok) { setError("Failed to load tenants"); return; }
       const data = await res.json();
       setTenants(data.tenants ?? []);
+      setPendingTenants(data.pending_tenants ?? []);
     } catch { setError("Connection error"); } finally { setLoading(false); }
   }, []);
 
@@ -1049,6 +1150,8 @@ export default function TenantsPage() {
               <AlertCircle size={14} /> {error}
             </div>
           )}
+
+          <PendingOnboardingSection pending={pendingTenants} onGateAApproved={load} />
 
           {/* Summary cards */}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14, marginBottom: 20 }}>

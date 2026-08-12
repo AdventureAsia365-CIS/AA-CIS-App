@@ -412,6 +412,72 @@ class TestGateAStatus:
         assert result["tenant_is_active"] is False
 
 
+class TestListTenantsPending:
+    """AA-389 (reopened): GET /admin/tenants used to return active tenants only, so a brand-new
+    tenant (is_active=false by Gate A design) vanished from the UI with no way back in. Now also
+    returns pending_tenants with real onboarding progress, not inferred from is_active alone."""
+
+    @pytest.mark.asyncio
+    async def test_pending_tenant_never_seeded(self):
+        conn = AsyncMock()
+        conn.fetch.side_effect = [
+            [],  # active tenants
+            [{
+                "tenant_id": TENANT_ID, "name": "TEST-N1-flow", "slug": "test-n1-flow",
+                "plan_tier": "business", "posts_per_week": 3, "country": None,
+                "created_at": __import__("datetime").datetime(2026, 8, 12),
+                "seeded_tour_count": 0, "angle_assigned": False, "approval_status": None,
+            }],
+        ]
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await admin.list_tenants(request, x_admin_secret=_TEST_SECRET)
+
+        assert result["pending_total"] == 1
+        p = result["pending_tenants"][0]
+        assert p["tenant_id"] == str(TENANT_ID)
+        assert p["onboarding"] == {
+            "seeded": False, "seeded_tour_count": 0,
+            "angle_assigned": False, "gate_a_status": "not_started",
+        }
+
+    @pytest.mark.asyncio
+    async def test_pending_tenant_seeded_angle_assigned_gate_a_pending(self):
+        conn = AsyncMock()
+        conn.fetch.side_effect = [
+            [],
+            [{
+                "tenant_id": TENANT_ID, "name": "TEST-N1-flow", "slug": "test-n1-flow",
+                "plan_tier": "business", "posts_per_week": 3, "country": None,
+                "created_at": __import__("datetime").datetime(2026, 8, 12),
+                "seeded_tour_count": 4, "angle_assigned": True, "approval_status": "pending",
+            }],
+        ]
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await admin.list_tenants(request, x_admin_secret=_TEST_SECRET)
+
+        p = result["pending_tenants"][0]
+        assert p["onboarding"] == {
+            "seeded": True, "seeded_tour_count": 4,
+            "angle_assigned": True, "gate_a_status": "pending",
+        }
+
+    @pytest.mark.asyncio
+    async def test_no_pending_tenants_empty_list(self):
+        conn = AsyncMock()
+        conn.fetch.side_effect = [[], []]
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await admin.list_tenants(request, x_admin_secret=_TEST_SECRET)
+
+        assert result["pending_tenants"] == []
+        assert result["pending_total"] == 0
+
+
 class TestUpdateTenantGateAGuard:
     """AA-389: PATCH /tenants/{id} used to be able to activate a tenant with zero Gate A checks —
     a one-click bypass of the REQUIRED/NEVER-auto guarantee gate-a/approve exists to enforce.
