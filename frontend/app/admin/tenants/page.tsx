@@ -17,13 +17,13 @@ import {
 
 // AA-309 fixed vocabulary (api/routers/admin.py::ASSIGNED_ANGLES) — mirrored here, not free text.
 const ASSIGNED_ANGLES: Record<string, string> = {
-  culinary_people:    "Ẩm thực & Con người",
-  physical_terrain:   "Thể lực & Địa hình",
-  culture_craft:       "Văn hoá & Thủ công",
-  nature_wildlife:     "Thiên nhiên & Hoang dã",
-  luxury_leisure:      "Sang trọng & Nghỉ dưỡng",
-  family_group:        "Gia đình & Trải nghiệm nhóm",
-  wellness_spiritual:  "Tâm linh & Chữa lành",
+  culinary_people:    "Culinary & people",
+  physical_terrain:   "Physical & terrain",
+  culture_craft:       "Culture & craft",
+  nature_wildlife:     "Nature & wildlife",
+  luxury_leisure:      "Luxury & leisure",
+  family_group:        "Family & group experiences",
+  wellness_spiritual:  "Wellness & spiritual",
 };
 
 function getCookie(name: string): string {
@@ -154,7 +154,7 @@ function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
     if (!name.trim() || !slug.trim()) { setError("Name and slug are required"); return; }
     const ppw = Number(postsPerWeek);
     if (!Number.isInteger(ppw) || ppw < 1 || ppw > 14) {
-      setError("Bài/tuần phải là số nguyên từ 1 đến 14"); return;
+      setError("Posts/week must be an integer from 1 to 14"); return;
     }
     setLoading(true); setError("");
     try {
@@ -201,12 +201,12 @@ function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
         </div>
         <div style={{ marginBottom: 24 }}>
           <label style={{ fontSize: 11, fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.1em", display: "block", marginBottom: 8 }}>
-            Bài/tuần (nhịp đăng nội dung)
+            Posts/week (content posting cadence)
           </label>
           <input type="number" min={1} max={14} value={postsPerWeek} onChange={e => setPostsPerWeek(e.target.value)}
             style={{ width: 100, padding: "10px 12px", background: A.bg, border: `1px solid ${A.line}`, borderRadius: 8, color: A.body, fontSize: 13, outline: "none", fontFamily: sans }} />
           <p style={{ fontSize: 11, color: A.muted2, margin: "6px 0 0" }}>
-            Tenant tự chọn tự do, không giới hạn theo plan (1–14 bài/tuần).
+            Tenant chooses freely, not limited by plan (1–14 posts/week).
           </p>
         </div>
         {error && (
@@ -549,16 +549,16 @@ function OnboardingTabContent({ tenantId, onGateAApproved }: { tenantId: string;
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       {/* Step 1 — Seed Atoms */}
       <div style={{ padding: "12px 14px", background: "#fff", border: `1px solid ${A.line}`, borderRadius: 8 }}>
-        <StepHeader n={1} label="Seed Atoms từ Marketplace portfolio" done={seeded} locked={false} />
+        <StepHeader n={1} label="Seed atoms from Marketplace portfolio" done={seeded} locked={false} />
         {seeded ? (
           <div style={{ fontSize: 12, color: A.muted }}>
-            Đã seed từ portfolio <code style={{ fontFamily: mono, color: A.body }}>{portfolioId}</code>
-            {seededCount != null && <> — {seededCount} tour</>}
+            Seeded from portfolio <code style={{ fontFamily: mono, color: A.body }}>{portfolioId}</code>
+            {seededCount != null && <> — {seededCount} tour{seededCount !== 1 ? "s" : ""}</>}
           </div>
         ) : (
           <>
             <div style={{ fontSize: 11.5, color: A.muted2, marginBottom: 8 }}>
-              Copy portfolio_id từ Marketplace sau khi finalize.
+              Copy the portfolio_id from Marketplace after finalizing.
             </div>
             <div style={{ display: "flex", gap: 8 }}>
               <input value={portfolioId} onChange={e => setPortfolioId(e.target.value)}
@@ -578,7 +578,7 @@ function OnboardingTabContent({ tenantId, onGateAApproved }: { tenantId: string;
         padding: "12px 14px", background: seeded ? "#fff" : A.bg, border: `1px solid ${A.line}`,
         borderRadius: 8, opacity: seeded ? 1 : 0.6,
       }}>
-        <StepHeader n={2} label="Gán góc nội dung (angle)" done={angleAssigned} locked={!seeded} />
+        <StepHeader n={2} label="Assign content angle" done={angleAssigned} locked={!seeded} />
         {seeded && (
           <>
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
@@ -601,7 +601,7 @@ function OnboardingTabContent({ tenantId, onGateAApproved }: { tenantId: string;
 
       {/* Step 3 — Mirror pointer (Mirror tab itself untouched) */}
       <div style={{ fontSize: 11.5, color: A.muted2, fontStyle: "italic" }}>
-        Xem tab Mirror để biết atom count / runway trước khi Approve.
+        See the Mirror tab for atom count / runway before approving.
       </div>
 
       {/* Step 4 — Gate A approve */}
@@ -609,7 +609,7 @@ function OnboardingTabContent({ tenantId, onGateAApproved }: { tenantId: string;
         padding: "12px 14px", background: angleAssigned ? "#fff" : A.bg, border: `1px solid ${A.line}`,
         borderRadius: 8, opacity: angleAssigned ? 1 : 0.6,
       }}>
-        <StepHeader n={4} label="Gate A — duyệt kích hoạt tenant" done={approved} locked={!angleAssigned} />
+        <StepHeader n={4} label="Gate A — approve tenant activation" done={approved} locked={!angleAssigned} />
         {angleAssigned && gateA && (
           approved ? (
             <div style={{ fontSize: 12, color: A.muted, display: "flex", alignItems: "center", gap: 6 }}>
@@ -619,7 +619,7 @@ function OnboardingTabContent({ tenantId, onGateAApproved }: { tenantId: string;
           ) : (
             <>
               <div style={{ fontSize: 11.5, color: A.muted2, marginBottom: 8 }}>
-                Gate A là bắt buộc, không auto-approve — tenant chỉ chuyển active sau khi bấm nút này.
+                Gate A is required and never auto-approved — the tenant only goes active after this button is clicked.
               </div>
               <Btn variant="primary" size="sm" disabled={approving} onClick={approveGateA}>
                 {approving
@@ -672,7 +672,7 @@ function MirrorTabContent({ tenantId }: { tenantId: string }) {
   if (notSeeded) {
     return (
       <div style={{ padding: "20px 0", textAlign: "center", fontSize: 12, color: A.muted }}>
-        Chưa seed atom cho tenant này — chạy Seed Atoms (Marketplace → finalize portfolio) trước.
+        This tenant has not seeded atoms yet — run Seed atoms (Marketplace → finalize portfolio) first.
       </div>
     );
   }
@@ -682,10 +682,10 @@ function MirrorTabContent({ tenantId }: { tenantId: string }) {
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
         {([
-          ["Bài/tuần", `${data.posts_per_week}`],
-          ["Tour", `${data.tour_count}`],
-          ["Atom (thật)", `${data.atom_count}`],
-          ["Runway", data.runway_months != null ? `~${data.runway_months} tháng` : "—"],
+          ["Posts/week", `${data.posts_per_week}`],
+          ["Tours", `${data.tour_count}`],
+          ["Atoms (real)", `${data.atom_count}`],
+          ["Runway", data.runway_months != null ? `~${data.runway_months} months` : "—"],
         ] as [string, string][]).map(([l, v]) => (
           <div key={l} style={{ minWidth: 90 }}>
             <div style={{ fontSize: 10, color: A.muted2, marginBottom: 2 }}>{l}</div>
@@ -700,7 +700,7 @@ function MirrorTabContent({ tenantId }: { tenantId: string }) {
       </div>
       {data.assigned_angle_label && (
         <div style={{ fontSize: 11.5, color: A.muted2 }}>
-          Góc nội dung: <strong style={{ color: A.body }}>{data.assigned_angle_label}</strong>
+          Content angle: <strong style={{ color: A.body }}>{data.assigned_angle_label}</strong>
         </div>
       )}
     </div>
@@ -1012,7 +1012,7 @@ function TenantRow({ tenant, onRotateKey, onDeleted }: {
         <td style={TD}>
           <Badge color={PLAN_BADGE[tenant.plan_tier] ?? "gray"}>{tenant.plan_tier}</Badge>
           <div style={{ fontSize: 10.5, color: A.muted2, marginTop: 4 }}>
-            {tenant.posts_per_week != null ? `${tenant.posts_per_week} bài/tuần` : "—"}
+            {tenant.posts_per_week != null ? `${tenant.posts_per_week} posts/week` : "—"}
           </div>
         </td>
 
