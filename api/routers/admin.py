@@ -1639,6 +1639,51 @@ async def create_quarter_plan(
     }
 
 
+# ── GET /admin/quarter-plan/pending — Gate B queue: all pending versions ──────
+
+
+@router.get("/quarter-plan/pending", summary="Gate B — list all pending quarter plan versions (AA-388)")
+async def list_pending_quarter_plans(
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    """No prior endpoint listed pending versions across tenants (AA-320 only shipped
+    a per-tenant/year/quarter GET) -- confirmed with Nghiep during AA-388 STEP 0
+    before adding this. Lists newest-first; joins shared.tenants for a display name
+    since quarter_plan_version has no tenant column of its own (tenant_id lives on
+    quarter_plan)."""
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT qpv.version_id, qpv.plan_id, qpv.version_no, qpv.source, qpv.created_at,
+                   qp.tenant_id, qp.year, qp.quarter, t.name AS tenant_name
+            FROM acp_shared.quarter_plan_version qpv
+            JOIN acp_shared.quarter_plan qp ON qp.plan_id = qpv.plan_id
+            JOIN shared.tenants t ON t.tenant_id = qp.tenant_id
+            WHERE qpv.approval_status = 'pending'
+            ORDER BY qpv.created_at DESC
+            """
+        )
+    return {
+        "items": [
+            {
+                "version_id": str(r["version_id"]),
+                "plan_id": str(r["plan_id"]),
+                "version_no": r["version_no"],
+                "source": r["source"],
+                "created_at": r["created_at"].isoformat(),
+                "tenant_id": str(r["tenant_id"]),
+                "tenant_name": r["tenant_name"],
+                "year": r["year"],
+                "quarter": r["quarter"],
+            }
+            for r in rows
+        ]
+    }
+
+
 # ── GET /admin/quarter-plan/{tenant_id}/{year}/{quarter} — latest version for review ──
 
 

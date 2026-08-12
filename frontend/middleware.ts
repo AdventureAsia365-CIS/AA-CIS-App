@@ -61,6 +61,10 @@ const PROTECTED_ROUTES: { prefix: string; roles: string[] }[] = [
   // — Marketplace builds the portfolio that directly feeds tenant onboarding (seed-atoms), same
   // commercial sensitivity, not a general staff/reviewer page.
   { prefix: "/admin/marketplace", roles: ["admin"] },
+  // AA-388: Gate B (Ms. Thu's quarter-plan approval) — admin-only, same shape as
+  // Gate A (/admin/tenants). Learned from AA-384's own gap in this file's header:
+  // a page without an entry here 404s-to-login even with a valid admin session.
+  { prefix: "/admin/quarter-plan", roles: ["admin"] },
   // Internal staff pages (was INTERNAL_PATHS) — admin/reviewer get real JWT
   // verification; content is the known-limitation carve-out described above.
   { prefix: "/admin/dashboard", roles: ["admin", "reviewer", "content"] },

@@ -3,7 +3,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Search, CalendarDays, FileText, Share2, Sparkles, ShoppingBag } from "lucide-react";
+import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Search, CalendarDays, FileText, Share2, Sparkles, ShoppingBag, CalendarCheck } from "lucide-react";
 import { A, serif, sans } from "./adminUi";
 
 interface Notif {
@@ -191,6 +191,9 @@ export default function AdminSidebar() {
             <NavItem active={active("/admin/marketplace")} accent={A.red}
               icon={<ShoppingBag size={15} />} label="Marketplace"
               onClick={() => router.push("/admin/marketplace")} />
+            <NavItem active={active("/admin/quarter-plan")} accent={A.red}
+              icon={<CalendarCheck size={15} />} label="Quarter Plan (Gate B)"
+              onClick={() => router.push("/admin/quarter-plan")} />
             <NavItem active={active("/admin/run-health")} accent={A.red}
               icon={<Activity size={15} />} label="Run Health"
               onClick={() => router.push("/admin/run-health")} />
