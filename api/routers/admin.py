@@ -360,6 +360,26 @@ async def update_tenant(
             """, tenant_id, plan_tier, rpm)
 
         if is_active is not None:
+            # AA-389: this generic route used to be able to activate a tenant that never went
+            # through Gate A (no seed-atoms, no assigned_angle, no approval) — a one-click bypass
+            # of the "REQUIRED/NEVER-auto" guarantee gate-a/approve exists to enforce. Deactivation
+            # (is_active=false, e.g. suspending an existing tenant) stays unrestricted; activation
+            # is only allowed here for a tenant that has ALREADY cleared Gate A once (tenant_
+            # onboarding.approval_status='approved') — that's a legitimate reactivate-after-suspend,
+            # not a bypass, since Gate A's own checks (angle assigned, onboarding reviewed) were
+            # already satisfied. A tenant with no onboarding row, or still 'pending', must go
+            # through POST .../gate-a/approve instead.
+            if is_active:
+                approval_status = await conn.fetchval(
+                    "SELECT approval_status FROM acp_shared.tenant_onboarding WHERE tenant_id = $1",
+                    tenant_id,
+                )
+                if approval_status != "approved":
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Cannot activate a tenant that has not completed Gate A approval — "
+                               "use POST /tenants/{tenant_id}/gate-a/approve.",
+                    )
             await conn.execute("""
                 UPDATE shared.tenants
                 SET is_active = $2, updated_at = NOW()

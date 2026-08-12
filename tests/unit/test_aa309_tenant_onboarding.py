@@ -410,3 +410,58 @@ class TestGateAStatus:
         result = await admin.get_gate_a_status(TENANT_ID, request, x_admin_secret=_TEST_SECRET)
         assert result["approval_status"] == "pending"
         assert result["tenant_is_active"] is False
+
+
+class TestUpdateTenantGateAGuard:
+    """AA-389: PATCH /tenants/{id} used to be able to activate a tenant with zero Gate A checks —
+    a one-click bypass of the REQUIRED/NEVER-auto guarantee gate-a/approve exists to enforce.
+    Deactivation must stay unrestricted; activation must only succeed for a tenant whose Gate A
+    onboarding row is already 'approved' (a legitimate reactivate-after-suspend, not a bypass)."""
+
+    @pytest.mark.asyncio
+    async def test_activate_never_onboarded_tenant_rejected_400(self):
+        conn = _make_conn()
+        conn.fetchval.return_value = None  # no tenant_onboarding row at all
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        with pytest.raises(HTTPException) as exc:
+            await admin.update_tenant(TENANT_ID, request, x_admin_secret=_TEST_SECRET, is_active=True)
+        assert exc.value.status_code == 400
+        conn.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_activate_pending_gate_a_rejected_400(self):
+        conn = _make_conn()
+        conn.fetchval.return_value = "pending"
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        with pytest.raises(HTTPException) as exc:
+            await admin.update_tenant(TENANT_ID, request, x_admin_secret=_TEST_SECRET, is_active=True)
+        assert exc.value.status_code == 400
+        conn.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_activate_approved_gate_a_allowed(self):
+        conn = _make_conn()
+        conn.fetchval.return_value = "approved"
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await admin.update_tenant(TENANT_ID, request, x_admin_secret=_TEST_SECRET, is_active=True)
+        assert result["status"] == "updated"
+        conn.execute.assert_called_once()
+        assert conn.execute.call_args[0][2] is True  # is_active bound param
+
+    @pytest.mark.asyncio
+    async def test_deactivate_never_checks_gate_a(self):
+        conn = _make_conn()
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await admin.update_tenant(TENANT_ID, request, x_admin_secret=_TEST_SECRET, is_active=False)
+        assert result["status"] == "updated"
+        conn.fetchval.assert_not_called()
+        conn.execute.assert_called_once()
+        assert conn.execute.call_args[0][2] is False
