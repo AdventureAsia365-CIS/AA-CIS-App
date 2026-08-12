@@ -5,7 +5,7 @@
 // browse/filter, select tours, save draft portfolio, finalize) but following THIS repo's admin
 // page pattern: AdminSidebar + adminUi design tokens + /api/admin/[...path] proxy, not Tailwind.
 //
-// Wires to the AA-330 Phần A/B endpoints exactly as-is (no backend change here):
+// Wires to the AA-330 Part A/B endpoints exactly as-is (no backend change here):
 //   GET   /admin/marketplace/catalog
 //   POST  /admin/marketplace/portfolios
 //   PATCH /admin/marketplace/portfolios/{id}/finalize
@@ -117,7 +117,7 @@ function FilterBar({ filters, onChange, onApply, loading }: {
         </Btn>
       </div>
       <p style={{ fontSize: 11, color: A.muted2, marginTop: 12, marginBottom: 0, fontStyle: "italic" }}>
-        Tour không có giá tin cậy hiển thị &quot;Giá: liên hệ&quot; và luôn xuất hiện — không bị ẩn bởi bộ lọc giá.
+        Tours without a reliable price show &quot;Price: contact us&quot; and always appear — not hidden by the price filter.
       </p>
     </Card>
   );
@@ -151,7 +151,7 @@ function CatalogRow({ tour, checked, onToggle }: {
       <td style={TD}>
         {tour.price_available
           ? <span style={{ fontFamily: mono }}>${tour.price_usd?.toLocaleString()}</span>
-          : <span style={{ color: A.muted2, fontStyle: "italic" }}>Giá: liên hệ</span>}
+          : <span style={{ color: A.muted2, fontStyle: "italic" }}>Price: contact us</span>}
       </td>
       <td style={TD}><AtomCell total={tour.total_atoms} high={tour.high_atoms_count} /></td>
       <td style={{ ...TD, textAlign: "center" }}>
@@ -180,13 +180,13 @@ function PortfolioBar({ selectedCount, postsPerWeek, onPostsPerWeekChange, onSav
   onSave: () => void; saving: boolean; saveError: string;
 }) {
   return (
-    <Card style={{ marginTop: 16, display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
-      <FilterField label="Bài/tuần (ước tính runway)">
+    <Card style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+      <FilterField label="Posts/week (estimates runway)">
         <input type="number" min={0} step={0.5} style={inputStyle} value={postsPerWeek}
           onChange={e => onPostsPerWeekChange(e.target.value)} />
       </FilterField>
       <Btn variant="primary" onClick={onSave} disabled={selectedCount === 0 || saving}>
-        <Package size={13} /> {saving ? "Saving…" : `Lưu portfolio (draft) — ${selectedCount} tour`}
+        <Package size={13} /> {saving ? "Saving…" : `Save portfolio (draft) — ${selectedCount} tour`}
       </Btn>
       {saveError && (
         <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: A.red }}>
@@ -205,7 +205,7 @@ function PortfolioResult({ portfolio, onFinalize, finalizing, finalizeError }: {
     <Card style={{ marginTop: 16, maxWidth: 460 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
         <div style={{ fontFamily: serif, fontSize: 16, fontWeight: 500, color: A.ink }}>
-          Portfolio {isFinalized ? "đã chốt" : "saved (draft)"}
+          Portfolio {isFinalized ? "finalized" : "saved (draft)"}
         </div>
         <Badge color={isFinalized ? "green" : "gray"}>{portfolio.status}</Badge>
       </div>
@@ -213,26 +213,26 @@ function PortfolioResult({ portfolio, onFinalize, finalizing, finalizeError }: {
         {portfolio.portfolio_id}
       </div>
       <div style={{ fontSize: 13, color: A.body }}>
-        {portfolio.atom_snapshot.total_atoms} atom thật · {portfolio.tour_ids.length} tour
+        {portfolio.atom_snapshot.total_atoms} real atoms · {portfolio.tour_ids.length} tours
       </div>
       {portfolio.atom_snapshot.runway_months != null ? (
         <div style={{ fontSize: 13, color: A.body, marginTop: 4 }}>
-          Runway ước tính: <strong>~{portfolio.atom_snapshot.runway_months} tháng</strong>
-          {" "}@ {portfolio.atom_snapshot.posts_per_week} bài/tuần
+          Estimated runway: <strong>~{portfolio.atom_snapshot.runway_months} months</strong>
+          {" "}@ {portfolio.atom_snapshot.posts_per_week} posts/week
         </div>
       ) : (
         <div style={{ fontSize: 11.5, color: A.muted2, marginTop: 4 }}>
-          Runway: chưa tính (chưa nhập bài/tuần)
+          Runway: not calculated yet (posts/week not entered)
         </div>
       )}
       {!isFinalized ? (
         <Btn variant="secondary" onClick={onFinalize} disabled={finalizing} style={{ marginTop: 12 }}>
-          {finalizing ? "Đang chốt…" : "Chốt portfolio"}
+          {finalizing ? "Finalizing…" : "Finalize portfolio"}
         </Btn>
       ) : (
         <div style={{ fontSize: 11, color: A.muted2, marginTop: 12 }}>
-          Chốt lúc {portfolio.finalized_at ? new Date(portfolio.finalized_at).toLocaleString() : "—"} —
-          dùng portfolio_id này ở bước Tenants → New Tenant → Seed Atoms.
+          Finalized at {portfolio.finalized_at ? new Date(portfolio.finalized_at).toLocaleString() : "—"} —
+          use this portfolio_id in the Tenants → New Tenant → Seed Atoms step.
         </div>
       )}
       {finalizeError && (
@@ -354,8 +354,8 @@ export default function MarketplacePage() {
               Marketplace
             </h1>
             <p style={{ fontSize: 13, color: A.muted, margin: 0 }}>
-              Duyệt catalog AA, chọn tour cho một tenant mới, lưu và chốt portfolio — bước tiền đề
-              của N1 onboarding (Tenants → Seed Atoms).
+              Browse the AA catalog, select tours for a new tenant, save and finalize a portfolio —
+              the prerequisite step for N1 onboarding (Tenants → Seed Atoms).
             </p>
           </div>
 
@@ -373,7 +373,7 @@ export default function MarketplacePage() {
                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead>
                     <tr>
-                      {["", "Tour", "Destination", "Duration", "Season", "Giá (USD)", "Atoms", "Ảnh", "URL"].map((h, i) => (
+                      {["", "Tour", "Destination", "Duration", "Season", "Price (USD)", "Atoms", "Image", "URL"].map((h, i) => (
                         <th key={i} style={TH}>{h}</th>
                       ))}
                     </tr>
@@ -395,7 +395,15 @@ export default function MarketplacePage() {
               <CheckSquare size={12} /> {selected.size} selected of {tours.length} shown
             </div>
           )}
+        </main>
 
+        {/* AA-387: sticky footer — Save/Finalize toolbar + result stay visible without scrolling
+            through the (growing, ~54 → ~763 after AA-345) tour list above. */}
+        <div style={{
+          position: "sticky", bottom: 0, zIndex: 10, background: A.bg,
+          borderTop: `1px solid ${A.line}`, padding: "16px 36px",
+          boxShadow: "0 -2px 8px rgba(0,0,0,0.04)",
+        }}>
           <PortfolioBar
             selectedCount={selected.size} postsPerWeek={postsPerWeek}
             onPostsPerWeekChange={setPostsPerWeek} onSave={savePortfolio}
@@ -408,7 +416,7 @@ export default function MarketplacePage() {
               finalizing={finalizing} finalizeError={finalizeError}
             />
           )}
-        </main>
+        </div>
       </div>
     </div>
   );
