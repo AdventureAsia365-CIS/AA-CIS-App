@@ -57,7 +57,7 @@ def _fake_resp(content, cost_usd=0.006,
                model="us.anthropic.claude-haiku-4-5-20251001-v1:0", fallback=False):
     return SimpleNamespace(content=content, cost_usd=cost_usd,
                            model_used=model, fallback_used=fallback,
-                           satellite_used=False,
+                           satellite_account=None,
                            # AA-288: generate_node reads these off every resp now.
                            cache_read_tokens=0, cache_write_tokens=0)
 

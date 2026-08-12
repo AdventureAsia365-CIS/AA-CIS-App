@@ -15,8 +15,9 @@ general. Density gate (F2, services/acp_shared/atom_constants.ATOM_DENSITY_WORDS
 asking the model to self-report.
 
 Writer model (AA-392, 09/08/2026 — supersedes AA-306's original Palmyra X5
-choice): Bedrock satellite acc1 Sonnet (shared/llm_client/bedrock_satellite.py,
-model="sonnet"), the exact same writer N7 Produce uses (services/acp_produce/
+choice; AA-397 12/08/2026 — acc3 now primary, acc1 fallback): Bedrock satellite
+acc3 Sonnet (shared/llm_client/bedrock_satellite.py, model="sonnet"), the exact
+same writer N7 Produce uses (services/acp_produce/
 generation.py, AA-370/AA-334). Palmyra X5 (acc2-native,
 us.writer.palmyra-x5-v1:0) is permanently rejected for this module — AA-337
 measured it hard-capped at 1 req/min (channel-program limit, not adjustable),
@@ -255,14 +256,14 @@ def generate_draft(system_prompt: str, user_prompt: str, model_tier: str = DEFAU
 
 
 def _call_claude_satellite(system_prompt: str, user_prompt: str, max_tokens: int) -> dict:
-    """AA-392 default writer — acc1 Claude Sonnet via the AA-296 Bedrock satellite,
-    the same `invoke_claude()` call N7's own writer uses (services/acp_produce/
-    generation.py). Real billed money post Activate-credits-rejection
-    (ADR-2026-032) — accepted cost, same as N7's own AA-334 sign-off (06/08/2026)
-    to move off Palmyra."""
+    """AA-392 default writer — acc3 Claude Sonnet via the AA-296/397 Bedrock
+    satellite (acc1 fallback), the same `invoke_claude()` call N7's own writer
+    uses (services/acp_produce/generation.py). Real billed money post
+    Activate-credits-rejection (ADR-2026-032) — accepted cost, same as N7's own
+    AA-334 sign-off (06/08/2026) to move off Palmyra."""
     from shared.llm_client.bedrock_satellite import invoke_claude, BedrockUnavailable
     try:
-        result = invoke_claude(user_prompt, model="sonnet", max_tokens=max_tokens, system=system_prompt)
+        result = invoke_claude(user_prompt, model="sonnet", max_tokens=max_tokens, system=system_prompt, account="acc3")
     except BedrockUnavailable as e:
         raise RuntimeError(f"Claude satellite failed: {e}") from e
     return {

@@ -120,7 +120,7 @@ def test_generate_draft_batches_5_sections_as_3_then_2():
     outline = [OutlineSection(title=f"Section {i}", atom_ids=[], goal="g") for i in range(5)]
     calls = []
 
-    def _fake_invoke(prompt, model, max_tokens, system):
+    def _fake_invoke(prompt, model, max_tokens, system, account=None):
         calls.append(prompt)
         batch_titles = [ln.split("SECTION: ")[1] for ln in prompt.splitlines() if ln.startswith("SECTION: ")]
         text = "".join(_marker_block(t, f"body for {t} [R:atom_a]") for t in batch_titles)

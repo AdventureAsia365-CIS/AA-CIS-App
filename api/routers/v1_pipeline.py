@@ -184,11 +184,11 @@ async def _rewrite_tour(
             # AA-213: propagate fallback_used so metadata.fallback_used isn't always-False (graph
             # declares it but _rewrite_tour rebuilds the dict — same strip class as the judge_* fix).
             "fallback_used":   result.get("fallback_used", False),
-            # AA-296: same strip class as fallback_used above — propagate satellite_used so it
-            # isn't always-False (graph declares it but _rewrite_tour rebuilds the dict).
-            "satellite_used":  result.get("satellite_used", False),
+            # AA-296/397: same strip class as fallback_used above — propagate satellite_account so it
+            # isn't always-None (graph declares it but _rewrite_tour rebuilds the dict).
+            "satellite_account": result.get("satellite_account"),
             # AA-289/AA-288: prompt_version + cache token counts, same strip class as fallback_used/
-            # satellite_used above — graph.py declares these in ContentState but _rewrite_tour
+            # satellite_account above — graph.py declares these in ContentState but _rewrite_tour
             # rebuilds the dict from scratch, so anything not explicitly re-listed here is lost.
             "prompt_version":      result.get("prompt_version", ""),
             "cache_read_tokens":   result.get("cache_read_tokens", 0),

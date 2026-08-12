@@ -29,8 +29,8 @@ here:
   appended FAQ section — not unsafe (they'd still be real, already-grounded
   atoms) but it drifts from "adapt the blog content", the scope this issue
   actually asked for.
-- Model is Bedrock satellite acc1 Sonnet, same `invoke_claude(...,
-  model="sonnet")` call as E2 (generation.py) — CHỐT, not a proposal
+- Model is Bedrock satellite acc3 Sonnet (AA-397, acc1 fallback under it), same
+  `invoke_claude(..., model="sonnet")` call as E2 (generation.py) — CHỐT, not a proposal
   (AA-334 Cancelled, see generation.py's own docstring). Palmyra must never
   appear anywhere in this module.
 - Two independent Sonnet calls (facebook, tiktok), not one combined call —
@@ -145,7 +145,9 @@ def _invoke_channel_with_retry(blog_body: str, cited_atom_text: dict[str, str], 
     last_err: Exception | None = None
     for attempt in range(1, _MAX_INVOKE_ATTEMPTS + 1):
         try:
-            result: BedrockInvokeResult = invoke_claude(prompt, model="sonnet", max_tokens=_MAX_TOKENS, system=system)
+            result: BedrockInvokeResult = invoke_claude(
+                prompt, model="sonnet", max_tokens=_MAX_TOKENS, system=system, account="acc3"
+            )
         except BedrockUnavailable as e:
             last_err = e
             logger.warning("e3_adapt_sonnet_retry", channel=channel, attempt=attempt,
