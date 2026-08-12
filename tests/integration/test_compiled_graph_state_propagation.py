@@ -167,7 +167,7 @@ async def test_full_graph_run_returns_judge_fields_undropped(patch_llm_client):
 
 
 async def test_full_graph_run_propagates_model_tier_metadata(patch_llm_client):
-    """model_used/cost_usd/fallback_used/satellite_used are declared in ContentState and must
+    """model_used/cost_usd/fallback_used/satellite_account are declared in ContentState and must
     reach _rewrite_tour's result dict after a full graph run, not just after a direct node call."""
     patch_llm_client(
         [_generate_response(GOOD_GENERATED, cost_usd=0.002)],
@@ -185,7 +185,7 @@ async def test_full_graph_run_propagates_model_tier_metadata(patch_llm_client):
     # cost_usd accumulates across both the generate call and the judge call.
     assert result["cost_usd"] == pytest.approx(0.002 + 0.01)
     assert result["fallback_used"] is False
-    assert result["satellite_used"] is False
+    assert result["satellite_account"] is None
 
 
 async def test_full_graph_run_retry_path_preserves_state(patch_llm_client):

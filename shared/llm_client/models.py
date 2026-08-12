@@ -23,8 +23,10 @@ class LLMResponse(BaseModel):
     output_tokens: int = 0
     cost_usd:      float = 0.0
     fallback_used: bool = False
-    # AA-296 — True khi response qua Bedrock satellite (acc1); khác fallback_used (chất lượng thấp hơn ý định)
-    satellite_used: bool = False
+    # AA-296/397 — account satellite thực sự đã trả response ("acc1"/"acc3"), None nếu qua
+    # acc2 native hoặc GPT-4.1; khác fallback_used (chất lượng thấp hơn ý định). Trước AA-397
+    # đây là bool `satellite_used` — đổi sang str|None để phân biệt acc1 vs acc3.
+    satellite_account: Optional[str] = None
     # AA-288: tokens read from / written to the Bedrock prompt cache for this call. Only ever
     # non-zero from _call_bedrock (acc2, use_cache=True) — satellite/OpenAI calls don't cache,
     # so they keep the 0 default rather than a caller having to know which provider ran.

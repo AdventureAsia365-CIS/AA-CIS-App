@@ -16,7 +16,7 @@ def _meta(n):
 def _resp(payload, cost=0.004):
     return SimpleNamespace(content=json.dumps(payload), cost_usd=cost,
                            model_used="haiku", fallback_used=False,
-                           satellite_used=False,
+                           satellite_account=None,
                            # AA-288: generate_node reads these off every resp now.
                            cache_read_tokens=0, cache_write_tokens=0)
 

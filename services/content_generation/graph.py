@@ -3,7 +3,7 @@ import json
 import re
 import structlog
 from json_repair import repair_json
-from typing import TypedDict, Annotated
+from typing import TypedDict, Annotated, Optional
 from langgraph.graph import StateGraph, END
 
 from shared.llm_client.client import LLMClient
@@ -144,7 +144,7 @@ class ContentState(TypedDict):
     brand_good_examples:    str
     model_tier:             str
     fallback_used:          bool   # AA-213: True khi Sonnet T1 fell back to Haiku T2
-    satellite_used:         bool   # AA-296: True khi content được viết qua Bedrock satellite (acc1)
+    satellite_account:      Optional[str]  # AA-296/397: "acc1"/"acc3" nếu qua satellite, None nếu không
     prompt_version:         str    # AA-289: sha256[:8] của system prompt cuối cùng gửi cho LLM
     cache_read_tokens:      int    # AA-288: Bedrock prompt-cache tokens read (0 nếu không cache)
     cache_write_tokens:     int    # AA-288: Bedrock prompt-cache tokens written (0 nếu không cache)
@@ -393,7 +393,7 @@ def generate_node(state: ContentState) -> ContentState:
             "is_branded": is_branded,
             "error":      "",
             "fallback_used": resp.fallback_used,
-            "satellite_used": resp.satellite_used,
+            "satellite_account": resp.satellite_account,
             "prompt_version": prompt_version,
             "cache_read_tokens": (state.get("cache_read_tokens", 0) + resp.cache_read_tokens
                                    + _itin_result["extra_cache_read_tokens"]),
