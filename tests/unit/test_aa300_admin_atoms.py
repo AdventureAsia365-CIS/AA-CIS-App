@@ -238,6 +238,39 @@ class TestListAtoms:
         assert "ta.tour_id = ANY(" in query
         assert "ta.tour_id = $" not in query
 
+    # AA-345 round 4 — Nghiep live-verified a real atomize run with EXACTLY
+    # ONE tour_id ("Jomolhari Trek") and the deep link's ?tour_ids=<one uuid>
+    # did not show that tour in Curation. Investigated end to end (live DB
+    # query + a direct curl against the actual running ECS container,
+    # bypassing the gateway/frontend entirely, using the real tour_id from
+    # the incident) — both the SQL this handler builds and the live HTTP
+    # response are correct for a single tour_id: `ta.tour_id =
+    # ANY($1::uuid[])` with a 1-element array matches fine in Postgres, and
+    # `test_tour_ids_plural_wins_over_singular_tour_id` above already
+    # exercises a single-id string through this code path, but never
+    # actually asserted the resulting SQL PARAMS were a proper 1-element
+    # list (only that the ANY(...) clause was chosen) — that's the exact gap
+    # this closes. Root cause of the live report was not found in this
+    # handler; see docs/implementation-notes/AA-345-round4.md for the full
+    # investigation (live data proved both this endpoint and
+    # GET /admin/atoms/summary return the tour correctly).
+    @pytest.mark.asyncio
+    async def test_tour_ids_single_element_produces_single_element_param(self):
+        conn = AsyncMock()
+        conn.fetch.return_value = []
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+        single_id = str(uuid.uuid4())
+
+        await admin_atoms.list_atoms(
+            request, tour_id=None, tour_ids=single_id, distinctiveness=None,
+            unreviewed_only=False, thin_only=False, include_deleted=False,
+            limit=50, offset=0, x_admin_secret=_TEST_SECRET,
+        )
+        query, *params = conn.fetch.call_args[0]
+        assert "ta.tour_id = ANY(" in query
+        assert [single_id] in params
+
     @pytest.mark.asyncio
     async def test_singular_tour_id_still_works_when_tour_ids_absent(self):
         """Backward compat — the older single-tour deep link (still used
