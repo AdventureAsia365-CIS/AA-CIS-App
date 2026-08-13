@@ -73,6 +73,7 @@ const PROTECTED_ROUTES: { prefix: string; roles: string[] }[] = [
   { prefix: "/admin/master-content", roles: ["admin", "reviewer", "content"] },
   { prefix: "/admin/review", roles: ["admin", "reviewer", "content"] },
   { prefix: "/admin/curation", roles: ["admin", "reviewer", "content"] }, // AA-300
+  { prefix: "/admin/atomize", roles: ["admin", "reviewer", "content"] }, // AA-345 — same roles as curation, feeds it
   { prefix: "/admin/brand", roles: ["admin", "reviewer", "content"] },
   { prefix: "/admin/run-health", roles: ["admin", "reviewer", "content"] }, // #4
   { prefix: "/admin/s1-rewrite", roles: ["admin", "reviewer", "content"] }, // #4

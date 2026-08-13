@@ -18,6 +18,7 @@ from typing import Optional, List
 
 from api.routers.admin import verify_admin_secret
 from api.routers.v1_pipeline import _rewrite_tour
+from services.acp_shared.atom_constants import THIN_TRIP_ATOM_MIN
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/admin", tags=["admin-pipeline"])
@@ -1627,6 +1628,16 @@ async def get_all_tours(request: Request, x_admin_secret: str = Header(None)):
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
     async with pool.acquire() as conn:
+        # AA-345: floor copied verbatim from acp_contract.v_trip_registry
+        # (migration 083) — NULL-safe on source_status (a bare `!= 'trashed'`
+        # silently drops every NULL row, three-valued SQL logic) + excludes
+        # deleted/empty-itinerary rows. Published tours are NOT excluded here
+        # (open product question, AA-345 STEP 0 Phần 1 — not enough evidence
+        # either way, Nghiep to confirm) — pipeline_status is still returned
+        # below and the S1-rewrite frontend already badges it "Published"
+        # (frontend/app/admin/s1-rewrite/page.tsx), so no separate is_published
+        # field is added here — that would be a second, driftable source of
+        # truth for the same fact.
         tours = await conn.fetch("""
             SELECT
                 rt.tour_id::text, rt.src_name, rt.country,
@@ -1638,6 +1649,10 @@ async def get_all_tours(request: Request, x_admin_secret: str = Header(None)):
             FROM silver_aa_internal.raw_tours rt
             LEFT JOIN silver_aa_internal.raw_sources rs ON rs.id = rt.source_id
             LEFT JOIN silver_aa_internal.generated_content gc ON gc.tour_id = rt.tour_id
+            WHERE (rt.source_status IS NULL OR rt.source_status::text <> 'trashed'::text)
+              AND rt.deleted_at IS NULL
+              AND rt.src_itineraries IS NOT NULL
+              AND TRIM(BOTH FROM rt.src_itineraries) <> ''::text
             GROUP BY rt.tour_id, rt.src_name, rt.country, rt.pipeline_status,
                      rt.ingest_at, rt.batch_id, rt.source_id, rs.filename
             ORDER BY rt.ingest_at DESC
@@ -1660,6 +1675,83 @@ async def get_all_tours(request: Request, x_admin_secret: str = Header(None)):
         ],
         "total": len(tours),
     }
+
+
+# ── GET /admin/tours-for-atomization ──────────────────────────────────────────
+# AA-345: source for the "chọn tour để atom hoá" UI. Deliberately reads
+# acp_contract.v_trip_registry (migration 083) rather than re-deriving the
+# trashed/deleted/empty-itinerary floor filter here — that view IS the 763-tour
+# source of truth this feature is scoped against (AA-345 STEP 0). GET /admin/tours
+# above is NOT reused — it serves S1 rewrite (rewrite_count/pipeline_status), a
+# different purpose, per issue's own explicit instruction not to overload it.
+
+@router.get("/tours-for-atomization")
+async def get_tours_for_atomization(
+    request: Request,
+    include_atomized: bool = Query(False),
+    x_admin_secret: str = Header(None),
+):
+    """Tours available to run N2 decompose on. Percentile is computed over the
+    FULL 763-tour floor (matches AA-345 STEP 0's percentile method) before the
+    include_atomized filter is applied, so the number stays comparable across
+    both views instead of shifting under the user's feet when they toggle it.
+
+    Defaults to EXCLUDING tours that already have atoms (atom_count=0) — the
+    145-ish already-atomized tours are done, re-selecting them by accident just
+    re-runs a same-hash no-op (idempotent skip, v1_atoms.py's source_hash
+    check) but wastes a click; pass include_atomized=true to see them anyway
+    with their real atom_count, e.g. to sanity-check the THIN badge."""
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+
+    where_clause = "" if include_atomized else "WHERE a.tour_id IS NULL"
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(f"""
+            WITH base AS (
+                SELECT
+                    vtr.id, vtr.name, vtr.destination, vtr.duration_raw,
+                    LENGTH(vtr.itinerary_source) AS itinerary_length,
+                    PERCENT_RANK() OVER (ORDER BY LENGTH(vtr.itinerary_source)) AS pct_rank,
+                    vtr.quality_score, vtr.trip_url, vtr.url_alive,
+                    (vtr.aa_name IS NOT NULL) AS is_published
+                FROM acp_contract.v_trip_registry vtr
+            ),
+            atoms AS (
+                SELECT tour_id, COUNT(*) AS atom_count
+                FROM acp_contract.tour_atoms
+                WHERE NOT deleted AND NOT is_empty_marker
+                GROUP BY tour_id
+            )
+            SELECT b.id::text AS tour_id, b.name, b.destination, b.duration_raw,
+                   b.itinerary_length, b.pct_rank, b.quality_score, b.trip_url,
+                   b.url_alive, b.is_published, COALESCE(a.atom_count, 0) AS atom_count
+            FROM base b
+            LEFT JOIN atoms a ON a.tour_id = b.id
+            {where_clause}
+            ORDER BY b.itinerary_length ASC
+        """)
+
+    tours = []
+    for r in rows:
+        atom_count = r["atom_count"]
+        has_atoms = atom_count > 0
+        tours.append({
+            "tour_id":                     r["tour_id"],
+            "name":                        r["name"],
+            "destination":                 r["destination"],
+            "duration_raw":                r["duration_raw"],
+            "itinerary_length":            r["itinerary_length"],
+            "itinerary_length_percentile": round(float(r["pct_rank"]) * 100, 1),
+            "quality_score":               float(r["quality_score"]) if r["quality_score"] is not None else None,
+            "trip_url":                    r["trip_url"],
+            "url_alive":                   r["url_alive"],
+            "is_published":                r["is_published"],
+            "atom_count":                  atom_count,
+            "has_atoms":                   has_atoms,
+            "is_thin":                     has_atoms and atom_count < THIN_TRIP_ATOM_MIN,
+        })
+
+    return {"tours": tours, "total": len(tours)}
 
 
 # ── GET /admin/tours/export ──────────────────────────────────────────────────
