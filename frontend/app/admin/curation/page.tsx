@@ -16,8 +16,8 @@
 // the same fixed/backdrop overlay technique, not a new pattern invented
 // from scratch.
 
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   Star, Trash2, ImageIcon, Sparkles, Pencil, Check, X as XIcon,
   Grid3x3, ChevronDown, ChevronRight, AlertTriangle,
@@ -88,7 +88,7 @@ function formatDate(iso: string): string {
   });
 }
 
-export default function CurationPage() {
+function CurationPageInner() {
   const router = useRouter();
 
   const [summary, setSummary] = useState<Summary | null>(null);
@@ -111,30 +111,38 @@ export default function CurationPage() {
   const [thinOnly, setThinOnly] = useState(false);
   const [sortBy, setSortBy] = useState<SortKey>("");
   // AA-345: deep link from the new atomize UI (/admin/atomize) after a
-  // decompose run — read via window.location instead of Next's
-  // useSearchParams() to avoid that hook's Suspense-boundary requirement on
-  // a page that has none of the other admin pages in this repo use it.
-  // Lazy useState initializer (not a useEffect) — found live during AA-345
-  // round 1 verify that reading the URL in an effect let the mount-time
-  // unfiltered loadAtoms() fire BEFORE this resolved, then race a second,
-  // filtered fetch; whichever response happened to land last won, so the
-  // visible list would randomly flip between filtered and unfiltered.
-  // Setting the initial state synchronously means loadAtoms() only ever
-  // fires once, already correctly filtered — no second request, no race.
+  // decompose run.
+  //
+  // AA-345 round 5 — the previous approach (a lazy useState initializer
+  // reading window.location.search once at mount, chosen specifically to
+  // avoid useSearchParams()'s Suspense-boundary requirement) had a real,
+  // reproducible bug: on a client-side router.push() navigation FROM
+  // /admin/atomize (not a hard reload), React can mount this page and run
+  // that initializer before Next.js's router has actually applied the new
+  // URL, so it silently read the OLD (pre-navigation) window.location and
+  // initialized to []. The URL bar still showed the correct ?tour_ids=...
+  // (confirmed live: Nghiep's screenshot, and reproduced here via
+  // Playwright — a hard page.goto() to the exact same URL works correctly,
+  // only the router.push() soft-navigation path fails), but the filter
+  // silently never applied — full unfiltered list, no "Filtering to"
+  // banner, no error. useSearchParams() is the router-integrated way to
+  // read this and is guaranteed to reflect the params of the navigation
+  // actually being rendered, which eliminates this race by construction —
+  // worth the Suspense boundary this time (added below, wrapping the
+  // default export).
   //
   // AA-345 round 2, Việc 4: accepts both `?tour_ids=id1,id2` (plural, the
   // new multi-tour link from a batch Atomize run) and the older single
   // `?tour_id=id` (kept for anything still linking that way) — tour_ids
   // wins if both are present, same precedence as the backend's own
   // GET /admin/atoms?tour_ids= param.
-  const [highlightTourIds, setHighlightTourIds] = useState<string[]>(() => {
-    if (typeof window === "undefined") return [];
-    const params = new URLSearchParams(window.location.search);
-    const plural = params.get("tour_ids");
+  const searchParams = useSearchParams();
+  const highlightTourIds = useMemo(() => {
+    const plural = searchParams.get("tour_ids");
     if (plural) return plural.split(",").map(s => s.trim()).filter(Boolean);
-    const single = params.get("tour_id");
+    const single = searchParams.get("tour_id");
     return single ? [single] : [];
-  });
+  }, [searchParams]);
   const highlightSet = useMemo(() => new Set(highlightTourIds), [highlightTourIds]);
 
   const [expandedTourIds, setExpandedTourIds] = useState<Set<string>>(new Set());
@@ -379,10 +387,15 @@ export default function CurationPage() {
             </span>
             <button
               onClick={() => {
-                setHighlightTourIds([]);
-                // Drop the stale ?tour_ids=/?tour_id= from the URL too —
-                // otherwise a refresh after "clearing" silently re-applies
-                // the filter (found live during AA-345 round 1 verify).
+                // router.replace() updates the URL; useSearchParams() is
+                // reactive to that, so highlightTourIds (derived via
+                // useMemo above) recomputes to [] on its own — no separate
+                // state to clear by hand anymore (round 5 removed that
+                // parallel-state footgun along with the race condition it
+                // caused). Still drop the ?tour_ids=/?tour_id= from the URL
+                // itself — otherwise a refresh after "clearing" silently
+                // re-applies the filter (found live during AA-345 round 1
+                // verify).
                 router.replace("/admin/curation");
               }}
               style={{ background: "none", border: "none", cursor: "pointer", color: A.gold, fontWeight: 600, fontSize: 12 }}
@@ -645,6 +658,19 @@ export default function CurationPage() {
         )}
       </main>
     </div>
+  );
+}
+
+// AA-345 round 5 — useSearchParams() (used inside CurationPageInner, see
+// its comment above) requires a Suspense boundary around any component
+// that calls it, per Next.js App Router. The fallback is brief (only
+// blocks on search params resolving, not on this page's own data fetches,
+// which still show their own LoadingScreen once mounted).
+export default function CurationPage() {
+  return (
+    <Suspense fallback={<LoadingScreen msg="Loading…" />}>
+      <CurationPageInner />
+    </Suspense>
   );
 }
 
