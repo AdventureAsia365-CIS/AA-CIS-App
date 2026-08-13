@@ -91,7 +91,15 @@ test.describe('AA-345 round 5 — Atomize -> Curation single-tour deep link', ()
     // router) and clearing the URL via a raw history.replaceState() call
     // instead of router.replace().
     await page.click('text=Clear filter');
-    await page.waitForTimeout(1000);
+    // URL/banner update synchronously with the click (history.replaceState
+    // + the `cleared` flag) — a short wait covers those. The tour SECTIONS
+    // re-rendering below waits separately (via expect.poll) because round
+    // 7 made pagination tour-based (see curation/page.tsx's `sortedTours`/
+    // `loadAtoms` comments): "Clear filter" now re-fetches a whole batch of
+    // tours' atoms from scratch, which takes noticeably longer than the
+    // single fixed-size atom-row page it used to re-fetch pre-round-7 — a
+    // fixed short timeout here was flaky for exactly that reason.
+    await page.waitForTimeout(300);
     expect(new URL(page.url()).searchParams.has('tour_ids')).toBe(false);
     expect(new URL(page.url()).searchParams.has('tour_id')).toBe(false);
     await expect(page.getByText(/Filtering to.*just atomized/)).not.toBeVisible();
@@ -100,7 +108,9 @@ test.describe('AA-345 round 5 — Atomize -> Curation single-tour deep link', ()
     // the list actually went back to unfiltered rather than just hiding
     // the banner text. Each tour section header renders a "<N> atoms"
     // Badge (adminUi.tsx) — counting those counts sections.
-    const sectionCount = await page.getByText(/^\d+ atoms$/).count();
-    expect(sectionCount).toBeGreaterThan(1);
+    await expect.poll(
+      async () => page.getByText(/^\d+ atoms$/).count(),
+      { timeout: 8000 },
+    ).toBeGreaterThan(1);
   });
 });

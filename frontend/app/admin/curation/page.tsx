@@ -26,7 +26,37 @@ import AdminSidebar from "../_components/AdminSidebar";
 import { FilterBar } from "../_components/FilterBar";
 import { A, sans, serif, Card, Btn, Badge, LoadingScreen, StatCard } from "../_components/adminUi";
 
-const LOAD_LIMIT = 150;
+// AA-345 round 7 — see the `sortedTours`/`loadAtoms` comment below for why
+// pagination is tour-based now, not atom-row-based. This budget keeps each
+// batch's cumulative atom_count safely under GET /admin/atoms's hard
+// `limit <= 200` cap (api/routers/admin_atoms.py) even though we always
+// request the backend's max limit=200 for the actual fetch — margin for
+// the gap between a tour's raw atom_count (from summary, unfiltered) and
+// what a batch might return once distinctiveness/unreviewed_only trim it
+// (always ≤ the raw count, so this margin is conservative, never unsafe).
+const TOUR_BATCH_ATOM_BUDGET = 180;
+
+// Greedily grows a batch of tour_ids from `tours` starting at `startIndex`
+// until adding the next tour would push cumulative atom_count over
+// `budget` — always includes at least one tour so a single very-large
+// tour can't stall pagination entirely (its own atoms may still get
+// truncated by the backend's limit=200 cap in that edge case, same
+// pre-existing ceiling the old offset/limit pagination had too).
+function nextTourBatch(
+  tours: TourSummary[], startIndex: number, budget: number,
+): { ids: string[]; endIndex: number } {
+  const ids: string[] = [];
+  let atomSum = 0;
+  let i = startIndex;
+  while (i < tours.length) {
+    const t = tours[i];
+    if (ids.length > 0 && atomSum + t.atom_count > budget) break;
+    ids.push(t.tour_id);
+    atomSum += t.atom_count;
+    i++;
+  }
+  return { ids, endIndex: i };
+}
 
 interface Atom {
   atom_id: string;
@@ -93,14 +123,19 @@ function CurationPageInner() {
 
   const [summary, setSummary] = useState<Summary | null>(null);
   const [atoms, setAtoms] = useState<Atom[]>([]);
-  const [total, setTotal] = useState(0);
+  // AA-345 round 7 — how many tours (from the front of `sortedTours`, see
+  // below) have had their atoms fetched so far. Reactive state, not just
+  // the ref below, because it drives the "Load more (X / Y tours)" button
+  // text and visibility directly.
+  const [loadedTourCount, setLoadedTourCount] = useState(0);
   // Ref, not state — loadAtoms() below is memoized on filter values only, so a
-  // stale-closure bug would silently re-read whatever `offset` was captured at
+  // stale-closure bug would silently re-read whatever index was captured at
   // that memoization (typically 0) on every "Load more" click, re-fetching and
   // duplicating the first page instead of advancing. A ref sidesteps the
   // closure entirely: .current is always current, no matter how old the
-  // closure that reads it is.
-  const offsetRef = useRef(0);
+  // closure that reads it is. Tracks an INDEX INTO `sortedTours` now (round
+  // 7), not a raw atom offset — see `sortedTours`/`loadAtoms` below for why.
+  const tourIndexRef = useRef(0);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
@@ -165,6 +200,57 @@ function CurationPageInner() {
   }, [searchParams, cleared]);
   const highlightSet = useMemo(() => new Set(highlightTourIds), [highlightTourIds]);
 
+  // AA-345 round 7 — real bug, live-verified: "Newest first" (and every
+  // other Sort option) used to be applied client-side to `combined`, which
+  // was `summary.by_tour` FILTERED DOWN to only the tours already present
+  // in `atomsByTour` — i.e. only tours whose atoms happened to already be
+  // loaded. Atoms were loaded via GET /admin/atoms's plain offset/limit
+  // pagination, `ORDER BY ta.tour_id, ta.created_at` (api/routers/
+  // admin_atoms.py) — tour_id order, essentially random with respect to
+  // recency. Verified live against the real dev DB: of 24 tours atomized
+  // "today," 23 were missing from the very first page (offset=0,
+  // limit=150) under that ordering — so "Newest first" was sorting a
+  // near-arbitrary ~10-tour subset that had almost nothing to do with
+  // which tours were actually newest. This wasn't specific to "Newest
+  // first" either — every sort option filtered the SAME already-loaded
+  // subset first, so all of them shared this defect; "Newest first" and
+  // "Load more" just happened to be the two symptoms Nghiep noticed.
+  //
+  // Fix: `summary.by_tour` is already a COMPLETE, unpaginated per-tour
+  // aggregate (GET /admin/atoms/summary has no LIMIT) with every field
+  // every sort option needs (atom_count, unreviewed_count, tour_name,
+  // atomized_at, is_thin) — sort THAT (the real, complete list) instead of
+  // whatever's already loaded, and let pagination follow the sorted tour
+  // order rather than deciding it. `thinOnly` is a real per-tour property
+  // already on TourSummary, so it filters here too, before pagination;
+  // `distinctiveness`/`unreviewedOnly` stay as GET /admin/atoms query
+  // params (per-atom properties summary.by_tour can't pre-filter by) — a
+  // "page" of tours can still legitimately return fewer atoms than its raw
+  // atom_count sum once those apply, same tolerance the old pagination had.
+  const sortedTours = useMemo(() => {
+    if (!summary) return [];
+    let list = summary.by_tour;
+    if (highlightTourIds.length > 0) {
+      const hSet = highlightSet;
+      list = list.filter(t => hSet.has(t.tour_id));
+    }
+    if (thinOnly) list = list.filter(t => t.is_thin);
+    const sorted = [...list];
+    if (sortBy === "atoms_asc") sorted.sort((a, b) => a.atom_count - b.atom_count);
+    else if (sortBy === "atoms_desc") sorted.sort((a, b) => b.atom_count - a.atom_count);
+    else if (sortBy === "unreviewed_desc") {
+      sorted.sort((a, b) => (b.unreviewed_count / (b.atom_count || 1)) - (a.unreviewed_count / (a.atom_count || 1)));
+    } else if (sortBy === "name_asc") sorted.sort((a, b) => a.tour_name.localeCompare(b.tour_name));
+    else if (sortBy === "atomized_desc") {
+      // Nulls (no atoms ever recorded a timestamp, shouldn't happen in
+      // practice but keeps this defensive) sort last.
+      sorted.sort((a, b) => (b.atomized_at ? Date.parse(b.atomized_at) : 0) - (a.atomized_at ? Date.parse(a.atomized_at) : 0));
+    }
+    // default (no sortBy): summary.by_tour's own backend order (ORDER BY
+    // rt.src_name — alphabetical), unchanged.
+    return sorted;
+  }, [summary, sortBy, highlightTourIds, highlightSet, thinOnly]);
+
   const [expandedTourIds, setExpandedTourIds] = useState<Set<string>>(new Set());
   const didInitExpand = useRef(false);
 
@@ -175,6 +261,18 @@ function CurationPageInner() {
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
+  // AA-345 round 7 — set true once the summary fetch SETTLES, success or
+  // failure, distinct from `summary` itself (which stays null on failure).
+  // loadAtoms below needs this: pagination is now derived from
+  // summary.by_tour (see sortedTours), so it has to wait for summary to
+  // resolve before it knows what to fetch — but if it waited on `summary`
+  // being truthy alone, a summary fetch failure (e.g. a 401) would leave
+  // `summary` null forever and loadAtoms would just return early forever
+  // too, stuck on the loading spinner with no error ever surfacing. This
+  // flag lets loadAtoms distinguish "still waiting" from "summary failed,
+  // stop waiting and show the honest empty/error state instead."
+  const [summaryReady, setSummaryReady] = useState(false);
 
   // ── dashboard summary — independent of the atom list's current filter ────
   const loadSummary = useCallback(async () => {
@@ -193,33 +291,56 @@ function CurationPageInner() {
       }
     } catch (err: any) {
       setError(err.message || "Failed to load summary.");
+    } finally {
+      setSummaryReady(true);
     }
   }, [highlightSet]);
 
-  // ── atom list — resets on filter change, appends on "Load more" ──────────
+  // ── atom list — tour-based pagination (round 7), resets on filter/sort
+  // change, appends on "Load more" ──────────────────────────────────────
   const loadAtoms = useCallback(async (reset: boolean) => {
-    const nextOffset = reset ? 0 : offsetRef.current;
+    // sortedTours (and thus the correct batch) isn't known until summary
+    // has settled — see the `summaryReady` comment above for why this
+    // isn't just `if (!summary) return`.
+    if (!summaryReady) return;
+    if (!summary) {
+      // Summary fetch failed — nothing to paginate. Surface that through
+      // the normal loading/empty-state UI (orderedSections.length === 0
+      // below) instead of leaving the page stuck on "Loading atoms…"
+      // forever.
+      setLoading(false);
+      setLoadingMore(false);
+      return;
+    }
+    const startIndex = reset ? 0 : tourIndexRef.current;
     if (reset) setLoading(true); else setLoadingMore(true);
     setError("");
-    const params = new URLSearchParams({ limit: String(LOAD_LIMIT), offset: String(nextOffset) });
+    const { ids, endIndex } = nextTourBatch(sortedTours, startIndex, TOUR_BATCH_ATOM_BUDGET);
+    if (ids.length === 0) {
+      setAtoms(prev => (reset ? [] : prev));
+      tourIndexRef.current = endIndex;
+      setLoadedTourCount(endIndex);
+      setLoading(false);
+      setLoadingMore(false);
+      return;
+    }
+    const params = new URLSearchParams({ limit: "200", offset: "0", tour_ids: ids.join(",") });
     if (distinctiveness) params.set("distinctiveness", distinctiveness);
     if (unreviewedOnly) params.set("unreviewed_only", "true");
-    if (thinOnly) params.set("thin_only", "true");
-    if (highlightTourIds.length > 0) params.set("tour_ids", highlightTourIds.join(","));
     try {
       const res = await fetch(`/api/admin/atoms?${params}`);
       if (!res.ok) throw new Error(`Failed to load atoms (${res.status})`);
       const data = await res.json();
       setAtoms(prev => (reset ? data.atoms : [...prev, ...data.atoms]));
-      setTotal(data.total);
-      offsetRef.current = nextOffset + data.atoms.length;
+      tourIndexRef.current = endIndex;
+      setLoadedTourCount(endIndex);
     } catch (err: any) {
       setError(err.message || "Failed to load atoms.");
     } finally {
       setLoading(false);
       setLoadingMore(false);
     }
-  }, [distinctiveness, unreviewedOnly, thinOnly, highlightTourIds]);
+  }, [summaryReady, summary, sortedTours, distinctiveness, unreviewedOnly]);
 
   useEffect(() => { loadSummary(); }, [loadSummary]);
   useEffect(() => { loadAtoms(true); }, [loadAtoms]);
@@ -240,7 +361,6 @@ function CurationPageInner() {
       const updated = await res.json();
       if (updated.deleted) {
         setAtoms(prev => prev.filter(a => a.atom_id !== atomId));
-        setTotal(t => Math.max(0, t - 1));
         setSelectedIds(prev => { const n = new Set(prev); n.delete(atomId); return n; });
       } else {
         setAtoms(prev => prev.map(a => (a.atom_id === atomId ? { ...a, ...updated } : a)));
@@ -279,7 +399,6 @@ function CurationPageInner() {
       }
       if (body.deleted) {
         setAtoms(prev => prev.filter(a => !selectedIds.has(a.atom_id)));
-        setTotal(t => Math.max(0, t - ids.length));
       } else {
         const idSet = new Set(ids);
         setAtoms(prev => prev.map(a => (idSet.has(a.atom_id) ? { ...a, ...body } : a)));
@@ -346,11 +465,18 @@ function CurationPageInner() {
     return map;
   }, [atoms]);
 
+  // AA-345 round 7 — section order now comes straight from `sortedTours`
+  // (already correctly sorted over the COMPLETE tour list, see its own
+  // comment above), filtered to tours that actually have loaded atoms — no
+  // re-sorting needed here anymore, `sortedTours`'s order already reflects
+  // both the fetch order (loadAtoms fetched tours in exactly this order,
+  // batch by batch) and the display order.
   const orderedSections = useMemo(() => {
-    if (!summary) return [];
-    const order = summary.by_tour.filter(t => atomsByTour.has(t.tour_id));
-    // tours with loaded atoms but not (yet) in the summary snapshot — keep them visible
-    const known = new Set(order.map(t => t.tour_id));
+    const known = new Set(sortedTours.map(t => t.tour_id));
+    const order = sortedTours.filter(t => atomsByTour.has(t.tour_id));
+    // tours with loaded atoms but not (yet) in the sortedTours snapshot —
+    // keep them visible (defensive: a summary/atoms race at the very start
+    // of a load, same reasoning as before round 7).
     const extra: TourSummary[] = [];
     for (const [tourId, list] of atomsByTour) {
       if (!known.has(tourId)) {
@@ -360,21 +486,8 @@ function CurationPageInner() {
         });
       }
     }
-    const combined = [...order, ...extra];
-    if (!sortBy) return combined; // default — unchanged order from summary.by_tour
-    const sorted = [...combined];
-    if (sortBy === "atoms_asc") sorted.sort((a, b) => a.atom_count - b.atom_count);
-    else if (sortBy === "atoms_desc") sorted.sort((a, b) => b.atom_count - a.atom_count);
-    else if (sortBy === "unreviewed_desc") {
-      sorted.sort((a, b) => (b.unreviewed_count / (b.atom_count || 1)) - (a.unreviewed_count / (a.atom_count || 1)));
-    } else if (sortBy === "name_asc") sorted.sort((a, b) => a.tour_name.localeCompare(b.tour_name));
-    else if (sortBy === "atomized_desc") {
-      // AA-345 round 2, Việc 4 — nulls (no atoms ever recorded a timestamp,
-      // shouldn't happen in practice but keeps this defensive) sort last.
-      sorted.sort((a, b) => (b.atomized_at ? Date.parse(b.atomized_at) : 0) - (a.atomized_at ? Date.parse(a.atomized_at) : 0));
-    }
-    return sorted;
-  }, [summary, atomsByTour, sortBy]);
+    return [...order, ...extra];
+  }, [sortedTours, atomsByTour]);
 
   const searchLower = search.trim().toLowerCase();
 
@@ -631,10 +744,10 @@ function CurationPageInner() {
               );
             })}
 
-            {atoms.length < total && (
+            {loadedTourCount < sortedTours.length && (
               <div style={{ padding: 16, textAlign: "center" }}>
                 <Btn variant="secondary" onClick={() => loadAtoms(false)} disabled={loadingMore}>
-                  {loadingMore ? "Loading…" : `Load more (${atoms.length} / ${total})`}
+                  {loadingMore ? "Loading…" : `Load more (${loadedTourCount} / ${sortedTours.length} tours)`}
                 </Btn>
               </div>
             )}
