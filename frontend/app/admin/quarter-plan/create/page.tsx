@@ -294,37 +294,41 @@ export default function CreateQuarterPlanPage() {
               )}
             </Card>
 
-            {createdVersionId ? (
-              <Card>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-                  <CheckCircle2 size={16} color="#22C55E" />
-                  <span style={{ fontSize: 13, color: A.body }}>
-                    Quarter plan created — pending Gate B review.
-                  </span>
-                </div>
-                <Btn variant="primary" onClick={() => router.push("/admin/quarter-plan")}>
-                  Go to Quarter Plan Approval
-                </Btn>
-              </Card>
-            ) : (
-              // Sticky action bar — a tenant with hundreds of eligible trips (e.g. aa_internal,
-              // 763) makes the checklist above scroll very long; without this the submit button
-              // was only reachable after scrolling past all of it. Sticks to the viewport bottom
-              // instead (main's own scroll container is the document, so `sticky` needs no manual
-              // left-offset math against the sidebar — unlike `fixed`, it inherits its horizontal
-              // position from normal flow).
-              <div style={{
-                position: "sticky", bottom: 0, background: A.bg,
-                borderTop: `1px solid ${A.line}`, padding: "14px 0",
-                display: "flex", justifyContent: "flex-end",
-              }}>
+            {/* Sticky action bar — a tenant with hundreds of eligible trips (e.g. aa_internal,
+                763) makes the checklist above scroll very long; without this the submit button
+                (and, round 4: the post-submit result banner) was only reachable after scrolling
+                past all of it. Sticks to the viewport bottom instead (main's own scroll container
+                is the document, so `sticky` needs no manual left-offset math against the sidebar —
+                unlike `fixed`, it inherits its horizontal position from normal flow). Round 4:
+                same container swaps its content by state (pre-submit button vs. post-submit
+                banner+link) instead of appending a second, non-sticky banner at the end of the
+                DOM — the position established here never moves, only what's inside it changes. */}
+            <div style={{
+              position: "sticky", bottom: 0, background: A.bg,
+              borderTop: `1px solid ${A.line}`, padding: "14px 0",
+              display: "flex", alignItems: "center",
+              justifyContent: createdVersionId ? "space-between" : "flex-end",
+            }}>
+              {createdVersionId ? (
+                <>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <CheckCircle2 size={16} color="#22C55E" />
+                    <span style={{ fontSize: 13, color: A.body }}>
+                      Quarter plan created — pending Gate B review.
+                    </span>
+                  </div>
+                  <Btn variant="primary" onClick={() => router.push("/admin/quarter-plan")}>
+                    Go to Quarter Plan Approval
+                  </Btn>
+                </>
+              ) : (
                 <Btn variant="primary" disabled={creating || previewLoading} onClick={createPlan}>
                   {creating
                     ? <><Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> Creating…</>
                     : "Create Quarter Plan for Review"}
                 </Btn>
-              </div>
-            )}
+              )}
+            </div>
           </>
         )}
       </main>
