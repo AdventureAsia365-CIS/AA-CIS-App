@@ -33,7 +33,7 @@ from uuid import UUID
 from services.acp_shared.atom_constants import THIN_TRIP_ATOM_MIN
 
 from .constants import THIN_TRIP_MAX_SHARE
-from .models import AtomRecord, BigRock, QuarterPlan, RunwayMap, Trip, compute_trips_hash
+from .models import AtomRecord, BigRock, QuarterPlan, RunwayMap, Trip, TripScore, compute_trips_hash
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _TOKEN_MIN_PREFIX = 4
@@ -106,15 +106,40 @@ def _cap_thin_trip_shares(
     return capped, notes
 
 
+def _score_reason(runway_fit: float, richness: float, dist: float, forced: bool) -> str:
+    """AA-323 Gap 1 — short English label naming the dominant scoring factor.
+    Weights (0.4/0.3/0.3) mirror compute_quarter_plan()'s own score formula so
+    the label reflects what actually drove the ranking, not raw component
+    values a reviewer would have to interpret themselves."""
+    if forced:
+        return "Manually added"
+    contributions = {
+        "High runway fit (BOFU/MOFU window this quarter)": runway_fit * 0.4,
+        "Rich atom pool": richness * 0.3,
+        "High-distinctiveness atoms": dist * 0.3,
+    }
+    return max(contributions, key=contributions.get)
+
+
 def compute_quarter_plan(
     tenant_id: UUID, year: int, quarter: int, trips: list[Trip], markets: list[str],
     capacity_posts_per_week: int, specials: list[str], runway: RunwayMap,
     atoms_by_trip: dict[UUID, list[AtomRecord]],
+    excludes: Optional[set[UUID]] = None,
 ) -> QuarterPlan:
-    """Pure computation — no DB, no LLM, 100% unit-testable."""
-    q_months = [(quarter - 1) * 3 + i for i in (1, 2, 3)]
+    """Pure computation — no DB, no LLM, 100% unit-testable.
 
-    ranked: list[tuple[float, Trip, bool]] = []
+    `excludes` (AA-323 Gap 1 — manual N5 override, decision #3): trip ids a
+    human has chosen to remove from consideration. Excluded trips are still
+    scored and returned in `trip_scores` (so the UI can show them as an
+    unchecked candidate a reviewer could re-add), but never enter `ranked`
+    for selection — same effect as if capacity were computed without them.
+    Does NOT change the scoring weights themselves, only which trips are
+    eligible to be chosen."""
+    q_months = [(quarter - 1) * 3 + i for i in (1, 2, 3)]
+    excludes = excludes or set()
+
+    scored: list[tuple[float, Trip, bool, float, float, float, bool]] = []
     for t in trips:
         if t.lifecycle_stage == "retired":
             continue
@@ -127,29 +152,46 @@ def compute_quarter_plan(
         dist = sum({"HIGH": 1.0, "MED": 0.5, "LOW": 0.1}[a.distinctiveness] for a in atoms) / (len(atoms) or 1)
         forced = any(_fuzzy_match(s, t.name, t.destination) for s in specials)
         score = runway_fit * 0.4 + richness * 0.3 + dist * 0.3 + (1.0 if forced else 0.0)
-        ranked.append((score, t, forced))
-    ranked.sort(key=lambda x: -x[0])
+        is_excluded = t.id in excludes
+        scored.append((score, t, forced, runway_fit, richness, dist, is_excluded))
 
-    max_trips = max(2, min(len(ranked), capacity_posts_per_week + 1))
-    chosen = ranked[:max_trips]
+    eligible = [x for x in scored if not x[6]]
+    eligible.sort(key=lambda x: -x[0])
+
+    max_trips = max(2, min(len(eligible), capacity_posts_per_week + 1))
+    chosen = eligible[:max_trips]
+    chosen_ids = {t.id for _, t, _, _, _, _, _ in chosen}
     capacity_note = None
-    if len(ranked) > max_trips:
+    if len(eligible) > max_trips:
         capacity_note = (
-            f"{len(ranked)} eligible trips at {capacity_posts_per_week} posts/wk — "
+            f"{len(eligible)} eligible trips at {capacity_posts_per_week} posts/wk — "
             f"focusing on {max_trips} trips (applied).")
+
+    trip_scores = [
+        TripScore(
+            trip_id=t.id, name=t.name, destination=t.destination,
+            score=round(score, 3), runway_fit=round(runway_fit, 3),
+            richness=round(richness, 3), distinctiveness_score=round(dist, 3),
+            forced=forced, selected=(t.id in chosen_ids and not is_excluded),
+            reason=_score_reason(runway_fit, richness, dist, forced),
+        )
+        for score, t, forced, runway_fit, richness, dist, is_excluded in
+        sorted(scored, key=lambda x: -x[0])
+    ]
 
     plan = QuarterPlan(
         tenant_id=tenant_id, year=year, quarter=quarter,
-        trip_ids=[t.id for _, t, _ in chosen],
-        forced_specials=[t.id for _, t, forced in chosen if forced],
+        trip_ids=[t.id for _, t, _, _, _, _, _ in chosen],
+        forced_specials=[t.id for _, t, forced, _, _, _, _ in chosen if forced],
         capacity_note=capacity_note,
         trips_hash=compute_trips_hash(trips),
+        trip_scores=trip_scores,
     )
 
-    total_score = sum(s for s, _, _ in chosen) or 1
+    total_score = sum(s for s, _, _, _, _, _, _ in chosen) or 1
     raw_shares: dict[str, float] = {}
     dest_atom_counts: dict[str, int] = {}
-    for s, t, _ in chosen:
+    for s, t, _, _, _, _, _ in chosen:
         dest = t.destination or t.name
         raw_shares[dest] = raw_shares.get(dest, 0.0) + s / total_score
         dest_atom_counts[dest] = dest_atom_counts.get(dest, 0) + len(atoms_by_trip.get(t.id, []))
@@ -158,7 +200,7 @@ def compute_quarter_plan(
     plan.destination_shares = {k: round(v, 2) for k, v in capped_shares.items()}
     plan.thin_trip_notes = thin_notes
 
-    for _, t, _ in chosen[:3]:
+    for _, t, _, _, _, _, _ in chosen[:3]:
         highs = [a for a in atoms_by_trip.get(t.id, []) if a.distinctiveness == "HIGH" and not a.usage_log]
         if len(highs) >= 2:
             plan.big_rocks.append(BigRock(
@@ -213,16 +255,19 @@ async def fetch_atoms_by_trip(tenant_id: UUID, pool) -> dict[UUID, list[AtomReco
 async def plan_quarter(
     tenant_id: UUID, year: int, quarter: int, markets: list[str],
     capacity_posts_per_week: int, specials: list[str], runway: RunwayMap, pool,
+    excludes: Optional[set[UUID]] = None,
 ) -> QuarterPlan:
     """Async DB-wiring wrapper. `markets`/`capacity_posts_per_week`/`specials`
-    are caller-supplied — no tenant campaign-config table exists in this
-    schema yet (same gap noted in runway.py's runway_map())."""
+    are caller-supplied — tenant-config table for markets/channels added
+    AA-323 (see services/acp_planning/tenant_config.py); capacity still lives
+    on shared.tenants.posts_per_week (AA-384). `excludes` — AA-323 Gap 1,
+    manual N5 removal, see compute_quarter_plan()."""
     from .runway import fetch_trips
     trips = await fetch_trips(tenant_id, pool)
     atoms_by_trip = await fetch_atoms_by_trip(tenant_id, pool)
     return compute_quarter_plan(
         tenant_id, year, quarter, trips, markets, capacity_posts_per_week,
-        specials, runway, atoms_by_trip,
+        specials, runway, atoms_by_trip, excludes,
     )
 
 

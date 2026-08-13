@@ -38,9 +38,10 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from api.routers.admin import verify_admin_secret
-from services.acp_planning.allocator import allocate_month
-from services.acp_planning.quarter import approve_quarter_plan, plan_quarter
+from services.acp_planning.allocator import allocate_month, allocate_month_from_db
+from services.acp_planning.quarter import approve_quarter_plan, fetch_approved_quarter_plan, plan_quarter
 from services.acp_planning.runway import runway_map
+from services.acp_planning.tenant_config import fetch_tenant_planning_config
 from services.acp_shared.atom_constants import THIN_TRIP_ATOM_MIN
 
 router = APIRouter(prefix="/admin", tags=["admin-atoms"])
@@ -108,6 +109,7 @@ async def list_atoms(
     request: Request,
     tour_id: Optional[str] = Query(None),
     tour_ids: Optional[str] = Query(None),
+    atom_ids: Optional[str] = Query(None),
     distinctiveness: Optional[str] = Query(None, pattern="^(HIGH|MED|LOW)$"),
     unreviewed_only: bool = Query(False),
     thin_only: bool = Query(False),
@@ -153,6 +155,13 @@ async def list_atoms(
             _add("ta.tour_id = ANY(${n}::uuid[])", id_list)
     elif tour_id:
         _add("ta.tour_id = ${n}::uuid", tour_id)
+    # AA-323 Gap 4 — Preview's slot cards link an atom_id list straight to this
+    # endpoint for a detail panel, rather than adding a separate single-purpose
+    # route. Independent of tour_id/tour_ids so it can be combined or used alone.
+    if atom_ids:
+        atom_id_list = [a.strip() for a in atom_ids.split(",") if a.strip()]
+        if atom_id_list:
+            _add("ta.atom_id = ANY(${n})", atom_id_list)
     if distinctiveness:
         _add("ta.distinctiveness = ${n}", distinctiveness)
     if not include_deleted:
@@ -383,13 +392,19 @@ async def preview_slotgrid(
     SlotGrid — the first screen in the whole ACP v2 build (N0-N6) that
     shows anything visually, rather than test code + direct DB queries.
 
-    markets=["US"], channels=["blog"], capacity_posts_per_week=4 are
-    hardcoded demo defaults, NOT read from any tenant-config table — none
-    exists yet (flagged as a real gap in AA-301's own implementation notes,
-    same gap resurfacing here, not silently invented further). Quarter plan
-    is auto-approved as "admin-preview-demo" purely for this read-only demo
-    endpoint — Gate B (no auto-approval) still holds for the real N5/N6
-    production path; nothing here writes to the DB."""
+    markets/channels come from acp_shared.tenant_config (AA-323 Gap 3,
+    migration 101, defaults to ["US"]/["blog"] if unset); capacity comes from
+    shared.tenants.posts_per_week (AA-384) — no more hardcoded constants.
+
+    AA-323 Gap 1: checks for a real Gate-B-approved quarter_plan_version
+    first (fetch_approved_quarter_plan) and reads N6 through
+    allocate_month_from_db() when one exists. Only falls back to the
+    in-memory "admin-preview-demo" auto-approve + allocate_month() path when
+    no approved plan exists yet for this tenant/year/quarter — this is what
+    makes the full create -> Gate B approve -> N6-reads-the-real-version
+    chain observable from this screen without a separate production
+    endpoint. Either way nothing here writes a NEW row — the demo path never
+    persisted (unchanged from AA-300); the real path only ever reads."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
 
@@ -400,27 +415,45 @@ async def preview_slotgrid(
 
     today = date.today()
     quarter = (today.month - 1) // 3 + 1
-    markets = ["US"]
-    channels = ["blog"]
-    capacity_posts_per_week = 4
+    config = await fetch_tenant_planning_config(tenant_uuid, pool)
+    markets = config.markets
+    channels = config.channels
+    capacity_posts_per_week = config.capacity_posts_per_week
 
     runway = await runway_map(tenant_uuid, today.year, markets, pool)
-    quarter_plan = await plan_quarter(
-        tenant_uuid, today.year, quarter, markets, capacity_posts_per_week, [], runway, pool,
-    )
-    approve_quarter_plan(quarter_plan, approved_by="admin-preview-demo")
-    grid = await allocate_month(
-        tenant_uuid, today.year, today.month, channels, capacity_posts_per_week,
-        quarter_plan, runway, markets[0], pool,
-    )
+
+    quarter_plan = await fetch_approved_quarter_plan(tenant_uuid, today.year, quarter, pool)
+    demo_mode = quarter_plan is None
+    if demo_mode:
+        quarter_plan = await plan_quarter(
+            tenant_uuid, today.year, quarter, markets, capacity_posts_per_week, [], runway, pool,
+        )
+        approve_quarter_plan(quarter_plan, approved_by="admin-preview-demo")
+        grid = await allocate_month(
+            tenant_uuid, today.year, today.month, channels, capacity_posts_per_week,
+            quarter_plan, runway, markets[0], pool,
+        )
+    else:
+        grid = await allocate_month_from_db(
+            tenant_uuid, today.year, today.month, channels, capacity_posts_per_week,
+            runway, markets[0], pool,
+        )
 
     return {
         "runway_cell_count": len(runway.cells),
+        "runway_cells": [c.model_dump(mode="json") for c in runway.cells],
         "quarter_plan": quarter_plan.model_dump(mode="json"),
         "slot_grid": grid.model_dump(mode="json"),
         "demo_params": {
             "markets": markets, "channels": channels,
             "capacity_posts_per_week": capacity_posts_per_week,
-            "note": "hardcoded demo defaults — no tenant-config table exists yet (AA-301 gap)",
+            "demo_mode": demo_mode,
+            "note": (
+                "No Gate B-approved quarter plan exists yet for this tenant/quarter — showing an "
+                "unpersisted preview auto-approved in-memory as \"admin-preview-demo\". Create and "
+                "approve a real plan via Quarter Plan Approval to replace this."
+                if demo_mode else
+                "Reading a real Gate B-approved quarter plan (not a preview)."
+            ),
         },
     }

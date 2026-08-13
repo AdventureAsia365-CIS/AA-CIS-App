@@ -707,6 +707,129 @@ function MirrorTabContent({ tenantId }: { tenantId: string }) {
   );
 }
 
+// ─── Planning tab (AA-323 Gap 3: N4-N6 markets/channels/capacity) ─────────────
+
+interface TenantPlanningConfig {
+  markets: string[];
+  channels: string[];
+  posts_per_week: number;
+}
+
+const ALL_CHANNELS = ["blog", "facebook", "tiktok", "email"];
+
+function PlanningTabContent({ tenantId }: { tenantId: string }) {
+  const [config, setConfig] = useState<TenantPlanningConfig | null>(null);
+  const [marketsInput, setMarketsInput] = useState("");
+  const [channels, setChannels] = useState<string[]>([]);
+  const [postsPerWeek, setPostsPerWeek] = useState("1");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState("");
+
+  const load = useCallback(() => {
+    setLoading(true); setError("");
+    fetch(`/api/admin/tenants/${tenantId}/config`)
+      .then(r => (r.ok ? r.json() : Promise.reject()))
+      .then((d: TenantPlanningConfig) => {
+        setConfig(d);
+        setMarketsInput(d.markets.join(", "));
+        setChannels(d.channels);
+        setPostsPerWeek(String(d.posts_per_week));
+      })
+      .catch(() => setError("Failed to load planning config"))
+      .finally(() => setLoading(false));
+  }, [tenantId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  function toggleChannel(ch: string) {
+    setChannels(cs => (cs.includes(ch) ? cs.filter(c => c !== ch) : [...cs, ch]));
+  }
+
+  async function save() {
+    const markets = marketsInput.split(",").map(m => m.trim().toUpperCase()).filter(Boolean);
+    const ppw = Number(postsPerWeek);
+    if (markets.length === 0) { setError("At least one market is required"); return; }
+    if (channels.length === 0) { setError("At least one channel is required"); return; }
+    if (!Number.isInteger(ppw) || ppw < 1 || ppw > 14) {
+      setError("Posts/week must be an integer from 1 to 14"); return;
+    }
+    setSaving(true); setError(""); setSaved(false);
+    try {
+      const res = await fetch(`/api/admin/tenants/${tenantId}/config`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ markets, channels, posts_per_week: ppw }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.detail ?? "Failed to save planning config"); return; }
+      setConfig(data);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch { setError("Connection error"); } finally { setSaving(false); }
+  }
+
+  if (loading) return <div style={{ padding: "12px 0", fontSize: 12, color: A.muted }}>Loading…</div>;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 460 }}>
+      <p style={{ fontSize: 11.5, color: A.muted2, margin: 0 }}>
+        Markets/channels/capacity used by N4 (Runway Map), N5 (Quarter Plan), and N6 (Slot
+        Allocator) for this tenant. Applies the next time a quarter plan is previewed or created.
+      </p>
+      <div>
+        <label style={{ fontSize: 11, fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.1em", display: "block", marginBottom: 6 }}>
+          Markets (comma-separated)
+        </label>
+        <input value={marketsInput} onChange={e => setMarketsInput(e.target.value)} placeholder="US, UK"
+          style={{ width: "100%", padding: "9px 12px", background: "#fff", border: `1px solid ${A.line}`, borderRadius: 8, color: A.body, fontSize: 13, outline: "none", boxSizing: "border-box", fontFamily: sans }} />
+      </div>
+      <div>
+        <label style={{ fontSize: 11, fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.1em", display: "block", marginBottom: 8 }}>
+          Channels
+        </label>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {ALL_CHANNELS.map(ch => (
+            <button key={ch} onClick={() => toggleChannel(ch)} style={{
+              padding: "7px 12px", borderRadius: 8, cursor: "pointer", fontFamily: sans,
+              border: `1px solid ${channels.includes(ch) ? A.red : A.line}`,
+              background: channels.includes(ch) ? A.redTint : "#fff",
+              color: channels.includes(ch) ? A.red : A.muted,
+              fontSize: 12.5, fontWeight: channels.includes(ch) ? 700 : 400,
+            }}>{ch}</button>
+          ))}
+        </div>
+      </div>
+      <div>
+        <label style={{ fontSize: 11, fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.1em", display: "block", marginBottom: 6 }}>
+          Posts/week (capacity)
+        </label>
+        <input type="number" min={1} max={14} value={postsPerWeek} onChange={e => setPostsPerWeek(e.target.value)}
+          style={{ width: 100, padding: "9px 12px", background: "#fff", border: `1px solid ${A.line}`, borderRadius: 8, color: A.body, fontSize: 13, outline: "none", fontFamily: sans }} />
+        <p style={{ fontSize: 11, color: A.muted2, margin: "6px 0 0" }}>
+          Same value shown on the Mirror tab — editing it here updates shared.tenants.posts_per_week.
+        </p>
+      </div>
+      {error && (
+        <div style={{ padding: "9px 12px", background: A.redSoft, border: `1px solid ${A.redBorder}`, borderRadius: 8, fontSize: 12, color: A.red }}>
+          {error}
+        </div>
+      )}
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <Btn variant="primary" size="sm" disabled={saving} onClick={save}>
+          {saving ? <><Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} /> Saving…</> : "Save"}
+        </Btn>
+        {saved && <span style={{ fontSize: 12, color: "#22C55E", display: "flex", alignItems: "center", gap: 4 }}><CheckCircle2 size={13} /> Saved</span>}
+        {config && !saved && (
+          <span style={{ fontSize: 11, color: A.muted2 }}>
+            Current: {config.markets.join(",")} / {config.channels.join(",")} / {config.posts_per_week}/wk
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function BrandTabContent({ rules }: { rules: TenantDetails["brand_rules"] }) {
   if (!rules.system_prompt && !rules.style_guide && rules.forbidden_words.length === 0) {
     return <div style={{ padding: "20px 0", textAlign: "center", fontSize: 12, color: A.muted }}>No brand rules configured</div>;
@@ -778,7 +901,7 @@ function ActivityTabContent({ items }: { items: RewriteActivityItem[] }) {
 
 // ─── Tenant Detail Panel ──────────────────────────────────────────────────────
 
-type DTab = "onboarding" | "tours" | "pipeline" | "activity" | "mirror" | "api" | "brand";
+type DTab = "onboarding" | "tours" | "pipeline" | "activity" | "mirror" | "planning" | "api" | "brand";
 
 function TenantDetail({ tenantId, planTier, isActive, onGateAApproved }: {
   tenantId: string; planTier: string; isActive: boolean; onGateAApproved: () => void;
@@ -826,6 +949,7 @@ function TenantDetail({ tenantId, planTier, isActive, onGateAApproved }: {
       : [{ key: "activity" as DTab, label: `Activity (${activity.length})` }]
     ),
     { key: "mirror", label: "Mirror" },
+    { key: "planning", label: "Planning" },
     { key: "api",   label: "API Usage" },
     { key: "brand", label: "Brand" },
   ];
@@ -862,6 +986,7 @@ function TenantDetail({ tenantId, planTier, isActive, onGateAApproved }: {
       {tab === "pipeline" && <PipelineTabContent runs={data.pipeline_runs}    pipelineNote={data.summary.pipeline_note} />}
       {tab === "activity" && <ActivityTabContent items={activity} />}
       {tab === "mirror"   && <MirrorTabContent   tenantId={tenantId} />}
+      {tab === "planning" && <PlanningTabContent tenantId={tenantId} />}
       {tab === "api"      && <ApiTabContent      usage={data.api_usage} />}
       {tab === "brand"    && <BrandTabContent    rules={data.brand_rules} />}
     </div>
