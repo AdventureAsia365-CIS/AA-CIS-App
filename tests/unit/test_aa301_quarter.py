@@ -15,7 +15,7 @@ from services.acp_planning.constants import THIN_TRIP_MAX_SHARE
 from services.acp_planning.models import (AtomRecord, RunwayCell, RunwayMap, Trip,
                                           compute_trips_hash)
 from services.acp_planning.quarter import (_cap_thin_trip_shares, _fuzzy_match,
-                                           _parse_jsonb, _row_to_atom,
+                                           _parse_jsonb, _row_to_atom, _score_reason,
                                            approve_quarter_plan, compute_quarter_plan,
                                            fetch_atoms_by_trip)
 from services.acp_shared.atom_constants import THIN_TRIP_ATOM_MIN
@@ -145,6 +145,49 @@ class TestComputeQuarterPlan:
             TENANT, 2026, 1, [t], markets=["US"], capacity_posts_per_week=1,
             specials=[], runway=runway, atoms_by_trip={})
         assert plan.trips_hash == compute_trips_hash([t])
+
+
+class TestScoreReasonTieBreak:
+    """AA-323 round 6, Phần C — round 5's live audit found 562/763 real trips
+    (78% of the trips showing this label) mislabeled "High runway fit" while
+    their actual runway_fit was 0.0, because plain `max(dict, key=...)`
+    resolves a tie to whichever key is listed FIRST, not the one that's
+    actually largest. Locks in the fix: an honest label for the all-zero
+    case, "Balanced" for a genuine nonzero tie, and the correct single
+    dominant factor otherwise."""
+
+    def test_forced_short_circuits_before_any_contribution_check(self):
+        assert _score_reason(0.9, 0.9, 0.9, forced=True) == "Manually added"
+
+    def test_all_zero_no_longer_defaults_to_first_key(self):
+        """The exact real-world case round 5 found: runway_fit=richness=dist=0.0
+        (no BOFU/MOFU window yet, no curated atoms) must NOT read as
+        'High runway fit' — the literal opposite of what 0.0 means."""
+        reason = _score_reason(0.0, 0.0, 0.0, forced=False)
+        assert reason != "High runway fit (BOFU/MOFU window this quarter)"
+        assert reason == "No runway or atom signal yet this quarter"
+
+    def test_genuine_runway_fit_dominance_still_labeled_correctly(self):
+        # runway_fit*0.4=0.4, richness*0.3=0.15, dist*0.3=0.06 -> runway_fit wins
+        reason = _score_reason(1.0, 0.5, 0.2, forced=False)
+        assert reason == "High runway fit (BOFU/MOFU window this quarter)"
+
+    def test_genuine_richness_dominance_labeled_correctly(self):
+        # richness*0.3=0.3 beats runway_fit*0.4=0.08 and dist*0.3=0.03
+        reason = _score_reason(0.2, 1.0, 0.1, forced=False)
+        assert reason == "Rich atom pool"
+
+    def test_genuine_distinctiveness_dominance_labeled_correctly(self):
+        # dist*0.3=0.3 beats runway_fit*0.4=0.08 and richness*0.3=0.03
+        reason = _score_reason(0.2, 0.1, 1.0, forced=False)
+        assert reason == "High-distinctiveness atoms"
+
+    def test_nonzero_tie_reads_as_balanced_not_first_key(self):
+        # richness*0.3 == dist*0.3 == 0.3 (same multiplier applied to the same
+        # value 1.0, so this is an EXACT float tie, not just close) -> both
+        # beat runway_fit*0.4=0.0 -> a real tie between two nonzero factors.
+        reason = _score_reason(0.0, 1.0, 1.0, forced=False)
+        assert reason == "Balanced score (multiple factors tied)"
 
 
 class TestNoLlmCost:

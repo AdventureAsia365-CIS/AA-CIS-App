@@ -233,7 +233,17 @@ class TestNoLlmCost:
 
 class TestFetchTripsDbWrapper:
     @pytest.mark.asyncio
-    async def test_query_filters_by_tenant_id(self):
+    async def test_query_reads_full_catalog_no_tenant_filter(self):
+        """AA-323 round 6, Phần B (Nghiep decision, 2026-08-13, TEMP) —
+        fetch_trips() used to filter `WHERE tenant_id = $1`, which live-DB
+        evidence showed left EVERY non-aa_internal tenant with 0 eligible
+        trips on /admin/quarter-plan/create, even one with a real
+        Gate-A-approved N1 onboarding (tenant_atom_state was never what this
+        query read from). Every tenant now reads the same full platform
+        catalog until Marketplace/N1 licensing (D3/D4) is built — see
+        runway.py's fetch_trips() docstring/comment for the full reasoning.
+        `tenant_id` stays a required param (unused for filtering now) so the
+        call signature doesn't ripple through every caller."""
         conn = AsyncMock()
         conn.fetch.return_value = [{
             "id": uuid.uuid4(), "name": "DB Trip", "destination": "Testland",
@@ -250,6 +260,6 @@ class TestFetchTripsDbWrapper:
 
         assert len(trips) == 1
         assert trips[0].name == "DB Trip"
-        called_query, called_tenant = conn.fetch.call_args[0]
-        assert "WHERE tenant_id = $1" in called_query
-        assert called_tenant == TENANT
+        (called_query,) = conn.fetch.call_args[0]
+        assert "WHERE tenant_id" not in called_query
+        assert "FROM acp_contract.v_trip_registry" in called_query

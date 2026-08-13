@@ -189,7 +189,6 @@ _TRIP_ROW_QUERY = """
     SELECT id, name, destination, period, duration_raw, itinerary_source,
            lifecycle_stage, trip_url, url_alive
     FROM acp_contract.v_trip_registry
-    WHERE tenant_id = $1
 """
 
 
@@ -204,8 +203,25 @@ def _row_to_trip(row) -> Trip:
 
 
 async def fetch_trips(tenant_id: UUID, pool) -> list[Trip]:
+    # TEMP (2026-08-13, Nghiep decision, AA-323 round 6 Phần B): every tenant
+    # now reads the SAME full platform catalog (today == aa_internal's 763
+    # trips — v_trip_registry.tenant_id is backed by raw_tours.tenant_id,
+    # which is only ever aa_internal; no B2B ingestion pipeline writes
+    # raw_tours rows for any other tenant) instead of filtering
+    # `WHERE tenant_id = $1`. Live-DB finding this round: that filter meant
+    # EVERY non-aa_internal tenant saw 0 eligible trips on
+    # /admin/quarter-plan/create — including a tenant with a real,
+    # Gate-A-approved N1 onboarding (acp_shared.tenant_atom_state had 6 valid
+    # tour_ids for it), because tenant_atom_state was never what this query
+    # read from. Nghiep's explicit call: this is still the development
+    # stage — product/UX quality over licensing gates — so every tenant
+    # shares the full catalog until Marketplace/N1 licensing (D3/D4, PRD ACP
+    # v2) is actually built and wired into trip eligibility. REVISIT WHEN N1
+    # SHIPS — see AA-309. `tenant_id` stays a required param (used by
+    # compute_runway_map()'s RunwayMap.tenant_id and every other caller's
+    # signature) — only the WHERE clause is gone.
     async with pool.acquire() as conn:
-        rows = await conn.fetch(_TRIP_ROW_QUERY, tenant_id)
+        rows = await conn.fetch(_TRIP_ROW_QUERY)
     return [_row_to_trip(r) for r in rows]
 
 

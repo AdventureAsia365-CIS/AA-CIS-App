@@ -18,17 +18,36 @@ interface Notif {
   created_at: string;
 }
 
-const CONTENT_NAV = [
+// AA-323 round 6, Phần D — sidebar reorganized around the real ACP v2
+// (N0-N8) business flow instead of historical grouping. Recon confirmed the
+// sidebar actually spans THREE separate pipelines, not one:
+//   1. Real ACP v2 (N0-N8): Tenants(N1)/Marketplace(N1)/Atomize(N2)/
+//      Atom Curation(N2, + deep-links to N4-N6 preview)/Quarter Plan Gate B(N5).
+//   2. AA-internal's own content-authoring pipeline (Upload/S1 Rewrite/
+//      Review/Brand/Master Content) — a different, older system for AA's
+//      own tour copy, unrelated to the B2B tenant flow.
+//   3. ACP v1 (S2 Research/S3 Calendar/S4 Blog/S4 Social) — a separate,
+//      still-live legacy B2B pipeline (admin_acp_proxy.py) that predates
+//      the N0-N8 redesign. Previously labeled "ACP Pipeline", which shared
+//      the "ACP" name with the real ACP v2 items sitting right above it —
+//      a mislabeling risk already flagged in a prior STEP 0 audit
+//      (2026-08-09). Routes/items/roles are UNCHANGED below — this only
+//      reorders and relabels groups so the real N0-N8 flow reads first and
+//      the other two pipelines are unambiguously named as what they are.
+const ATOMS_NAV = [
+  { href: "/admin/atomize",  icon: <Boxes size={15} />,    label: "Atomize (N2)" },
+  { href: "/admin/curation", icon: <Sparkles size={15} />, label: "Atom Curation" },
+];
+
+const CONTENT_AUTHORING_NAV = [
   { href: "/admin/upload",         icon: <Upload size={15} />,        label: "Upload (S0)" },
   { href: "/admin/s1-rewrite",      icon: <Wand2 size={15} />,         label: "S1 Rewrite" },
   { href: "/admin/review",         icon: <ClipboardList size={15} />, label: "Review Queue" },
   { href: "/admin/brand",          icon: <Palette size={15} />,       label: "Brand Identity" },
   { href: "/admin/master-content", icon: <Library size={15} />,       label: "Master Content" },
-  { href: "/admin/atomize",        icon: <Boxes size={15} />,         label: "Atomize (N2)" },
-  { href: "/admin/curation",       icon: <Sparkles size={15} />,      label: "Atom Curation" },
 ];
 
-const PIPELINE_NAV = [
+const ACP_V1_NAV = [
   { href: "/admin/pipeline/s2",       icon: <Search size={15} />,       label: "S2 Research" },
   { href: "/admin/pipeline/s3",       icon: <CalendarDays size={15} />, label: "S3 Calendar" },
   { href: "/admin/pipeline/s4-blog",  icon: <FileText size={15} />,     label: "S4 Blog" },
@@ -178,11 +197,17 @@ export default function AdminSidebar() {
         )}
       </div>
 
-      {/* Nav */}
+      {/* Nav — AA-323 round 6, Phần D: real ACP v2 (N0-N8) flow first (N1
+          setup/approval, admin-only, then N2 atoms, all roles), then the
+          two OTHER pipelines clearly labeled as separate, then Settings.
+          Every {isAdmin && ...} / unconditional-visibility boundary below
+          is byte-for-byte the same boundary as before this round — only
+          which group an item sits in, and each group's order/label,
+          changed. */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 24 }}>
-        {/* Admin-only section */}
+        {/* ACP v2 — N1 setup + N5 approval (admin-only, same as before) */}
         {isAdmin && (
-          <NavGroup label="Admin">
+          <NavGroup label="ACP v2 — Setup & Approval">
             <NavItem active={active("/admin/dashboard")} accent={A.red}
               icon={<LayoutDashboard size={15} />} label="Dashboard"
               onClick={() => router.push("/admin/dashboard")} />
@@ -201,22 +226,36 @@ export default function AdminSidebar() {
           </NavGroup>
         )}
 
-        {/* Content section — visible to all roles */}
-        <NavGroup label={isAdmin ? "Content Team" : "Tools"}>
+        {/* ACP v2 — N2 atoms (visible to all roles, same as before) */}
+        <NavGroup label="ACP v2 — Atoms">
           {!isAdmin && (
             <NavItem active={active("/admin/dashboard")} accent={A.gold}
               icon={<LayoutDashboard size={15} />} label="Dashboard"
               onClick={() => router.push("/admin/dashboard")} />
           )}
-          {CONTENT_NAV.map(n => (
+          {ATOMS_NAV.map(n => (
             <NavItem key={n.href} active={active(n.href)} accent={A.gold}
               icon={n.icon} label={n.label} onClick={() => router.push(n.href)} />
           ))}
         </NavGroup>
 
-        {/* ACP Pipeline stages */}
-        <NavGroup label="ACP Pipeline">
-          {PIPELINE_NAV.map(n => (
+        {/* AA-internal's own content-authoring pipeline — a different, older
+            system for AA's own tour copy, not part of the B2B ACP v2 flow.
+            Visible to all roles (same as before). */}
+        <NavGroup label="AA Internal Content">
+          {CONTENT_AUTHORING_NAV.map(n => (
+            <NavItem key={n.href} active={active(n.href)} accent={A.gold}
+              icon={n.icon} label={n.label} onClick={() => router.push(n.href)} />
+          ))}
+        </NavGroup>
+
+        {/* Legacy B2B pipeline (ACP v1) — predates the N0-N8 redesign, still
+            live with real traffic, kept as its own clearly-labeled group so
+            it's no longer confused with the real ACP v2 items above
+            (previously both shared the ambiguous "ACP" name). Visible to
+            all roles (same as before). */}
+        <NavGroup label="Legacy Pipeline (ACP v1)">
+          {ACP_V1_NAV.map(n => (
             <NavItem key={n.href} active={active(n.href)} accent={A.gold}
               icon={n.icon} label={n.label} onClick={() => router.push(n.href)} />
           ))}

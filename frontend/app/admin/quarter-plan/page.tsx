@@ -315,6 +315,7 @@ function HistoryPanel({ tenants, onSelect, setError }: {
   onSelect: (v: HistoryVersion, tenantId: string, tenantName: string, year: number, quarter: number) => void;
   setError: (msg: string) => void;
 }) {
+  const router = useRouter();
   const { year: defaultYear, quarter: defaultQuarter } = currentQuarter();
   const [tenantId, setTenantId] = useState("");
   const [year, setYear] = useState(defaultYear);
@@ -410,7 +411,19 @@ function HistoryPanel({ tenants, onSelect, setError }: {
                     <td style={TD}>{v.approved_at ? new Date(v.approved_at).toLocaleString() : "—"}</td>
                     <td style={TD}>{new Date(v.created_at).toLocaleString()}</td>
                     <td style={{ ...TD, textAlign: "right" }}>
-                      <Btn size="sm" onClick={() => onSelect(v, tenantId, tenantName, year, quarter)}>View</Btn>
+                      <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                        <Btn size="sm" onClick={() => onSelect(v, tenantId, tenantName, year, quarter)}>View</Btn>
+                        {/* AA-323 round 6, Phần A — only approved versions can feed N6 (Gate B),
+                            so only approved rows get a Slot Grid Preview link. */}
+                        {v.approval_status === "approved" && (
+                          <Btn
+                            size="sm" variant="secondary"
+                            onClick={() => router.push(`/admin/curation/preview?version_id=${v.version_id}`)}
+                          >
+                            <ExternalLink size={12} /> Slot Grid Preview
+                          </Btn>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );
@@ -454,9 +467,15 @@ function DetailView({ selected, detail, loading, approving, onApprove, router }:
               Approved by {detail.approved_by} at {detail.approved_at ? new Date(detail.approved_at).toLocaleString() : "—"}
             </div>
             {/* AA-323 round 4 — Việc 3: the Approved screen had no path onward to N6's
-                Preview; a human had to already know the URL. */}
+                Preview; a human had to already know the URL.
+                AA-323 round 6, Phần A — now passes this exact version_id, so opening
+                this from an old History row previews THAT version, not always
+                whatever happens to be current (preview-slotgrid now supports both). */}
             <div style={{ marginTop: 10, display: "flex", justifyContent: "flex-end" }}>
-              <Btn size="sm" variant="primary" onClick={() => router.push("/admin/curation/preview")}>
+              <Btn
+                size="sm" variant="primary"
+                onClick={() => router.push(`/admin/curation/preview?version_id=${selected.version_id}`)}
+              >
                 <ExternalLink size={12} /> View in Slot Grid Preview
               </Btn>
             </div>

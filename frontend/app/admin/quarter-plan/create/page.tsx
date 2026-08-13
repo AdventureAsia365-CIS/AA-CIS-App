@@ -17,7 +17,10 @@ import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { ListChecks, ChevronLeft, Loader2, CheckCircle2, Info } from "lucide-react";
 import AdminSidebar from "../../_components/AdminSidebar";
-import { A, serif, sans, mono, Card, SLabel, Btn, Badge, LoadingScreen } from "../../_components/adminUi";
+import { A, serif, sans, mono, Card, SLabel, Btn, Badge, LoadingScreen, TH, TD } from "../../_components/adminUi";
+import { Pagination } from "../../_components/Pagination";
+
+const TRIPS_PAGE_SIZE = 50; // AA-300's established "50 per screen" convention
 
 interface Tenant {
   tenant_id: string;
@@ -68,6 +71,12 @@ export default function CreateQuarterPlanPage() {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
   const [added, setAdded] = useState<Set<string>>(new Set());
+  // AA-323 round 6, Phần C — 763 trips for aa_internal was one flat scrolling
+  // list before this round; paginate instead. Reset to page 1 on every fresh
+  // preview response, since toggling a checkbox re-sorts the list server-side
+  // (a newly-forced trip's score jumps, so "page 3" can otherwise silently
+  // start showing different trips after a re-preview).
+  const [page, setPage] = useState(1);
 
   const [creating, setCreating] = useState(false);
   const [createdVersionId, setCreatedVersionId] = useState<string | null>(null);
@@ -111,6 +120,7 @@ export default function CreateQuarterPlanPage() {
           throw new Error(e.detail || "Failed to preview quarter plan");
         }
         setPlan((await res.json()).plan);
+        setPage(1);
       } catch (e) {
         setError(e instanceof Error ? e.message : "Failed to preview quarter plan");
       } finally {
@@ -272,25 +282,65 @@ export default function CreateQuarterPlanPage() {
                   No eligible trips found for this tenant.
                 </div>
               ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                  {plan.trip_scores.map(t => (
-                    <label key={t.trip_id} style={{
-                      display: "flex", alignItems: "center", gap: 10, padding: "8px 6px",
-                      borderRadius: 6, cursor: "pointer",
-                      background: t.selected ? A.redTint : "transparent",
-                    }}>
-                      <input type="checkbox" checked={t.selected} onChange={() => toggleTrip(t)}
-                        style={{ flexShrink: 0, cursor: "pointer" }} />
-                      <span style={{ fontSize: 13, fontWeight: 600, color: A.ink, minWidth: 180 }}>{t.name}</span>
-                      <span style={{ fontSize: 12, color: A.muted2, minWidth: 100 }}>{t.destination ?? "—"}</span>
-                      <span style={{ fontSize: 11, fontFamily: mono, color: A.muted2, minWidth: 48 }}>
-                        {t.score.toFixed(2)}
-                      </span>
-                      <span style={{ fontSize: 12, color: A.muted, flex: 1 }}>{t.reason}</span>
-                      {t.forced && <Badge color="amber">forced</Badge>}
-                    </label>
-                  ))}
-                </div>
+                <>
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                      <thead>
+                        <tr>
+                          <th style={{ ...TH, width: 32 }}></th>
+                          <th style={TH}>Trip</th>
+                          <th style={TH}>Destination</th>
+                          <th style={TH}>Status</th>
+                          <th style={TH} title="Composite: runway fit (40%) + atom richness (30%) + distinctiveness (30%), plus a +1.0 bonus if manually added">
+                            Score
+                          </th>
+                          <th style={TH}>Why</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {plan.trip_scores
+                          .slice((page - 1) * TRIPS_PAGE_SIZE, page * TRIPS_PAGE_SIZE)
+                          .map(t => (
+                            <tr
+                              key={t.trip_id}
+                              onClick={() => toggleTrip(t)}
+                              style={{ cursor: "pointer", background: t.selected ? A.redTint : "transparent" }}
+                            >
+                              <td style={TD}>
+                                <input type="checkbox" checked={t.selected} onChange={() => toggleTrip(t)}
+                                  onClick={e => e.stopPropagation()}
+                                  style={{ cursor: "pointer" }} />
+                              </td>
+                              <td style={{ ...TD, fontWeight: 600, color: A.ink }}>{t.name}</td>
+                              <td style={{ ...TD, color: A.muted2 }}>{t.destination ?? "—"}</td>
+                              <td style={TD}>
+                                {/* AA-323 round 6, Phần C — one indicator, not two: the old UI showed
+                                    both a "FORCED" badge AND a "Manually added" reason text for the
+                                    exact same boolean. This Status column replaces both. */}
+                                {t.forced ? (
+                                  <Badge color="amber">Manually added</Badge>
+                                ) : t.selected ? (
+                                  <Badge color="green">Auto-selected</Badge>
+                                ) : (
+                                  <span style={{ fontSize: 11, color: A.muted2 }}>Not selected</span>
+                                )}
+                              </td>
+                              <td style={{ ...TD, fontFamily: mono, color: A.muted2 }}>{t.score.toFixed(2)}</td>
+                              <td style={{ ...TD, color: A.muted, fontSize: 12 }}>
+                                {t.forced ? "—" : t.reason}
+                              </td>
+                            </tr>
+                          ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div style={{ marginTop: 14, display: "flex", justifyContent: "flex-end" }}>
+                    <Pagination
+                      page={page} total={plan.trip_scores.length} pageSize={TRIPS_PAGE_SIZE}
+                      onPage={setPage}
+                    />
+                  </div>
+                </>
               )}
             </Card>
 

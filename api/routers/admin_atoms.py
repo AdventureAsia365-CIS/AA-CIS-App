@@ -21,6 +21,10 @@ PATCH /admin/atoms/{atom_id}          — star / soft-delete / light text edit
 GET   /admin/atoms/preview-slotgrid   — runway_map -> plan_quarter ->
                                          approve_quarter_plan -> allocate_month
                                          for one tenant, returns the SlotGrid
+                                         (optional ?version_id= reads one
+                                         specific approved historical version
+                                         instead of the current one, AA-323
+                                         round 6 Phần A)
 
 Route order note: /atoms/bulk and /atoms/summary/preview-slotgrid are
 registered BEFORE /atoms/{atom_id} — this repo's own CRITICAL rule
@@ -40,7 +44,8 @@ from pydantic import BaseModel
 from api.routers.admin import verify_admin_secret
 from services.acp_planning.allocator import allocate_month, allocate_month_from_db
 from services.acp_planning.quarter import (
-    approve_quarter_plan, fetch_approved_quarter_plan, fetch_current_version_no, plan_quarter,
+    approve_quarter_plan, fetch_approved_quarter_plan, fetch_current_version_no,
+    fetch_quarter_plan_version, plan_quarter,
 )
 from services.acp_planning.runway import runway_map
 from services.acp_planning.tenant_config import fetch_tenant_planning_config
@@ -387,6 +392,7 @@ async def patch_atom(
 async def preview_slotgrid(
     request: Request,
     tenant_id: str = Query(str(_AA_INTERNAL_TENANT_ID)),
+    version_id: Optional[str] = Query(None),
     x_admin_secret: str = Header(None),
 ):
     """Runs the real N4/N5/N6 chain (services/acp_planning/) against the
@@ -406,43 +412,97 @@ async def preview_slotgrid(
     makes the full create -> Gate B approve -> N6-reads-the-real-version
     chain observable from this screen without a separate production
     endpoint. Either way nothing here writes a NEW row — the demo path never
-    persisted (unchanged from AA-300); the real path only ever reads."""
+    persisted (unchanged from AA-300); the real path only ever reads.
+
+    AA-323 round 6, Phần A: optional `version_id` reads one SPECIFIC
+    historical version (from the History tab's new "View in Slot Grid
+    Preview" link) instead of always the tenant/quarter's current approved
+    version. version_id alone determines tenant/year/quarter (via
+    fetch_quarter_plan_version) — the `tenant_id` query param is ignored
+    when version_id is given. Only an approved version may be previewed
+    (Gate B: N6 must never read an un-approved plan, historical or not) —
+    a pending/rejected version_id 400s with a clear reason rather than
+    silently allocating from it. The month used is the target quarter's
+    first month, since a past quarter has no "current month" of its own."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
 
-    try:
-        tenant_uuid = UUID(tenant_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid tenant_id: {tenant_id!r}")
+    version_row = None
+    if version_id:
+        try:
+            version_uuid = UUID(version_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid version_id: {version_id!r}")
+        version_row = await fetch_quarter_plan_version(version_uuid, pool)
+        if version_row is None:
+            raise HTTPException(status_code=404, detail=f"Quarter plan version {version_id} not found")
+        if version_row["approval_status"] != "approved":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Version v{version_row['version_no']} is '{version_row['approval_status']}', not "
+                    "approved — Gate B requires approval before a slot grid can be computed for it."
+                ),
+            )
+        tenant_uuid = version_row["tenant_id"]
+        year = version_row["year"]
+        quarter = version_row["quarter"]
+        month = (quarter - 1) * 3 + 1
+    else:
+        try:
+            tenant_uuid = UUID(tenant_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid tenant_id: {tenant_id!r}")
+        today = date.today()
+        year = today.year
+        quarter = (today.month - 1) // 3 + 1
+        month = today.month
 
-    today = date.today()
-    quarter = (today.month - 1) // 3 + 1
     config = await fetch_tenant_planning_config(tenant_uuid, pool)
     markets = config.markets
     channels = config.channels
     capacity_posts_per_week = config.capacity_posts_per_week
 
-    runway = await runway_map(tenant_uuid, today.year, markets, pool)
+    runway = await runway_map(tenant_uuid, year, markets, pool)
 
-    quarter_plan = await fetch_approved_quarter_plan(tenant_uuid, today.year, quarter, pool)
-    demo_mode = quarter_plan is None
-    version_no = None
-    if demo_mode:
-        quarter_plan = await plan_quarter(
-            tenant_uuid, today.year, quarter, markets, capacity_posts_per_week, [], runway, pool,
-        )
-        approve_quarter_plan(quarter_plan, approved_by="admin-preview-demo")
+    if version_row is not None:
+        quarter_plan = version_row["plan"]
+        demo_mode = False
+        version_no = version_row["version_no"]
         grid = await allocate_month(
-            tenant_uuid, today.year, today.month, channels, capacity_posts_per_week,
+            tenant_uuid, year, month, channels, capacity_posts_per_week,
             quarter_plan, runway, markets[0], pool,
         )
-    else:
-        # AA-323 round 5 — Việc 2: which persisted version this screen is reading.
-        version_no = await fetch_current_version_no(tenant_uuid, today.year, quarter, pool)
-        grid = await allocate_month_from_db(
-            tenant_uuid, today.year, today.month, channels, capacity_posts_per_week,
-            runway, markets[0], pool,
+        note = (
+            f"Reading historical quarter plan version v{version_no} (Q{quarter} {year}) — "
+            "not necessarily the tenant's current live version."
         )
+    else:
+        quarter_plan = await fetch_approved_quarter_plan(tenant_uuid, year, quarter, pool)
+        demo_mode = quarter_plan is None
+        version_no = None
+        if demo_mode:
+            quarter_plan = await plan_quarter(
+                tenant_uuid, year, quarter, markets, capacity_posts_per_week, [], runway, pool,
+            )
+            approve_quarter_plan(quarter_plan, approved_by="admin-preview-demo")
+            grid = await allocate_month(
+                tenant_uuid, year, month, channels, capacity_posts_per_week,
+                quarter_plan, runway, markets[0], pool,
+            )
+            note = (
+                "No Gate B-approved quarter plan exists yet for this tenant/quarter — showing an "
+                "unpersisted preview auto-approved in-memory as \"admin-preview-demo\". Create and "
+                "approve a real plan via Quarter Plan Approval to replace this."
+            )
+        else:
+            # AA-323 round 5 — Việc 2: which persisted version this screen is reading.
+            version_no = await fetch_current_version_no(tenant_uuid, year, quarter, pool)
+            grid = await allocate_month_from_db(
+                tenant_uuid, year, month, channels, capacity_posts_per_week,
+                runway, markets[0], pool,
+            )
+            note = "Reading a real Gate B-approved quarter plan (not a preview)."
 
     return {
         "runway_cell_count": len(runway.cells),
@@ -454,12 +514,6 @@ async def preview_slotgrid(
             "markets": markets, "channels": channels,
             "capacity_posts_per_week": capacity_posts_per_week,
             "demo_mode": demo_mode,
-            "note": (
-                "No Gate B-approved quarter plan exists yet for this tenant/quarter — showing an "
-                "unpersisted preview auto-approved in-memory as \"admin-preview-demo\". Create and "
-                "approve a real plan via Quarter Plan Approval to replace this."
-                if demo_mode else
-                "Reading a real Gate B-approved quarter plan (not a preview)."
-            ),
+            "note": note,
         },
     }

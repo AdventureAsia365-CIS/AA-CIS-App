@@ -626,7 +626,9 @@ class TestPreviewSlotgrid:
         pool = _make_pool(AsyncMock())
         request = _make_request(pool)
         with pytest.raises(HTTPException) as exc:
-            await admin_atoms.preview_slotgrid(request, tenant_id="not-a-uuid", x_admin_secret=_TEST_SECRET)
+            await admin_atoms.preview_slotgrid(
+                request, tenant_id="not-a-uuid", version_id=None, x_admin_secret=_TEST_SECRET,
+            )
         assert exc.value.status_code == 400
 
     @pytest.mark.asyncio
@@ -637,7 +639,9 @@ class TestPreviewSlotgrid:
         pool = _make_pool(conn)
         request = _make_request(pool)
 
-        result = await admin_atoms.preview_slotgrid(request, tenant_id=TENANT, x_admin_secret=_TEST_SECRET)
+        result = await admin_atoms.preview_slotgrid(
+            request, tenant_id=TENANT, version_id=None, x_admin_secret=_TEST_SECRET,
+        )
 
         assert result["quarter_plan"]["approved"] is True
         assert result["quarter_plan"]["approved_by"] == "admin-preview-demo"
@@ -706,7 +710,9 @@ class TestPreviewSlotgrid:
         pool = _make_pool(conn)
         request = _make_request(pool)
 
-        result = await admin_atoms.preview_slotgrid(request, tenant_id=TENANT, x_admin_secret=_TEST_SECRET)
+        result = await admin_atoms.preview_slotgrid(
+            request, tenant_id=TENANT, version_id=None, x_admin_secret=_TEST_SECRET,
+        )
 
         all_atom_ids = {aid for slot in result["slot_grid"]["slots"] for aid in slot["atom_ids"]}
         assert "atom_deleted_must_not_appear" not in all_atom_ids
@@ -742,7 +748,9 @@ class TestPreviewSlotgrid:
         pool = _make_pool(conn)
         request = _make_request(pool)
 
-        result = await admin_atoms.preview_slotgrid(request, tenant_id=TENANT, x_admin_secret=_TEST_SECRET)
+        result = await admin_atoms.preview_slotgrid(
+            request, tenant_id=TENANT, version_id=None, x_admin_secret=_TEST_SECRET,
+        )
 
         evergreen_slots = [s for s in result["slot_grid"]["slots"] if s["kind"] == "evergreen"]
         assert evergreen_slots, "expected at least one evergreen slot"
@@ -759,7 +767,8 @@ class TestPreviewSlotgrid:
         pool = _make_pool(conn)
         request = _make_request(pool)
         result = await admin_atoms.preview_slotgrid(
-            request, tenant_id=str(admin_atoms._AA_INTERNAL_TENANT_ID), x_admin_secret=_TEST_SECRET,
+            request, tenant_id=str(admin_atoms._AA_INTERNAL_TENANT_ID), version_id=None,
+            x_admin_secret=_TEST_SECRET,
         )
         assert result["slot_grid"]["tenant_id"] == str(admin_atoms._AA_INTERNAL_TENANT_ID)
 
@@ -801,7 +810,9 @@ class TestPreviewSlotgrid:
         pool = _make_pool(conn)
         request = _make_request(pool)
 
-        result = await admin_atoms.preview_slotgrid(request, tenant_id=TENANT, x_admin_secret=_TEST_SECRET)
+        result = await admin_atoms.preview_slotgrid(
+            request, tenant_id=TENANT, version_id=None, x_admin_secret=_TEST_SECRET,
+        )
 
         assert result["demo_params"]["demo_mode"] is False
         assert result["quarter_plan"]["approved_by"] == "real-admin@example.com"
@@ -815,6 +826,115 @@ class TestPreviewSlotgrid:
         with pytest.raises(HTTPException) as exc:
             await admin_atoms.preview_slotgrid(request, tenant_id=TENANT, x_admin_secret="wrong")
         assert exc.value.status_code == 403
+
+    # ── AA-323 round 6, Phần A — version-scoped Preview (?version_id=) ─────
+
+    @pytest.mark.asyncio
+    async def test_invalid_version_id_400(self):
+        pool = _make_pool(AsyncMock())
+        request = _make_request(pool)
+        with pytest.raises(HTTPException) as exc:
+            await admin_atoms.preview_slotgrid(
+                request, tenant_id=TENANT, version_id="not-a-uuid", x_admin_secret=_TEST_SECRET,
+            )
+        assert exc.value.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_unknown_version_id_404(self):
+        conn = AsyncMock()
+        conn.fetchrow.return_value = None  # fetch_quarter_plan_version finds nothing
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+        with pytest.raises(HTTPException) as exc:
+            await admin_atoms.preview_slotgrid(
+                request, tenant_id=TENANT, version_id=str(uuid.uuid4()), x_admin_secret=_TEST_SECRET,
+            )
+        assert exc.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_pending_version_id_400_not_500(self):
+        """Gate B: N6 must never allocate from an un-approved plan — a pending/
+        rejected version_id must be a clear 400, not silently treated as
+        approved or a crash."""
+        pending_payload = json.dumps({
+            "tenant_id": TENANT, "year": 2026, "quarter": 3,
+            "trip_ids": [], "forced_specials": [], "big_rocks": [],
+            "destination_shares": {}, "thin_trip_notes": [], "capacity_note": None,
+            "trips_hash": None, "trip_scores": [], "approved": False, "approved_by": None,
+        })
+
+        def fetchrow_side_effect(query, *args):
+            if "qpv.version_id = $1" in query:
+                return {
+                    "tenant_id": TENANT, "year": 2026, "quarter": 3, "version_no": 2,
+                    "payload": pending_payload, "approval_status": "pending", "approved_by": None,
+                }
+            return None
+
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = fetchrow_side_effect
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+        with pytest.raises(HTTPException) as exc:
+            await admin_atoms.preview_slotgrid(
+                request, tenant_id=TENANT, version_id=str(uuid.uuid4()), x_admin_secret=_TEST_SECRET,
+            )
+        assert exc.value.status_code == 400
+        assert "v2" in exc.value.detail
+        assert "pending" in exc.value.detail
+
+    @pytest.mark.asyncio
+    async def test_approved_version_id_reads_that_specific_version(self):
+        """The version row's own tenant_id/year/quarter drive the computation
+        (not the tenant_id query param, not today's date) — proves this by
+        using a year/quarter that couldn't possibly be "today"."""
+        trip_id = uuid.uuid4()
+        historical_payload = json.dumps({
+            "tenant_id": TENANT, "year": 2024, "quarter": 1,
+            "trip_ids": [str(trip_id)], "forced_specials": [], "big_rocks": [],
+            "destination_shares": {}, "thin_trip_notes": [], "capacity_note": None,
+            "trips_hash": None, "trip_scores": [], "approved": False, "approved_by": None,
+        })
+
+        def fetchrow_side_effect(query, *args):
+            if "qpv.version_id = $1" in query:
+                # asyncpg returns tenant_id as a real UUID object (it's a uuid
+                # column) — QuarterPlan(**payload) pydantic-coerces the JSON
+                # payload's tenant_id string to UUID too, so this must match
+                # or compute_slot_grid()'s cross-tenant guard trips.
+                return {
+                    "tenant_id": uuid.UUID(TENANT), "year": 2024, "quarter": 1, "version_no": 3,
+                    "payload": historical_payload, "approval_status": "approved",
+                    "approved_by": "ms.thu",
+                }
+            if "posts_per_week" in query:
+                return {"posts_per_week": 4, "markets": None, "channels": None}
+            return None
+
+        def fetch_side_effect(query, *args):
+            if "v_trip_registry" in query:
+                return [self._trip_row(trip_id)]
+            if "tour_atoms" in query:
+                return [self._atom_db_row("atom_hist", trip_id)]
+            return []
+
+        conn = AsyncMock()
+        conn.fetch.side_effect = fetch_side_effect
+        conn.fetchrow.side_effect = fetchrow_side_effect
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await admin_atoms.preview_slotgrid(
+            request, tenant_id=TENANT, version_id=str(uuid.uuid4()), x_admin_secret=_TEST_SECRET,
+        )
+
+        assert result["demo_params"]["demo_mode"] is False
+        assert result["quarter_plan_version_no"] == 3
+        assert result["quarter_plan"]["year"] == 2024
+        assert result["quarter_plan"]["quarter"] == 1
+        assert result["slot_grid"]["year"] == 2024
+        assert result["slot_grid"]["month"] == 1  # first month of Q1, not "today"
+        conn.execute.assert_not_called()  # still read-only
 
 
 class TestNoV1AtomsRegression:
