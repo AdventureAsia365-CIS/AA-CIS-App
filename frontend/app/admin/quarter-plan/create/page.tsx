@@ -178,7 +178,7 @@ export default function CreateQuarterPlanPage() {
   return (
     <div style={{ display: "flex", minHeight: "100vh", background: A.bg }}>
       <AdminSidebar />
-      <main style={{ flex: 1, padding: "28px 32px", maxWidth: 900 }}>
+      <main style={{ flex: 1, padding: "28px 32px", paddingBottom: 0, maxWidth: 900 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 6 }}>
           <button onClick={() => router.push("/admin/quarter-plan")} style={{
             background: "none", border: "none", cursor: "pointer", color: A.muted,
@@ -307,7 +307,17 @@ export default function CreateQuarterPlanPage() {
                 </Btn>
               </Card>
             ) : (
-              <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              // Sticky action bar — a tenant with hundreds of eligible trips (e.g. aa_internal,
+              // 763) makes the checklist above scroll very long; without this the submit button
+              // was only reachable after scrolling past all of it. Sticks to the viewport bottom
+              // instead (main's own scroll container is the document, so `sticky` needs no manual
+              // left-offset math against the sidebar — unlike `fixed`, it inherits its horizontal
+              // position from normal flow).
+              <div style={{
+                position: "sticky", bottom: 0, background: A.bg,
+                borderTop: `1px solid ${A.line}`, padding: "14px 0",
+                display: "flex", justifyContent: "flex-end",
+              }}>
                 <Btn variant="primary" disabled={creating || previewLoading} onClick={createPlan}>
                   {creating
                     ? <><Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> Creating…</>
