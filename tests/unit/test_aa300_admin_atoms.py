@@ -15,6 +15,7 @@ monkeypatch.setattr("api.routers.admin.ADMIN_SECRET", ...) instead.
 """
 import json
 import uuid
+from datetime import date
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -935,6 +936,144 @@ class TestPreviewSlotgrid:
         assert result["slot_grid"]["year"] == 2024
         assert result["slot_grid"]["month"] == 1  # first month of Q1, not "today"
         conn.execute.assert_not_called()  # still read-only
+
+    # ── AA-323 round 7 — same version, two entry points, must agree ────────
+    # Live-verified real bug: v6 (aa_internal, Q3 2026, approved, current)
+    # gave MOFU/PAS via ?version_id= (month=7, quarter's first month) but
+    # BOFU/AIDA via the plain default link (month=8, today's real month) —
+    # runway.stage("South Korea", "US", 7) vs (..., 8) genuinely differ.
+    # Root cause: preview_slotgrid()'s two branches derived `month`
+    # independently. Fixed via a single shared `_preview_month_for_quarter()`.
+
+    def test_preview_month_current_quarter_uses_todays_real_month(self, monkeypatch):
+        fixed_today = date(2026, 8, 13)  # Q3 2026, NOT July (Q3's first month)
+
+        class _FixedDate(date):
+            @classmethod
+            def today(cls):
+                return fixed_today
+
+        monkeypatch.setattr(admin_atoms, "date", _FixedDate)
+        assert admin_atoms._preview_month_for_quarter(2026, 3) == 8
+
+    def test_preview_month_different_quarter_uses_quarters_first_month(self, monkeypatch):
+        fixed_today = date(2026, 8, 13)  # Q3 2026 — 2020 Q1 is a different quarter/year
+
+        class _FixedDate(date):
+            @classmethod
+            def today(cls):
+                return fixed_today
+
+        monkeypatch.setattr(admin_atoms, "date", _FixedDate)
+        assert admin_atoms._preview_month_for_quarter(2020, 1) == 1
+        assert admin_atoms._preview_month_for_quarter(2026, 4) == 10  # same year, different quarter
+
+    @pytest.mark.asyncio
+    async def test_current_version_via_version_id_matches_plain_default_exactly(self, monkeypatch):
+        """The core round 7 invariant: `?version_id=<the tenant's current
+        version>` and no `?version_id=` at all must compute the byte-identical
+        SlotGrid — both represent "the tenant's current approved plan"."""
+        fixed_today = date(2026, 8, 13)
+
+        class _FixedDate(date):
+            @classmethod
+            def today(cls):
+                return fixed_today
+
+        monkeypatch.setattr(admin_atoms, "date", _FixedDate)
+
+        trip_id = uuid.uuid4()
+        payload = json.dumps({
+            "tenant_id": TENANT, "year": 2026, "quarter": 3,
+            "trip_ids": [str(trip_id)], "forced_specials": [], "big_rocks": [],
+            "destination_shares": {}, "thin_trip_notes": [], "capacity_note": None,
+            "trips_hash": None, "trip_scores": [], "approved": False, "approved_by": None,
+        })
+        current_version_id = str(uuid.uuid4())
+
+        def fetchrow_side_effect(query, *args):
+            if "qpv.version_id = $1" in query:
+                return {
+                    "tenant_id": uuid.UUID(TENANT), "year": 2026, "quarter": 3, "version_no": 6,
+                    "payload": payload, "approval_status": "approved", "approved_by": "ms.thu",
+                }
+            if "posts_per_week" in query:
+                return {"posts_per_week": 4, "markets": None, "channels": None}
+            if "qpv.payload, qpv.approved_by" in query:
+                return {"payload": payload, "approved_by": "ms.thu"}
+            return None
+
+        def fetch_side_effect(query, *args):
+            if "v_trip_registry" in query:
+                return [self._trip_row(trip_id)]
+            if "tour_atoms" in query:
+                return [self._atom_db_row("atom_current", trip_id)]
+            return []
+
+        # Path 1: explicit ?version_id= for the tenant's current version.
+        conn1 = AsyncMock()
+        conn1.fetch.side_effect = fetch_side_effect
+        conn1.fetchrow.side_effect = fetchrow_side_effect
+        result_with_id = await admin_atoms.preview_slotgrid(
+            _make_request(_make_pool(conn1)), tenant_id=TENANT,
+            version_id=current_version_id, x_admin_secret=_TEST_SECRET,
+        )
+
+        # Path 2: no version_id — the plain default link (Atom Curation's button).
+        conn2 = AsyncMock()
+        conn2.fetch.side_effect = fetch_side_effect
+        conn2.fetchrow.side_effect = fetchrow_side_effect
+        result_default = await admin_atoms.preview_slotgrid(
+            _make_request(_make_pool(conn2)), tenant_id=TENANT,
+            version_id=None, x_admin_secret=_TEST_SECRET,
+        )
+
+        # slot_id is intentionally random for reactive_hold slots (unrelated
+        # to round 7 — a placeholder ID, not real content) and left out of
+        # this comparison; everything else (funnel_stage, framework,
+        # atom_ids, trip_id — the actual content round 7's bug changed)
+        # must match exactly.
+        def _content(slots):
+            return [{k: v for k, v in s.items() if k != "slot_id"} for s in slots]
+
+        assert result_with_id["slot_grid"]["month"] == result_default["slot_grid"]["month"] == 8
+        assert _content(result_with_id["slot_grid"]["slots"]) == _content(result_default["slot_grid"]["slots"]), (
+            "same approved version reached via the two different UI entry points "
+            "produced two different Slot Grids — this is exactly round 7's bug"
+        )
+        assert result_with_id["demo_params"]["demo_mode"] is False
+        assert result_default["demo_params"]["demo_mode"] is False
+
+    @pytest.mark.asyncio
+    async def test_demo_mode_never_true_when_current_version_id_exists(self):
+        """AA-323 round 7 — confirms (not just asserts in a comment) that the
+        in-memory demo path is structurally unreachable once a real approved
+        current version exists: fetch_approved_quarter_plan()'s WHERE clause
+        (qpv.version_id = qp.current_version_id AND approval_status =
+        'approved') is what guarantees this, not a separate flag check."""
+        payload = json.dumps({
+            "tenant_id": TENANT, "year": 2026, "quarter": 3,
+            "trip_ids": [], "forced_specials": [], "big_rocks": [],
+            "destination_shares": {}, "thin_trip_notes": [], "capacity_note": None,
+            "trips_hash": None, "trip_scores": [], "approved": False, "approved_by": None,
+        })
+
+        def fetchrow_side_effect(query, *args):
+            if "posts_per_week" in query:
+                return {"posts_per_week": 4, "markets": None, "channels": None}
+            if "qpv.payload, qpv.approved_by" in query:
+                return {"payload": payload, "approved_by": "ms.thu"}
+            return None
+
+        conn = AsyncMock()
+        conn.fetch.return_value = []
+        conn.fetchrow.side_effect = fetchrow_side_effect
+        result = await admin_atoms.preview_slotgrid(
+            _make_request(_make_pool(conn)), tenant_id=TENANT, version_id=None,
+            x_admin_secret=_TEST_SECRET,
+        )
+        assert result["demo_params"]["demo_mode"] is False
+        assert result["quarter_plan"]["approved_by"] == "ms.thu"
 
 
 class TestNoV1AtomsRegression:

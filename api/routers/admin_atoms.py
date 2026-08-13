@@ -59,6 +59,34 @@ router = APIRouter(prefix="/admin", tags=["admin-atoms"])
 _AA_INTERNAL_TENANT_ID = UUID("00000000-0000-0000-0000-000000000001")
 
 
+def _preview_month_for_quarter(year: int, quarter: int) -> int:
+    """AA-323 round 7 — single source of truth for "which month does a Slot
+    Grid Preview compute", used by BOTH preview_slotgrid() branches below.
+    Before this, the two branches derived `month` independently
+    (`?version_id=` used the quarter's first month; the no-`version_id`
+    default used `date.today().month`) — for the SAME (year, quarter) these
+    only agree when today happens to fall in the quarter's first month.
+    Live-verified round 7: for aa_internal's actually-current v6 (Q3 2026,
+    today=2026-08-13), that mismatch (month=7 vs month=8) made
+    `runway.stage("South Korea", "US", month)` return MOFU for one path and
+    BOFU for the other — same approved version, two different Slot Grids
+    (funnel_stage AND framework, since FRAMEWORK_TABLE keys off funnel_stage)
+    depending only on which UI button was clicked. Fix: derive month from
+    (year, quarter) alone — if it's the REAL current quarter, "what should
+    ship right now" is today's actual month (matches what the default,
+    no-`?version_id=` Preview button has always shown); otherwise (a
+    genuinely different quarter — a true historical version, or one that's
+    not yet current) there is no meaningful "today" for it, so it falls
+    back to the quarter's first month. This makes `?version_id=<the current
+    version's id>` and no `?version_id=` at all ALWAYS resolve to the exact
+    same (year, quarter, month) and therefore the exact same computed
+    SlotGrid — the invariant round 7 requires."""
+    today = date.today()
+    if (year, quarter) == (today.year, (today.month - 1) // 3 + 1):
+        return today.month
+    return (quarter - 1) * 3 + 1
+
+
 def _safe(row) -> dict:
     """Same pattern as v1_tours.py's local safe() helper — UUID/Decimal/
     datetime -> JSON-safe. No shared api/utils.safe() exists in this repo
@@ -422,8 +450,15 @@ async def preview_slotgrid(
     when version_id is given. Only an approved version may be previewed
     (Gate B: N6 must never read an un-approved plan, historical or not) —
     a pending/rejected version_id 400s with a clear reason rather than
-    silently allocating from it. The month used is the target quarter's
-    first month, since a past quarter has no "current month" of its own."""
+    silently allocating from it.
+
+    AA-323 round 7: `month` for BOTH branches now comes from the single
+    shared `_preview_month_for_quarter()` (see its docstring for the full
+    root-cause story) instead of each branch computing it independently —
+    that divergence was a real, live-verified bug: the exact same approved
+    version rendered two different Slot Grids (different funnel_stage AND
+    framework) depending only on whether it was reached via `?version_id=`
+    or the plain default link."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
 
@@ -447,7 +482,7 @@ async def preview_slotgrid(
         tenant_uuid = version_row["tenant_id"]
         year = version_row["year"]
         quarter = version_row["quarter"]
-        month = (quarter - 1) * 3 + 1
+        month = _preview_month_for_quarter(year, quarter)
     else:
         try:
             tenant_uuid = UUID(tenant_id)
@@ -456,7 +491,7 @@ async def preview_slotgrid(
         today = date.today()
         year = today.year
         quarter = (today.month - 1) // 3 + 1
-        month = today.month
+        month = _preview_month_for_quarter(year, quarter)
 
     config = await fetch_tenant_planning_config(tenant_uuid, pool)
     markets = config.markets
@@ -478,6 +513,16 @@ async def preview_slotgrid(
             "not necessarily the tenant's current live version."
         )
     else:
+        # AA-323 round 7: confirmed (not assumed) that the in-memory demo
+        # path below can NEVER run while a real current_version_id exists —
+        # fetch_approved_quarter_plan()'s own query requires
+        # `qpv.version_id = qp.current_version_id AND qpv.approval_status =
+        # 'approved'`, so `demo_mode` is only True when no plan row exists
+        # yet, or current_version_id is unset. This is what round 5's live
+        # curl already showed (demo_mode=False, trip_ids matched v6
+        # byte-for-byte) — round 7 re-confirmed it live again after this
+        # round's changes; see TestPreviewSlotgridDemoNeverRunsWithCurrent
+        # in test_aa300_admin_atoms.py for the locked-in regression test.
         quarter_plan = await fetch_approved_quarter_plan(tenant_uuid, year, quarter, pool)
         demo_mode = quarter_plan is None
         version_no = None
