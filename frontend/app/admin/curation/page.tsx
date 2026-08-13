@@ -50,6 +50,9 @@ interface TourSummary {
   atom_count: number;
   is_thin: boolean;
   unreviewed_count: number;
+  // AA-345 round 2, Việc 4: MAX(tour_atoms.created_at) for this tour — same
+  // "last touched" choice as GET /admin/tours-for-atomization's atomized_at.
+  atomized_at: string | null;
 }
 
 interface Summary {
@@ -65,14 +68,19 @@ const DIST_BADGE: Record<string, "green" | "amber" | "gray"> = { HIGH: "green", 
 // off the viewport bottom) never covers the Load More button underneath it.
 const FLOATING_BAR_CLEARANCE = 92;
 
-type SortKey = "" | "atoms_asc" | "atoms_desc" | "unreviewed_desc" | "name_asc";
+type SortKey = "" | "atoms_asc" | "atoms_desc" | "unreviewed_desc" | "name_asc" | "atomized_desc";
 
 const SORT_OPTIONS: { label: string; value: SortKey }[] = [
   { label: "Atom count (asc)", value: "atoms_asc" },
   { label: "Atom count (desc)", value: "atoms_desc" },
   { label: "% unreviewed (most first)", value: "unreviewed_desc" },
   { label: "Tour name (A–Z)", value: "name_asc" },
+  { label: "Newest first", value: "atomized_desc" },
 ];
+
+function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
 
 export default function CurationPage() {
   const router = useRouter();
@@ -96,19 +104,32 @@ export default function CurationPage() {
   const [unreviewedOnly, setUnreviewedOnly] = useState(false);
   const [thinOnly, setThinOnly] = useState(false);
   const [sortBy, setSortBy] = useState<SortKey>("");
-  // AA-345: deep link from the new atomize UI (/admin/atomize) after a tour
-  // finishes decomposing — read via window.location instead of Next's
+  // AA-345: deep link from the new atomize UI (/admin/atomize) after a
+  // decompose run — read via window.location instead of Next's
   // useSearchParams() to avoid that hook's Suspense-boundary requirement on
   // a page that has none of the other admin pages in this repo use it.
   // Lazy useState initializer (not a useEffect) — found live during AA-345
-  // verify that reading the URL in an effect let the mount-time unfiltered
-  // loadAtoms() fire BEFORE this resolved, then race a second, filtered
-  // fetch; whichever response happened to land last won, so the visible
-  // list would randomly flip between filtered and unfiltered. Setting the
-  // initial state synchronously means loadAtoms() only ever fires once,
-  // already correctly filtered — no second request, no race.
-  const [tourIdFilter, setTourIdFilter] = useState(() =>
-    typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get("tour_id") || "");
+  // round 1 verify that reading the URL in an effect let the mount-time
+  // unfiltered loadAtoms() fire BEFORE this resolved, then race a second,
+  // filtered fetch; whichever response happened to land last won, so the
+  // visible list would randomly flip between filtered and unfiltered.
+  // Setting the initial state synchronously means loadAtoms() only ever
+  // fires once, already correctly filtered — no second request, no race.
+  //
+  // AA-345 round 2, Việc 4: accepts both `?tour_ids=id1,id2` (plural, the
+  // new multi-tour link from a batch Atomize run) and the older single
+  // `?tour_id=id` (kept for anything still linking that way) — tour_ids
+  // wins if both are present, same precedence as the backend's own
+  // GET /admin/atoms?tour_ids= param.
+  const [highlightTourIds, setHighlightTourIds] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
+    const params = new URLSearchParams(window.location.search);
+    const plural = params.get("tour_ids");
+    if (plural) return plural.split(",").map(s => s.trim()).filter(Boolean);
+    const single = params.get("tour_id");
+    return single ? [single] : [];
+  });
+  const highlightSet = useMemo(() => new Set(highlightTourIds), [highlightTourIds]);
 
   const [expandedTourIds, setExpandedTourIds] = useState<Set<string>>(new Set());
   const didInitExpand = useRef(false);
@@ -131,13 +152,15 @@ export default function CurationPage() {
       if (!didInitExpand.current) {
         didInitExpand.current = true;
         setExpandedTourIds(new Set(
-          data.by_tour.filter(t => t.is_thin || t.unreviewed_count > 0).map(t => t.tour_id),
+          data.by_tour
+            .filter(t => t.is_thin || t.unreviewed_count > 0 || highlightSet.has(t.tour_id))
+            .map(t => t.tour_id),
         ));
       }
     } catch (err: any) {
       setError(err.message || "Failed to load summary.");
     }
-  }, []);
+  }, [highlightSet]);
 
   // ── atom list — resets on filter change, appends on "Load more" ──────────
   const loadAtoms = useCallback(async (reset: boolean) => {
@@ -148,7 +171,7 @@ export default function CurationPage() {
     if (distinctiveness) params.set("distinctiveness", distinctiveness);
     if (unreviewedOnly) params.set("unreviewed_only", "true");
     if (thinOnly) params.set("thin_only", "true");
-    if (tourIdFilter) params.set("tour_id", tourIdFilter);
+    if (highlightTourIds.length > 0) params.set("tour_ids", highlightTourIds.join(","));
     try {
       const res = await fetch(`/api/admin/atoms?${params}`);
       if (!res.ok) throw new Error(`Failed to load atoms (${res.status})`);
@@ -162,7 +185,7 @@ export default function CurationPage() {
       setLoading(false);
       setLoadingMore(false);
     }
-  }, [distinctiveness, unreviewedOnly, thinOnly, tourIdFilter]);
+  }, [distinctiveness, unreviewedOnly, thinOnly, highlightTourIds]);
 
   useEffect(() => { loadSummary(); }, [loadSummary]);
   useEffect(() => { loadAtoms(true); }, [loadAtoms]);
@@ -297,7 +320,10 @@ export default function CurationPage() {
     const extra: TourSummary[] = [];
     for (const [tourId, list] of atomsByTour) {
       if (!known.has(tourId)) {
-        extra.push({ tour_id: tourId, tour_name: list[0].tour_name, atom_count: list.length, is_thin: false, unreviewed_count: 0 });
+        extra.push({
+          tour_id: tourId, tour_name: list[0].tour_name, atom_count: list.length,
+          is_thin: false, unreviewed_count: 0, atomized_at: null,
+        });
       }
     }
     const combined = [...order, ...extra];
@@ -308,6 +334,11 @@ export default function CurationPage() {
     else if (sortBy === "unreviewed_desc") {
       sorted.sort((a, b) => (b.unreviewed_count / (b.atom_count || 1)) - (a.unreviewed_count / (a.atom_count || 1)));
     } else if (sortBy === "name_asc") sorted.sort((a, b) => a.tour_name.localeCompare(b.tour_name));
+    else if (sortBy === "atomized_desc") {
+      // AA-345 round 2, Việc 4 — nulls (no atoms ever recorded a timestamp,
+      // shouldn't happen in practice but keeps this defensive) sort last.
+      sorted.sort((a, b) => (b.atomized_at ? Date.parse(b.atomized_at) : 0) - (a.atomized_at ? Date.parse(a.atomized_at) : 0));
+    }
     return sorted;
   }, [summary, atomsByTour, sortBy]);
 
@@ -332,18 +363,20 @@ export default function CurationPage() {
           default. Hover a row and press <b>X</b> to delete, <b>S</b> to star.
         </p>
 
-        {tourIdFilter && (
+        {highlightTourIds.length > 0 && (
           <div style={{
             display: "flex", alignItems: "center", gap: 10, fontSize: 12, color: A.body,
             background: A.line2, borderRadius: 8, padding: "8px 12px", marginBottom: 14,
           }}>
-            <span>Filtering to one tour (from Atom hoá).</span>
+            <span>
+              Filtering to {highlightTourIds.length} tour{highlightTourIds.length === 1 ? "" : "s"} just atomized.
+            </span>
             <button
               onClick={() => {
-                setTourIdFilter("");
-                // Drop the stale ?tour_id= from the URL too — otherwise a
-                // refresh after "clearing" silently re-applies the filter
-                // (found live during AA-345 verify).
+                setHighlightTourIds([]);
+                // Drop the stale ?tour_ids=/?tour_id= from the URL too —
+                // otherwise a refresh after "clearing" silently re-applies
+                // the filter (found live during AA-345 round 1 verify).
                 router.replace("/admin/curation");
               }}
               style={{ background: "none", border: "none", cursor: "pointer", color: A.gold, fontWeight: 600, fontSize: 12 }}
@@ -437,6 +470,7 @@ export default function CurationPage() {
               if (sectionAtoms.length === 0 && searchLower) return null;
               const isExpanded = expandedTourIds.has(section.tour_id);
               const allSelected = sectionAtoms.length > 0 && sectionAtoms.every(a => selectedIds.has(a.atom_id));
+              const justAtomized = highlightSet.has(section.tour_id);
 
               return (
                 <div key={section.tour_id} style={{ borderBottom: `1px solid ${A.line}` }}>
@@ -444,7 +478,7 @@ export default function CurationPage() {
                     onClick={() => toggleTourExpand(section.tour_id)}
                     style={{
                       display: "flex", alignItems: "center", gap: 8, padding: "10px 16px",
-                      cursor: "pointer", background: A.line2, fontFamily: sans,
+                      cursor: "pointer", background: justAtomized ? `${A.gold}18` : A.line2, fontFamily: sans,
                     }}
                   >
                     {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
@@ -459,6 +493,10 @@ export default function CurationPage() {
                     <Badge color="gray">{section.atom_count} atoms</Badge>
                     {section.is_thin && <Badge color="red">thin</Badge>}
                     {section.unreviewed_count > 0 && <Badge color="blue">{section.unreviewed_count} unreviewed</Badge>}
+                    {justAtomized && <Badge color="gold">Just atomized</Badge>}
+                    {section.atomized_at && (
+                      <span style={{ fontSize: 11, color: A.muted2 }}>Atomized {formatDate(section.atomized_at)}</span>
+                    )}
                   </div>
 
                   {isExpanded && (
