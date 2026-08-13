@@ -51,7 +51,7 @@ const LOAD_LIMIT = 150;
 const INLINE_SYNC_MAX = 100;
 
 type StatusFilter = "pending" | "atomized" | "";
-type SortKey = "" | "length_asc" | "length_desc" | "duration_asc" | "duration_desc";
+type SortKey = "" | "length_asc" | "length_desc" | "duration_asc" | "duration_desc" | "atomized_desc" | "atomized_asc";
 
 const STATUS_OPTIONS: { label: string; value: StatusFilter }[] = [
   { label: "Not yet atomized", value: "pending" },
@@ -63,15 +63,36 @@ const STATUS_OPTIONS: { label: string; value: StatusFilter }[] = [
 // reliable way to parse a comparable day count, so its sort is plain
 // alphabetical on the raw string (documented limitation, pre-approved
 // rather than building a parser — see backend's _SORT_COLUMNS comment).
-const SORT_OPTIONS: { label: string; value: SortKey }[] = [
+const BASE_SORT_OPTIONS: { label: string; value: SortKey }[] = [
   { label: "Source length (shortest first)", value: "length_asc" },
   { label: "Source length (longest first)", value: "length_desc" },
   { label: "Duration (A–Z, alphabetical)", value: "duration_asc" },
   { label: "Duration (Z–A, alphabetical)", value: "duration_desc" },
 ];
+// AA-345 round 3, Việc 1 — symmetric with curation's "Newest first" (same
+// MAX(tour_atoms.created_at) field, added PR #133). Every status=pending
+// row has atomized_at=NULL (no atoms exist yet), so these two options
+// would be a silent no-op there — hidden from the dropdown in that filter
+// state instead of presenting a choice that visibly does nothing.
+const ATOMIZED_SORT_OPTIONS: { label: string; value: SortKey }[] = [
+  { label: "Newest atomized first", value: "atomized_desc" },
+  { label: "Oldest atomized first", value: "atomized_asc" },
+];
 
+// AA-345 round 3: found live — with no explicit timeZone, this implicitly
+// used whichever zone the rendering runtime happened to be in (the viewer's
+// browser, or this "use client" page's server-side render pass — either is
+// possible and not reliably one or the other), which could land on the
+// wrong calendar day for a timestamp close to midnight VN time (e.g. a
+// tour_atoms.created_at of 20:00 UTC is already 03:00 the NEXT day in VN).
+// Checked the rest of the app first (61 toLocaleDateString/toLocaleString
+// call sites, zero specify timeZone) — there is no existing convention to
+// match, so Asia/Ho_Chi_Minh (UTC+7, the team's timezone) is hardcoded here
+// as a local decision for these two pages, not a repo-wide fix.
 function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  return new Date(iso).toLocaleDateString("en-US", {
+    year: "numeric", month: "short", day: "numeric", timeZone: "Asia/Ho_Chi_Minh",
+  });
 }
 
 interface TourRow {
@@ -134,6 +155,19 @@ export default function AtomizePage() {
   const [destinationFilter, setDestinationFilter] = useState("");
   const [sortBy, setSortBy] = useState<SortKey>("");
   const [search, setSearch] = useState("");
+
+  const sortOptions = useMemo(
+    () => statusFilter === "pending" ? BASE_SORT_OPTIONS : [...BASE_SORT_OPTIONS, ...ATOMIZED_SORT_OPTIONS],
+    [statusFilter],
+  );
+  // Switching to "Not yet atomized" while an atomized_* sort is active would
+  // otherwise leave it silently selected but hidden from the dropdown (every
+  // row there has atomized_at=NULL, so it'd be a no-op the user can't even
+  // see to undo) — fall back to the default instead.
+  function handleStatusChange(v: StatusFilter) {
+    setStatusFilter(v);
+    if (v === "pending" && (sortBy === "atomized_desc" || sortBy === "atomized_asc")) setSortBy("");
+  }
 
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [running, setRunning] = useState(false);
@@ -268,7 +302,7 @@ export default function AtomizePage() {
                 label: "Status", value: statusFilter, current: statusFilter,
                 allLabel: "All tours",
                 options: STATUS_OPTIONS,
-                onChange: v => setStatusFilter(v as StatusFilter),
+                onChange: v => handleStatusChange(v as StatusFilter),
               },
               {
                 label: "Destination", value: destinationFilter, current: destinationFilter,
@@ -279,7 +313,7 @@ export default function AtomizePage() {
               {
                 label: "Sort", value: sortBy, current: sortBy,
                 allLabel: "Shortest source first (default)",
-                options: SORT_OPTIONS,
+                options: sortOptions,
                 onChange: v => setSortBy(v as SortKey),
               },
             ]}

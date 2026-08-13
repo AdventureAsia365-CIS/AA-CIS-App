@@ -78,8 +78,14 @@ const SORT_OPTIONS: { label: string; value: SortKey }[] = [
   { label: "Newest first", value: "atomized_desc" },
 ];
 
+// AA-345 round 3: see the matching comment in app/admin/atomize/page.tsx —
+// hardcoding Asia/Ho_Chi_Minh (UTC+7) here is a local decision for these two
+// pages specifically, not a repo-wide convention (checked: none exists yet
+// across the other 61 toLocaleDateString/toLocaleString call sites).
 function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  return new Date(iso).toLocaleDateString("en-US", {
+    year: "numeric", month: "short", day: "numeric", timeZone: "Asia/Ho_Chi_Minh",
+  });
 }
 
 export default function CurationPage() {
