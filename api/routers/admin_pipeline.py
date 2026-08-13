@@ -1699,7 +1699,17 @@ _SORT_COLUMNS = {
     # a parser), not a bug.
     "duration_asc":  "b.duration_raw ASC NULLS LAST",
     "duration_desc": "b.duration_raw DESC NULLS LAST",
+    # AA-345 round 3, Việc 1 — symmetric with curation's "Newest first"
+    # (same MAX(created_at) field, added PR #133). Only meaningful under
+    # status=atomized/"" — every status=pending row has atomized_at=NULL
+    # (no atoms exist yet), so NULLS LAST just leaves them in their
+    # existing relative order, a harmless no-op rather than an error; the
+    # frontend hides these two options from the dropdown while
+    # status=pending so a no-op is never presented as a real choice.
+    "atomized_desc": "a.atomized_at DESC NULLS LAST",
+    "atomized_asc":  "a.atomized_at ASC NULLS LAST",
 }
+_SORT_PATTERN = "^(" + "|".join(_SORT_COLUMNS.keys()) + ")$"
 
 
 @router.get("/tours-for-atomization")
@@ -1707,7 +1717,7 @@ async def get_tours_for_atomization(
     request: Request,
     status: str = Query("pending", pattern="^(pending|atomized|)$"),
     destination: str = Query(""),
-    sort: str = Query("length_asc", pattern="^(length_asc|length_desc|duration_asc|duration_desc)$"),
+    sort: str = Query("length_asc", pattern=_SORT_PATTERN),
     limit: int = Query(150, ge=1, le=500),
     offset: int = Query(0, ge=0),
     x_admin_secret: str = Header(None),

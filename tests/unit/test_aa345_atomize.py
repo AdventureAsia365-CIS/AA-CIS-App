@@ -373,6 +373,50 @@ class TestToursForAtomization:
         query = conn.fetch.call_args[0][0]
         assert "ORDER BY b.duration_raw ASC" in query
 
+    # ── AA-345 round 3, Việc 1: "Newest/Oldest atomized first" ──────────────
+    @pytest.mark.asyncio
+    async def test_sort_atomized_desc(self):
+        conn = self._mock_conn([], 0)
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        await self._call(request, status="atomized", sort="atomized_desc")
+
+        query = conn.fetch.call_args[0][0]
+        assert "ORDER BY a.atomized_at DESC NULLS LAST" in query
+
+    @pytest.mark.asyncio
+    async def test_sort_atomized_asc(self):
+        conn = self._mock_conn([], 0)
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        await self._call(request, status="atomized", sort="atomized_asc")
+
+        query = conn.fetch.call_args[0][0]
+        assert "ORDER BY a.atomized_at ASC NULLS LAST" in query
+
+    @pytest.mark.asyncio
+    async def test_sort_atomized_desc_orders_rows_by_real_timestamp(self):
+        import datetime
+        newer = datetime.datetime(2026, 8, 13, 2, 41, 59, tzinfo=datetime.timezone.utc)
+        older = datetime.datetime(2026, 7, 21, 15, 51, 28, tzinfo=datetime.timezone.utc)
+        # Mock DB order deliberately matches what a real DESC-sorted query
+        # would return — this test isn't re-verifying Postgres's ORDER BY
+        # (that's the DB's job, and can't be exercised against a mock), it's
+        # confirming the endpoint doesn't re-shuffle rows after fetching them.
+        rows = [self._base_row(name="Punakha Festival", atomized_at=newer),
+                self._base_row(name="Yaksa Trek", atomized_at=older)]
+        conn = self._mock_conn(rows, total=2)
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await self._call(request, status="atomized", sort="atomized_desc")
+
+        assert result["tours"][0]["name"] == "Punakha Festival"
+        assert result["tours"][0]["atomized_at"] == newer.isoformat()
+        assert result["tours"][1]["atomized_at"] == older.isoformat()
+
     @pytest.mark.asyncio
     async def test_invalid_sort_value_not_silently_accepted(self):
         """A real HTTP request with an unrecognized `sort` never reaches this
