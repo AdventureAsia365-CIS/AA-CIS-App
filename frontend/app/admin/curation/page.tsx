@@ -137,12 +137,32 @@ function CurationPageInner() {
   // wins if both are present, same precedence as the backend's own
   // GET /admin/atoms?tour_ids= param.
   const searchParams = useSearchParams();
+  // AA-345 round 6 — "Clear filter" (below) used to call router.replace()
+  // to a same-pathname, search-params-only URL (?tour_ids=X -> no query at
+  // all). Confirmed live in a real production build (next build && next
+  // start — the round 5 bug only showed up cross-pathname in `next dev`;
+  // this one is same-pathname and ONLY reproduced in a production build,
+  // not dev) that this specific class of router.replace() call updated
+  // neither window.location NOR triggered a re-render with fresh
+  // useSearchParams() output — confirmed via a console.log placed directly
+  // in the button's onClick: it fired, router.replace() was called, and
+  // the URL bar + this hook's value were both simply frozen afterward. A
+  // known, long-standing class of Next.js App Router flakiness
+  // (same-pathname, search-params-only navigations), distinct from round
+  // 5's issue (which was a cross-pathname push() race and is unaffected by
+  // this change). Rather than depend on the router reliably re-rendering
+  // this component for that one specific transition, `cleared` is a plain,
+  // guaranteed-to-rerender local flag the button sets directly — the URL
+  // itself is cleaned up via a raw history.replaceState() call instead of
+  // router.replace() (see the button's onClick for why).
+  const [cleared, setCleared] = useState(false);
   const highlightTourIds = useMemo(() => {
+    if (cleared) return [];
     const plural = searchParams.get("tour_ids");
     if (plural) return plural.split(",").map(s => s.trim()).filter(Boolean);
     const single = searchParams.get("tour_id");
     return single ? [single] : [];
-  }, [searchParams]);
+  }, [searchParams, cleared]);
   const highlightSet = useMemo(() => new Set(highlightTourIds), [highlightTourIds]);
 
   const [expandedTourIds, setExpandedTourIds] = useState<Set<string>>(new Set());
@@ -387,16 +407,26 @@ function CurationPageInner() {
             </span>
             <button
               onClick={() => {
-                // router.replace() updates the URL; useSearchParams() is
-                // reactive to that, so highlightTourIds (derived via
-                // useMemo above) recomputes to [] on its own — no separate
-                // state to clear by hand anymore (round 5 removed that
-                // parallel-state footgun along with the race condition it
-                // caused). Still drop the ?tour_ids=/?tour_id= from the URL
-                // itself — otherwise a refresh after "clearing" silently
-                // re-applies the filter (found live during AA-345 round 1
-                // verify).
-                router.replace("/admin/curation");
+                // See the `cleared` comment above — this flag is what
+                // actually drives the filter off, independent of the URL.
+                setCleared(true);
+                // Drop the ?tour_ids=/?tour_id= from the URL too —
+                // otherwise a refresh after "clearing" silently re-applies
+                // the filter (found live during AA-345 round 1 verify).
+                // router.replace() alone confirmed unreliable here in a
+                // real production build (round 6 — same-pathname,
+                // search-params-only navigations are a known flaky class in
+                // Next's App Router: it sometimes silently no-ops, and on
+                // the runs where it doesn't, it triggers a second, redundant
+                // refetch on top of the one `cleared` already causes).
+                // history.replaceState() is a raw browser API call not
+                // subject to that same-page router-cache path — reliably
+                // updates the visible URL on every run, is a "replace" (not
+                // "push", same as router.replace() would have been) so
+                // back-button behavior is unaffected, and doesn't also fire
+                // its own re-render — no router.replace() call needed
+                // alongside it.
+                window.history.replaceState(null, "", "/admin/curation");
               }}
               style={{ background: "none", border: "none", cursor: "pointer", color: A.gold, fontWeight: 600, fontSize: 12 }}
             >
