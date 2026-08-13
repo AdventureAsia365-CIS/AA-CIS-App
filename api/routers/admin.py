@@ -1895,6 +1895,59 @@ async def get_quarter_plan(
     }
 
 
+# ── GET /admin/quarter-plan/{tenant_id}/{year}/{quarter}/history — all versions ──
+# AA-323 round 4: no prior endpoint listed every version for a tenant/year/quarter —
+# GET /quarter-plan/{tenant_id}/{year}/{quarter} above only ever returns the newest
+# (ORDER BY version_no DESC LIMIT 1). Live-verified by Nghiep: v1-v5 exist for some
+# tenants and none but the latest was reachable from any UI. Includes the full plan
+# payload per version (not just summary fields) so the History tab can reuse
+# DetailView directly on click, without a second round-trip per row.
+
+
+@router.get("/quarter-plan/{tenant_id}/{year}/{quarter}/history",
+            summary="List every quarter plan version for a tenant/year/quarter, newest first (AA-323)")
+async def get_quarter_plan_history(
+    tenant_id: UUID,
+    year: int,
+    quarter: int,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT qpv.version_id, qpv.plan_id, qpv.version_no, qpv.source, qpv.payload,
+                   qpv.approval_status, qpv.approved_by, qpv.approved_at, qpv.created_at
+            FROM acp_shared.quarter_plan qp
+            JOIN acp_shared.quarter_plan_version qpv ON qpv.plan_id = qp.plan_id
+            WHERE qp.tenant_id = $1 AND qp.year = $2 AND qp.quarter = $3
+            ORDER BY qpv.version_no DESC
+            """,
+            tenant_id, year, quarter,
+        )
+
+    versions = []
+    for r in rows:
+        payload = r["payload"]
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        versions.append({
+            "version_id": str(r["version_id"]),
+            "plan_id": str(r["plan_id"]),
+            "version_no": r["version_no"],
+            "source": r["source"],
+            "approval_status": r["approval_status"],
+            "approved_by": r["approved_by"],
+            "approved_at": r["approved_at"].isoformat() if r["approved_at"] else None,
+            "created_at": r["created_at"].isoformat(),
+            "trip_count": len(payload.get("trip_ids", [])) if payload else 0,
+            "plan": payload,
+        })
+    return {"versions": versions}
+
+
 # ── POST /admin/quarter-plan/{version_id}/approve — Gate B human approval ──────
 
 
