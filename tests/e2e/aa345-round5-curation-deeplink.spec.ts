@@ -73,5 +73,34 @@ test.describe('AA-345 round 5 — Atomize -> Curation single-tour deep link', ()
     await expect(page.getByRole('heading', { name: 'Atom Curation' })).toBeVisible({ timeout: 10000 });
     await expect(page.getByText(/Filtering to 1 tour just atomized/)).toBeVisible({ timeout: 10000 });
     await expect(page.getByText(tourName, { exact: false }).first()).toBeVisible({ timeout: 10000 });
+
+    // AA-345 round 6 — a real, confirmed regression from this fix: clicking
+    // "Clear filter" did nothing at all in a real production build (next
+    // build && next start), even though it worked fine under `next dev`.
+    // Root cause: router.replace() to a same-pathname, search-params-only
+    // URL (?tour_ids=X -> no query) is a known flaky class of navigation in
+    // Next's App Router — confirmed via a console.log placed directly in
+    // the onClick that it fired and router.replace() was called, but
+    // neither the URL nor useSearchParams()'s output changed afterward.
+    // Only reproduced against a production build; `next dev` masked it
+    // completely, same as this repo's own Playwright suite would if run
+    // against a dev server instead of BASE_URL pointed at a `next start`
+    // instance — this test needs the real thing to mean anything for this
+    // specific case. Fixed by driving the filter off a plain React state
+    // flag (guaranteed to trigger a re-render, doesn't depend on the
+    // router) and clearing the URL via a raw history.replaceState() call
+    // instead of router.replace().
+    await page.click('text=Clear filter');
+    await page.waitForTimeout(1000);
+    expect(new URL(page.url()).searchParams.has('tour_ids')).toBe(false);
+    expect(new URL(page.url()).searchParams.has('tour_id')).toBe(false);
+    await expect(page.getByText(/Filtering to.*just atomized/)).not.toBeVisible();
+    // The just-cleared tour's own section should still be present (it's
+    // real data, not deleted) — but no longer the ONLY section, proving
+    // the list actually went back to unfiltered rather than just hiding
+    // the banner text. Each tour section header renders a "<N> atoms"
+    // Badge (adminUi.tsx) — counting those counts sections.
+    const sectionCount = await page.getByText(/^\d+ atoms$/).count();
+    expect(sectionCount).toBeGreaterThan(1);
   });
 });
