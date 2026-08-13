@@ -13,6 +13,7 @@ admin_atoms.py via `from api.routers.admin import verify_admin_secret`).
 monkeypatch.setenv() after import has no effect on it; every test here uses
 monkeypatch.setattr("api.routers.admin.ADMIN_SECRET", ...) instead.
 """
+import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock
 
@@ -97,7 +98,7 @@ class TestListAtoms:
         request = _make_request(pool)
 
         result = await admin_atoms.list_atoms(
-            request, tour_id=None, tour_ids=None, distinctiveness=None, unreviewed_only=False,
+            request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness=None, unreviewed_only=False,
             thin_only=False, include_deleted=False, limit=50, offset=0,
             x_admin_secret=_TEST_SECRET,
         )
@@ -116,7 +117,7 @@ class TestListAtoms:
         request = _make_request(pool)
 
         result = await admin_atoms.list_atoms(
-            request, tour_id=None, tour_ids=None, distinctiveness=None, unreviewed_only=False,
+            request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness=None, unreviewed_only=False,
             thin_only=False, include_deleted=False, limit=50, offset=0,
             x_admin_secret=_TEST_SECRET,
         )
@@ -132,7 +133,7 @@ class TestListAtoms:
         request = _make_request(pool)
 
         await admin_atoms.list_atoms(
-            request, tour_id=None, tour_ids=None, distinctiveness=None, unreviewed_only=True,
+            request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness=None, unreviewed_only=True,
             thin_only=False, include_deleted=False, limit=50, offset=0,
             x_admin_secret=_TEST_SECRET,
         )
@@ -149,7 +150,7 @@ class TestListAtoms:
         from services.acp_shared.atom_constants import THIN_TRIP_ATOM_MIN
 
         await admin_atoms.list_atoms(
-            request, tour_id=None, tour_ids=None, distinctiveness=None, unreviewed_only=False,
+            request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness=None, unreviewed_only=False,
             thin_only=True, include_deleted=False, limit=50, offset=0,
             x_admin_secret=_TEST_SECRET,
         )
@@ -165,7 +166,7 @@ class TestListAtoms:
         request = _make_request(pool)
 
         await admin_atoms.list_atoms(
-            request, tour_id=None, tour_ids=None, distinctiveness="HIGH", unreviewed_only=False,
+            request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness="HIGH", unreviewed_only=False,
             thin_only=False, include_deleted=False, limit=50, offset=0,
             x_admin_secret=_TEST_SECRET,
         )
@@ -181,7 +182,7 @@ class TestListAtoms:
         request = _make_request(pool)
 
         await admin_atoms.list_atoms(
-            request, tour_id=None, tour_ids=None, distinctiveness=None, unreviewed_only=False,
+            request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness=None, unreviewed_only=False,
             thin_only=False, include_deleted=False, limit=50, offset=0,
             x_admin_secret=_TEST_SECRET,
         )
@@ -196,7 +197,7 @@ class TestListAtoms:
         request = _make_request(pool)
 
         await admin_atoms.list_atoms(
-            request, tour_id=None, tour_ids=None, distinctiveness=None, unreviewed_only=False,
+            request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness=None, unreviewed_only=False,
             thin_only=False, include_deleted=True, limit=50, offset=0,
             x_admin_secret=_TEST_SECRET,
         )
@@ -213,7 +214,7 @@ class TestListAtoms:
         ids = [str(uuid.uuid4()), str(uuid.uuid4())]
 
         await admin_atoms.list_atoms(
-            request, tour_id=None, tour_ids=",".join(ids), distinctiveness=None,
+            request, tour_id=None, tour_ids=",".join(ids), atom_ids=None, distinctiveness=None,
             unreviewed_only=False, thin_only=False, include_deleted=False,
             limit=50, offset=0, x_admin_secret=_TEST_SECRET,
         )
@@ -230,7 +231,7 @@ class TestListAtoms:
         ids = [str(uuid.uuid4())]
 
         await admin_atoms.list_atoms(
-            request, tour_id="some-other-id", tour_ids=ids[0], distinctiveness=None,
+            request, tour_id="some-other-id", tour_ids=ids[0], atom_ids=None, distinctiveness=None,
             unreviewed_only=False, thin_only=False, include_deleted=False,
             limit=50, offset=0, x_admin_secret=_TEST_SECRET,
         )
@@ -263,7 +264,7 @@ class TestListAtoms:
         single_id = str(uuid.uuid4())
 
         await admin_atoms.list_atoms(
-            request, tour_id=None, tour_ids=single_id, distinctiveness=None,
+            request, tour_id=None, tour_ids=single_id, atom_ids=None, distinctiveness=None,
             unreviewed_only=False, thin_only=False, include_deleted=False,
             limit=50, offset=0, x_admin_secret=_TEST_SECRET,
         )
@@ -281,7 +282,7 @@ class TestListAtoms:
         request = _make_request(pool)
 
         await admin_atoms.list_atoms(
-            request, tour_id="abc-123", tour_ids=None, distinctiveness=None,
+            request, tour_id="abc-123", tour_ids=None, atom_ids=None, distinctiveness=None,
             unreviewed_only=False, thin_only=False, include_deleted=False,
             limit=50, offset=0, x_admin_secret=_TEST_SECRET,
         )
@@ -606,6 +607,19 @@ class TestBulkPatchAtoms:
         assert single_body["atom_id"] == "atom_abc1234567"
 
 
+def _preview_fetchrow_side_effect(query, *args):
+    """AA-323 — preview_slotgrid now issues two conn.fetchrow() calls before
+    the N4/N5/N6 chain: fetch_tenant_planning_config() (tenant_config +
+    posts_per_week join) and fetch_approved_quarter_plan() (Gate B lookup).
+    Returns a real config row (no tenant_config row -> markets/channels fall
+    back to defaults, same as the old hardcoded constants) and None for the
+    quarter-plan lookup (no approved plan -> demo_mode=True), preserving
+    every pre-AA-323 assertion below unchanged."""
+    if "posts_per_week" in query:
+        return {"posts_per_week": 4, "markets": None, "channels": None}
+    return None
+
+
 class TestPreviewSlotgrid:
     @pytest.mark.asyncio
     async def test_invalid_tenant_id_400(self):
@@ -619,6 +633,7 @@ class TestPreviewSlotgrid:
     async def test_calls_full_n4_n5_n6_chain_and_gate_b_approved(self):
         conn = AsyncMock()
         conn.fetch.return_value = []  # no trips -> empty chain, still must not crash
+        conn.fetchrow.side_effect = _preview_fetchrow_side_effect
         pool = _make_pool(conn)
         request = _make_request(pool)
 
@@ -687,6 +702,7 @@ class TestPreviewSlotgrid:
 
         conn = AsyncMock()
         conn.fetch.side_effect = fetch_side_effect
+        conn.fetchrow.side_effect = _preview_fetchrow_side_effect
         pool = _make_pool(conn)
         request = _make_request(pool)
 
@@ -722,6 +738,7 @@ class TestPreviewSlotgrid:
 
         conn = AsyncMock()
         conn.fetch.side_effect = fetch_side_effect
+        conn.fetchrow.side_effect = _preview_fetchrow_side_effect
         pool = _make_pool(conn)
         request = _make_request(pool)
 
@@ -738,12 +755,58 @@ class TestPreviewSlotgrid:
     async def test_defaults_to_aa_internal_tenant(self):
         conn = AsyncMock()
         conn.fetch.return_value = []
+        conn.fetchrow.side_effect = _preview_fetchrow_side_effect
         pool = _make_pool(conn)
         request = _make_request(pool)
         result = await admin_atoms.preview_slotgrid(
             request, tenant_id=str(admin_atoms._AA_INTERNAL_TENANT_ID), x_admin_secret=_TEST_SECRET,
         )
         assert result["slot_grid"]["tenant_id"] == str(admin_atoms._AA_INTERNAL_TENANT_ID)
+
+    @pytest.mark.asyncio
+    async def test_reads_real_approved_quarter_plan_when_one_exists(self):
+        """AA-323 Gap 1 — the full create -> Gate B approve -> N6 reads the
+        real version chain, exercised at the unit level since live AWS
+        (ECS/RDS) is stopped and needs interactive MFA this session (cannot
+        be driven headlessly here — flagged to Nghiep for a live re-check).
+        Confirms: when fetch_approved_quarter_plan() finds an approved
+        version, preview_slotgrid takes the allocate_month_from_db() branch
+        (demo_mode=False, approved_by is the REAL approver, not
+        "admin-preview-demo"), instead of the in-memory demo auto-approve."""
+        trip_id = uuid.uuid4()
+        real_payload = json.dumps({
+            "tenant_id": TENANT, "year": 2026, "quarter": 3,
+            "trip_ids": [str(trip_id)], "forced_specials": [], "big_rocks": [],
+            "destination_shares": {}, "thin_trip_notes": [], "capacity_note": None,
+            "trips_hash": None, "trip_scores": [], "approved": False, "approved_by": None,
+        })
+
+        def fetchrow_side_effect(query, *args):
+            if "posts_per_week" in query:
+                return {"posts_per_week": 4, "markets": None, "channels": None}
+            if "quarter_plan_version" in query:
+                return {"payload": real_payload, "approved_by": "real-admin@example.com"}
+            return None
+
+        def fetch_side_effect(query, *args):
+            if "v_trip_registry" in query:
+                return [self._trip_row(trip_id)]
+            if "tour_atoms" in query:
+                return [self._atom_db_row("atom_real", trip_id)]
+            return []
+
+        conn = AsyncMock()
+        conn.fetch.side_effect = fetch_side_effect
+        conn.fetchrow.side_effect = fetchrow_side_effect
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await admin_atoms.preview_slotgrid(request, tenant_id=TENANT, x_admin_secret=_TEST_SECRET)
+
+        assert result["demo_params"]["demo_mode"] is False
+        assert result["quarter_plan"]["approved_by"] == "real-admin@example.com"
+        assert result["quarter_plan"]["approved"] is True
+        conn.execute.assert_not_called()  # still read-only
 
     @pytest.mark.asyncio
     async def test_wrong_secret_rejected_on_preview(self):

@@ -22,6 +22,11 @@ from services.acp_planning.quarter import (
     save_quarter_plan_version,
 )
 from services.acp_planning.runway import runway_map
+from services.acp_planning.tenant_config import (
+    TenantNotFoundError,
+    fetch_tenant_planning_config,
+    save_tenant_planning_config,
+)
 from services.acp_shared.marketplace_estimates import runway_months
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -1081,6 +1086,70 @@ async def get_tenant_mirror(
     }
 
 
+# ── GET/PUT /admin/tenants/{id}/config — AA-323 Gap 3: N4-N6 markets/channels/
+# capacity config. capacity_posts_per_week reads/writes shared.tenants.posts_per_week
+# (AA-384, existing single source of truth) — markets/channels read/write the new
+# acp_shared.tenant_config table (migration 101). One combined form since the issue
+# asked for a single place to set all three; no duplicate posts_per_week column.
+
+class TenantConfigRequest(BaseModel):
+    markets: list[str] = Field(..., min_length=1)
+    channels: list[str] = Field(..., min_length=1)
+    posts_per_week: int = Field(..., ge=1, le=14)
+
+
+_VALID_CHANNELS = {"blog", "facebook", "tiktok", "email"}
+
+
+@router.get("/tenants/{tenant_id}/config", summary="AA-323 — N4-N6 markets/channels/capacity for one tenant")
+async def get_tenant_config(
+    tenant_id: UUID,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    try:
+        cfg = await fetch_tenant_planning_config(tenant_id, pool)
+    except TenantNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Tenant not found: {tenant_id}")
+    return {
+        "tenant_id": str(tenant_id),
+        "markets": cfg.markets,
+        "channels": cfg.channels,
+        "posts_per_week": cfg.capacity_posts_per_week,
+    }
+
+
+@router.put("/tenants/{tenant_id}/config", summary="AA-323 — set N4-N6 markets/channels/capacity for one tenant")
+async def update_tenant_config(
+    tenant_id: UUID,
+    body: TenantConfigRequest,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    invalid = [c for c in body.channels if c not in _VALID_CHANNELS]
+    if invalid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid channel(s): {invalid} — must be one of {sorted(_VALID_CHANNELS)}",
+        )
+    pool = request.app.state.pool
+    try:
+        await save_tenant_planning_config(
+            tenant_id, body.markets, body.channels, body.posts_per_week, pool,
+        )
+    except TenantNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Tenant not found: {tenant_id}")
+    return {
+        "tenant_id": str(tenant_id),
+        "markets": body.markets,
+        "channels": body.channels,
+        "posts_per_week": body.posts_per_week,
+    }
+
+
 # ── POST /admin/tenants/{id}/gate-a/approve — N1 step 6 ──────────────────────
 
 class GateAApproveRequest(BaseModel):
@@ -1677,6 +1746,10 @@ class CreateQuarterPlanRequest(BaseModel):
     markets: list[str]
     capacity_posts_per_week: int
     specials: list[str] = []
+    # AA-323 Gap 1 (decision #3) — manual N5 removal. specials[] already covers
+    # "force add"; this is the missing "remove" side. Never changes scoring
+    # weights, only which trips are eligible for selection.
+    excluded_trip_ids: list[UUID] = []
 
 
 @router.post("/quarter-plan", summary="Compute a quarter plan and persist it as a pending version (AA-320)")
@@ -1692,6 +1765,7 @@ async def create_quarter_plan(
     plan = await plan_quarter(
         body.tenant_id, body.year, body.quarter, body.markets,
         body.capacity_posts_per_week, body.specials, runway, pool,
+        set(body.excluded_trip_ids),
     )
     version_id = await save_quarter_plan_version(plan, pool, source="standard")
 
@@ -1700,6 +1774,31 @@ async def create_quarter_plan(
         "approval_status": "pending",
         "plan": plan.model_dump(mode="json"),
     }
+
+
+# ── POST /admin/quarter-plan/preview — AA-323 Gap 1: read-only N5 preview ──────
+# Same computation as create_quarter_plan() above, but never calls
+# save_quarter_plan_version() — nothing is persisted. Powers the create-plan UI's
+# live checkbox override (add via specials[], remove via excluded_trip_ids) so a
+# human can see the effect of a change before committing to a pending version.
+
+
+@router.post("/quarter-plan/preview", summary="Compute a quarter plan without persisting it (AA-323)")
+async def preview_quarter_plan(
+    body: CreateQuarterPlanRequest,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+
+    runway = await runway_map(body.tenant_id, body.year, body.markets, pool)
+    plan = await plan_quarter(
+        body.tenant_id, body.year, body.quarter, body.markets,
+        body.capacity_posts_per_week, body.specials, runway, pool,
+        set(body.excluded_trip_ids),
+    )
+    return {"plan": plan.model_dump(mode="json")}
 
 
 # ── GET /admin/quarter-plan/pending — Gate B queue: all pending versions ──────

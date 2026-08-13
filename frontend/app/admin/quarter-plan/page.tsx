@@ -9,7 +9,8 @@
 // was explicitly out of scope for this issue.
 
 import { useState, useEffect, useCallback } from "react";
-import { CalendarCheck, CheckCircle2, ChevronLeft, Loader2 } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { CalendarCheck, CheckCircle2, ChevronLeft, Loader2, Plus } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
 import { A, serif, sans, Card, SLabel, Btn, Badge, LoadingScreen, TH, TD } from "../_components/adminUi";
 
@@ -33,6 +34,20 @@ interface BigRock {
   atomization_contract: Record<string, number>;
 }
 
+// AA-323 Gap 1 — per-trip N5 scoring, added to QuarterPlan so this card can
+// resolve real tour names instead of raw UUIDs. Absent on quarter plan
+// versions persisted before this change (payload is JSONB, old rows just
+// have no trip_scores key) — DetailView falls back to the UUID for those.
+interface TripScore {
+  trip_id: string;
+  name: string;
+  destination: string | null;
+  score: number;
+  forced: boolean;
+  selected: boolean;
+  reason: string;
+}
+
 interface QuarterPlanPayload {
   tenant_id: string;
   year: number;
@@ -43,6 +58,7 @@ interface QuarterPlanPayload {
   destination_shares: Record<string, number>;
   thin_trip_notes: string[];
   capacity_note: string | null;
+  trip_scores?: TripScore[];
 }
 
 interface VersionDetail {
@@ -61,6 +77,7 @@ function getCookie(name: string): string {
 }
 
 export default function QuarterPlanPage() {
+  const router = useRouter();
   const [pending, setPending] = useState<PendingItem[] | null>(null);
   const [selected, setSelected] = useState<PendingItem | null>(null);
   const [detail, setDetail] = useState<VersionDetail | null>(null);
@@ -141,6 +158,12 @@ export default function QuarterPlanPage() {
           <h1 style={{ fontFamily: serif, fontSize: 22, fontWeight: 500, color: A.ink, margin: 0 }}>
             Quarter Plan Approval (Gate B)
           </h1>
+          <div style={{ flex: 1 }} />
+          {!selected && (
+            <Btn size="sm" variant="primary" onClick={() => router.push("/admin/quarter-plan/create")}>
+              <Plus size={12} /> Create Plan
+            </Btn>
+          )}
         </div>
         <p style={{ fontSize: 13, color: A.muted, marginBottom: 24, fontFamily: sans }}>
           Every quarter plan must be reviewed and approved by a human before N6 can allocate
@@ -262,9 +285,33 @@ function DetailView({ selected, detail, loading, approving, onApprove }: {
             border: "1px solid #FDE68A", borderRadius: 6, padding: "8px 10px", marginBottom: 12,
           }}>{plan.capacity_note}</div>
         )}
-        <div style={{ fontSize: 12, color: A.muted, fontFamily: "monospace", lineHeight: 1.8, wordBreak: "break-all" }}>
-          {plan.trip_ids.join(", ") || "—"}
-        </div>
+        {plan.trip_ids.length === 0 ? (
+          <div style={{ fontSize: 12, color: A.muted }}>—</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {plan.trip_ids.map(id => {
+              const score = plan.trip_scores?.find(s => s.trip_id === id);
+              return (
+                <div key={id} style={{
+                  display: "flex", alignItems: "baseline", gap: 8, fontSize: 12,
+                  padding: "4px 0", borderBottom: `1px solid ${A.line2}`,
+                }}>
+                  <span style={{ color: A.body, fontWeight: 600 }}>
+                    {score ? score.name : id}
+                  </span>
+                  {score?.destination && (
+                    <span style={{ color: A.muted2 }}>{score.destination}</span>
+                  )}
+                  {score && (
+                    <span style={{ color: A.muted2, marginLeft: "auto", fontStyle: "italic" }}>
+                      {score.reason}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
         {plan.forced_specials.length > 0 && (
           <div style={{ fontSize: 12, color: A.muted, marginTop: 8 }}>
             Forced specials: {plan.forced_specials.length} trip(s)

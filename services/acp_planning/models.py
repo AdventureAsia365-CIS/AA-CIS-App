@@ -86,6 +86,26 @@ class BigRock(BaseModel):
     atomization_contract: dict[str, int] = Field(default_factory=dict)
 
 
+class TripScore(BaseModel):
+    """AA-323 Gap 1 — per-trip N5 scoring, exposed so a human reviewing or
+    overriding the auto-selection can see why a trip was (or wasn't) chosen.
+    Covers every non-retired, non-excluded trip considered for the quarter,
+    not just the ones that made the cut — the create-plan UI needs the full
+    candidate list to render add/remove checkboxes. `reason` is a short
+    English label naming the dominant scoring factor (never the algorithm's
+    internal weights — those stay fixed, per AA-323 decision #3)."""
+    trip_id: UUID
+    name: str
+    destination: Optional[str] = None
+    score: float
+    runway_fit: float
+    richness: float
+    distinctiveness_score: float
+    forced: bool
+    selected: bool
+    reason: str
+
+
 class QuarterPlan(BaseModel):
     tenant_id: UUID
     year: int
@@ -97,6 +117,7 @@ class QuarterPlan(BaseModel):
     thin_trip_notes: list[str] = Field(default_factory=list)
     capacity_note: Optional[str] = None
     trips_hash: Optional[str] = None
+    trip_scores: list[TripScore] = Field(default_factory=list)
     # Gate B — Ms. Thu must approve before N6 can allocate (REQUIRED, NEVER auto)
     approved: bool = False
     approved_by: Optional[str] = None
