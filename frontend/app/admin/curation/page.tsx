@@ -96,6 +96,19 @@ export default function CurationPage() {
   const [unreviewedOnly, setUnreviewedOnly] = useState(false);
   const [thinOnly, setThinOnly] = useState(false);
   const [sortBy, setSortBy] = useState<SortKey>("");
+  // AA-345: deep link from the new atomize UI (/admin/atomize) after a tour
+  // finishes decomposing — read via window.location instead of Next's
+  // useSearchParams() to avoid that hook's Suspense-boundary requirement on
+  // a page that has none of the other admin pages in this repo use it.
+  // Lazy useState initializer (not a useEffect) — found live during AA-345
+  // verify that reading the URL in an effect let the mount-time unfiltered
+  // loadAtoms() fire BEFORE this resolved, then race a second, filtered
+  // fetch; whichever response happened to land last won, so the visible
+  // list would randomly flip between filtered and unfiltered. Setting the
+  // initial state synchronously means loadAtoms() only ever fires once,
+  // already correctly filtered — no second request, no race.
+  const [tourIdFilter, setTourIdFilter] = useState(() =>
+    typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get("tour_id") || "");
 
   const [expandedTourIds, setExpandedTourIds] = useState<Set<string>>(new Set());
   const didInitExpand = useRef(false);
@@ -135,6 +148,7 @@ export default function CurationPage() {
     if (distinctiveness) params.set("distinctiveness", distinctiveness);
     if (unreviewedOnly) params.set("unreviewed_only", "true");
     if (thinOnly) params.set("thin_only", "true");
+    if (tourIdFilter) params.set("tour_id", tourIdFilter);
     try {
       const res = await fetch(`/api/admin/atoms?${params}`);
       if (!res.ok) throw new Error(`Failed to load atoms (${res.status})`);
@@ -148,7 +162,7 @@ export default function CurationPage() {
       setLoading(false);
       setLoadingMore(false);
     }
-  }, [distinctiveness, unreviewedOnly, thinOnly]);
+  }, [distinctiveness, unreviewedOnly, thinOnly, tourIdFilter]);
 
   useEffect(() => { loadSummary(); }, [loadSummary]);
   useEffect(() => { loadAtoms(true); }, [loadAtoms]);
@@ -317,6 +331,27 @@ export default function CurationPage() {
           Grouped by tour — thin tours (&lt; 5 atoms) or tours with unreviewed atoms open by
           default. Hover a row and press <b>X</b> to delete, <b>S</b> to star.
         </p>
+
+        {tourIdFilter && (
+          <div style={{
+            display: "flex", alignItems: "center", gap: 10, fontSize: 12, color: A.body,
+            background: A.line2, borderRadius: 8, padding: "8px 12px", marginBottom: 14,
+          }}>
+            <span>Filtering to one tour (from Atom hoá).</span>
+            <button
+              onClick={() => {
+                setTourIdFilter("");
+                // Drop the stale ?tour_id= from the URL too — otherwise a
+                // refresh after "clearing" silently re-applies the filter
+                // (found live during AA-345 verify).
+                router.replace("/admin/curation");
+              }}
+              style={{ background: "none", border: "none", cursor: "pointer", color: A.gold, fontWeight: 600, fontSize: 12 }}
+            >
+              Clear filter
+            </button>
+          </div>
+        )}
 
         {/* ── Dashboard ──────────────────────────────────────────────────── */}
         {summary && (
