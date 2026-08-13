@@ -43,6 +43,9 @@ interface PreviewResponse {
     destination_shares: Record<string, number>; approved: boolean; approved_by: string | null;
     thin_trip_notes: string[]; capacity_note: string | null;
   };
+  // AA-323 round 5 — Việc 2: null in demo mode (nothing persisted yet to have a
+  // version number); the persisted version_no this screen is reading otherwise.
+  quarter_plan_version_no: number | null;
   slot_grid: {
     tenant_id: string; year: number; month: number; slots: Slot[]; capacity_note: string | null;
   };
@@ -270,7 +273,9 @@ export default function CurationPreviewPage() {
         </div>
         <p style={{ fontSize: 13, color: A.muted, marginTop: 4, marginBottom: 18 }}>
           Runs the real N4 (Runway Map) → N5 (Quarter Plan) → N6 (Slot Allocator) chain against
-          the currently curated atom pool. Read-only — nothing here is written to the database.
+          the currently curated atom pool, reading the tenant's Gate-B-approved quarter plan from
+          the database when one exists (falling back to an unpersisted preview otherwise — see the
+          note below). Computing this slot grid never writes anything back to the database.
         </p>
 
         {error && (
@@ -308,7 +313,9 @@ export default function CurationPreviewPage() {
                   Quarter plan
                 </div>
                 <div style={{ fontFamily: serif, fontSize: 20, color: A.ink }}>
-                  Q{data.quarter_plan.quarter} {data.quarter_plan.year} — {data.quarter_plan.trip_ids.length} trips
+                  Q{data.quarter_plan.quarter} {data.quarter_plan.year}
+                  {data.quarter_plan_version_no !== null && ` · v${data.quarter_plan_version_no}`}
+                  {" "}— {data.quarter_plan.trip_ids.length} trips
                 </div>
                 <Badge color={data.quarter_plan.approved ? "green" : "red"}>
                   {data.quarter_plan.approved ? `Approved (${data.quarter_plan.approved_by})` : "Not approved (Gate B)"}

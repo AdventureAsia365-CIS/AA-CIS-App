@@ -407,9 +407,34 @@ async def fetch_approved_quarter_plan(
     return plan
 
 
+async def fetch_current_version_no(
+    tenant_id: UUID, year: int, quarter: int, pool,
+) -> Optional[int]:
+    """AA-323 round 5 — Việc 2. A separate lightweight lookup (not folded into
+    fetch_approved_quarter_plan's return shape, to avoid touching that
+    function's existing contract/callers/tests) so the Preview screen can show
+    which version it's reading — with several approved versions accumulating
+    per tenant/quarter (approve never revokes an older version's
+    approval_status, it only moves quarter_plan.current_version_id — see
+    approve_quarter_plan_version above), "8 trips" alone doesn't tell a human
+    which one they're looking at."""
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            """
+            SELECT qpv.version_no
+            FROM acp_shared.quarter_plan qp
+            JOIN acp_shared.quarter_plan_version qpv ON qpv.version_id = qp.current_version_id
+            WHERE qp.tenant_id = $1 AND qp.year = $2 AND qp.quarter = $3
+              AND qpv.approval_status = 'approved'
+            """,
+            tenant_id, year, quarter,
+        )
+
+
 __all__ = [
     "compute_quarter_plan", "fetch_atoms_by_trip", "plan_quarter",
     "approve_quarter_plan", "save_quarter_plan_version",
     "approve_quarter_plan_version", "fetch_approved_quarter_plan",
+    "fetch_current_version_no",
     "QuarterPlanVersionNotFoundError", "QuarterPlanVersionNotPendingError",
 ]
