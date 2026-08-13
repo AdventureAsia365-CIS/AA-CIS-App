@@ -110,7 +110,18 @@ def _score_reason(runway_fit: float, richness: float, dist: float, forced: bool)
     """AA-323 Gap 1 — short English label naming the dominant scoring factor.
     Weights (0.4/0.3/0.3) mirror compute_quarter_plan()'s own score formula so
     the label reflects what actually drove the ranking, not raw component
-    values a reviewer would have to interpret themselves."""
+    values a reviewer would have to interpret themselves.
+
+    AA-323 round 6, Phần C — fixed a tie-break bug found in round 5's live
+    audit: plain `max(contributions, key=...)` always resolves a tie to the
+    FIRST dict key regardless of which component actually tied for highest,
+    which mislabeled 562/763 real trips as "High runway fit" while their
+    actual runway_fit was 0.0 (the single most common case — most trips have
+    neither a BOFU/MOFU runway window yet nor curated atoms). Now: an
+    all-zero (or tied-at-zero) contribution set gets its own honest label
+    instead of defaulting to whichever key happens to be listed first, and a
+    genuine tie among nonzero contributors reads as "Balanced" rather than
+    naming only one of the tied factors."""
     if forced:
         return "Manually added"
     contributions = {
@@ -118,7 +129,13 @@ def _score_reason(runway_fit: float, richness: float, dist: float, forced: bool)
         "Rich atom pool": richness * 0.3,
         "High-distinctiveness atoms": dist * 0.3,
     }
-    return max(contributions, key=contributions.get)
+    top_value = max(contributions.values())
+    if top_value <= 0.0:
+        return "No runway or atom signal yet this quarter"
+    top_keys = [k for k, v in contributions.items() if v == top_value]
+    if len(top_keys) > 1:
+        return "Balanced score (multiple factors tied)"
+    return top_keys[0]
 
 
 def compute_quarter_plan(
@@ -431,10 +448,48 @@ async def fetch_current_version_no(
         )
 
 
+async def fetch_quarter_plan_version(version_id: UUID, pool) -> Optional[dict]:
+    """AA-323 round 6, Phần A — read one SPECIFIC persisted version by its
+    version_id, regardless of approval_status (unlike
+    fetch_approved_quarter_plan, which only ever returns the tenant/quarter's
+    CURRENT approved version). version_id is a global primary key, so this
+    needs no tenant_id/year/quarter from the caller — the row itself carries
+    them (via the quarter_plan join), which is what lets the Preview screen
+    resolve a historical version from just its id in the URL.
+
+    Returns None when the id doesn't exist. Does NOT enforce Gate B (that a
+    version must be 'approved' to feed N6) — same division of responsibility
+    as fetch_approved_quarter_plan not raising: this is a pure read, the
+    caller (admin_atoms.py's preview-slotgrid) decides what a non-approved
+    version means for its use case."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT qp.tenant_id, qp.year, qp.quarter, qpv.version_no,
+                   qpv.payload, qpv.approval_status, qpv.approved_by
+            FROM acp_shared.quarter_plan_version qpv
+            JOIN acp_shared.quarter_plan qp ON qp.plan_id = qpv.plan_id
+            WHERE qpv.version_id = $1
+            """,
+            version_id,
+        )
+    if row is None:
+        return None
+    payload = _parse_jsonb(row["payload"], {})
+    plan = QuarterPlan(**payload)
+    plan.approved = row["approval_status"] == "approved"
+    plan.approved_by = row["approved_by"]
+    return {
+        "tenant_id": row["tenant_id"], "year": row["year"], "quarter": row["quarter"],
+        "version_no": row["version_no"], "approval_status": row["approval_status"],
+        "plan": plan,
+    }
+
+
 __all__ = [
     "compute_quarter_plan", "fetch_atoms_by_trip", "plan_quarter",
     "approve_quarter_plan", "save_quarter_plan_version",
     "approve_quarter_plan_version", "fetch_approved_quarter_plan",
-    "fetch_current_version_no",
+    "fetch_current_version_no", "fetch_quarter_plan_version",
     "QuarterPlanVersionNotFoundError", "QuarterPlanVersionNotPendingError",
 ]

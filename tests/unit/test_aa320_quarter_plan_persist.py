@@ -22,6 +22,7 @@ from services.acp_planning.quarter import (
     approve_quarter_plan_version,
     fetch_approved_quarter_plan,
     fetch_current_version_no,
+    fetch_quarter_plan_version,
     save_quarter_plan_version,
 )
 
@@ -125,6 +126,18 @@ class FakeConn:
             if v["approval_status"] != "approved":
                 return None
             return {"payload": v["payload"], "approved_by": v["approved_by"]}
+        if "SELECT qp.tenant_id, qp.year, qp.quarter, qpv.version_no" in q:
+            (version_id,) = params
+            v = self.db.versions.get(version_id)
+            if v is None:
+                return None
+            tenant_id, year, quarter = next(
+                key for key, pid in self.db.plans.items() if pid == v["plan_id"])
+            return {
+                "tenant_id": tenant_id, "year": year, "quarter": quarter,
+                "version_no": v["version_no"], "payload": v["payload"],
+                "approval_status": v["approval_status"], "approved_by": v["approved_by"],
+            }
         raise AssertionError(f"Unhandled fetchrow query: {q!r}")
 
     async def _fetchval_version_no(self, params):
@@ -338,3 +351,57 @@ class TestFetchCurrentVersionNo:
 
         result = await fetch_current_version_no(plan.tenant_id, plan.year, plan.quarter, pool)
         assert result == 2
+
+
+class TestFetchQuarterPlanVersion:
+    """AA-323 round 6, Phần A — powers the History tab's 'Slot Grid Preview'
+    link, which must resolve one SPECIFIC version_id regardless of whether
+    it's the tenant's current approved version, an old superseded approved
+    one, or still pending/rejected (the router layer, not this function,
+    decides what to do with a non-approved result)."""
+
+    @pytest.mark.asyncio
+    async def test_returns_none_for_unknown_version_id(self, pool):
+        result = await fetch_quarter_plan_version(uuid.uuid4(), pool)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_pending_version_with_approved_false(self, pool):
+        plan = _plan()
+        v1 = await save_quarter_plan_version(plan, pool)
+        result = await fetch_quarter_plan_version(v1, pool)
+        assert result is not None
+        assert result["approval_status"] == "pending"
+        assert result["version_no"] == 1
+        assert result["tenant_id"] == plan.tenant_id
+        assert result["year"] == plan.year
+        assert result["quarter"] == plan.quarter
+        assert result["plan"].approved is False
+
+    @pytest.mark.asyncio
+    async def test_returns_approved_version_with_approved_true(self, pool):
+        plan = _plan()
+        v1 = await save_quarter_plan_version(plan, pool)
+        await approve_quarter_plan_version(v1, "ms.thu", pool)
+        result = await fetch_quarter_plan_version(v1, pool)
+        assert result["approval_status"] == "approved"
+        assert result["plan"].approved is True
+        assert result["plan"].approved_by == "ms.thu"
+
+    @pytest.mark.asyncio
+    async def test_old_version_still_fetchable_after_a_newer_one_is_current(self, pool, db):
+        """Matches round 5's live-DB finding: approving v2 does not revoke v1's
+        approval_status — both must stay individually fetchable by version_id,
+        even though quarter_plan.current_version_id now points at v2."""
+        plan = _plan()
+        v1 = await save_quarter_plan_version(plan, pool)
+        await approve_quarter_plan_version(v1, "ms.thu", pool)
+
+        plan_2 = _plan(destination_shares={"Sapa": 0.5, "Ha Giang": 0.5})
+        v2 = await save_quarter_plan_version(plan_2, pool)
+        await approve_quarter_plan_version(v2, "ms.thu", pool)
+
+        result_v1 = await fetch_quarter_plan_version(v1, pool)
+        assert result_v1["approval_status"] == "approved"
+        assert result_v1["version_no"] == 1
+        assert result_v1["plan"].destination_shares == {"Sapa": 1.0}

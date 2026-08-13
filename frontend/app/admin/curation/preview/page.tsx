@@ -6,8 +6,8 @@
 // (services/acp_planning/) via GET /admin/atoms/preview-slotgrid and
 // renders the resulting SlotGrid.
 
-import { useState, useEffect, useCallback } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useState, useEffect, useCallback } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Grid3x3, RefreshCw, Info, Sparkles, X, ExternalLink } from "lucide-react";
 import AdminSidebar from "../../_components/AdminSidebar";
 import { A, sans, serif, mono, Card, Btn, Badge, LoadingScreen } from "../../_components/adminUi";
@@ -226,8 +226,16 @@ function SlotDetailModal({ slot, onClose }: { slot: Slot; onClose: () => void })
   );
 }
 
-export default function CurationPreviewPage() {
+function CurationPreviewPageInner() {
   const router = useRouter();
+  // AA-323 round 6, Phần A — the History tab's "Slot Grid Preview" link
+  // navigates here with ?version_id=<uuid> to view one specific historical
+  // (always-approved) version instead of the tenant's current one.
+  // useSearchParams(), not a lazy window.location read — same reasoning as
+  // AA-345 round 5 (a client-side router.push() navigation can otherwise
+  // race the URL actually updating).
+  const searchParams = useSearchParams();
+  const versionId = searchParams.get("version_id");
   const [data, setData] = useState<PreviewResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -237,7 +245,10 @@ export default function CurationPreviewPage() {
     setLoading(true);
     setError("");
     try {
-      const res = await fetch("/api/admin/atoms/preview-slotgrid");
+      const url = versionId
+        ? `/api/admin/atoms/preview-slotgrid?version_id=${encodeURIComponent(versionId)}`
+        : "/api/admin/atoms/preview-slotgrid";
+      const res = await fetch(url);
       if (!res.ok) {
         const e = await res.json().catch(() => ({}));
         throw new Error(e.detail || `Failed to load preview (${res.status})`);
@@ -248,7 +259,7 @@ export default function CurationPreviewPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [versionId]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -316,6 +327,10 @@ export default function CurationPreviewPage() {
                   Q{data.quarter_plan.quarter} {data.quarter_plan.year}
                   {data.quarter_plan_version_no !== null && ` · v${data.quarter_plan_version_no}`}
                   {" "}— {data.quarter_plan.trip_ids.length} trips
+                  {/* AA-323 round 6, Phần A — distinguishes a historical version
+                      (reached via ?version_id=) from the tenant's current one, so a
+                      reviewer can't mistake an old version for what's live today. */}
+                  {versionId && <span style={{ color: A.muted, fontWeight: 400 }}> (historical)</span>}
                 </div>
                 <Badge color={data.quarter_plan.approved ? "green" : "red"}>
                   {data.quarter_plan.approved ? `Approved (${data.quarter_plan.approved_by})` : "Not approved (Gate B)"}
@@ -418,5 +433,16 @@ export default function CurationPreviewPage() {
       </main>
       {selectedSlot && <SlotDetailModal slot={selectedSlot} onClose={() => setSelectedSlot(null)} />}
     </div>
+  );
+}
+
+// AA-323 round 6, Phần A — useSearchParams() (used in CurationPreviewPageInner
+// above) requires a Suspense boundary around any component that calls it, per
+// Next.js App Router — same pattern as curation/page.tsx (AA-345 round 5).
+export default function CurationPreviewPage() {
+  return (
+    <Suspense fallback={<LoadingScreen msg="Loading…" />}>
+      <CurationPreviewPageInner />
+    </Suspense>
   );
 }
