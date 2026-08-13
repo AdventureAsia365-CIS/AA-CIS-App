@@ -112,20 +112,31 @@ class TestToursForAtomization:
             "tour_id": str(uuid.uuid4()), "name": "Sapa Valley Trek", "destination": "Vietnam",
             "duration_raw": "3 days", "itinerary_length": 2140, "pct_rank": 0.481,
             "quality_score": None, "trip_url": None, "url_alive": None,
-            "is_published": False, "atom_count": 0,
+            "is_published": False, "atom_count": 0, "atomized_at": None,
         }
         base.update(over)
         return base
 
-    def _mock_conn(self, rows, total):
+    def _mock_conn(self, rows, total, destination_rows=None):
+        # get_tours_for_atomization() calls conn.fetch() TWICE (distinct
+        # destinations, then the paginated rows) — a plain return_value
+        # would make both calls return the same thing, which is fine for
+        # tests that only care about the rows/WHERE-clause (call_args always
+        # reflects the LAST call, i.e. the rows query), but wrong for tests
+        # asserting on distinct_destinations specifically, so side_effect is
+        # used whenever destination_rows is given explicitly.
         conn = AsyncMock()
         conn.fetchval.return_value = total
-        conn.fetch.return_value = rows
+        if destination_rows is not None:
+            conn.fetch.side_effect = [destination_rows, rows]
+        else:
+            conn.fetch.return_value = rows
         return conn
 
-    async def _call(self, request, status="pending", limit=150, offset=0):
+    async def _call(self, request, status="pending", destination="", sort="length_asc", limit=150, offset=0):
         return await admin_pipeline.get_tours_for_atomization(
-            request, status=status, limit=limit, offset=offset, x_admin_secret=_TEST_SECRET,
+            request, status=status, destination=destination, sort=sort,
+            limit=limit, offset=offset, x_admin_secret=_TEST_SECRET,
         )
 
     @pytest.mark.asyncio
@@ -258,6 +269,152 @@ class TestToursForAtomization:
         result = await self._call(request, status="")
 
         assert result["tours"][0]["itinerary_length_percentile"] == 48.1
+
+    # ── AA-345 round 2, Bug 5 (regression) ──────────────────────────────────
+    # The frontend's `if (statusFilter) params.set("status", statusFilter)`
+    # treated status="" (the "All tours" option) as falsy -> "send nothing" ->
+    # silently fell back to this endpoint's own "pending" default. That bug
+    # was entirely client-side (fixed in atomize/page.tsx), but these three
+    # tests re-confirm the SERVER side of all 3 status values explicitly and
+    # independently — not just 1 or 2 as before — so a future regression on
+    # either side gets caught here regardless of which layer breaks.
+    @pytest.mark.asyncio
+    async def test_bug5_status_pending_is_restrictive(self):
+        conn = self._mock_conn([], 0)
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        await self._call(request, status="pending")
+
+        query = conn.fetch.call_args[0][0]
+        assert "WHERE a.tour_id IS NULL" in query
+
+    @pytest.mark.asyncio
+    async def test_bug5_status_atomized_is_restrictive(self):
+        conn = self._mock_conn([], 0)
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        await self._call(request, status="atomized")
+
+        query = conn.fetch.call_args[0][0]
+        assert "WHERE a.tour_id IS NOT NULL" in query
+
+    @pytest.mark.asyncio
+    async def test_bug5_status_all_is_unrestrictive(self):
+        """This is the exact case the regression broke: status="" reaching
+        the backend must produce NO status filter at all, not silently
+        collapse to the "pending" default's WHERE clause."""
+        conn = self._mock_conn([], 0)
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        await self._call(request, status="")
+
+        query = conn.fetch.call_args[0][0]
+        assert "a.tour_id IS NULL" not in query
+        assert "a.tour_id IS NOT NULL" not in query
+
+    # ── Việc 2: destination filter + sort ───────────────────────────────────
+    @pytest.mark.asyncio
+    async def test_destination_filter_adds_where_clause(self):
+        conn = self._mock_conn([], 0)
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        await self._call(request, status="", destination="Japan")
+
+        query, *params = conn.fetch.call_args[0]
+        assert "b.destination = $" in query
+        assert "Japan" in params
+
+    @pytest.mark.asyncio
+    async def test_no_destination_filter_when_empty(self):
+        conn = self._mock_conn([], 0)
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        await self._call(request, status="", destination="")
+
+        query = conn.fetch.call_args[0][0]
+        assert "b.destination = $" not in query
+
+    @pytest.mark.asyncio
+    async def test_distinct_destinations_in_response(self):
+        rows = [self._base_row()]
+        dest_rows = [{"destination": "Japan"}, {"destination": "Laos"}]
+        conn = self._mock_conn(rows, total=1, destination_rows=dest_rows)
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await self._call(request)
+
+        assert result["distinct_destinations"] == ["Japan", "Laos"]
+
+    @pytest.mark.asyncio
+    async def test_sort_length_desc(self):
+        conn = self._mock_conn([], 0)
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        await self._call(request, status="", sort="length_desc")
+
+        query = conn.fetch.call_args[0][0]
+        assert "ORDER BY b.itinerary_length DESC" in query
+
+    @pytest.mark.asyncio
+    async def test_sort_duration_asc(self):
+        conn = self._mock_conn([], 0)
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        await self._call(request, status="", sort="duration_asc")
+
+        query = conn.fetch.call_args[0][0]
+        assert "ORDER BY b.duration_raw ASC" in query
+
+    @pytest.mark.asyncio
+    async def test_invalid_sort_value_not_silently_accepted(self):
+        """A real HTTP request with an unrecognized `sort` never reaches this
+        function body at all — FastAPI's own Query(pattern=...) rejects it
+        with a 422 first. That layer isn't exercised by calling the function
+        directly (no request parsing happens), so this only proves the
+        second line of defense: _SORT_COLUMNS has no silent fallback that
+        would let a bad value slip into raw SQL string interpolation."""
+        conn = self._mock_conn([], 0)
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        with pytest.raises(KeyError):
+            await admin_pipeline.get_tours_for_atomization(
+                request, status="", destination="", sort="not_a_real_sort",
+                limit=150, offset=0, x_admin_secret=_TEST_SECRET,
+            )
+
+    # ── Việc 4: atomized_at timestamp ───────────────────────────────────────
+    @pytest.mark.asyncio
+    async def test_atomized_at_present_when_tour_has_atoms(self):
+        import datetime
+        ts = datetime.datetime(2026, 8, 9, 6, 14, 45, tzinfo=datetime.timezone.utc)
+        rows = [self._base_row(atom_count=5, atomized_at=ts)]
+        conn = self._mock_conn(rows, total=1)
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await self._call(request, status="")
+
+        assert result["tours"][0]["atomized_at"] == ts.isoformat()
+
+    @pytest.mark.asyncio
+    async def test_atomized_at_null_when_never_atomized(self):
+        rows = [self._base_row(atom_count=0, atomized_at=None)]
+        conn = self._mock_conn(rows, total=1)
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await self._call(request, status="")
+
+        assert result["tours"][0]["atomized_at"] is None
 
 
 class TestAdminDecomposeAlias:

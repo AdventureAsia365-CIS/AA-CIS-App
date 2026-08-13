@@ -5,32 +5,33 @@
 // (select tour -> trigger -> atoms appear); /admin/curation (AA-300) owns
 // POST-decompose (curate/star/delete existing atoms). This page never edits
 // tour_atoms rows itself — after a run it links straight to /admin/curation
-// filtered to that tour.
+// filtered to the tours just processed.
 //
 // Patterns reused verbatim from app/admin/curation/page.tsx and
 // app/admin/s1-rewrite/page.tsx (this repo's established shapes): checkbox
 // multi-select via Set<string>, AdminSidebar/adminUi tokens, table not
-// cards, a floating bulk-action bar, FilterBar's dropdown-filter convention,
+// cards, a floating bulk-action bar, FilterBar's dropdown-filter convention
+// (Status/Destination/Sort — same shape as curation's Distinctiveness/Sort),
 // the sticky-header-over-scrollable-main layout, and the "Load more (X / Y)"
 // pagination pattern (LOAD_LIMIT batches, same as curation's).
 //
-// AA-345 fixes round (this file, after live prod verify found real bugs):
-// - Bug 1: decompose was posted to /api/atoms/decompose -> /v1/atoms/decompose,
-//   which sits behind the API Gateway Lambda Authorizer (requires Bearer JWT —
-//   see admin_pipeline.py's AA-230 precedent comment). The admin BFF proxy only
-//   ever sends X-Admin-Secret, so that call 401'd at the gateway itself
-//   ({"message":"Unauthorized"}, the gateway's own denial shape) before ever
-//   reaching the backend. Fixed by calling the new admin-side alias
-//   POST /admin/atoms/decompose instead (routed through the already-working
-//   /api/admin/[...path] proxy — /admin/* is exempt from that authorizer).
-//   The old dedicated /api/atoms/[...path] proxy is now unused and removed.
-// - Bug 2: the old include_atomized boolean toggle could only WIDEN "not yet
-//   atomized" into "everything" — there was no way to see ONLY already-
-//   atomized tours, which is what a "show atomized" click reasonably implies.
-//   Replaced with a real 3-way `status` filter (pending / atomized / all),
-//   backed by GET /admin/tours-for-atomization?status=... (see that endpoint's
-//   docstring for the full server-side change).
-// - UX 3/4: pagination + sticky header, both below.
+// AA-345 fixes round 1 (401 silent-fail, atomized-only filter, pagination,
+// sticky header, i18n) — see git history / AA-345-fixes.md for that round.
+//
+// AA-345 round 2 (this file, after live prod verify on round 1 found a new
+// regression + 4 more asks):
+// - Bug 5 (regression): status="" ("All tours") never reached the backend —
+//   `if (statusFilter) params.set(...)` treated the falsy empty string as
+//   "send nothing", so the request silently fell back to the backend's own
+//   default ("pending"). Always send `status` explicitly now.
+// - Việc 1 (destination blank cells): investigated, not a code bug — see
+//   docs/implementation-notes/AA-345-round2.md for the real live NULL rate.
+// - Việc 2: destination + sort now real filters (dropdowns, not free text).
+// - Việc 3: dropped the inline "(pX)" percentile from the Source Length
+//   column (internal-only number, not something content team acts on) —
+//   kept as a hover tooltip instead of deleting it outright.
+// - Việc 4: "Atomized on <date>" per row + tour_ids (plural) passed to the
+//   Curation deep link so a multi-tour run doesn't get lost in a long list.
 
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
@@ -50,11 +51,28 @@ const LOAD_LIMIT = 150;
 const INLINE_SYNC_MAX = 100;
 
 type StatusFilter = "pending" | "atomized" | "";
+type SortKey = "" | "length_asc" | "length_desc" | "duration_asc" | "duration_desc";
 
 const STATUS_OPTIONS: { label: string; value: StatusFilter }[] = [
   { label: "Not yet atomized", value: "pending" },
   { label: "Already atomized", value: "atomized" },
 ];
+
+// Duration is free text in the source data ("12days 11nights", "DAY TRIP",
+// "40 MIN.", mixed units, embedded newlines — verified live) with no
+// reliable way to parse a comparable day count, so its sort is plain
+// alphabetical on the raw string (documented limitation, pre-approved
+// rather than building a parser — see backend's _SORT_COLUMNS comment).
+const SORT_OPTIONS: { label: string; value: SortKey }[] = [
+  { label: "Source length (shortest first)", value: "length_asc" },
+  { label: "Source length (longest first)", value: "length_desc" },
+  { label: "Duration (A–Z, alphabetical)", value: "duration_asc" },
+  { label: "Duration (Z–A, alphabetical)", value: "duration_desc" },
+];
+
+function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
 
 interface TourRow {
   tour_id: string;
@@ -70,6 +88,7 @@ interface TourRow {
   atom_count: number;
   has_atoms: boolean;
   is_thin: boolean;
+  atomized_at: string | null;
 }
 
 interface DecomposeResult {
@@ -88,10 +107,9 @@ interface DecomposeResult {
 
 // Backend error bodies vary by layer: FastAPI uses {"detail": ...}, this
 // repo's own BFF auth helper uses {"error": ...} (lib/auth-server.ts), and
-// AWS API Gateway's own denials use {"message": ...} (the Bug 1 shape found
-// live — a request that never reached FastAPI at all). Checking all three
-// means a real error message surfaces regardless of which layer produced it,
-// instead of collapsing to a bare status code.
+// AWS API Gateway's own denials use {"message": ...} (the round-1 Bug 1
+// shape — a request that never reached FastAPI at all). Checking all three
+// means a real error message surfaces regardless of which layer produced it.
 async function extractErrorMessage(res: Response, fallback: string): Promise<string> {
   const body = await res.json().catch(() => ({}) as Record<string, unknown>);
   const msg = (body as any).detail || (body as any).message || (body as any).error;
@@ -103,6 +121,7 @@ export default function AtomizePage() {
 
   const [tours, setTours] = useState<TourRow[]>([]);
   const [total, setTotal] = useState(0);
+  const [distinctDestinations, setDistinctDestinations] = useState<string[]>([]);
   // Ref, not state — mirrors curation/page.tsx's own comment: loadTours()
   // below is memoized on filter values only, so a stale-closure bug would
   // silently re-read whatever `offset` was captured at that memoization
@@ -112,6 +131,8 @@ export default function AtomizePage() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("pending");
+  const [destinationFilter, setDestinationFilter] = useState("");
+  const [sortBy, setSortBy] = useState<SortKey>("");
   const [search, setSearch] = useState("");
 
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -120,8 +141,8 @@ export default function AtomizePage() {
   const [resultError, setResultError] = useState("");
   // The inline response only carries a succeeded COUNT, not which tour_ids
   // succeeded (api/routers/v1_atoms.py's _decompose_inline() return shape) —
-  // keep what was submitted so a single-tour run can still deep-link
-  // straight to it in /admin/curation instead of the unfiltered list.
+  // keep what was submitted so the deep link can still point at exactly the
+  // tours from this run instead of the unfiltered list.
   const [submittedTourIds, setSubmittedTourIds] = useState<string[]>([]);
 
   const loadTours = useCallback(async (reset: boolean) => {
@@ -129,13 +150,22 @@ export default function AtomizePage() {
     if (reset) setLoading(true); else setLoadingMore(true);
     setError("");
     try {
-      const params = new URLSearchParams({ limit: String(LOAD_LIMIT), offset: String(nextOffset) });
-      if (statusFilter) params.set("status", statusFilter);
+      // Bug 5 (AA-345 round 2 regression): statusFilter="" (the "All tours"
+      // option) is a real, meaningful value here — unlike e.g. curation's
+      // distinctiveness filter, this endpoint's default when the param is
+      // OMITTED is "pending", not "all" (see GET /admin/tours-for-atomization's
+      // docstring). A prior `if (statusFilter) params.set(...)` treated the
+      // falsy empty string as "send nothing", so "All tours" silently fell
+      // back to "pending" — status is now always sent explicitly.
+      const params = new URLSearchParams({ limit: String(LOAD_LIMIT), offset: String(nextOffset), status: statusFilter });
+      if (destinationFilter) params.set("destination", destinationFilter);
+      if (sortBy) params.set("sort", sortBy);
       const res = await fetch(`/api/admin/tours-for-atomization?${params}`);
       if (!res.ok) throw new Error(await extractErrorMessage(res, "Failed to load tours"));
       const data = await res.json();
       setTours(prev => (reset ? data.tours : [...prev, ...data.tours]));
       setTotal(data.total);
+      setDistinctDestinations(data.distinct_destinations || []);
       offsetRef.current = nextOffset + data.tours.length;
     } catch (err: any) {
       setError(err.message || "Failed to load tours.");
@@ -143,7 +173,7 @@ export default function AtomizePage() {
       setLoading(false);
       setLoadingMore(false);
     }
-  }, [statusFilter]);
+  }, [statusFilter, destinationFilter, sortBy]);
 
   useEffect(() => { loadTours(true); }, [loadTours]);
 
@@ -154,10 +184,10 @@ export default function AtomizePage() {
       t.name.toLowerCase().includes(q) || (t.destination || "").toLowerCase().includes(q));
   }, [tours, search]);
 
-  // Already-atomized rows are visible (under the "Already atomized" or "All"
-  // filter) but not selectable — re-decompose is a safe, idempotent no-op
-  // (source_hash match in v1_atoms.py), but letting them into the selection
-  // just invites accidental wasted clicks on tours that are done.
+  // Already-atomized rows are visible (under the "Already atomized" or "All
+  // tours" filter) but not selectable — re-decompose is a safe, idempotent
+  // no-op (source_hash match in v1_atoms.py), but letting them into the
+  // selection just invites accidental wasted clicks on tours that are done.
   function toggleRow(tourId: string, selectable: boolean) {
     if (!selectable) return;
     setSelectedIds(prev => {
@@ -190,7 +220,7 @@ export default function AtomizePage() {
       const data: DecomposeResult = await res.json();
       setResult(data);
       setSelectedIds(new Set());
-      loadTours(true); // refresh atom_count/has_atoms for the tours that just ran
+      loadTours(true); // refresh atom_count/has_atoms/atomized_at for the tours that just ran
     } catch (err: any) {
       setResultError(err.message || "Atomization failed. Please try again.");
     } finally {
@@ -239,6 +269,18 @@ export default function AtomizePage() {
                 allLabel: "All tours",
                 options: STATUS_OPTIONS,
                 onChange: v => setStatusFilter(v as StatusFilter),
+              },
+              {
+                label: "Destination", value: destinationFilter, current: destinationFilter,
+                allLabel: "All destinations",
+                options: distinctDestinations.map(d => ({ label: d, value: d })),
+                onChange: setDestinationFilter,
+              },
+              {
+                label: "Sort", value: sortBy, current: sortBy,
+                allLabel: "Shortest source first (default)",
+                options: SORT_OPTIONS,
+                onChange: v => setSortBy(v as SortKey),
               },
             ]}
           />
@@ -292,11 +334,7 @@ export default function AtomizePage() {
                   )}
                   <Btn
                     size="sm" variant="secondary"
-                    onClick={() => router.push(
-                      submittedTourIds.length === 1
-                        ? `/admin/curation?tour_id=${submittedTourIds[0]}`
-                        : "/admin/curation",
-                    )}
+                    onClick={() => router.push(`/admin/curation?tour_ids=${submittedTourIds.join(",")}`)}
                   >
                     <ExternalLink size={12} /> View in Atom Curation
                   </Btn>
@@ -361,19 +399,25 @@ export default function AtomizePage() {
                         </td>
                         <td style={TD}>{t.destination || "—"}</td>
                         <td style={TD}>{t.duration_raw || "—"}</td>
-                        <td style={TD}>
+                        <td style={TD} title={`Percentile within all 763 tours: p${t.itinerary_length_percentile}`}>
                           {t.itinerary_length.toLocaleString()} chars
-                          <span style={{ color: A.muted2, marginLeft: 4 }}>(p{t.itinerary_length_percentile})</span>
                         </td>
                         <td style={TD}>
-                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                            {t.is_published && <Badge color="green">published</Badge>}
-                            {t.has_atoms ? (
-                              <Badge color="blue">{t.atom_count} atoms</Badge>
-                            ) : (
-                              <Badge color="gray">not atomized</Badge>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                              {t.is_published && <Badge color="green">published</Badge>}
+                              {t.has_atoms ? (
+                                <Badge color="blue">{t.atom_count} atoms</Badge>
+                              ) : (
+                                <Badge color="gray">not atomized</Badge>
+                              )}
+                              {t.is_thin && <Badge color="red">THIN</Badge>}
+                            </div>
+                            {t.atomized_at && (
+                              <span style={{ fontSize: 11, color: A.muted2 }}>
+                                Atomized {formatDate(t.atomized_at)}
+                              </span>
                             )}
-                            {t.is_thin && <Badge color="red">THIN</Badge>}
                           </div>
                         </td>
                       </tr>

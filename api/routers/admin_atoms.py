@@ -107,6 +107,7 @@ _LIST_SELECT_COLS = """
 async def list_atoms(
     request: Request,
     tour_id: Optional[str] = Query(None),
+    tour_ids: Optional[str] = Query(None),
     distinctiveness: Optional[str] = Query(None, pattern="^(HIGH|MED|LOW)$"),
     unreviewed_only: bool = Query(False),
     thin_only: bool = Query(False),
@@ -141,7 +142,16 @@ async def list_atoms(
         params.append(value)
         clauses.append(clause.format(n=len(params)))
 
-    if tour_id:
+    # AA-345 round 2, Việc 4: tour_ids (comma-separated, plural) is the deep
+    # link from /admin/atomize after a multi-tour decompose run — lets the
+    # curation page filter to exactly the tours just processed instead of
+    # losing them in a long list. tour_id (singular) is the older single-tour
+    # link, kept unchanged for backward compat; tour_ids wins if both given.
+    if tour_ids:
+        id_list = [t.strip() for t in tour_ids.split(",") if t.strip()]
+        if id_list:
+            _add("ta.tour_id = ANY(${n}::uuid[])", id_list)
+    elif tour_id:
         _add("ta.tour_id = ${n}::uuid", tour_id)
     if distinctiveness:
         _add("ta.distinctiveness = ${n}", distinctiveness)
@@ -209,7 +219,8 @@ async def atoms_summary(
         by_tour_rows = await conn.fetch("""
             SELECT ta.tour_id, rt.src_name AS tour_name,
                    count(*) AS atom_count,
-                   count(*) FILTER (WHERE ta.updated_at = ta.created_at) AS unreviewed_count
+                   count(*) FILTER (WHERE ta.updated_at = ta.created_at) AS unreviewed_count,
+                   MAX(ta.created_at) AS atomized_at
             FROM acp_contract.tour_atoms ta
             JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = ta.tour_id
             WHERE NOT ta.deleted AND NOT ta.is_empty_marker
@@ -227,6 +238,10 @@ async def atoms_summary(
             "tour_id": str(r["tour_id"]), "tour_name": r["tour_name"],
             "atom_count": r["atom_count"], "is_thin": r["atom_count"] < THIN_TRIP_ATOM_MIN,
             "unreviewed_count": r["unreviewed_count"],
+            # AA-345 round 2, Việc 4: MAX(created_at) — same "last touched"
+            # choice as GET /admin/tours-for-atomization's atomized_at, for
+            # the new "Newest first" sort + section-header date display.
+            "atomized_at": r["atomized_at"].isoformat() if r["atomized_at"] else None,
         }
         for r in by_tour_rows
     ]

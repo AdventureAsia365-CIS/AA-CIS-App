@@ -1686,10 +1686,28 @@ async def get_all_tours(request: Request, x_admin_secret: str = Header(None)):
 # above is NOT reused — it serves S1 rewrite (rewrite_count/pipeline_status), a
 # different purpose, per issue's own explicit instruction not to overload it.
 
+_SORT_COLUMNS = {
+    "length_asc":    "b.itinerary_length ASC",
+    "length_desc":   "b.itinerary_length DESC",
+    # duration_raw is free text ("12days 11nights", "DAY TRIP", "40 MIN.",
+    # embedded newlines — verified live, AA-345 round 2 Việc 2) with mixed
+    # units (days/hours/minutes) and no consistent format, so there is no
+    # reliable way to parse it into a comparable day count. Sorting is
+    # plain alphabetical on the raw string — "10 DAYS" sorts before
+    # "9 days" because '1' < '9' as characters, not because 10 < 9. This
+    # limitation is deliberate (explicitly pre-approved instead of building
+    # a parser), not a bug.
+    "duration_asc":  "b.duration_raw ASC NULLS LAST",
+    "duration_desc": "b.duration_raw DESC NULLS LAST",
+}
+
+
 @router.get("/tours-for-atomization")
 async def get_tours_for_atomization(
     request: Request,
     status: str = Query("pending", pattern="^(pending|atomized|)$"),
+    destination: str = Query(""),
+    sort: str = Query("length_asc", pattern="^(length_asc|length_desc|duration_asc|duration_desc)$"),
     limit: int = Query(150, ge=1, le=500),
     offset: int = Query(0, ge=0),
     x_admin_secret: str = Header(None),
@@ -1699,7 +1717,7 @@ async def get_tours_for_atomization(
     status filter is applied, so the number stays comparable across all three
     views instead of shifting under the user's feet when the filter changes.
 
-    `status` (AA-345 fixes round — replaces the old include_atomized bool,
+    `status` (AA-345 fixes round 1 — replaces the old include_atomized bool,
     which could only widen "pending" into "everything" and had no way to
     show ONLY already-atomized tours, the exact gap a live prod bug report
     flagged):
@@ -1709,6 +1727,20 @@ async def get_tours_for_atomization(
       - "atomized" — atom_count > 0 only.
       - ""         — no filter, every tour in the 763-floor.
 
+    `destination` (round 2, Việc 2) — exact match against v_trip_registry's
+    destination column (only 13 distinct values live, verified — a plain
+    dropdown, not a search box). `distinct_destinations` in the response is
+    the full list across the whole 763-floor regardless of the current
+    status/destination filter, so the dropdown's own option list doesn't
+    shrink out from under the user as they filter.
+
+    `atomized_at` (round 2, Việc 4) — MAX(tour_atoms.created_at) per tour.
+    MAX, not MIN: a tour can accumulate atoms across more than one decompose
+    run over time (idempotency lets a later run with changed source ADD
+    atoms rather than replace), and "when was this last touched" is the more
+    useful signal for "Atomized on <date>" than "when was the first atom
+    ever inserted".
+
     Paginated (limit/offset, same shape as GET /admin/atoms in admin_atoms.py)
     — `total` reflects the full filtered count via a separate COUNT(*), not
     just this page's row count, so the frontend can render "Showing X of Y"
@@ -1717,11 +1749,18 @@ async def get_tours_for_atomization(
     pool = request.app.state.pool
 
     if status == "pending":
-        where_clause = "WHERE a.tour_id IS NULL"
+        status_clause = "a.tour_id IS NULL"
     elif status == "atomized":
-        where_clause = "WHERE a.tour_id IS NOT NULL"
+        status_clause = "a.tour_id IS NOT NULL"
     else:
-        where_clause = ""
+        status_clause = ""
+
+    params: list = []
+    clauses = [c for c in [status_clause] if c]
+    if destination:
+        params.append(destination)
+        clauses.append(f"b.destination = ${len(params)}")
+    where_clause = ("WHERE " + " AND ".join(clauses)) if clauses else ""
 
     from_sql = f"""
         FROM base b
@@ -1739,23 +1778,30 @@ async def get_tours_for_atomization(
             FROM acp_contract.v_trip_registry vtr
         ),
         atoms AS (
-            SELECT tour_id, COUNT(*) AS atom_count
+            SELECT tour_id, COUNT(*) AS atom_count, MAX(created_at) AS atomized_at
             FROM acp_contract.tour_atoms
             WHERE NOT deleted AND NOT is_empty_marker
             GROUP BY tour_id
         )
     """
+    order_sql = _SORT_COLUMNS[sort]
     async with pool.acquire() as conn:
-        total = await conn.fetchval(cte_sql + "SELECT count(*) " + from_sql)
+        total = await conn.fetchval(cte_sql + "SELECT count(*) " + from_sql, *params)
+        distinct_destinations = await conn.fetch("""
+            SELECT DISTINCT destination FROM acp_contract.v_trip_registry
+            WHERE destination IS NOT NULL AND TRIM(destination) <> ''
+            ORDER BY destination
+        """)
         rows = await conn.fetch(
             cte_sql + f"""
                 SELECT b.id::text AS tour_id, b.name, b.destination, b.duration_raw,
                        b.itinerary_length, b.pct_rank, b.quality_score, b.trip_url,
-                       b.url_alive, b.is_published, COALESCE(a.atom_count, 0) AS atom_count
+                       b.url_alive, b.is_published, COALESCE(a.atom_count, 0) AS atom_count,
+                       a.atomized_at
                 {from_sql}
-                ORDER BY b.itinerary_length ASC
-                LIMIT $1 OFFSET $2
-            """, limit, offset,
+                ORDER BY {order_sql}
+                LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
+            """, *params, limit, offset,
         )
 
     tours = []
@@ -1776,9 +1822,13 @@ async def get_tours_for_atomization(
             "atom_count":                  atom_count,
             "has_atoms":                   has_atoms,
             "is_thin":                     has_atoms and atom_count < THIN_TRIP_ATOM_MIN,
+            "atomized_at":                 r["atomized_at"].isoformat() if r["atomized_at"] else None,
         })
 
-    return {"tours": tours, "total": total, "limit": limit, "offset": offset}
+    return {
+        "tours": tours, "total": total, "limit": limit, "offset": offset,
+        "distinct_destinations": [r["destination"] for r in distinct_destinations],
+    }
 
 
 # ── POST /admin/atoms/decompose (admin alias — same shape as AA-230's

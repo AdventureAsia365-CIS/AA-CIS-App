@@ -97,7 +97,7 @@ class TestListAtoms:
         request = _make_request(pool)
 
         result = await admin_atoms.list_atoms(
-            request, tour_id=None, distinctiveness=None, unreviewed_only=False,
+            request, tour_id=None, tour_ids=None, distinctiveness=None, unreviewed_only=False,
             thin_only=False, include_deleted=False, limit=50, offset=0,
             x_admin_secret=_TEST_SECRET,
         )
@@ -116,7 +116,7 @@ class TestListAtoms:
         request = _make_request(pool)
 
         result = await admin_atoms.list_atoms(
-            request, tour_id=None, distinctiveness=None, unreviewed_only=False,
+            request, tour_id=None, tour_ids=None, distinctiveness=None, unreviewed_only=False,
             thin_only=False, include_deleted=False, limit=50, offset=0,
             x_admin_secret=_TEST_SECRET,
         )
@@ -132,7 +132,7 @@ class TestListAtoms:
         request = _make_request(pool)
 
         await admin_atoms.list_atoms(
-            request, tour_id=None, distinctiveness=None, unreviewed_only=True,
+            request, tour_id=None, tour_ids=None, distinctiveness=None, unreviewed_only=True,
             thin_only=False, include_deleted=False, limit=50, offset=0,
             x_admin_secret=_TEST_SECRET,
         )
@@ -149,7 +149,7 @@ class TestListAtoms:
         from services.acp_shared.atom_constants import THIN_TRIP_ATOM_MIN
 
         await admin_atoms.list_atoms(
-            request, tour_id=None, distinctiveness=None, unreviewed_only=False,
+            request, tour_id=None, tour_ids=None, distinctiveness=None, unreviewed_only=False,
             thin_only=True, include_deleted=False, limit=50, offset=0,
             x_admin_secret=_TEST_SECRET,
         )
@@ -165,7 +165,7 @@ class TestListAtoms:
         request = _make_request(pool)
 
         await admin_atoms.list_atoms(
-            request, tour_id=None, distinctiveness="HIGH", unreviewed_only=False,
+            request, tour_id=None, tour_ids=None, distinctiveness="HIGH", unreviewed_only=False,
             thin_only=False, include_deleted=False, limit=50, offset=0,
             x_admin_secret=_TEST_SECRET,
         )
@@ -181,7 +181,7 @@ class TestListAtoms:
         request = _make_request(pool)
 
         await admin_atoms.list_atoms(
-            request, tour_id=None, distinctiveness=None, unreviewed_only=False,
+            request, tour_id=None, tour_ids=None, distinctiveness=None, unreviewed_only=False,
             thin_only=False, include_deleted=False, limit=50, offset=0,
             x_admin_secret=_TEST_SECRET,
         )
@@ -196,12 +196,65 @@ class TestListAtoms:
         request = _make_request(pool)
 
         await admin_atoms.list_atoms(
-            request, tour_id=None, distinctiveness=None, unreviewed_only=False,
+            request, tour_id=None, tour_ids=None, distinctiveness=None, unreviewed_only=False,
             thin_only=False, include_deleted=True, limit=50, offset=0,
             x_admin_secret=_TEST_SECRET,
         )
         query = conn.fetch.call_args[0][0]
         assert "NOT ta.is_empty_marker" in query
+
+    # ── AA-345 round 2, Việc 4: tour_ids (plural) deep link ─────────────────
+    @pytest.mark.asyncio
+    async def test_tour_ids_plural_filters_to_exact_set(self):
+        conn = AsyncMock()
+        conn.fetch.return_value = []
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+        ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+
+        await admin_atoms.list_atoms(
+            request, tour_id=None, tour_ids=",".join(ids), distinctiveness=None,
+            unreviewed_only=False, thin_only=False, include_deleted=False,
+            limit=50, offset=0, x_admin_secret=_TEST_SECRET,
+        )
+        query, *params = conn.fetch.call_args[0]
+        assert "ta.tour_id = ANY(" in query
+        assert ids in params
+
+    @pytest.mark.asyncio
+    async def test_tour_ids_plural_wins_over_singular_tour_id(self):
+        conn = AsyncMock()
+        conn.fetch.return_value = []
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+        ids = [str(uuid.uuid4())]
+
+        await admin_atoms.list_atoms(
+            request, tour_id="some-other-id", tour_ids=ids[0], distinctiveness=None,
+            unreviewed_only=False, thin_only=False, include_deleted=False,
+            limit=50, offset=0, x_admin_secret=_TEST_SECRET,
+        )
+        query = conn.fetch.call_args[0][0]
+        assert "ta.tour_id = ANY(" in query
+        assert "ta.tour_id = $" not in query
+
+    @pytest.mark.asyncio
+    async def test_singular_tour_id_still_works_when_tour_ids_absent(self):
+        """Backward compat — the older single-tour deep link (still used
+        elsewhere) must keep working unchanged."""
+        conn = AsyncMock()
+        conn.fetch.return_value = []
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        await admin_atoms.list_atoms(
+            request, tour_id="abc-123", tour_ids=None, distinctiveness=None,
+            unreviewed_only=False, thin_only=False, include_deleted=False,
+            limit=50, offset=0, x_admin_secret=_TEST_SECRET,
+        )
+        query, *params = conn.fetch.call_args[0]
+        assert "ta.tour_id = $1::uuid" in query
+        assert "abc-123" in params
 
 
 class TestPatchAtom:
@@ -302,9 +355,9 @@ class TestAtomsSummary:
             [{"distinctiveness": "LOW", "c": 230}, {"distinctiveness": "HIGH", "c": 5}],
             [
                 {"tour_id": uuid.uuid4(), "tour_name": "Sapa Valley Trek",
-                 "atom_count": 4, "unreviewed_count": 4},
+                 "atom_count": 4, "unreviewed_count": 4, "atomized_at": None},
                 {"tour_id": uuid.uuid4(), "tour_name": "Mongolia Gobi",
-                 "atom_count": 12, "unreviewed_count": 0},
+                 "atom_count": 12, "unreviewed_count": 0, "atomized_at": None},
             ],
         ]
         conn.fetchrow.return_value = {"total": 235, "reviewed": 12}
@@ -325,9 +378,9 @@ class TestAtomsSummary:
             [],
             [
                 {"tour_id": uuid.uuid4(), "tour_name": "Ha Giang Loop",
-                 "atom_count": 4, "unreviewed_count": 4},  # < THIN_TRIP_ATOM_MIN=5 -> thin
+                 "atom_count": 4, "unreviewed_count": 4, "atomized_at": None},  # < THIN_TRIP_ATOM_MIN=5 -> thin
                 {"tour_id": uuid.uuid4(), "tour_name": "Mongolia Gobi",
-                 "atom_count": 12, "unreviewed_count": 0},  # not thin
+                 "atom_count": 12, "unreviewed_count": 0, "atomized_at": None},  # not thin
             ],
         ]
         conn.fetchrow.return_value = {"total": 16, "reviewed": 0}
@@ -340,6 +393,43 @@ class TestAtomsSummary:
         assert by_name["Ha Giang Loop"]["atom_count"] < THIN_TRIP_ATOM_MIN
         assert by_name["Ha Giang Loop"]["is_thin"] is True
         assert by_name["Mongolia Gobi"]["is_thin"] is False
+
+    @pytest.mark.asyncio
+    async def test_atomized_at_isoformatted_for_newest_first_sort(self):
+        """AA-345 round 2, Việc 4: 'Newest first' sort on the curation page
+        reads by_tour[i].atomized_at — must be a JSON-safe ISO string, not a
+        raw datetime (which json.dumps can't serialize as-is)."""
+        import datetime
+        ts = datetime.datetime(2026, 8, 9, 6, 14, 45, tzinfo=datetime.timezone.utc)
+        conn = AsyncMock()
+        conn.fetch.side_effect = [
+            [],
+            [{"tour_id": uuid.uuid4(), "tour_name": "Classic Laos",
+              "atom_count": 48, "unreviewed_count": 0, "atomized_at": ts}],
+        ]
+        conn.fetchrow.return_value = {"total": 48, "reviewed": 48}
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await admin_atoms.atoms_summary(request, x_admin_secret=_TEST_SECRET)
+
+        assert result["by_tour"][0]["atomized_at"] == ts.isoformat()
+
+    @pytest.mark.asyncio
+    async def test_atomized_at_null_when_no_atoms_have_a_timestamp(self):
+        conn = AsyncMock()
+        conn.fetch.side_effect = [
+            [],
+            [{"tour_id": uuid.uuid4(), "tour_name": "Untouched Tour",
+              "atom_count": 0, "unreviewed_count": 0, "atomized_at": None}],
+        ]
+        conn.fetchrow.return_value = {"total": 0, "reviewed": 0}
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await admin_atoms.atoms_summary(request, x_admin_secret=_TEST_SECRET)
+
+        assert result["by_tour"][0]["atomized_at"] is None
 
     @pytest.mark.asyncio
     async def test_wrong_secret_rejected(self):
