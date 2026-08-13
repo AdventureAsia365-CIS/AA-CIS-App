@@ -197,6 +197,14 @@ async def list_tenants(
     request: Request,
     x_admin_secret: str = Header(None),
 ):
+    """AA-389 (reopened): this endpoint used to return active tenants only (`WHERE t.is_active =
+    true`), so a brand-new tenant — is_active=false by design until Gate A approves it — vanished
+    from the UI the instant it was created, with no way to click back into it and finish
+    onboarding. Now also returns `pending_tenants` (is_active=false) alongside the unchanged
+    `tenants` (active) list, each carrying its real onboarding progress (seeded / angle_assigned /
+    gate_a_status) read from acp_shared.tenant_atom_state + tenant_onboarding — not inferred from
+    is_active alone, since is_active stays false for the entire pending window regardless of which
+    step the tenant is actually on."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
     async with pool.acquire() as conn:
@@ -232,6 +240,22 @@ async def list_tenants(
                      u.api_calls_used, u.quota_tours_pct, u.quota_calls_pct,
                      u.tours_overage, u.overage_usd, u.llm_cost_usd,
                      u.tours_quota_monthly, u.api_calls_quota_monthly, u.price_usd_monthly
+            ORDER BY t.created_at
+        """)
+
+        pending_rows = await conn.fetch("""
+            SELECT
+                t.tenant_id, t.name, t.slug, t.plan_tier::text, t.posts_per_week,
+                t.country, t.created_at,
+                COUNT(tas.tour_id)                        AS seeded_tour_count,
+                BOOL_OR(tas.assigned_angle IS NOT NULL)    AS angle_assigned,
+                to_.approval_status
+            FROM shared.tenants t
+            LEFT JOIN acp_shared.tenant_atom_state tas ON tas.tenant_id = t.tenant_id
+            LEFT JOIN acp_shared.tenant_onboarding to_ ON to_.tenant_id = t.tenant_id
+            WHERE t.is_active = false
+            GROUP BY t.tenant_id, t.name, t.slug, t.plan_tier, t.posts_per_week, t.country,
+                     t.created_at, to_.approval_status
             ORDER BY t.created_at
         """)
     return {
@@ -272,6 +296,25 @@ async def list_tenants(
             for r in rows
         ],
         "total": len(rows),
+        "pending_tenants": [
+            {
+                "tenant_id":      str(r["tenant_id"]),
+                "name":           r["name"],
+                "slug":           r["slug"],
+                "plan_tier":      str(r["plan_tier"]),
+                "posts_per_week": r["posts_per_week"],
+                "country":        r["country"],
+                "created_at":     r["created_at"].isoformat(),
+                "onboarding": {
+                    "seeded":            r["seeded_tour_count"] > 0,
+                    "seeded_tour_count": r["seeded_tour_count"],
+                    "angle_assigned":    bool(r["angle_assigned"]),
+                    "gate_a_status":     r["approval_status"] or "not_started",
+                },
+            }
+            for r in pending_rows
+        ],
+        "pending_total": len(pending_rows),
     }
 
 # ── GET /admin/tenants/{id}/usage — Billing metrics ──────────────────────────
@@ -360,6 +403,26 @@ async def update_tenant(
             """, tenant_id, plan_tier, rpm)
 
         if is_active is not None:
+            # AA-389: this generic route used to be able to activate a tenant that never went
+            # through Gate A (no seed-atoms, no assigned_angle, no approval) — a one-click bypass
+            # of the "REQUIRED/NEVER-auto" guarantee gate-a/approve exists to enforce. Deactivation
+            # (is_active=false, e.g. suspending an existing tenant) stays unrestricted; activation
+            # is only allowed here for a tenant that has ALREADY cleared Gate A once (tenant_
+            # onboarding.approval_status='approved') — that's a legitimate reactivate-after-suspend,
+            # not a bypass, since Gate A's own checks (angle assigned, onboarding reviewed) were
+            # already satisfied. A tenant with no onboarding row, or still 'pending', must go
+            # through POST .../gate-a/approve instead.
+            if is_active:
+                approval_status = await conn.fetchval(
+                    "SELECT approval_status FROM acp_shared.tenant_onboarding WHERE tenant_id = $1",
+                    tenant_id,
+                )
+                if approval_status != "approved":
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Cannot activate a tenant that has not completed Gate A approval — "
+                               "use POST /tenants/{tenant_id}/gate-a/approve.",
+                    )
             await conn.execute("""
                 UPDATE shared.tenants
                 SET is_active = $2, updated_at = NOW()
