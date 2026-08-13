@@ -24,7 +24,7 @@ const CONTENT_NAV = [
   { href: "/admin/review",         icon: <ClipboardList size={15} />, label: "Review Queue" },
   { href: "/admin/brand",          icon: <Palette size={15} />,       label: "Brand Identity" },
   { href: "/admin/master-content", icon: <Library size={15} />,       label: "Master Content" },
-  { href: "/admin/atomize",        icon: <Boxes size={15} />,         label: "Atom hoá (N2)" },
+  { href: "/admin/atomize",        icon: <Boxes size={15} />,         label: "Atomize (N2)" },
   { href: "/admin/curation",       icon: <Sparkles size={15} />,      label: "Atom Curation" },
 ];
 

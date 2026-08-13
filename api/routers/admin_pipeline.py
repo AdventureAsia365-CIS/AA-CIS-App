@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 
 from api.routers.admin import verify_admin_secret
+from api.routers.v1_atoms import DecomposeRequest as _V1DecomposeRequest
 from api.routers.v1_pipeline import _rewrite_tour
 from services.acp_shared.atom_constants import THIN_TRIP_ATOM_MIN
 
@@ -1688,48 +1689,74 @@ async def get_all_tours(request: Request, x_admin_secret: str = Header(None)):
 @router.get("/tours-for-atomization")
 async def get_tours_for_atomization(
     request: Request,
-    include_atomized: bool = Query(False),
+    status: str = Query("pending", pattern="^(pending|atomized|)$"),
+    limit: int = Query(150, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     x_admin_secret: str = Header(None),
 ):
     """Tours available to run N2 decompose on. Percentile is computed over the
     FULL 763-tour floor (matches AA-345 STEP 0's percentile method) before the
-    include_atomized filter is applied, so the number stays comparable across
-    both views instead of shifting under the user's feet when they toggle it.
+    status filter is applied, so the number stays comparable across all three
+    views instead of shifting under the user's feet when the filter changes.
 
-    Defaults to EXCLUDING tours that already have atoms (atom_count=0) — the
-    145-ish already-atomized tours are done, re-selecting them by accident just
-    re-runs a same-hash no-op (idempotent skip, v1_atoms.py's source_hash
-    check) but wastes a click; pass include_atomized=true to see them anyway
-    with their real atom_count, e.g. to sanity-check the THIN badge."""
+    `status` (AA-345 fixes round — replaces the old include_atomized bool,
+    which could only widen "pending" into "everything" and had no way to
+    show ONLY already-atomized tours, the exact gap a live prod bug report
+    flagged):
+      - "pending"  (default) — atom_count = 0. Re-selecting a done tour by
+        accident just re-runs a same-hash no-op (idempotent skip, v1_atoms.py's
+        source_hash check) but wastes a click, so this is the default view.
+      - "atomized" — atom_count > 0 only.
+      - ""         — no filter, every tour in the 763-floor.
+
+    Paginated (limit/offset, same shape as GET /admin/atoms in admin_atoms.py)
+    — `total` reflects the full filtered count via a separate COUNT(*), not
+    just this page's row count, so the frontend can render "Showing X of Y"
+    and a Load More button against the true total."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
 
-    where_clause = "" if include_atomized else "WHERE a.tour_id IS NULL"
+    if status == "pending":
+        where_clause = "WHERE a.tour_id IS NULL"
+    elif status == "atomized":
+        where_clause = "WHERE a.tour_id IS NOT NULL"
+    else:
+        where_clause = ""
+
+    from_sql = f"""
+        FROM base b
+        LEFT JOIN atoms a ON a.tour_id = b.id
+        {where_clause}
+    """
+    cte_sql = """
+        WITH base AS (
+            SELECT
+                vtr.id, vtr.name, vtr.destination, vtr.duration_raw,
+                LENGTH(vtr.itinerary_source) AS itinerary_length,
+                PERCENT_RANK() OVER (ORDER BY LENGTH(vtr.itinerary_source)) AS pct_rank,
+                vtr.quality_score, vtr.trip_url, vtr.url_alive,
+                (vtr.aa_name IS NOT NULL) AS is_published
+            FROM acp_contract.v_trip_registry vtr
+        ),
+        atoms AS (
+            SELECT tour_id, COUNT(*) AS atom_count
+            FROM acp_contract.tour_atoms
+            WHERE NOT deleted AND NOT is_empty_marker
+            GROUP BY tour_id
+        )
+    """
     async with pool.acquire() as conn:
-        rows = await conn.fetch(f"""
-            WITH base AS (
-                SELECT
-                    vtr.id, vtr.name, vtr.destination, vtr.duration_raw,
-                    LENGTH(vtr.itinerary_source) AS itinerary_length,
-                    PERCENT_RANK() OVER (ORDER BY LENGTH(vtr.itinerary_source)) AS pct_rank,
-                    vtr.quality_score, vtr.trip_url, vtr.url_alive,
-                    (vtr.aa_name IS NOT NULL) AS is_published
-                FROM acp_contract.v_trip_registry vtr
-            ),
-            atoms AS (
-                SELECT tour_id, COUNT(*) AS atom_count
-                FROM acp_contract.tour_atoms
-                WHERE NOT deleted AND NOT is_empty_marker
-                GROUP BY tour_id
-            )
-            SELECT b.id::text AS tour_id, b.name, b.destination, b.duration_raw,
-                   b.itinerary_length, b.pct_rank, b.quality_score, b.trip_url,
-                   b.url_alive, b.is_published, COALESCE(a.atom_count, 0) AS atom_count
-            FROM base b
-            LEFT JOIN atoms a ON a.tour_id = b.id
-            {where_clause}
-            ORDER BY b.itinerary_length ASC
-        """)
+        total = await conn.fetchval(cte_sql + "SELECT count(*) " + from_sql)
+        rows = await conn.fetch(
+            cte_sql + f"""
+                SELECT b.id::text AS tour_id, b.name, b.destination, b.duration_raw,
+                       b.itinerary_length, b.pct_rank, b.quality_score, b.trip_url,
+                       b.url_alive, b.is_published, COALESCE(a.atom_count, 0) AS atom_count
+                {from_sql}
+                ORDER BY b.itinerary_length ASC
+                LIMIT $1 OFFSET $2
+            """, limit, offset,
+        )
 
     tours = []
     for r in rows:
@@ -1751,7 +1778,31 @@ async def get_tours_for_atomization(
             "is_thin":                     has_atoms and atom_count < THIN_TRIP_ATOM_MIN,
         })
 
-    return {"tours": tours, "total": len(tours)}
+    return {"tours": tours, "total": total, "limit": limit, "offset": offset}
+
+
+# ── POST /admin/atoms/decompose (admin alias — same shape as AA-230's
+# review-queue aliases above) ─────────────────────────────────────────────────
+# /v1/atoms/decompose sits behind the API Gateway Lambda Authorizer (requires a
+# Bearer JWT) — found live in production (AA-345 fixes round): the admin BFF
+# proxy only ever sends X-Admin-Secret, so that call 401s at the gateway
+# itself ({"message":"Unauthorized"}, the API Gateway's own denial shape, not
+# a FastAPI response — never reaches _get_tenant()/decompose() at all). /admin/*
+# is exempt from the authorizer (see AA-230 comment above), so — same fix
+# shape — expose the same operation here and reuse v1_atoms.decompose()
+# verbatim. tenant=None because decompose() never reads it (only used by
+# _get_tenant's Depends() for FastAPI-native auth, irrelevant when called
+# directly like this).
+
+@router.post("/atoms/decompose", status_code=202)
+async def admin_decompose_atoms(
+    body: _V1DecomposeRequest,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    from api.routers.v1_atoms import decompose
+    return await decompose(body=body, request=request, tenant=None)
 
 
 # ── GET /admin/tours/export ──────────────────────────────────────────────────
