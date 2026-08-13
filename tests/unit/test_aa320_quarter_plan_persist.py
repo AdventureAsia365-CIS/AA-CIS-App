@@ -21,6 +21,7 @@ from services.acp_planning.quarter import (
     QuarterPlanVersionNotPendingError,
     approve_quarter_plan_version,
     fetch_approved_quarter_plan,
+    fetch_current_version_no,
     save_quarter_plan_version,
 )
 
@@ -100,6 +101,8 @@ class FakeConn:
                 "approved_by": None, "approved_at": None,
             }
             return version_id
+        if "SELECT qpv.version_no" in q:
+            return await self._fetchval_version_no(params)
         raise AssertionError(f"Unhandled fetchval query: {q!r}")
 
     async def fetchrow(self, query, *params):
@@ -123,6 +126,19 @@ class FakeConn:
                 return None
             return {"payload": v["payload"], "approved_by": v["approved_by"]}
         raise AssertionError(f"Unhandled fetchrow query: {q!r}")
+
+    async def _fetchval_version_no(self, params):
+        tenant_id, year, quarter = params
+        plan_id = self.db.plans.get((tenant_id, year, quarter))
+        if plan_id is None:
+            return None
+        version_id = self.db.current_version.get(plan_id)
+        if version_id is None:
+            return None
+        v = self.db.versions[version_id]
+        if v["approval_status"] != "approved":
+            return None
+        return v["version_no"]
 
 
 class FakePool:
@@ -287,3 +303,38 @@ class TestReApprovalDoesNotOverwrite:
 
         fetched = await fetch_approved_quarter_plan(plan.tenant_id, plan.year, plan.quarter, pool)
         assert fetched.destination_shares == {"Sapa": 0.5, "Ha Giang": 0.5}
+
+
+class TestFetchCurrentVersionNo:
+    """AA-323 round 5, Việc 2 — the number the Preview screen now shows next to
+    'Q3 2026'. Same real-world case round 5's live-DB investigation confirmed
+    (aa_internal Q3 2026: v1-v6 all left approval_status='approved', only
+    current_version_id moves) — this must resolve to the CURRENT version's
+    number, not the highest version_no or the first approved one."""
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_nothing_approved(self, pool):
+        plan = _plan()
+        result = await fetch_current_version_no(plan.tenant_id, plan.year, plan.quarter, pool)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_version_no_of_the_approved_version(self, pool):
+        plan = _plan()
+        v1 = await save_quarter_plan_version(plan, pool)
+        await approve_quarter_plan_version(v1, "ms.thu", pool)
+        result = await fetch_current_version_no(plan.tenant_id, plan.year, plan.quarter, pool)
+        assert result == 1
+
+    @pytest.mark.asyncio
+    async def test_moves_to_the_newest_version_after_reapproval(self, pool):
+        plan = _plan()
+        v1 = await save_quarter_plan_version(plan, pool)
+        await approve_quarter_plan_version(v1, "ms.thu", pool)
+
+        plan_2 = _plan(destination_shares={"Sapa": 0.5, "Ha Giang": 0.5})
+        v2 = await save_quarter_plan_version(plan_2, pool)
+        await approve_quarter_plan_version(v2, "ms.thu", pool)
+
+        result = await fetch_current_version_no(plan.tenant_id, plan.year, plan.quarter, pool)
+        assert result == 2

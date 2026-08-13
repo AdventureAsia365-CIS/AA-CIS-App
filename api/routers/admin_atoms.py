@@ -39,7 +39,9 @@ from pydantic import BaseModel
 
 from api.routers.admin import verify_admin_secret
 from services.acp_planning.allocator import allocate_month, allocate_month_from_db
-from services.acp_planning.quarter import approve_quarter_plan, fetch_approved_quarter_plan, plan_quarter
+from services.acp_planning.quarter import (
+    approve_quarter_plan, fetch_approved_quarter_plan, fetch_current_version_no, plan_quarter,
+)
 from services.acp_planning.runway import runway_map
 from services.acp_planning.tenant_config import fetch_tenant_planning_config
 from services.acp_shared.atom_constants import THIN_TRIP_ATOM_MIN
@@ -424,6 +426,7 @@ async def preview_slotgrid(
 
     quarter_plan = await fetch_approved_quarter_plan(tenant_uuid, today.year, quarter, pool)
     demo_mode = quarter_plan is None
+    version_no = None
     if demo_mode:
         quarter_plan = await plan_quarter(
             tenant_uuid, today.year, quarter, markets, capacity_posts_per_week, [], runway, pool,
@@ -434,6 +437,8 @@ async def preview_slotgrid(
             quarter_plan, runway, markets[0], pool,
         )
     else:
+        # AA-323 round 5 — Việc 2: which persisted version this screen is reading.
+        version_no = await fetch_current_version_no(tenant_uuid, today.year, quarter, pool)
         grid = await allocate_month_from_db(
             tenant_uuid, today.year, today.month, channels, capacity_posts_per_week,
             runway, markets[0], pool,
@@ -443,6 +448,7 @@ async def preview_slotgrid(
         "runway_cell_count": len(runway.cells),
         "runway_cells": [c.model_dump(mode="json") for c in runway.cells],
         "quarter_plan": quarter_plan.model_dump(mode="json"),
+        "quarter_plan_version_no": version_no,
         "slot_grid": grid.model_dump(mode="json"),
         "demo_params": {
             "markets": markets, "channels": channels,
