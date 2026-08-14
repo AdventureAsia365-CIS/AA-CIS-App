@@ -125,14 +125,128 @@ def test_gate_framework_fails_on_score_0():
 
 
 def test_gate_framework_treats_score_1_without_evidence_as_fail():
-    """Mandatory evidence citation — a 1 with no quote does not count."""
+    """Mandatory evidence citation — a 1 with no quote does not count.
+    AA-396 follow-up: "ends with CTA" is no longer sent to the LLM for
+    hook_story_cta (see below), so this uses "first line is the hook" — a
+    criterion still on the LLM path — and gives the piece a real trailing
+    CTA phrase so the new deterministic sub-check doesn't also fail it."""
     fake_client = MagicMock()
-    data = {"items": [{"criterion": "ends with CTA", "score": "1", "evidence": ""}]}
+    data = {"items": [{"criterion": "first line is the hook", "score": "1", "evidence": ""}]}
     fake_client.invoke_model.return_value = _bedrock_response(json.dumps(data))
     with patch("services.acp_produce.judge_client.boto3.client", return_value=fake_client):
-        result = gate_framework("piece text", "hook_story_cta")
+        result = gate_framework("Hook line.\n\nDesign This Journey.", "hook_story_cta")
     assert result.passed is False
     assert any("no evidence" in v for v in result.violations)
+
+
+# ── AA-396 follow-up: hook_story_cta "ends with CTA" (DET, pulled off the LLM) ──
+
+def test_gate_framework_hook_story_cta_rubric_no_longer_asks_llm_about_cta():
+    """The Nova Pro prompt for hook_story_cta must carry ONLY the 2 remaining
+    genuinely-semantic criteria — "ends with CTA" moved to _ends_with_cta()."""
+    fake_client = MagicMock()
+    data = {"items": [
+        {"criterion": "first line is the hook", "score": "1", "evidence": "Hook line."},
+        {"criterion": "one atom, one emotion", "score": "1", "evidence": "Hook line."},
+    ]}
+    fake_client.invoke_model.return_value = _bedrock_response(json.dumps(data))
+    with patch("services.acp_produce.judge_client.boto3.client", return_value=fake_client) as mock_boto:
+        gate_framework("Hook line.\n\nDesign This Journey.", "hook_story_cta")
+    sent_body = json.loads(mock_boto.return_value.invoke_model.call_args.kwargs["body"])
+    prompt = sent_body["messages"][0]["content"][0]["text"]
+    assert "first line is the hook" in prompt
+    assert "one atom, one emotion" in prompt
+    assert "ends with CTA" not in prompt
+
+
+def test_gate_framework_ends_with_cta_det_pass_markdown_link_literally_last():
+    """Real AA-396 bug case (slot_c5471's blog piece): body's literal last
+    content is a markdown CTA link, no trailing prose after it. Previously
+    scored 0 by the LLM judge; must now pass via the deterministic check."""
+    fake_client = MagicMock()
+    data = {"items": [
+        {"criterion": "first line is the hook", "score": "1", "evidence": "quote"},
+        {"criterion": "one atom, one emotion", "score": "1", "evidence": "quote"},
+    ]}
+    fake_client.invoke_model.return_value = _bedrock_response(json.dumps(data))
+    body = (
+        "Hook line about South Korea.\n\n"
+        "Some body prose about the trip.\n\n"
+        "[Design This Journey](https://aa-cis.lumiguides.it.com/)"
+    )
+    with patch("services.acp_produce.judge_client.boto3.client", return_value=fake_client):
+        result = gate_framework(body, "hook_story_cta")
+    assert result.passed is True
+
+
+def test_gate_framework_ends_with_cta_det_pass_link_followed_by_coda_sentence():
+    """Real AA-396 corpus (slot_4139's blog piece): CTA link is followed by
+    a short coda sentence in the SAME final paragraph, not the literal last
+    characters. This piece already passed under the old LLM judge; the
+    deterministic check must not regress it."""
+    fake_client = MagicMock()
+    data = {"items": [
+        {"criterion": "first line is the hook", "score": "1", "evidence": "quote"},
+        {"criterion": "one atom, one emotion", "score": "1", "evidence": "quote"},
+    ]}
+    fake_client.invoke_model.return_value = _bedrock_response(json.dumps(data))
+    body = (
+        "Hook line about South Korea.\n\n"
+        "Some body prose about the trip.\n\n"
+        "[Design This Journey](https://aa-cis.lumiguides.it.com/) with the "
+        "understanding that South Korea will ask something of you in return."
+    )
+    with patch("services.acp_produce.judge_client.boto3.client", return_value=fake_client):
+        result = gate_framework(body, "hook_story_cta")
+    assert result.passed is True
+
+
+def test_gate_framework_ends_with_cta_det_fail_no_cta_present():
+    """Real AA-396 corpus (facebook pieces, slot_c5471/slot_4139): body ends
+    on hashtags with no CTA phrase anywhere — a genuine failure the
+    deterministic check must still catch."""
+    fake_client = MagicMock()
+    data = {"items": [
+        {"criterion": "first line is the hook", "score": "1", "evidence": "quote"},
+        {"criterion": "one atom, one emotion", "score": "1", "evidence": "quote"},
+    ]}
+    fake_client.invoke_model.return_value = _bedrock_response(json.dumps(data))
+    body = (
+        "A journey through South Korea begins not with sightseeing, but with discipline.\n\n"
+        "HASHTAGS: #AdventureAsia #SouthKorea #Taekwondo"
+    )
+    with patch("services.acp_produce.judge_client.boto3.client", return_value=fake_client):
+        result = gate_framework(body, "hook_story_cta")
+    assert result.passed is False
+    assert any("ends with CTA" in v for v in result.violations)
+
+
+def test_gate_framework_ends_with_cta_det_runs_even_when_llm_criteria_pass_all():
+    """The deterministic violation must surface even when every LLM-judged
+    criterion scores 1 -- it is combined with, not shadowed by, the judge
+    result."""
+    fake_client = MagicMock()
+    data = {"items": [
+        {"criterion": "first line is the hook", "score": "1", "evidence": "quote"},
+        {"criterion": "one atom, one emotion", "score": "1", "evidence": "quote"},
+    ]}
+    fake_client.invoke_model.return_value = _bedrock_response(json.dumps(data))
+    with patch("services.acp_produce.judge_client.boto3.client", return_value=fake_client):
+        result = gate_framework("Hook line.\n\nNo call to action here at all.", "hook_story_cta")
+    assert result.passed is False
+    assert result.violations == ["framework criterion failed: ends with CTA"]
+
+
+def test_gate_framework_ends_with_cta_det_not_applied_to_other_frameworks():
+    """AIDA's "single clear action (CTA)" and reader_as_hero's "single CTA"
+    stay purely LLM-judged -- the deterministic check is scoped to
+    hook_story_cta only and must not fire for other frameworks."""
+    fake_client = MagicMock()
+    data = {"items": [{"criterion": "single clear action (CTA)", "score": "1", "evidence": "quote"}]}
+    fake_client.invoke_model.return_value = _bedrock_response(json.dumps(data))
+    with patch("services.acp_produce.judge_client.boto3.client", return_value=fake_client):
+        result = gate_framework("No CTA phrase anywhere in this piece.", "AIDA")
+    assert result.passed is True
 
 
 def test_gate_framework_treats_empty_judge_output_as_fail_not_silent_pass():

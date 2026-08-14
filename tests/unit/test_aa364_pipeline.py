@@ -325,9 +325,15 @@ async def test_facebook_piece_routes_f8_to_hook_story_cta_not_blog_hub():
     """AA-372 §2: an adapted-channel Piece has no Brief of its own, so the
     blog Brief's framework ("hub", from COMMON_KWARGS) must NOT be what F8
     judges a facebook piece against — pipeline.py must resolve
-    hook_story_cta via FRAMEWORK_TABLE instead."""
+    hook_story_cta via FRAMEWORK_TABLE instead.
+
+    AA-396 follow-up: F8's hook_story_cta "ends with CTA" is now a real
+    deterministic check, not fully mocked — needs a genuine trailing CTA
+    phrase so F8 doesn't spuriously fail and trigger a real (unmocked)
+    repair call this test isn't set up for."""
     piece = _piece(
-        "Ride the tuk-tuk through old town at sunrise [R:atom_1].\nHASHTAGS: #travel #asia",
+        "Ride the tuk-tuk through old town at sunrise [R:atom_1]. Design This Journey."
+        "\nHASHTAGS: #travel #asia",
         piece_id="p1#facebook", channel="facebook",
     )
     db = _make_db(rules=[])
@@ -385,9 +391,15 @@ async def test_facebook_piece_fails_only_f9_then_repair_round_passes():
     facebook piece failing ONLY F9 (passes output_rules/F1/F2/F3/F6/F7/F8)
     should reach status=passed after exactly one repair round, without ever
     regenerating the piece from scratch (E1-E4 are not called here at all —
-    repair_piece() rewrites body_tagged in place)."""
+    repair_piece() rewrites body_tagged in place).
+
+    AA-396 follow-up: F8's hook_story_cta "ends with CTA" is now a real
+    deterministic check (services.acp_produce.gates._ends_with_cta()), not a
+    fully-mocked judge response — the body needs a genuine trailing CTA
+    phrase or F8, not F9, would be this piece's first failure."""
     piece = _piece(
-        "Ride the tuk-tuk through old town at sunrise [R:atom_1].\nHASHTAGS: #travel #asia",
+        "Ride the tuk-tuk through old town at sunrise [R:atom_1]. Design This Journey."
+        "\nHASHTAGS: #travel #asia",
         piece_id="p1#facebook", channel="facebook",
     )
     db = _make_db(rules=[])
@@ -405,7 +417,10 @@ async def test_facebook_piece_fails_only_f9_then_repair_round_passes():
         _passing_framework_response(), passing_f9,       # round 2 (post-repair): F8 pass, F9 pass
     ]
 
-    repaired_body = "Ride the tuk-tuk through old town at golden hour [R:atom_1].\nHASHTAGS: #travel #asia"
+    repaired_body = (
+        "Ride the tuk-tuk through old town at golden hour [R:atom_1]. Design This Journey."
+        "\nHASHTAGS: #travel #asia"
+    )
     original_body = piece.body_tagged
     with patch("services.acp_produce.judge_client.boto3.client",
                side_effect=_boto3_router(fake_bedrock, MagicMock())), \
