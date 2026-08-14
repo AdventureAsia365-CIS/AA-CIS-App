@@ -40,10 +40,13 @@ Repair loop (AA-376, wired real): `run_gates()` (gates.py) is called with
 `repair_fn=repair_piece` (`services.acp_produce.repair`, E5 — Sonnet rewrite
 call, ported from the aamc/ prototype's own E5) and
 `max_repairs=REPAIR_TOTAL_MAX` (models.py, ADR-2026-029's already-decided
-budget of 3 repair ROUNDS, imported rather than re-hardcoded). A piece
-failing any gate now gets up to `REPAIR_TOTAL_MAX` repair rounds — each round
-re-runs the ENTIRE gate stack (P0-3, gates.py's own docstring) — before
-holding. `is_repairable=_is_f6_content_fixable` (below) filters OUT F6
+BASE budget of 3 repair ROUNDS, imported rather than re-hardcoded — AA-396
+follow-up: `run_gates()` now scales this up per-piece via
+`compute_repair_budget()` when a piece starts with more than 1 gate failing
+at once, capped at `REPAIR_BUDGET_CAP`; see gates.py's own docstring). A
+piece failing any gate now gets up to that computed budget of repair
+rounds — each round re-runs the ENTIRE gate stack (P0-3, gates.py's own
+docstring) — before holding. `is_repairable=_is_f6_content_fixable` (below) filters OUT F6
 violations that are external caller/DB state ("no cta_target", "url_alive
 not True" — `acp_deliver.tenant_tour_pages` row/`Brief.cta_target`, neither
 of which `body_tagged` text can ever fix) so `run_gates()` holds those
@@ -259,24 +262,33 @@ async def _persist_piece(
     gate-pass moment (STEP 5 boundary); packet assembly sets it later."""
     gate_ledger_json = json.dumps([g.model_dump() for g in piece.gate_ledger])
     audit_json = json.dumps(brand_seo_audit) if brand_seo_audit is not None else None
+    # AA-396 follow-up: repair_log/repair_budget/initial_failing_gate_count
+    # (migration 102) — same human-reviewable location as gate_ledger/
+    # held_reason, see gates.py::run_gates()'s own docstring.
+    repair_log_json = json.dumps([r.model_dump() for r in piece.repair_log])
 
     await db.execute(
         """
         INSERT INTO acp_deliver.pieces
             (piece_id, run_id, tenant_id, slot_id, channel, body_tagged,
-             status, gate_ledger, brand_seo_audit, repair_count, held_reason)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11)
+             status, gate_ledger, brand_seo_audit, repair_count, held_reason,
+             repair_log, repair_budget, initial_failing_gate_count)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12::jsonb, $13, $14)
         ON CONFLICT (piece_id) DO UPDATE SET
-            body_tagged     = EXCLUDED.body_tagged,
-            status          = EXCLUDED.status,
-            gate_ledger     = EXCLUDED.gate_ledger,
-            brand_seo_audit = EXCLUDED.brand_seo_audit,
-            repair_count    = EXCLUDED.repair_count,
-            held_reason     = EXCLUDED.held_reason,
-            updated_at      = now()
+            body_tagged                = EXCLUDED.body_tagged,
+            status                     = EXCLUDED.status,
+            gate_ledger                = EXCLUDED.gate_ledger,
+            brand_seo_audit            = EXCLUDED.brand_seo_audit,
+            repair_count               = EXCLUDED.repair_count,
+            held_reason                = EXCLUDED.held_reason,
+            repair_log                 = EXCLUDED.repair_log,
+            repair_budget              = EXCLUDED.repair_budget,
+            initial_failing_gate_count = EXCLUDED.initial_failing_gate_count,
+            updated_at                 = now()
         """,
         piece.piece_id, run_id, tenant_id, slot_id, channel, piece.body_tagged,
         piece.status, gate_ledger_json, audit_json, piece.repair_count, piece.held_reason,
+        repair_log_json, piece.repair_budget, piece.initial_failing_gate_count,
     )
 
 

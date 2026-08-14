@@ -489,10 +489,15 @@ async def test_f6_url_not_alive_holds_immediately_no_repair_attempted():
 
 @pytest.mark.asyncio
 async def test_piece_that_never_repairs_holds_after_max_repairs_rounds():
-    """max_repairs=REPAIR_TOTAL_MAX (3) must terminate -- a repair_fn that
-    never actually fixes the violation holds after exactly 3 rounds, never
-    loops forever."""
-    from services.acp_produce.models import REPAIR_TOTAL_MAX
+    """A repair_fn that never actually fixes anything must still terminate,
+    never loop forever. This fixture's `Piece` fails 5 gates simultaneously
+    on the first pass (F1/F4/F6/F8/F9, per COMMON_KWARGS' brief=None +
+    no-cta_target/url_alive setup) -- AA-396 follow-up's dynamic repair
+    budget (gates.py::compute_repair_budget()) scales the ceiling for that,
+    so this now holds after the COMPUTED budget (base 3 + 4 extra
+    simultaneous failures = 7), not the old flat REPAIR_TOTAL_MAX (3).
+    Asserting against the real computed value (not re-deriving the formula
+    here) keeps this test honest about what actually ran."""
     piece = _piece("A made-up elephant trek happens here [R:atom_fake999].")
     db = _make_db(rules=[])
     fake_bedrock = MagicMock()
@@ -504,6 +509,8 @@ async def test_piece_that_never_repairs_holds_after_max_repairs_rounds():
         result = await run_piece_through_produce_gates(piece, db=db, **COMMON_KWARGS)
 
     assert result.status == "held"
-    assert result.repair_count == REPAIR_TOTAL_MAX
-    assert mock_repair.call_count == REPAIR_TOTAL_MAX
+    assert result.initial_failing_gate_count == 5
+    assert result.repair_budget == 7
+    assert result.repair_count == 7
+    assert mock_repair.call_count == 7
     assert "F1_grounding" in result.held_reason
