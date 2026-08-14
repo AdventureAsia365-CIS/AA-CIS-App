@@ -45,7 +45,8 @@ from typing import Callable
 import structlog
 
 from services.acp_produce.judge_client import invoke_judge, parse_judge_json
-from services.acp_produce.models import REPAIR_TOTAL_MAX, Brief, GateResult, Piece
+from services.acp_produce.models import (REPAIR_BUDGET_CAP, REPAIR_TOTAL_MAX, Brief, GateResult,
+                                            Piece, RepairRoundLog)
 from services.acp_shared.grounding import find_novel_numeric_claims
 
 logger = structlog.get_logger()
@@ -576,6 +577,30 @@ def gate_brand_seo_audit_social(
 
 # ---------------------------------------------------------------- orchestration + repair budget (P0-3)
 
+# AA-396 follow-up (option C, Nghiep — decided over option B "repair every
+# failing gate in one round"): ADR-2026-029's flat REPAIR_TOTAL_MAX=3 starves
+# a piece that starts with multiple gates failing at once, because run_gates()
+# below only ever targets ONE gate per round (the first-failing gate, in
+# gate_fns order) — 3 rounds can fix at most 3 simultaneous failures. Real
+# data proved this: piece slot_b09166b7f2fdc28c87fd:blog (docs/
+# implementation-notes/AA-391-report-data.json, aa394_followup_test) started
+# with F3+F4+F8+F9 all failing and was mathematically unable to converge
+# within budget. Confirmed via the same corpus that 4 is the worst case
+# actually observed across all 9 real held pieces — see REPAIR_BUDGET_CAP's
+# own comment in models.py for how that calibrates the cap below.
+def compute_repair_budget(initial_failing_gate_count: int, base_repairs: int = REPAIR_TOTAL_MAX) -> int:
+    """Scales the repair-round budget to how many gates were ALREADY failing
+    when a piece's repair loop started — computed once from that first
+    gate-stack run (see run_gates()), never recomputed on a later round, so
+    the budget is fixed per piece at the outset rather than a moving target.
+    `initial_failing_gate_count <= 1` always returns exactly `base_repairs`
+    (3, ADR-2026-029) — the common single-gate-failure case is completely
+    unaffected by this change. Each additional simultaneous failure beyond
+    the first earns exactly one more round, capped at REPAIR_BUDGET_CAP so a
+    pathological piece can't spiral into unbounded Sonnet spend."""
+    return min(base_repairs + max(0, initial_failing_gate_count - 1), REPAIR_BUDGET_CAP)
+
+
 def run_gates(
     piece: Piece,
     gate_fns: list[Callable[[str], GateResult]],
@@ -610,31 +635,94 @@ def run_gates(
     the whole slot-production run over one piece's repair infra failure) —
     `piece.repair_count` is only incremented on a repair_fn call that
     actually returns, matching the aamc/ prototype's own repair() (which
-    only incremented its own counter after a successful LLM call)."""
+    only incremented its own counter after a successful LLM call).
+
+    AA-396 follow-up (option C, dynamic repair budget): `max_repairs` is now
+    the BASE budget (ADR-2026-029's 3), not always the piece's final
+    ceiling — `compute_repair_budget()` scales it up once, from THIS piece's
+    first gate-stack run's failing-gate count, before any repair happens.
+    Every existing caller/test passing `max_repairs=3` against a
+    single-failing-gate scenario is unaffected: the computed budget equals
+    `max_repairs` exactly whenever the piece starts with 0 or 1 failing
+    gates. The repair STRATEGY itself (one gate targeted per round, full
+    P0-3 re-run after each repair) is unchanged — only the round ceiling is
+    dynamic now.
+
+    `piece.repair_budget`/`piece.initial_failing_gate_count`/
+    `piece.repair_log` (models.py, AA-396 follow-up) are populated here and
+    persisted by the caller (`pipeline.py::_persist_piece()`) so a human
+    reviewing a held piece has the full per-round repair history in the same
+    place they already look (`acp_deliver.pieces`), not a separate log
+    store. Promoting a recurring pattern from that history into an
+    `acp_output_rules` row stays a MANUAL step — H-3's automatic
+    Haiku-extraction path (`services/acp_shared/h3_rule_extractor.py::
+    extract_and_save_rule()`) is keyed on a human reviewer's rejection note
+    tied to a real `acp_hitl_requests` row, which an auto-repair-exhausted
+    N7 piece never has; wiring N7 into that path is a separate follow-up,
+    not built here."""
+    repair_budget: int | None = None
+    pending_round: RepairRoundLog | None = None
+
     while True:
         piece.gate_ledger = []
         first_failure: GateResult | None = None
+        failing_count = 0
         for gate_fn in gate_fns:
             result = gate_fn(piece.body_tagged)
             piece.gate_ledger.append(result)
-            if not result.passed and first_failure is None:
-                first_failure = result
+            if not result.passed:
+                failing_count += 1
+                if first_failure is None:
+                    first_failure = result
+
+        if repair_budget is None:
+            repair_budget = compute_repair_budget(failing_count, base_repairs=max_repairs)
+            piece.initial_failing_gate_count = failing_count
+            piece.repair_budget = repair_budget
+            logger.info("n7_repair_budget_computed", piece_id=piece.piece_id,
+                        initial_failing_gate_count=failing_count, repair_budget=repair_budget)
+
+        if pending_round is not None:
+            targeted = next((g for g in piece.gate_ledger if g.gate == pending_round.gate_targeted), None)
+            pending_round.outcome = "passed" if (targeted is None or targeted.passed) else "failed"
+            logger.info("n7_repair_round_result", piece_id=piece.piece_id,
+                        round=pending_round.round, gate_targeted=pending_round.gate_targeted,
+                        outcome=pending_round.outcome)
+            pending_round = None
 
         if first_failure is None:
             piece.status = "passed"
+            _log_repair_loop_summary(piece, "passed")
             return piece
 
         if not is_repairable(first_failure):
-            return _hold(piece, first_failure)
+            _hold(piece, first_failure)
+            _log_repair_loop_summary(piece, "held")
+            return piece
 
-        if piece.repair_count >= max_repairs:
-            return _hold(piece, first_failure)
+        if piece.repair_count >= repair_budget:
+            _hold(piece, first_failure)
+            _log_repair_loop_summary(piece, "held")
+            return piece
+
+        round_entry = RepairRoundLog(
+            round=piece.repair_count + 1, gate_targeted=first_failure.gate,
+            violations=list(first_failure.violations), outcome="attempted",
+        )
+        piece.repair_log.append(round_entry)
+        pending_round = round_entry
+        logger.info("n7_repair_round_attempt", piece_id=piece.piece_id, round=round_entry.round,
+                    gate_targeted=round_entry.gate_targeted, violations=round_entry.violations)
 
         try:
             piece.body_tagged = repair_fn(piece.body_tagged, first_failure.violations)
         except Exception as e:
             logger.warning("gate_repair_fn_failed", gate=first_failure.gate, error=str(e))
-            return _hold(piece, first_failure)
+            round_entry.outcome = "exception"
+            pending_round = None
+            _hold(piece, first_failure)
+            _log_repair_loop_summary(piece, "held")
+            return piece
         piece.repair_count += 1
 
 
@@ -643,3 +731,19 @@ def _hold(piece: Piece, result: GateResult) -> Piece:
     piece.status = "held"
     piece.held_reason = f"{result.gate}: {'; '.join(result.violations[:3])}"
     return piece
+
+
+def _log_repair_loop_summary(piece: Piece, outcome: str) -> None:
+    """AA-396 follow-up: one final structured log line per piece that went
+    through run_gates(), independent of the per-round persisted repair_log
+    (this is for live CloudWatch visibility; repair_log on the Piece is the
+    durable, human-reviewable record). `never_repaired_gates` is only
+    meaningful for outcome="held" — a "passed" piece has nothing left
+    failing by definition."""
+    never_repaired = [g.gate for g in piece.gate_ledger if not g.passed] if outcome == "held" else []
+    logger.info(
+        "n7_repair_loop_summary", piece_id=piece.piece_id,
+        initial_failing_gate_count=piece.initial_failing_gate_count,
+        repair_budget=piece.repair_budget, rounds_used=piece.repair_count,
+        outcome=outcome, never_repaired_gates=never_repaired,
+    )

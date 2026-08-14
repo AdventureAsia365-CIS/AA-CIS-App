@@ -25,13 +25,42 @@ from pydantic import BaseModel, Field
 # ADR-2026-029: 1 repair attempt per failing gate is allowed, but the whole
 # piece is held after this many repair ROUNDS total (a round = repair + full
 # re-run of every gate, P0-3) regardless of which gate(s) kept failing.
+# AA-396 follow-up (option C, dynamic repair budget, gates.py::
+# compute_repair_budget()): this is now the BASE budget for the common
+# single-gate-failure case, not always the final per-piece ceiling.
 REPAIR_TOTAL_MAX = 3
+
+# AA-396 follow-up: hard ceiling on the DYNAMIC budget regardless of how many
+# gates start out failing. Calibrated against the real N7 corpus (9 held
+# pieces, docs/implementation-notes/AA-391-report-data.json) -- the worst
+# case actually observed is 4 simultaneous failing gates (budget 6 under
+# compute_repair_budget()'s formula); 8 leaves headroom for one more
+# simultaneous failure than anything seen in production while still
+# bounding a pathological piece's Sonnet-repair spend, not leaving it
+# unbounded.
+REPAIR_BUDGET_CAP = 8
 
 
 class GateResult(BaseModel):
     gate: str
     passed: bool
     violations: list[str] = Field(default_factory=list)
+
+
+class RepairRoundLog(BaseModel):
+    """AA-396 follow-up: one entry per `repair_fn` call inside a piece's
+    `run_gates()` loop (gates.py) -- which gate was targeted, its violations
+    at the time, and whether that gate passed on the following round's full
+    gate-stack re-run ("passed"/"failed"/"exception" if `repair_fn` itself
+    raised). Persisted on the `Piece` (not only structlog'd) so a human
+    reviewing a held piece has the whole repair history in the same place
+    they already look (`acp_deliver.pieces`), without a separate log query
+    -- see gates.py::run_gates()'s own docstring for what still needs manual
+    promotion into `acp_shared.acp_output_rules` from here."""
+    round: int
+    gate_targeted: str
+    violations: list[str] = Field(default_factory=list)
+    outcome: Literal["attempted", "passed", "failed", "exception"] = "attempted"
 
 
 class FAQItem(BaseModel):
@@ -57,6 +86,12 @@ class Piece(BaseModel):
     # future export/publish path needs structured Q/A or schema.org markup).
     faq_items: list[FAQItem] = Field(default_factory=list)
     faq_jsonld: Optional[dict] = None
+    # AA-396 follow-up (option C, dynamic repair budget): set once by
+    # run_gates() from the piece's FIRST gate-stack run, never recomputed
+    # mid-loop -- see gates.py::compute_repair_budget()/run_gates().
+    initial_failing_gate_count: Optional[int] = None
+    repair_budget: Optional[int] = None
+    repair_log: list[RepairRoundLog] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------- AA-369 C1/C2/C3
