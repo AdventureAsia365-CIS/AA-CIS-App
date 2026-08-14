@@ -206,6 +206,24 @@ def test_gate_brand_seo_audit_context_isolation():
     assert _GROUNDING_SYSTEM_PROMPT not in json.dumps(sent_body)
 
 
+def test_gate_brand_seo_audit_includes_notes_alongside_failure_codes():
+    """AA-396: `notes` must not be dropped when `failure_codes` is non-empty --
+    it was the only channel that could ever carry the judge's actual
+    explanation through to repair_fn (repair.py), and the old
+    `", ".join(failure_codes) or audit.get("notes")` pattern discarded it
+    every time failure_codes was non-empty (i.e. almost always)."""
+    fake_client = MagicMock()
+    data = {"status": "flagged", "brand_fit": 0, "human_read": 1, "seo_fit": 1,
+            "trip_type_accuracy": 1, "publish_readiness": 0,
+            "failure_codes": ["SUMMARY_OFF_BRAND"],
+            "notes": "opens with a generic AI-sounding preamble before the first real fact"}
+    fake_client.invoke_model.return_value = _bedrock_response(json.dumps(data))
+    with patch("services.acp_produce.judge_client.boto3.client", return_value=fake_client):
+        result, audit = gate_brand_seo_audit("piece text", "brand rubric text")
+    assert "SUMMARY_OFF_BRAND" in result.violations[0]
+    assert "generic AI-sounding preamble" in result.violations[0]
+
+
 def test_gate_brand_seo_audit_judge_unavailable_returns_none_audit_not_fabricated():
     fake_client = MagicMock()
     fake_client.invoke_model.side_effect = RuntimeError("Bedrock throttled")
