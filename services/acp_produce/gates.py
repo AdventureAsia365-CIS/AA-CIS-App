@@ -308,11 +308,48 @@ FRAMEWORK_RUBRICS: dict[str, list[str]] = {
             "resolves with the trip as solve"],
     "AIDA": ["attention hook first", "interest via specifics",
              "desire built on concrete moments", "single clear action (CTA)"],
-    "hook_story_cta": ["first line is the hook", "one atom, one emotion", "ends with CTA"],
+    "hook_story_cta": ["first line is the hook", "one atom, one emotion"],
     "hook_beats_payoff": ["hook stated", "timed beats present", "payoff lands"],
     "reader_as_hero": ["reader is the subject, not the brand", "single CTA"],
 }
 _DEFAULT_FRAMEWORK_RUBRIC = ["structure matches the stated framework"]
+
+# AA-396 follow-up: "ends with CTA" pulled out of hook_story_cta's Nova Pro
+# rubric and made deterministic. Real N7 data (docs/implementation-notes/
+# AA-391-report-data.json) showed the judge was actively unreliable on this
+# specific criterion: a facebook/blog piece whose body ended in a literal
+# `[Design This Journey](url)` link scored 0, while a sibling piece whose CTA
+# link was followed by more prose scored 1 -- the judge's verdict was
+# uncorrelated with, sometimes inverted from, the actual text. "Ends with a
+# CTA" is a structural/positional question, not a semantic one -- a
+# deterministic check is strictly more reliable here. AIDA's "single clear
+# action (CTA)" and reader_as_hero's "single CTA" are left on the LLM judge:
+# those ask about clarity/singularity of the ask, a genuinely semantic
+# question this fix does not touch.
+#
+# Every real CTA instance in the corpus -- markdown-linked (blog) or plain
+# prose (facebook/tiktok) -- uses the one brand-standard phrase
+# (services/content_generation/brand_standards.py: CTA is always "Design
+# This Journey", never "Book Now"), so the check anchors on that phrase
+# rather than a generic link/URL pattern (a URL-only pattern would wrongly
+# fail every facebook piece -- gate_route_to_sellable()'s own docstring
+# confirms FB/TikTok captions "reference the trip conversationally, never
+# embedding a literal URL").
+_CTA_PHRASE_RE = re.compile(r"design this journey", re.IGNORECASE)
+
+
+def _ends_with_cta(piece_body: str) -> bool:
+    """Checks the FINAL `\\n\\n`-delimited paragraph of the body for the CTA
+    phrase, not just the literal trailing characters -- a real passing
+    example (slot_4139's blog piece) closes its CTA link with a short coda
+    sentence in the same paragraph ("[Design This Journey](url) with the
+    understanding that..."); that's still "ending with" the CTA in the sense
+    the rubric means, just not the literal last token."""
+    body = (piece_body or "").rstrip()
+    if not body:
+        return False
+    last_para = body.split("\n\n")[-1]
+    return bool(_CTA_PHRASE_RE.search(last_para))
 
 def _format_audit_reason(failure_codes: list[str], notes: Optional[str]) -> str:
     """AA-396: build the repair-visible reason string for a failed F9 audit
@@ -339,12 +376,19 @@ _JUDGE_SYSTEM_PROMPT = (
 
 def gate_framework(piece_body: str, framework: str) -> GateResult:
     """F8 framework judge — LLM, Nova Pro, cross-weight from the writer per
-    ADR-2026-014/ADR-2026-027/L3. The judge receives ONLY the piece body and
-    a hard-anchored rubric (see FRAMEWORK_RUBRICS above) — never the writer's
-    generation system/user prompt (services/acp_produce/judge_client.py
-    documents why that isolation is structural, not just promised). Binary
-    1/0 per criterion with a MANDATORY evidence quote for every 1 — never a
-    1-10 scale, which invites drift with no accountable evidence trail."""
+    ADR-2026-014/ADR-2026-027/L3, PLUS one deterministic sub-check (AA-396
+    follow-up: hook_story_cta's "ends with CTA", see _ends_with_cta() above
+    for why this one criterion was pulled off the LLM). The judge receives
+    ONLY the piece body and a hard-anchored rubric (see FRAMEWORK_RUBRICS
+    above) — never the writer's generation system/user prompt (services/
+    acp_produce/judge_client.py documents why that isolation is structural,
+    not just promised). Binary 1/0 per criterion with a MANDATORY evidence
+    quote for every 1 — never a 1-10 scale, which invites drift with no
+    accountable evidence trail."""
+    violations: list[str] = []
+    if framework == "hook_story_cta" and not _ends_with_cta(piece_body):
+        violations.append("framework criterion failed: ends with CTA")
+
     rubric_items = FRAMEWORK_RUBRICS.get(framework, _DEFAULT_FRAMEWORK_RUBRIC)
     contract = json.dumps({
         "items": [{"criterion": "str", "score": "1|0",
@@ -360,11 +404,10 @@ def gate_framework(piece_body: str, framework: str) -> GateResult:
         raw = invoke_judge(_JUDGE_SYSTEM_PROMPT, user_prompt)
         data = parse_judge_json(raw["text"])
     except Exception as e:
-        return GateResult(gate="F8_framework", passed=False,
-                           violations=[f"judge unavailable: {e} — manual check"])
+        violations.append(f"judge unavailable: {e} — manual check")
+        return GateResult(gate="F8_framework", passed=False, violations=violations)
 
     items = data.get("items") or []
-    violations = []
     for item in items:
         criterion = item.get("criterion", "(unnamed criterion)")
         score = str(item.get("score"))
