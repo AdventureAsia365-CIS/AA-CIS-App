@@ -3,7 +3,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Search, CalendarDays, FileText, Share2, Sparkles, ShoppingBag, CalendarCheck, Boxes } from "lucide-react";
+import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Sparkles, ShoppingBag, CalendarCheck, Boxes } from "lucide-react";
 import { A, serif, sans } from "./adminUi";
 
 interface Notif {
@@ -19,21 +19,16 @@ interface Notif {
 }
 
 // AA-323 round 6, Phần D — sidebar reorganized around the real ACP v2
-// (N0-N8) business flow instead of historical grouping. Recon confirmed the
-// sidebar actually spans THREE separate pipelines, not one:
+// (N0-N8) business flow instead of historical grouping:
 //   1. Real ACP v2 (N0-N8): Tenants(N1)/Marketplace(N1)/Atomize(N2)/
 //      Atom Curation(N2, + deep-links to N4-N6 preview)/Quarter Plan Gate B(N5).
 //   2. AA-internal's own content-authoring pipeline (Upload/S1 Rewrite/
 //      Review/Brand/Master Content) — a different, older system for AA's
 //      own tour copy, unrelated to the B2B tenant flow.
-//   3. ACP v1 (S2 Research/S3 Calendar/S4 Blog/S4 Social) — a separate,
-//      still-live legacy B2B pipeline (admin_acp_proxy.py) that predates
-//      the N0-N8 redesign. Previously labeled "ACP Pipeline", which shared
-//      the "ACP" name with the real ACP v2 items sitting right above it —
-//      a mislabeling risk already flagged in a prior STEP 0 audit
-//      (2026-08-09). Routes/items/roles are UNCHANGED below — this only
-//      reorders and relabels groups so the real N0-N8 flow reads first and
-//      the other two pipelines are unambiguously named as what they are.
+// AA-390 — the third group (legacy ACP v1: S2 Research/S3 Calendar/S4 Blog/
+// S4 Social, admin_acp_proxy.py) was removed from this sidebar entirely
+// (nobody needs ACPv1 access anymore, per Nghiep). The routes/pages and
+// their backend are untouched and still reachable directly by URL.
 const ATOMS_NAV = [
   { href: "/admin/atomize",  icon: <Boxes size={15} />,    label: "Atomize (N2)" },
   { href: "/admin/curation", icon: <Sparkles size={15} />, label: "Atom Curation" },
@@ -45,13 +40,6 @@ const CONTENT_AUTHORING_NAV = [
   { href: "/admin/review",         icon: <ClipboardList size={15} />, label: "Review Queue" },
   { href: "/admin/brand",          icon: <Palette size={15} />,       label: "Brand Identity" },
   { href: "/admin/master-content", icon: <Library size={15} />,       label: "Master Content" },
-];
-
-const ACP_V1_NAV = [
-  { href: "/admin/pipeline/s2",       icon: <Search size={15} />,       label: "S2 Research" },
-  { href: "/admin/pipeline/s3",       icon: <CalendarDays size={15} />, label: "S3 Calendar" },
-  { href: "/admin/pipeline/s4-blog",  icon: <FileText size={15} />,     label: "S4 Blog" },
-  { href: "/admin/pipeline/s4-social",icon: <Share2 size={15} />,       label: "S4 Social" },
 ];
 
 export default function AdminSidebar() {
@@ -249,17 +237,11 @@ export default function AdminSidebar() {
           ))}
         </NavGroup>
 
-        {/* Legacy B2B pipeline (ACP v1) — predates the N0-N8 redesign, still
-            live with real traffic, kept as its own clearly-labeled group so
-            it's no longer confused with the real ACP v2 items above
-            (previously both shared the ambiguous "ACP" name). Visible to
-            all roles (same as before). */}
-        <NavGroup label="Legacy Pipeline (ACP v1)">
-          {ACP_V1_NAV.map(n => (
-            <NavItem key={n.href} active={active(n.href)} accent={A.gold}
-              icon={n.icon} label={n.label} onClick={() => router.push(n.href)} />
-          ))}
-        </NavGroup>
+        {/* AA-390: Legacy B2B pipeline (ACP v1) sidebar entry hidden — nobody
+            needs ACPv1 Pipeline access via the sidebar anymore (per Nghiep).
+            The routes/pages (admin/pipeline/s2, s3, s4-blog, s4-social) and
+            their backend (admin_acp_proxy.py, v1_acp.py, etc.) are untouched
+            and still reachable directly by URL if ever needed again. */}
       </div>
 
       {/* Settings — admin only */}
