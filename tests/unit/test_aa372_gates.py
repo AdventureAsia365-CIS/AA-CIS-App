@@ -277,6 +277,23 @@ def test_f9_social_tiktok_uses_2_field_contract():
     assert audit["failure_codes"] == ["HOOK_WEAK"]
 
 
+def test_f9_social_includes_notes_alongside_failure_codes():
+    """AA-396: same notes-preservation fix as the blog gate (gates.py::
+    _format_audit_reason) -- notes must survive into violations[0] even when
+    failure_codes is non-empty."""
+    fake_client = MagicMock()
+    fake_client.invoke_model.return_value = _bedrock_response({
+        "status": "flagged", "hook_strength": 0, "cta_clear": 1,
+        "failure_codes": ["HOOK_WEAK"], "notes": "hook restates the destination name, no tension",
+    })
+    with patch("services.acp_produce.judge_client.boto3.client", return_value=fake_client):
+        result, audit = gate_brand_seo_audit_social("HOOK: meh.\nSCRIPT: ...\nVISUAL: ...",
+                                                       "tiktok", "brand rubric text")
+
+    assert "HOOK_WEAK" in result.violations[0]
+    assert "restates the destination name" in result.violations[0]
+
+
 def test_f9_social_drops_failure_codes_outside_fixed_vocabulary():
     fake_client = MagicMock()
     fake_client.invoke_model.return_value = _bedrock_response({

@@ -314,6 +314,20 @@ FRAMEWORK_RUBRICS: dict[str, list[str]] = {
 }
 _DEFAULT_FRAMEWORK_RUBRIC = ["structure matches the stated framework"]
 
+def _format_audit_reason(failure_codes: list[str], notes: Optional[str]) -> str:
+    """AA-396: build the repair-visible reason string for a failed F9 audit
+    (blog or social). Previously `", ".join(failure_codes) or audit.get("notes")`
+    dropped `notes` entirely whenever any failure_codes existed — repair_fn
+    (repair.py) only ever saw the terse code list, never the judge's actual
+    explanation. `notes` is now appended alongside the codes, not used only
+    as a fallback when codes is empty."""
+    codes = ", ".join(failure_codes)
+    notes = (notes or "").strip()
+    if codes and notes:
+        return f"{codes} -- {notes}"
+    return codes or notes or "(no reason given)"
+
+
 _JUDGE_SYSTEM_PROMPT = (
     "You are a structural editor. You score writing against a fixed rubric — you do not "
     "rewrite, you do not soften scores, and every score of 1 must be backed by an exact "
@@ -369,9 +383,23 @@ def gate_framework(piece_body: str, framework: str) -> GateResult:
 # Fixed failure-code vocabulary — the judge must classify into ONE of these,
 # never invent its own label (a free-text failure reason can't be tracked,
 # trended, or turned into an acp_output_rules entry later, N8 flywheel).
+#
+# AA-396: 4 of these codes were originally verbatim copies of the S1 pipeline's
+# own failure vocabulary (services/content_generation/graph.py::_CODE_FIELD_MAP /
+# flag_fix_node.py — where SEO_TITLE_*, aa_highlights, aa_itineraries, seo_meta
+# are REAL discrete generated_content DB columns). N7 has no such columns —
+# every one of these qualities lives inside the single `piece_body` prose
+# handed to the judge. A real repair (Sonnet) run confused the two: reading
+# "SEO_TITLE_WEAK"/"HIGHLIGHTS_TOO_GENERIC"/etc., it concluded these named
+# fields that "don't exist in this document" and refused to act, leaking that
+# reasoning into the piece body instead of fixing it (see repair.py's
+# leak-guard, same AA-396 fix). Renamed the 4 colliding codes below to remove
+# the exact-string collision at its source — no code elsewhere imports these
+# as literals (confirmed: this list has zero cross-module consumers outside
+# this file), so the rename has no other blast radius.
 BRAND_SEO_FAILURE_CODES = [
-    "PRODUCT_TRUTH_RISK", "SUMMARY_OFF_BRAND", "HIGHLIGHTS_TOO_GENERIC",
-    "ITINERARY_STRUCTURE_WEAK", "SEO_TITLE_WEAK", "META_INCOMPLETE_SENTENCE",
+    "PRODUCT_TRUTH_RISK", "SUMMARY_OFF_BRAND", "BODY_EXPERIENCE_DETAILS_TOO_GENERIC",
+    "BODY_DAY_FLOW_STRUCTURE_WEAK", "BODY_OPENING_TITLE_WEAK", "BODY_SUMMARY_LINE_INCOMPLETE",
     "DFS_INTENT_UNDERUSED", "KEYWORD_STUFFING_RISK", "GENERIC_AI_WORDING",
     "FACT_CHECK_MANUAL_CHECK",
 ]
@@ -421,7 +449,7 @@ def gate_brand_seo_audit(piece_body: str, brand_rubric_text: str) -> tuple[GateR
     passed = status == "pass"
     violations = []
     if not passed:
-        reason = ", ".join(failure_codes) or audit.get("notes") or "(no reason given)"
+        reason = _format_audit_reason(failure_codes, audit.get("notes"))
         violations = [f"audit {status}: {reason}"]
     return GateResult(gate="F9_brand_seo_audit", passed=passed, violations=violations), audit
 
@@ -498,7 +526,7 @@ def gate_brand_seo_audit_social(
     passed = status == "pass"
     violations = []
     if not passed:
-        reason = ", ".join(failure_codes) or audit.get("notes") or "(no reason given)"
+        reason = _format_audit_reason(failure_codes, audit.get("notes"))
         violations = [f"audit {status}: {reason}"]
     return GateResult(gate="F9_brand_seo_audit_social", passed=passed, violations=violations), audit
 

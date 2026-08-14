@@ -30,6 +30,7 @@ call on a violation this module cannot possibly fix by rewriting text.
 """
 from __future__ import annotations
 
+import re
 import time
 
 import structlog
@@ -56,6 +57,37 @@ _REPAIR_SYSTEM_PROMPT = (
     "- Output ONLY the full repaired text, same format as the input — no commentary, no\n"
     "  explanation, no markdown fence.\n"
 )
+
+
+# AA-396 (piece-7 class): a real Sonnet repair call, confused by the
+# BRAND_SEO_FAILURE_CODES naming collision with the S1 pipeline's real DB
+# fields (see gates.py's own AA-396 comment), returned its own chain-of-
+# thought about why it couldn't act ("Looking at the violations, I need to
+# identify... The current text is a summary/editorial piece — it does not
+# contain discrete AA_HIGHLIGHTS... which means they cannot be repaired
+# within this document as written.") instead of a repaired body, and that
+# text got PERSISTED as the piece's real content. Narrow, evidence-based
+# guard: only checked against the first paragraph (real leaks precede the
+# actual repaired content, this one did) and only for phrases that are
+# self-referential about the repair task itself — not any use of words like
+# "violations" or "structure" a legitimate travel article might contain
+# deeper in the body.
+_LEAK_SIGNAL_RE = re.compile(
+    r"\b(the violations?(\s+to\s+fix)?|cannot be repaired|i need to identify|"
+    r"the current text is (a|an)\b|does not contain discrete|re-reading carefully)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_leaked_reasoning(text: str) -> bool:
+    """AA-396: does `text` open with repair's own meta-commentary about the
+    repair task, rather than actual repaired content? Checked only against
+    the first paragraph/prefix on purpose — narrows the guard to the exact
+    corruption shape observed in real data (leak precedes the real content)
+    instead of scanning the whole body, which would risk false-flagging
+    legitimate prose that later discusses e.g. itinerary structure."""
+    prefix = text.split("\n\n", 1)[0][:500]
+    return bool(_LEAK_SIGNAL_RE.search(prefix))
 
 
 class RepairFailed(Exception):
@@ -89,9 +121,18 @@ def repair_piece(body_tagged: str, violations: list[str]) -> str:
                 time.sleep(_RETRY_BACKOFF_SECONDS * attempt)
             continue
 
+        repaired = result.text.strip()
+        if _looks_like_leaked_reasoning(repaired):
+            logger.warning("e5_repair_leaked_reasoning_rejected", violations=violations,
+                            prefix=repaired[:200])
+            raise RepairFailed(
+                "repair output failed sanity check -- looks like leaked reasoning about the "
+                "repair task itself (AA-396 piece-7 class), not repaired content"
+            )
+
         logger.info("e5_repair_success", model_used=result.model_used,
                      latency_ms=result.latency_ms, usage=result.usage, violations=violations)
-        return result.text.strip()
+        return repaired
 
     raise RepairFailed(
         f"Sonnet invoke failed after {_MAX_INVOKE_ATTEMPTS} attempts: {last_err}"
