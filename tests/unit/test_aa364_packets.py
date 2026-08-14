@@ -40,12 +40,16 @@ async def test_create_packet_inserts_and_returns_packet_id():
     assert "status" not in sql
 
 
-# ── (d): F6 guard — the counter-proof test the task explicitly asked for ──
+# ── (d): F6 guard — AA-365 (14/08/2026) widened this to all 3 ramp states ──
 
-def test_allowed_modes_is_exactly_propose_only_today():
-    """If this ever changes, it must be a deliberate edit accompanying a new
-    Nghiep decision recorded in AA-364.md — not a silent widening."""
-    assert ALLOWED_PUBLISH_MODES_UNTIL_F6 == frozenset({"propose_only"})
+def test_allowed_modes_is_all_three_ramp_states_since_aa365():
+    """Nghiep's AA-365 decision (14/08/2026) widened this past AA-364's
+    original propose_only-only lock, now that F6 is confirmed wired into
+    run_gates(). If this ever changes again, it must be a deliberate edit
+    accompanying a new recorded decision — not a silent narrowing/widening."""
+    assert ALLOWED_PUBLISH_MODES_UNTIL_F6 == frozenset(
+        {"propose_only", "approve_to_publish", "veto_window_auto"}
+    )
 
 
 @pytest.mark.asyncio
@@ -58,23 +62,28 @@ async def test_set_publish_mode_propose_only_succeeds():
 
 
 @pytest.mark.asyncio
-async def test_set_publish_mode_approve_to_publish_blocked():
+async def test_set_publish_mode_approve_to_publish_succeeds_since_aa365():
     db = _make_db()
-    with pytest.raises(PublishModeBlockedError, match="approve_to_publish"):
-        await set_publish_mode(db, "pkt-1", "approve_to_publish")
-    db.execute.assert_not_called()
+    await set_publish_mode(db, "pkt-1", "approve_to_publish")
+    db.execute.assert_called_once()
+    sql, *params = db.execute.call_args.args
+    assert params == ["approve_to_publish", "pkt-1"]
 
 
 @pytest.mark.asyncio
-async def test_set_publish_mode_veto_window_auto_blocked():
+async def test_set_publish_mode_veto_window_auto_succeeds_since_aa365():
     db = _make_db()
-    with pytest.raises(PublishModeBlockedError, match="veto_window_auto"):
-        await set_publish_mode(db, "pkt-1", "veto_window_auto")
-    db.execute.assert_not_called()
+    await set_publish_mode(db, "pkt-1", "veto_window_auto")
+    db.execute.assert_called_once()
+    sql, *params = db.execute.call_args.args
+    assert params == ["veto_window_auto", "pkt-1"]
 
 
 @pytest.mark.asyncio
-async def test_set_publish_mode_error_cites_f6_and_the_decision_date():
+async def test_set_publish_mode_rejects_invalid_mode_string():
+    """The membership check stays as a general invalid-mode guard even
+    though all 3 real ramp states are now allowed (AA-365)."""
     db = _make_db()
-    with pytest.raises(PublishModeBlockedError, match="F6"):
-        await set_publish_mode(db, "pkt-1", "approve_to_publish")
+    with pytest.raises(PublishModeBlockedError, match="not a valid mode"):
+        await set_publish_mode(db, "pkt-1", "bogus_mode")
+    db.execute.assert_not_called()

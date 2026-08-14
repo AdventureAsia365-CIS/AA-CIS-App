@@ -4,26 +4,39 @@ the F6 revenue-safety guard on `publish_mode`. AA-367: real assemble/status
 lifecycle + `write_usage_log()` wiring, now that C3/E1-E5 exist (AA-368,
 PR #110) and produce real `Piece` rows with `status='passed'`.
 
-F6 guard: Nghiep's AA-364 decision (05/08/2026) blocks `publish_mode` from
-ever advancing past `'propose_only'` in code until F6 (route-to-sellable —
-dead/missing CTA-URL check, services/acp_produce/gates.py) exists. A piece
-can pass every gate that exists today (output_rules, F1, F8, F9) while
-pointing at a dead `trip_url` — a concrete revenue defect nothing currently
-catches (see docs/implementation-notes/AA-364.md "Should know"). This is a
-deliberate hold, not an oversight — `set_publish_mode()` is the ONLY
-function in this module (and, by convention, should stay the only call site
-anywhere) that writes `acp_deliver.packets.publish_mode`, so the guard has a
-single choke point.
+RESOLVED — AA-365 (14/08/2026): Nghiep gave the explicit decision AA-364/
+AA-367 were both waiting on. F6 (`gates.py::gate_route_to_sellable`) is
+confirmed real and wired into `pipeline.py::run_piece_through_produce_gates()`
+(AA-372, 5th of 9 gates in the real DET chain). `ALLOWED_PUBLISH_MODES_UNTIL_F6`
+now allows all 3 ramp states — `publish_mode` can reach `'approve_to_publish'`
+and `'veto_window_auto'` through `set_publish_mode()`. The constant name is
+kept as-is (not renamed) for traceability across the AA-364/AA-367/AA-365
+history below; it no longer restricts anything beyond "a real ramp state",
+since F6's own condition is now satisfied. See docs/implementation-notes/
+AA-365.md for the full record of this decision.
 
-AA-367 STEP 0 (06/08/2026) re-confirmed this guard must stay exactly as-is:
-F6 (`gates.py::gate_route_to_sellable`) is now wired into
-`pipeline.py::run_piece_through_produce_gates()` (AA-372), but
-`ALLOWED_PUBLISH_MODES_UNTIL_F6` here was never touched — no new Nghiep
-decision exists to widen it. Separately, `acp_deliver.tenant_tour_pages` has
-0 rows in dev for every real tour (confirmed live, 06/08/2026), so F6 fails
-closed on every real piece today regardless — the guard and F6's own
-fail-closed behavior are currently DOUBLY blocking `publish_mode` past
-`propose_only`. Do not relax either side without a recorded decision.
+The BOFU/pricing hard block (`services/acp_produce/trust_ramp.py::
+packet_has_bofu_piece()` / `BofuVetoBlockedError`) is INDEPENDENT of this
+guard and unaffected by this widening — a packet with any BOFU-funnel-stage
+piece still cannot reach `veto_window_auto`, checked before this module's
+`set_publish_mode()` is ever called.
+
+Historical context (why the guard existed, kept for the record):
+Nghiep's original AA-364 decision (05/08/2026) blocked `publish_mode` from
+ever advancing past `'propose_only'` in code until F6 existed. A piece could
+pass every gate that existed then (output_rules, F1, F8, F9) while pointing
+at a dead `trip_url` — a concrete revenue defect nothing then caught (see
+docs/implementation-notes/AA-364.md "Should know"). `set_publish_mode()` is
+the ONLY function in this module (and, by convention, should stay the only
+call site anywhere) that writes `acp_deliver.packets.publish_mode`, so the
+guard has a single choke point. AA-367 STEP 0 (06/08/2026) re-confirmed the
+guard should stay locked at that time — F6 was wired into `pipeline.py` by
+then, but no fresh Nghiep decision yet existed to widen it, and separately
+`acp_deliver.tenant_tour_pages` had 0 rows in dev for every real tour, so F6
+failed closed on every real piece regardless of this module's own guard.
+Both points are now superseded by the AA-365 decision above; F6's own
+fail-closed behavior on a still-missing `tenant_tour_pages` row is unchanged
+and continues to apply per-piece, independent of this module.
 """
 from __future__ import annotations
 
@@ -34,16 +47,17 @@ import asyncpg
 from services.acp_produce.atom_usage import write_usage_log
 from services.acp_produce.models import Piece
 
-# Nghiep AA-364 decision, 05/08/2026: do not add 'approve_to_publish' or
-# 'veto_window_auto' here until F6 (route-to-sellable) exists. Do not relax
-# without a new decision recorded in docs/implementation-notes/AA-364.md.
-ALLOWED_PUBLISH_MODES_UNTIL_F6 = frozenset({"propose_only"})
+# Nghiep AA-365 decision (14/08/2026, supersedes AA-364's 05/08/2026 lock):
+# F6 confirmed real and wired into run_gates() — all 3 ramp states now
+# allowed. See module docstring for the full history/record.
+ALLOWED_PUBLISH_MODES_UNTIL_F6 = frozenset({"propose_only", "approve_to_publish", "veto_window_auto"})
 
 
 class PublishModeBlockedError(Exception):
-    """Raised when code attempts to advance publish_mode past what F6's
-    absence allows. Never catch-and-ignore this — it exists to make the
-    AA-364 revenue-safety hold impossible to bypass silently."""
+    """Raised when code attempts to set publish_mode to something outside
+    ALLOWED_PUBLISH_MODES_UNTIL_F6 — today that means any string that isn't
+    a real ramp state, since F6's condition is satisfied and all 3 states are
+    allowed (AA-365, 14/08/2026). Never catch-and-ignore this."""
 
 
 async def create_packet(db: asyncpg.Connection, tenant_id: str, year: int, week: int) -> str:
@@ -64,17 +78,17 @@ async def create_packet(db: asyncpg.Connection, tenant_id: str, year: int, week:
 
 
 async def set_publish_mode(db: asyncpg.Connection, packet_id: str, mode: str) -> None:
-    """BLOCKED until F6 (route-to-sellable) exists — AA-364 Nghiep decision
-    05/08/2026. Raises PublishModeBlockedError for any `mode` outside
-    ALLOWED_PUBLISH_MODES_UNTIL_F6 — today that's every mode except
-    'propose_only'. Do not add a bypass parameter, an env var override, or a
-    tenant-specific exception to this check; the block is revenue-safety,
-    not a default that individual callers should be able to opt out of."""
+    """Sets `acp_deliver.packets.publish_mode`. F6 (route-to-sellable) is
+    confirmed real and wired into run_gates() — AA-365 Nghiep decision
+    14/08/2026 widened ALLOWED_PUBLISH_MODES_UNTIL_F6 to all 3 ramp states,
+    so this no longer blocks 'approve_to_publish'/'veto_window_auto'. The
+    membership check stays as a general invalid-mode guard (raises for
+    anything not a real ramp state). Do not add a bypass parameter, an env
+    var override, or a tenant-specific exception to this check."""
     if mode not in ALLOWED_PUBLISH_MODES_UNTIL_F6:
         raise PublishModeBlockedError(
-            f"publish_mode={mode!r} blocked until F6 (route-to-sellable) exists — "
-            f"AA-364 Nghiep decision 05/08/2026. Only "
-            f"{sorted(ALLOWED_PUBLISH_MODES_UNTIL_F6)} allowed today."
+            f"publish_mode={mode!r} is not a valid mode. Only "
+            f"{sorted(ALLOWED_PUBLISH_MODES_UNTIL_F6)} allowed."
         )
     await db.execute(
         "UPDATE acp_deliver.packets SET publish_mode = $1 WHERE packet_id = $2",
