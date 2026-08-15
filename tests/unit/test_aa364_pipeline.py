@@ -436,6 +436,17 @@ async def test_facebook_piece_fails_only_f9_then_repair_round_passes():
     assert result.body_tagged == repaired_body
     assert fake_bedrock.invoke_model.call_count == 4  # F8+F9 x2 rounds, no E1-E4 regeneration
 
+    # AA-404: this is the real F9-social -> F8 pattern (6x, the dominant
+    # real regression) -- confirm the `_repair` closure actually threads a
+    # PieceInvariants with the facebook/hook_story_cta flags through to
+    # repair_piece(), even though the triggering violation (GENERIC_AI_
+    # WORDING, an F9 concern) has nothing to do with F8's CTA/single-atom
+    # rules that must survive this round.
+    invariants = mock_repair.call_args.kwargs["invariants"]
+    assert invariants.channel == "facebook"
+    assert invariants.cta_required is True
+    assert invariants.single_atom_required is True
+
 
 @pytest.mark.asyncio
 async def test_f6_no_cta_target_holds_immediately_no_repair_attempted():

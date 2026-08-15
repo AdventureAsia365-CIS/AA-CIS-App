@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from services.acp_produce.repair import RepairFailed, repair_piece
+from services.acp_produce.repair import PieceInvariants, RepairFailed, repair_piece
 from shared.llm_client.bedrock_satellite import BedrockInvokeResult, BedrockUnavailable
 
 
@@ -134,3 +134,146 @@ def test_repair_piece_does_not_false_flag_legitimate_travel_content():
     with patch("services.acp_produce.repair.invoke_claude", return_value=_sonnet_result(legit)):
         result = repair_piece("original body", ["v1"])
     assert result == legit
+
+
+# ── AA-404: PieceInvariants — general fix for the repair.py blind spot ────
+#
+# STEP 0 (docs/implementation-notes/AA-404.md's "mở rộng" section, 45 real
+# pieces across 4 N7 runs) found repair_piece() previously received only
+# (body_tagged, violations) -- the first failing gate's own narrow view --
+# so a repair round fixing one gate had zero visibility into ANOTHER gate's
+# piece-wide requirements and could silently regress it. Confirmed real: 14
+# events / 13 pieces, 4 causal pairs (F9-social->F8 6x, F4->F3 3x,
+# F9-blog->F4 3x, F4->F2 2x). These tests cover the two real shapes named in
+# the AA-404 task text, plus the other invariant fields for completeness.
+
+def test_repair_piece_with_no_invariants_matches_pre_aa404_prompt_shape():
+    """`invariants` defaults to None -- every caller/test that predates
+    AA-404 (including every test above this section) must see the exact
+    same prompt shape as before: no STRUCTURAL CONTEXT block at all."""
+    with patch("services.acp_produce.repair.invoke_claude", return_value=_sonnet_result("fixed")) as mock_invoke:
+        repair_piece("some body", ["some violation"])
+    prompt = mock_invoke.call_args.args[0]
+    assert "STRUCTURAL CONTEXT" not in prompt
+
+
+def test_repair_prompt_preserves_cta_when_f9_social_repair_triggers():
+    """Real case (a): a facebook piece held on F9_brand_seo_audit_social
+    (GENERIC_AI_WORDING) -- a violation that has NOTHING to do with the CTA
+    -- must still see the CTA preservation instruction in its repair prompt,
+    because `invariants.cta_required=True` for a hook_story_cta piece
+    regardless of which gate actually triggered this round. This is the
+    real F9-social -> F8 pattern (6x, the single dominant regression in the
+    45-piece corpus)."""
+    body = "Sunrise over the old quarter [R:atom_1]. Design This Journey.\nHASHTAGS: #travel"
+    invariants = PieceInvariants(channel="facebook", single_atom_required=True, cta_required=True)
+    f9_violation = "audit flagged: GENERIC_AI_WORDING -- opens with a generic AI-sounding phrase"
+
+    with patch("services.acp_produce.repair.invoke_claude", return_value=_sonnet_result(body)) as mock_invoke:
+        repair_piece(body, [f9_violation], invariants=invariants)
+
+    prompt = mock_invoke.call_args.args[0]
+    assert "STRUCTURAL CONTEXT" in prompt
+    assert "Design This Journey" in prompt
+    assert "REQUIRES ending on the exact brand CTA phrase" in prompt
+    # the violation itself is unrelated to the CTA -- confirms the CTA note
+    # is present BECAUSE of the invariant, not because of the violation text
+    assert "cta" not in f9_violation.lower()
+
+
+def test_repair_prompt_preserves_single_atom_when_f9_social_repair_triggers():
+    """Same real F9-social -> F8 pattern, the "one atom, one emotion"
+    sub-criterion: the prompt must tell repair to keep citing only the
+    atom(s) already present, re-derived from the CURRENT body (not a stale
+    stored id)."""
+    body = "Sunrise over the old quarter [R:atom_1]. Design This Journey.\nHASHTAGS: #travel"
+    invariants = PieceInvariants(channel="facebook", single_atom_required=True, cta_required=True)
+
+    with patch("services.acp_produce.repair.invoke_claude", return_value=_sonnet_result(body)) as mock_invoke:
+        repair_piece(body, ["audit flagged: GENERIC_AI_WORDING"], invariants=invariants)
+
+    prompt = mock_invoke.call_args.args[0]
+    assert "single-atom piece" in prompt
+    assert "[R:atom_1]" in prompt.split("STRUCTURAL CONTEXT")[1]  # cited in the invariant note itself
+
+
+def test_repair_prompt_preserves_section_balance_when_f4_repair_triggers():
+    """Real case (b): a blog piece held on F4_brief_compliance (a missing
+    required H2) -- a violation about a MISSING section, not length balance
+    -- must still see the section-ownership note in its repair prompt, so a
+    repair that adds/restructures a section doesn't blindly grow it into a
+    second "longest" section and break F3's >=1.4x ratio. This is the real
+    F4 -> F3 pattern (3x)."""
+    body = "## Intro\n\nShort intro.\n\n## Details\n\nMore detail here."
+    invariants = PieceInvariants(
+        channel="blog",
+        long_section_title="Details",
+        short_para_section_title="Intro",
+        required_h2s=["Intro", "Details", "Wrap-up"],
+    )
+    f4_violation = 'required H2 "Wrap-up" not found in body'
+
+    with patch("services.acp_produce.repair.invoke_claude", return_value=_sonnet_result(body)) as mock_invoke:
+        repair_piece(body, [f4_violation], invariants=invariants)
+
+    prompt = mock_invoke.call_args.args[0]
+    assert "STRUCTURAL CONTEXT" in prompt
+    assert '"## Details" section was deliberately written to run' in prompt
+    assert '"## Intro" section carries the piece\'s one required short' in prompt
+    assert 'required section headings are: "Intro", "Details", "Wrap-up"' in prompt
+    # the violation itself is about a missing heading, not length balance --
+    # confirms the balance note is present because of the invariant
+    assert "notably longer" not in f4_violation.lower()
+
+
+def test_repair_prompt_carries_aida_opening_closing_notes():
+    """F8 AIDA (blog): same class of gap as F3's -- structurally identical
+    exposure, no real regression yet (STEP 0), included so it doesn't need
+    a follow-up patch once real data catches it."""
+    body = "## Hook\n\nOpening.\n\n## Middle\n\nMore.\n\n## Close\n\nEnd."
+    invariants = PieceInvariants(
+        channel="blog", aida_opening_section_title="Hook", aida_closing_section_title="Close",
+    )
+    with patch("services.acp_produce.repair.invoke_claude", return_value=_sonnet_result(body)) as mock_invoke:
+        repair_piece(body, ["some unrelated violation"], invariants=invariants)
+
+    prompt = mock_invoke.call_args.args[0]
+    assert '"## Hook" section is this piece\'s OPENING' in prompt
+    assert '"## Close" section is this piece\'s CLOSING' in prompt
+
+
+def test_repair_prompt_ends_with_cta_violation_gets_explicit_hint_even_without_invariants():
+    """AA-404 STEP 0's own finding: the terse 'ends with CTA' violation
+    string never connected to the brand block's one-line CTA mention
+    elsewhere in context. This hint fires off the violation TEXT itself
+    (gates.py::_ends_with_cta() is the only check that emits this string),
+    so it's defense-in-depth even when `invariants` is None."""
+    with patch("services.acp_produce.repair.invoke_claude", return_value=_sonnet_result("fixed")) as mock_invoke:
+        repair_piece("some body", ["framework criterion failed: ends with CTA"])
+
+    prompt = mock_invoke.call_args.args[0]
+    assert 'HINT for the "ends with CTA" violation' in prompt
+    assert "Design This Journey" in prompt
+
+
+def test_repair_prompt_no_fabricated_context_when_invariants_mostly_empty():
+    """A `PieceInvariants` with only `channel` set (no applicable
+    constraint for this piece, e.g. a tiktok piece) must produce NO
+    STRUCTURAL CONTEXT block -- never invent guidance generation didn't
+    actually set."""
+    invariants = PieceInvariants(channel="tiktok")
+    with patch("services.acp_produce.repair.invoke_claude", return_value=_sonnet_result("fixed")) as mock_invoke:
+        repair_piece("some body", ["some violation"], invariants=invariants)
+
+    prompt = mock_invoke.call_args.args[0]
+    assert "STRUCTURAL CONTEXT" not in prompt
+
+
+def test_repair_piece_backward_compatible_positional_call_still_works():
+    """Confirms `invariants` is truly keyword-only and optional -- every
+    existing caller (including pipeline.py pre-AA-404 callers/tests) that
+    calls `repair_piece(body, violations)` positionally keeps working
+    unchanged."""
+    with patch("services.acp_produce.repair.invoke_claude", return_value=_sonnet_result("fixed body")):
+        result = repair_piece("body", ["v1"])
+    assert result == "fixed body"
