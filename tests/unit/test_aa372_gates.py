@@ -11,9 +11,9 @@ import json
 from unittest.mock import MagicMock, patch
 
 from services.acp_produce.gates import (SOCIAL_SEO_FAILURE_CODES, gate_banned_patterns,
-                                          gate_brand_seo_audit_social, gate_brief_compliance,
-                                          gate_faq_dedup, gate_route_to_sellable,
-                                          gate_structural_variance)
+                                          gate_brand_seo_audit, gate_brand_seo_audit_social,
+                                          gate_brief_compliance, gate_faq_dedup,
+                                          gate_route_to_sellable, gate_structural_variance)
 from services.acp_produce.models import Brief, KeywordRecord
 
 
@@ -395,3 +395,86 @@ def test_f9_social_no_allowlist_when_flagged_phrases_missing():
 
     assert result.passed is False
     assert audit["failure_codes"] == ["GENERIC_AI_WORDING"]
+
+
+# ── AA-404 F9 STEP 0 follow-up: concrete good/bad example anchor (fix #2) +
+# blog flagged_phrases evidence requirement (fix #3) ──────────────────────
+
+def test_f9_social_prompt_carries_generic_ai_wording_anchor():
+    """Fix #2: both F9 judge calls must see a concrete good/bad example for
+    GENERIC_AI_WORDING, not just the bare code name — real week=1 data showed
+    the judge flagging specific, well-grounded prose as "generic" with no
+    anchor to check against."""
+    fake_client = MagicMock()
+    fake_client.invoke_model.return_value = _bedrock_response({
+        "status": "pass", "hook_strength": 1, "cta_clear": 1, "failure_codes": [], "notes": "clean",
+    })
+    with patch("services.acp_produce.judge_client.boto3.client", return_value=fake_client):
+        gate_brand_seo_audit_social("piece body", "tiktok", "brand rubric text")
+
+    sent_user = json.loads(fake_client.invoke_model.call_args.kwargs["body"])["messages"][0]["content"][0]["text"]
+    assert "WHAT COUNTS AS GENERIC_AI_WORDING" in sent_user
+    assert "royal burial mounds" in sent_user  # the real, confirmed-on-brand GOOD example
+    assert "WHAT COUNTS AS SUMMARY_OFF_BRAND" in sent_user
+
+
+def test_f9_blog_prompt_carries_generic_ai_wording_anchor():
+    fake_client = MagicMock()
+    fake_client.invoke_model.return_value = _bedrock_response({
+        "status": "pass", "brand_fit": 1, "human_read": 1, "seo_fit": 1,
+        "trip_type_accuracy": 1, "publish_readiness": 1, "failure_codes": [], "notes": "clean",
+    })
+    with patch("services.acp_produce.judge_client.boto3.client", return_value=fake_client):
+        gate_brand_seo_audit("piece text", "brand rubric text")
+
+    sent_user = json.loads(fake_client.invoke_model.call_args.kwargs["body"])["messages"][0]["content"][0]["text"]
+    assert "WHAT COUNTS AS GENERIC_AI_WORDING" in sent_user
+    assert "royal burial mounds" in sent_user
+
+
+def test_f9_blog_prompt_now_requires_flagged_phrases_evidence():
+    """Fix #3: blog F9 previously had no structured evidence requirement at
+    all (only free-text `notes`) -- less accountable than social's, which
+    got flagged_phrases in PR #153 Part 4b. Must now match."""
+    fake_client = MagicMock()
+    fake_client.invoke_model.return_value = _bedrock_response({
+        "status": "pass", "brand_fit": 1, "human_read": 1, "seo_fit": 1,
+        "trip_type_accuracy": 1, "publish_readiness": 1, "failure_codes": [], "notes": "clean",
+    })
+    with patch("services.acp_produce.judge_client.boto3.client", return_value=fake_client):
+        gate_brand_seo_audit("piece text", "brand rubric text")
+
+    sent_user = json.loads(fake_client.invoke_model.call_args.kwargs["body"])["messages"][0]["content"][0]["text"]
+    assert "flagged_phrases" in sent_user
+    assert "you MUST quote the exact offending phrase" in sent_user
+
+
+def test_f9_blog_audit_carries_flagged_phrases_through_to_audit_dict():
+    fake_client = MagicMock()
+    fake_client.invoke_model.return_value = _bedrock_response({
+        "status": "flagged", "brand_fit": 0, "human_read": 1, "seo_fit": 1,
+        "trip_type_accuracy": 1, "publish_readiness": 0,
+        "failure_codes": ["GENERIC_AI_WORDING"],
+        "flagged_phrases": ["Experience the best of South Korea's rich culture"],
+        "notes": "templated superlatives",
+    })
+    with patch("services.acp_produce.judge_client.boto3.client", return_value=fake_client):
+        result, audit = gate_brand_seo_audit("piece text", "brand rubric text")
+
+    assert result.passed is False
+    assert audit["flagged_phrases"] == ["Experience the best of South Korea's rich culture"]
+
+
+def test_f9_blog_audit_flagged_phrases_defaults_to_empty_list_when_absent():
+    """A judge response that omits `flagged_phrases` entirely (older
+    behavior, or a model that ignores the new instruction) must not crash --
+    degrades to an empty list, same fail-closed convention as social's own
+    AA-404 Part 4b guard."""
+    fake_client = MagicMock()
+    fake_client.invoke_model.return_value = _bedrock_response({
+        "status": "pass", "failure_codes": [],
+    })
+    with patch("services.acp_produce.judge_client.boto3.client", return_value=fake_client):
+        result, audit = gate_brand_seo_audit("piece text", "brand rubric text")
+
+    assert audit["flagged_phrases"] == []
