@@ -105,6 +105,7 @@ async def test_faq_answer_failed_logs_unknown_and_returns_empty(
 
 
 @pytest.mark.asyncio
+@patch("services.acp_produce.slot_runner.fetch_brand_rubric_text", new_callable=AsyncMock)
 @patch("services.acp_produce.slot_runner.run_piece_through_produce_gates", new_callable=AsyncMock)
 @patch("services.acp_produce.slot_runner.apply_faq")
 @patch("services.acp_produce.slot_runner.adapt_channels")
@@ -114,10 +115,12 @@ async def test_faq_answer_failed_logs_unknown_and_returns_empty(
 @patch("services.acp_produce.slot_runner.run_slot_research", new_callable=AsyncMock)
 async def test_happy_path_fans_out_blog_plus_channel_pieces_through_gates(
     mock_research, mock_atoms, mock_outline, mock_draft, mock_adapt, mock_faq, mock_gates,
+    mock_rubric,
 ):
     brief = _brief()
     mock_research.return_value = brief
     mock_atoms.return_value = [{"atom_id": "atom_1", "text": "fact one"}]
+    mock_rubric.return_value = "REAL AA_INTERNAL BRAND RUBRIC"
 
     fb_piece = Piece(piece_id=f"{RUN_ID}:slot-1:blog#facebook", body_tagged="fb body", channel="facebook")
     tt_piece = Piece(piece_id=f"{RUN_ID}:slot-1:blog#tiktok", body_tagged="tt body", channel="tiktok")
@@ -138,9 +141,14 @@ async def test_happy_path_fans_out_blog_plus_channel_pieces_through_gates(
         assert call.kwargs["tour_id"] == str(TRIP_ID)
         assert call.kwargs["run_id"] == RUN_ID
         assert call.kwargs["framework"] == brief.framework
+        # AA-404 fix #1 — every piece this slot produces gets the SAME real per-tenant
+        # rubric (fetched once), not the old hardcoded AA_BRAND_IDENTITY_PROMPT constant.
+        assert call.kwargs["brand_rubric_text"] == "REAL AA_INTERNAL BRAND RUBRIC"
+    mock_rubric.assert_awaited_once_with(db, TENANT)
 
 
 @pytest.mark.asyncio
+@patch("services.acp_produce.slot_runner.fetch_brand_rubric_text", new_callable=AsyncMock)
 @patch("services.acp_produce.slot_runner.run_piece_through_produce_gates", new_callable=AsyncMock)
 @patch("services.acp_produce.slot_runner.apply_faq")
 @patch("services.acp_produce.slot_runner.adapt_channels", return_value=[])
@@ -150,11 +158,13 @@ async def test_happy_path_fans_out_blog_plus_channel_pieces_through_gates(
 @patch("services.acp_produce.slot_runner.run_slot_research", new_callable=AsyncMock)
 async def test_no_trip_id_passes_none_tour_id(
     mock_research, mock_atoms, mock_outline, mock_draft, mock_adapt, mock_faq, mock_gates,
+    mock_rubric,
 ):
     mock_research.return_value = _brief()
     mock_atoms.return_value = []
     mock_faq.side_effect = lambda piece, brief_, atom_text: piece
     mock_gates.side_effect = lambda piece, **kw: _held_piece(piece.piece_id, piece.channel)
+    mock_rubric.return_value = "REAL AA_INTERNAL BRAND RUBRIC"
 
     db = AsyncMock()
     slot = _slot(trip_id=None)
