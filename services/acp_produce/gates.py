@@ -2,15 +2,25 @@
 services.acp_produce.gates — MODULE F: N7 QA gate stack.
 
 F1 grounding (AA-298 Phần A) · F2 banned patterns, F3 structural variance,
-F4 brief compliance, F6 route-to-sellable, F7 FAQ dedup (AA-372) · F8
-framework judge, F9 brand/SEO audit (blog) + F9 social (facebook/tiktok,
-AA-372) — cross-weight LLM judges.
+F4 brief compliance, F5 atom density (AA-404, see below), F6
+route-to-sellable, F7 FAQ dedup (AA-372) · F8 framework judge, F9 brand/SEO
+audit (blog) + F9 social (facebook/tiktok, AA-372) — cross-weight LLM judges.
 
 Numbering note: F2/F3/F4/F6/F7 follow AA-372's OWN renumbering (confirmed
 against its Linear text, not the aamc/ prototype's F2=atom density/
-F3=banned/F4=structural/F5=brief-compliance/F6=route/F7=faq scheme). Atom
-density (the aamc prototype's original F2) is not part of this repo's gate
-set — AA-372 does not ask for it, and it is not built here.
+F3=banned/F4=structural/F5=brief-compliance/F6=route/F7=faq scheme). AA-372's
+renumbering shifted atom density's original slot away and never re-assigned
+it a number, leaving "F5" genuinely unused (docs/implementation-notes/
+AA-364.md's own docstring in pipeline.py said so explicitly: "F5 does not
+exist by design"). AA-404's N0-N8 defense-layer audit (docs/claude_audit/
+AA-404-N0-N8-defense-layer-audit.md) confirmed atom density itself — not just
+its number — was never built at all, and is CONTEXT.md §1.6's own
+highest-leverage anti-AI-voice layer ("AI-sounding text is an information-
+density problem, not a style problem: starve genericity out with
+specifics"), directly explaining F9's #1 blog failure code
+(BODY_EXPERIENCE_DETAILS_TOO_GENERIC, 22/109 real occurrences). Built here as
+`gate_atom_density()`, claiming the open "F5" slot — a real gate this time,
+not just a number.
 
 F1 ported from the aa-marketing-v2 research build's aamc/gates.py::
 gate_grounding() with the P0-1 bug fixed during the port (ADR-2026-029)
@@ -97,6 +107,59 @@ def gate_grounding(body_tagged: str, valid_ids: set[str], text_by_id: dict[str, 
             )
 
     return GateResult(gate="F1_grounding", passed=not violations, violations=violations)
+
+
+# ---------------------------------------------------------------- F5 atom density (DET, AA-404)
+
+# aa-marketing-v2/CONTEXT.md §1.6.1, verbatim: "Atom density validator: every 200–300 words
+# of body must cite ≥1 atom/facts entry. Zero-atom paragraphs are flagged — that's where
+# AI-voice lives." The real aamc/ prototype (aamc/config.py::ATOM_DENSITY_WORDS) resolved
+# "200–300" to a single window of 300 (the upper bound) rather than leaving it a range —
+# ported verbatim here, not re-decided, same value.
+ATOM_DENSITY_WORDS = 300
+
+
+def gate_atom_density(body_tagged: str) -> GateResult:
+    """F5 atom density (DET, AA-404 — see module docstring's Numbering note for why "F5").
+    Faithful port of aamc/gates.py::gate_atom_density() — same algorithm, same window
+    constant, same violation shape — not a re-design. Chunks `body_tagged` into
+    non-overlapping windows of `ATOM_DENSITY_WORDS` words (mechanical word-count chunking,
+    not markdown-paragraph-aware — matches the aamc original, which also just did
+    `body.split()` over the raw text); a chunk fails if it contains zero `[R:atom_id]`/
+    `[F:fact_id]` tags (reuses this module's own `TAG_RE`, not a new parser).
+
+    Threshold: ANY zero-atom chunk fails the whole piece (`passed = not violations`) — no
+    percentage/leniency knob. This mirrors the aamc original's own already-decided design
+    (`if not TAG_RE.search(chunk): violations.append(...)`, unconditional) — not a threshold
+    invented for this port. Flagged for Nghiep's review anyway (PR description) since it's a
+    strict, all-or-nothing rule same as F9's, on a NEW gate — worth an explicit sign-off even
+    though it's not new decision-making, just adopting the existing spec's own strictness.
+
+    A trailing chunk shorter than `ATOM_DENSITY_WORDS // 2` is skipped, not flagged — same
+    aamc guard, prevents a short leftover fragment at the very end of the body (which could
+    never reasonably reach a full window) from spuriously failing the gate. This is also what
+    naturally exempts short-form channels: no explicit `channel` check was added (the aamc
+    original's `gate_atom_density(piece)` never took one either) — real facebook (80-150
+    words)/tiktok (100-150 words) piece bodies fall entirely under the 150-word floor, so the
+    single implicit "chunk" they'd form is skipped outright, before the tag-presence check
+    ever runs. Verified by test (`test_facebook_length_body_is_exempted_by_window_floor` /
+    `test_tiktok_length_body_is_exempted_by_window_floor`), not just asserted."""
+    body = body_tagged or ""
+    words = body.split()
+    violations: list[str] = []
+    window = ATOM_DENSITY_WORDS
+    for start in range(0, max(1, len(words)), window):
+        chunk_words = words[start:start + window]
+        if len(chunk_words) < window // 2:
+            continue
+        chunk = " ".join(chunk_words)
+        if not TAG_RE.search(chunk):
+            violations.append(
+                f"words {start}-{start + len(chunk_words)}: zero atom/fact citations in this "
+                f"stretch — that's where AI-voice lives (CONTEXT.md §1.6.1); add a specific, "
+                f"verifiable detail or cut it. First 80 chars: '{chunk[:80]}'"
+            )
+    return GateResult(gate="F5_atom_density", passed=not violations, violations=violations)
 
 
 # ---------------------------------------------------------------- F2 banned patterns (DET)

@@ -18,11 +18,15 @@ failure — this is not a new choice, it is AA-363's own docstring's confirmed
 real call-order rationale ("running them before the F8/F9 Nova Pro judge
 calls avoids paying for a judge call on content that was always going to be
 rejected for a banned word"). Only if output_rules passes does the rest of
-the stack run, DET-cheapest-first: F1 (grounding) → F2 (banned patterns) →
-F3 (structural variance) → F4 (brief compliance) → F6 (route-to-sellable) →
-F7 (FAQ dedup) → F8 (framework, LLM) → F9 (brand_seo_audit / brand_seo_audit
-_social, LLM) — AA-372 wires F2/F3/F4/F6/F7 in; F5 does not exist by design
-(AA-372's own numbering skips it, see gates.py module docstring).
+the stack run, DET-cheapest-first: F1 (grounding) → F5 (atom density, AA-404
+— see below) → F2 (banned patterns) → F3 (structural variance) → F4 (brief
+compliance) → F6 (route-to-sellable) → F7 (FAQ dedup) → F8 (framework, LLM)
+→ F9 (brand_seo_audit / brand_seo_audit_social, LLM) — AA-372 wires
+F2/F3/F4/F6/F7 in. F5 (atom density) is AA-404's addition — runs right after
+F1, matching the aamc/ prototype's own original order (F1 grounding → F2
+atom density, gates.py's own docstring), even though its number ("F5") is
+unrelated to that position — the number just claims the slot AA-372's
+renumbering left open, per gates.py's Numbering note.
 
 Channel routing (AA-372): each new DET gate takes `channel` and no-ops/
 branches internally (F3/F4 are blog-only by design; F6/F7 apply to every
@@ -101,11 +105,11 @@ from typing import Optional
 import asyncpg
 
 from services.acp_planning.constants import FRAMEWORK_TABLE
-from services.acp_produce.gates import (gate_banned_patterns, gate_brand_seo_audit,
-                                          gate_brand_seo_audit_social, gate_brief_compliance,
-                                          gate_faq_dedup, gate_framework, gate_grounding,
-                                          gate_route_to_sellable, gate_structural_variance,
-                                          run_gates)
+from services.acp_produce.gates import (gate_atom_density, gate_banned_patterns,
+                                          gate_brand_seo_audit, gate_brand_seo_audit_social,
+                                          gate_brief_compliance, gate_faq_dedup, gate_framework,
+                                          gate_grounding, gate_route_to_sellable,
+                                          gate_structural_variance, run_gates)
 from services.acp_produce.generation import _select_variance_owners, build_outline
 from services.acp_produce.metrics import emit_piece_metrics
 from services.acp_produce.models import REPAIR_TOTAL_MAX, Brief, GateResult, Piece
@@ -151,7 +155,7 @@ async def run_piece_through_produce_gates(
     db: asyncpg.Connection,
 ) -> Piece:
     """Runs `piece` (already has `body_tagged`) through output_rules → F1 →
-    F2 → F3 → F4 → F6 → F7 → F8 → F9, persists the terminal result to
+    F5 → F2 → F3 → F4 → F6 → F7 → F8 → F9, persists the terminal result to
     `acp_deliver.pieces`, and emits CloudWatch metrics at the gate-pass
     moment. Returns the mutated `piece` (status is "passed" or "held" on
     return, never "in_progress").
@@ -201,6 +205,9 @@ async def run_piece_through_produce_gates(
         def _f1(body: str) -> GateResult:
             return gate_grounding(body, valid_ids, text_by_id)
 
+        def _f5(body: str) -> GateResult:
+            return gate_atom_density(body)
+
         def _f2(body: str) -> GateResult:
             return gate_banned_patterns(body, text_by_id)
 
@@ -230,7 +237,7 @@ async def run_piece_through_produce_gates(
         def _repair(body: str, violations: list[str]) -> str:
             return repair_piece(body, violations, invariants=invariants)
 
-        run_gates(piece, [_f1, _f2, _f3, _f4, _f6, _f7, _f8, _f9],
+        run_gates(piece, [_f1, _f5, _f2, _f3, _f4, _f6, _f7, _f8, _f9],
                   _repair, max_repairs=REPAIR_TOTAL_MAX, is_repairable=_is_f6_content_fixable)
         piece.gate_ledger = [rule_result] + piece.gate_ledger
         audit = audit_holder["audit"]

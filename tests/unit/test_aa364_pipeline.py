@@ -147,12 +147,13 @@ async def test_piece_passing_all_gates_persists_passed_and_emits_metrics_but_not
     assert params[2] == TENANT        # tenant_id
     assert params[6] == "passed"      # status
 
-    # gate_ledger persisted includes output_rules + the full F1-F9 stack (AA-372), in order
+    # gate_ledger persisted includes output_rules + the full F1-F9 stack (AA-372 + AA-404's
+    # F5 atom density, wired right after F1 per pipeline.py's own gate-order docstring), in order
     gate_ledger = json.loads(params[7])
     assert [g["gate"] for g in gate_ledger] == [
-        "output_rules", "F1_grounding", "F2_banned_patterns", "F3_structural_variance",
-        "F4_brief_compliance", "F6_route_to_sellable", "F7_faq_dedup",
-        "F8_framework", "F9_brand_seo_audit",
+        "output_rules", "F1_grounding", "F5_atom_density", "F2_banned_patterns",
+        "F3_structural_variance", "F4_brief_compliance", "F6_route_to_sellable",
+        "F7_faq_dedup", "F8_framework", "F9_brand_seo_audit",
     ]
     assert all(g["passed"] for g in gate_ledger)
 
