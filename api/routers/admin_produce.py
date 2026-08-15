@@ -184,7 +184,7 @@ async def trigger_produce_run(
         raise HTTPException(status_code=400, detail=str(exc))
 
     tenant_id_str = str(tenant_uuid)
-    run_id = await create_weekly_produce_run(pool, tenant_id_str, body.year, body.week)
+    run_id = await create_weekly_produce_run(pool, tenant_id_str, body.year, month, body.week)
     await persist_slot_grid(pool, run_id, tenant_id_str, body.week, grid)
     await _mark_run_status(pool, run_id, "producing")
 
@@ -204,6 +204,7 @@ async def trigger_produce_run(
         "run_id": run_id,
         "tenant_id": tenant_id_str,
         "year": body.year,
+        "month": month,
         "week": body.week,
         "due_slot_count": len(due_slots),
         "status": "producing",
@@ -221,7 +222,7 @@ async def get_produce_run(run_id: str, request: Request, x_admin_secret: str = H
 
     run_row = await pool.fetchrow(
         """
-        SELECT run_id::text, tenant_id, year, week, status, created_at, completed_at
+        SELECT run_id::text, tenant_id, year, month, week, status, created_at, completed_at
         FROM acp_shared.acp_v2_runs WHERE run_id = $1::uuid
         """,
         run_id,
@@ -250,6 +251,7 @@ async def get_produce_run(run_id: str, request: Request, x_admin_secret: str = H
         "run_id": run_row["run_id"],
         "tenant_id": run_row["tenant_id"],
         "year": run_row["year"],
+        "month": run_row["month"],
         "week": run_row["week"],
         "status": run_row["status"],
         "created_at": run_row["created_at"].isoformat() if run_row["created_at"] else None,

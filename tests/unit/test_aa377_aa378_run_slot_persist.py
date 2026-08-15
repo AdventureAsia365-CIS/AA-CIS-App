@@ -63,27 +63,43 @@ class TestDeterministicSlotId:
     def test_same_inputs_same_id(self):
         tid = uuid.uuid4()
         trip = uuid.uuid4()
-        a = _deterministic_slot_id(tid, 2, trip, "blog")
-        b = _deterministic_slot_id(tid, 2, trip, "blog")
+        a = _deterministic_slot_id(tid, 2026, 8, 2, trip, "blog")
+        b = _deterministic_slot_id(tid, 2026, 8, 2, trip, "blog")
         assert a == b
 
     def test_different_week_different_id(self):
         tid, trip = uuid.uuid4(), uuid.uuid4()
-        assert _deterministic_slot_id(tid, 1, trip, "blog") != _deterministic_slot_id(tid, 2, trip, "blog")
+        assert (_deterministic_slot_id(tid, 2026, 8, 1, trip, "blog")
+                != _deterministic_slot_id(tid, 2026, 8, 2, trip, "blog"))
 
     def test_different_channel_different_id(self):
         tid, trip = uuid.uuid4(), uuid.uuid4()
-        assert _deterministic_slot_id(tid, 1, trip, "blog") != _deterministic_slot_id(tid, 1, trip, "facebook")
+        assert (_deterministic_slot_id(tid, 2026, 8, 1, trip, "blog")
+                != _deterministic_slot_id(tid, 2026, 8, 1, trip, "facebook"))
 
     def test_different_trip_different_id(self):
         tid = uuid.uuid4()
-        assert (_deterministic_slot_id(tid, 1, uuid.uuid4(), "blog")
-                != _deterministic_slot_id(tid, 1, uuid.uuid4(), "blog"))
+        assert (_deterministic_slot_id(tid, 2026, 8, 1, uuid.uuid4(), "blog")
+                != _deterministic_slot_id(tid, 2026, 8, 1, uuid.uuid4(), "blog"))
 
     def test_different_tenant_different_id(self):
         trip = uuid.uuid4()
-        assert (_deterministic_slot_id(uuid.uuid4(), 1, trip, "blog")
-                != _deterministic_slot_id(uuid.uuid4(), 1, trip, "blog"))
+        assert (_deterministic_slot_id(uuid.uuid4(), 2026, 8, 1, trip, "blog")
+                != _deterministic_slot_id(uuid.uuid4(), 2026, 8, 1, trip, "blog"))
+
+    def test_different_year_different_id(self):
+        """AA-410 — year was missing from the hash entirely (day-one bug, independent of the
+        month gap this fix also closes)."""
+        tid, trip = uuid.uuid4(), uuid.uuid4()
+        assert (_deterministic_slot_id(tid, 2026, 8, 1, trip, "blog")
+                != _deterministic_slot_id(tid, 2027, 8, 1, trip, "blog"))
+
+    def test_different_month_different_id(self):
+        """AA-410 — the actual live-blocking bug: same (tenant, week, trip, channel) in two
+        different calendar months used to collide onto one slot_id."""
+        tid, trip = uuid.uuid4(), uuid.uuid4()
+        assert (_deterministic_slot_id(tid, 2026, 8, 1, trip, "blog")
+                != _deterministic_slot_id(tid, 2026, 9, 1, trip, "blog"))
 
 
 class TestMakeSlotDeterminism:
@@ -140,7 +156,7 @@ class FakeDB:
     """In-memory mirror of acp_shared.acp_v2_runs / acp_v2_slots."""
 
     def __init__(self):
-        self.runs: dict[tuple, uuid.UUID] = {}   # (tenant_id, year, week) -> run_id
+        self.runs: dict[tuple, uuid.UUID] = {}   # (tenant_id, year, month, week) -> run_id
         self.slots: dict[str, dict] = {}          # slot_id -> row dict
 
 
@@ -154,18 +170,18 @@ class FakeConn:
     async def execute(self, query, *params):
         q = " ".join(query.split())
         if "INSERT INTO acp_shared.acp_v2_runs" in q:
-            tenant_id, year, week = params
-            key = (tenant_id, year, week)
+            tenant_id, year, month, week = params
+            key = (tenant_id, year, month, week)
             if key not in self.db.runs:
                 self.db.runs[key] = uuid.uuid4()
             return "INSERT 0 1"
         if "INSERT INTO acp_shared.acp_v2_slots" in q:
-            slot_id, run_id, tenant_id, week, channel, kind, tour_id, payload = params
+            slot_id, run_id, tenant_id, week, month, channel, kind, tour_id, payload = params
             if slot_id not in self.db.slots:
                 self.db.slots[slot_id] = {
                     "slot_id": slot_id, "run_id": run_id, "tenant_id": tenant_id, "week": week,
-                    "channel": channel, "kind": kind, "tour_id": tour_id, "payload": payload,
-                    "status": "due", "produced_at": None, "skipped_reason": None,
+                    "month": month, "channel": channel, "kind": kind, "tour_id": tour_id,
+                    "payload": payload, "status": "due", "produced_at": None, "skipped_reason": None,
                 }
             return "INSERT 0 1"
         if "UPDATE acp_shared.acp_v2_slots" in q:
@@ -183,8 +199,8 @@ class FakeConn:
     async def fetchval(self, query, *params):
         q = " ".join(query.split())
         if "SELECT run_id FROM acp_shared.acp_v2_runs" in q:
-            tenant_id, year, week = params
-            return self.db.runs.get((tenant_id, year, week))
+            tenant_id, year, month, week = params
+            return self.db.runs.get((tenant_id, year, month, week))
         raise AssertionError(f"Unhandled fetchval query: {q!r}")
 
     async def fetch(self, query, *params):
@@ -217,28 +233,38 @@ def pool(db):
 class TestCreateWeeklyProduceRun:
     @pytest.mark.asyncio
     async def test_creates_run_on_first_call(self, pool, db):
-        run_id = await create_weekly_produce_run(pool, str(TENANT), 2026, 2)
-        assert (str(TENANT), 2026, 2) in db.runs
-        assert run_id == str(db.runs[(str(TENANT), 2026, 2)])
+        run_id = await create_weekly_produce_run(pool, str(TENANT), 2026, 8, 2)
+        assert (str(TENANT), 2026, 8, 2) in db.runs
+        assert run_id == str(db.runs[(str(TENANT), 2026, 8, 2)])
 
     @pytest.mark.asyncio
     async def test_second_call_same_week_returns_same_run_id(self, pool, db):
-        run_id_1 = await create_weekly_produce_run(pool, str(TENANT), 2026, 2)
-        run_id_2 = await create_weekly_produce_run(pool, str(TENANT), 2026, 2)
+        run_id_1 = await create_weekly_produce_run(pool, str(TENANT), 2026, 8, 2)
+        run_id_2 = await create_weekly_produce_run(pool, str(TENANT), 2026, 8, 2)
         assert run_id_1 == run_id_2
         assert len(db.runs) == 1
 
     @pytest.mark.asyncio
     async def test_different_week_gets_different_run_id(self, pool, db):
-        run_id_1 = await create_weekly_produce_run(pool, str(TENANT), 2026, 1)
-        run_id_2 = await create_weekly_produce_run(pool, str(TENANT), 2026, 2)
+        run_id_1 = await create_weekly_produce_run(pool, str(TENANT), 2026, 8, 1)
+        run_id_2 = await create_weekly_produce_run(pool, str(TENANT), 2026, 8, 2)
         assert run_id_1 != run_id_2
+
+    @pytest.mark.asyncio
+    async def test_different_month_same_week_gets_different_run_id(self, pool, db):
+        """AA-410 — this is the actual live-blocking bug: week 1 of August and week 1 of
+        September used to collide onto the SAME run (month was dropped from both the INSERT
+        and the UNIQUE constraint)."""
+        run_id_1 = await create_weekly_produce_run(pool, str(TENANT), 2026, 8, 1)
+        run_id_2 = await create_weekly_produce_run(pool, str(TENANT), 2026, 9, 1)
+        assert run_id_1 != run_id_2
+        assert len(db.runs) == 2
 
 
 class TestPersistSlotGridAndFetchDueSlots:
     @pytest.mark.asyncio
     async def test_persists_only_matching_week_non_hold_slots(self, pool, db):
-        run_id = await create_weekly_produce_run(pool, str(TENANT), 2026, 1)
+        run_id = await create_weekly_produce_run(pool, str(TENANT), 2026, 8, 1)
         grid_slots = [
             _slot(slot_id="s1", week=1, kind="evergreen"),
             _slot(slot_id="s2", week=2, kind="evergreen"),  # different week — excluded
@@ -246,18 +272,21 @@ class TestPersistSlotGridAndFetchDueSlots:
         ]
 
         class _Grid:
+            month = 8
             slots = grid_slots
 
         persisted = await persist_slot_grid(pool, run_id, str(TENANT), 1, _Grid())
         assert [s.slot_id for s in persisted] == ["s1"]
         assert set(db.slots.keys()) == {"s1"}
+        assert db.slots["s1"]["month"] == 8
 
     @pytest.mark.asyncio
     async def test_reallocation_is_idempotent_no_op(self, pool, db):
         """Same slot_id persisted twice must not create a second row or clobber status."""
-        run_id = await create_weekly_produce_run(pool, str(TENANT), 2026, 1)
+        run_id = await create_weekly_produce_run(pool, str(TENANT), 2026, 8, 1)
 
         class _Grid:
+            month = 8
             slots = [_slot(slot_id="s1", week=1, kind="evergreen")]
 
         await persist_slot_grid(pool, run_id, str(TENANT), 1, _Grid())
@@ -271,10 +300,11 @@ class TestPersistSlotGridAndFetchDueSlots:
     async def test_fetch_due_slots_round_trips_via_json_payload(self, pool, db):
         """Matches this app's real asyncpg gap (no jsonb codec registered, AA-300/AA-314) —
         payload comes back as a JSON string, not a dict."""
-        run_id = await create_weekly_produce_run(pool, str(TENANT), 2026, 1)
+        run_id = await create_weekly_produce_run(pool, str(TENANT), 2026, 8, 1)
         trip_id = uuid.uuid4()
 
         class _Grid:
+            month = 8
             slots = [_slot(slot_id="s1", week=1, kind="evergreen", trip_id=trip_id, keyword_seed="hoi an tours")]
 
         await persist_slot_grid(pool, run_id, str(TENANT), 1, _Grid())
@@ -290,9 +320,10 @@ class TestPersistSlotGridAndFetchDueSlots:
 
     @pytest.mark.asyncio
     async def test_produced_slot_excluded_from_due_query(self, pool, db):
-        run_id = await create_weekly_produce_run(pool, str(TENANT), 2026, 1)
+        run_id = await create_weekly_produce_run(pool, str(TENANT), 2026, 8, 1)
 
         class _Grid:
+            month = 8
             slots = [_slot(slot_id="s1", week=1, kind="evergreen"),
                     _slot(slot_id="s2", week=1, kind="evergreen", trip_id=uuid.uuid4())]
 
@@ -304,6 +335,30 @@ class TestPersistSlotGridAndFetchDueSlots:
         due_after = await fetch_due_slots(pool, run_id)
         assert {s.slot_id for s in due_after} == {"s2"}
 
+    @pytest.mark.asyncio
+    async def test_same_week_different_month_no_longer_collides(self, pool, db):
+        """AA-410 — the actual live-blocking bug, at the persist_slot_grid layer: week 1 of
+        August and week 1 of September must persist as DISTINCT slot rows now that
+        _deterministic_slot_id() includes year+month."""
+        run_id_aug = await create_weekly_produce_run(pool, str(TENANT), 2026, 8, 1)
+        run_id_sep = await create_weekly_produce_run(pool, str(TENANT), 2026, 9, 1)
+        trip_id = uuid.uuid4()
+
+        class _GridAug:
+            month = 8
+            slots = [_slot(slot_id="slot_aug", week=1, kind="evergreen", trip_id=trip_id)]
+
+        class _GridSep:
+            month = 9
+            slots = [_slot(slot_id="slot_sep", week=1, kind="evergreen", trip_id=trip_id)]
+
+        await persist_slot_grid(pool, run_id_aug, str(TENANT), 1, _GridAug())
+        await persist_slot_grid(pool, run_id_sep, str(TENANT), 1, _GridSep())
+
+        assert set(db.slots.keys()) == {"slot_aug", "slot_sep"}
+        assert db.slots["slot_aug"]["month"] == 8
+        assert db.slots["slot_sep"]["month"] == 9
+
 
 class TestMarkSlotStatus:
     @pytest.mark.asyncio
@@ -313,9 +368,10 @@ class TestMarkSlotStatus:
 
     @pytest.mark.asyncio
     async def test_skipped_records_reason(self, pool, db):
-        run_id = await create_weekly_produce_run(pool, str(TENANT), 2026, 1)
+        run_id = await create_weekly_produce_run(pool, str(TENANT), 2026, 8, 1)
 
         class _Grid:
+            month = 8
             slots = [_slot(slot_id="s1", week=1, kind="evergreen")]
 
         await persist_slot_grid(pool, run_id, str(TENANT), 1, _Grid())
@@ -347,7 +403,7 @@ class TestAllocateAndPersistWeek:
             TENANT, 2026, 2, 1, ["blog"], 4, plan, runway, "US", pool,
         )
 
-        assert run_id == str(db.runs[(str(TENANT), 2026, 1)])
+        assert run_id == str(db.runs[(str(TENANT), 2026, 2, 1)])
         assert all(s.week == 1 for s in slots)
         assert set(db.slots.keys()) == {s.slot_id for s in slots}
 
