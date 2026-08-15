@@ -313,3 +313,85 @@ def test_f9_social_judge_unavailable_fails_not_silent_pass():
 
     assert result.passed is False
     assert audit is None
+
+
+# ── AA-404 Part 4b: CTA-phrase allowlist for GENERIC_AI_WORDING/SUMMARY_OFF_BRAND ──
+
+# Reconstructed from the real held piece de8337ba...:slot_845eb6ec83cdf1f082ec:
+# blog#tiktok, round 2 of 3 (docs/implementation-notes/AA-404.md §3) — a real
+# Nova Pro F9-social audit flagged the brand's OWN mandated CTA phrase
+# ("Design This Journey", brand_standards.py:12) as GENERIC_AI_WORDING.
+_REAL_CTA_FALSE_POSITIVE_NOTES = (
+    "The summary contains generic AI wording such as 'An orientation walk through the city on the "
+    "first evening draws things into focus.' This does not align with the required brand voice and "
+    "language. Additionally, the summary uses phrases like 'Design This Journey' which, while "
+    "aligned with the CTA, feels somewhat generic and not sufficiently unique or specific to the "
+    "journey described."
+)
+
+
+def test_f9_social_allowlists_cta_phrase_only_generic_wording_complaint():
+    fake_client = MagicMock()
+    fake_client.invoke_model.return_value = _bedrock_response({
+        "status": "flagged", "hook_strength": 1, "cta_clear": 1,
+        "failure_codes": ["GENERIC_AI_WORDING"], "flagged_phrases": ["Design This Journey"],
+        "notes": _REAL_CTA_FALSE_POSITIVE_NOTES,
+    })
+    with patch("services.acp_produce.judge_client.boto3.client", return_value=fake_client):
+        result, audit = gate_brand_seo_audit_social("piece body", "tiktok", "brand rubric text")
+
+    assert result.passed is True
+    assert audit["failure_codes"] == []
+
+
+def test_f9_social_does_not_allowlist_when_a_different_phrase_is_also_flagged():
+    """The CTA phrase appearing ALONGSIDE a genuinely different off-brand
+    phrase is still a real complaint — only a CTA-phrase-ONLY complaint gets
+    dropped."""
+    fake_client = MagicMock()
+    fake_client.invoke_model.return_value = _bedrock_response({
+        "status": "flagged", "hook_strength": 1, "cta_clear": 1,
+        "failure_codes": ["GENERIC_AI_WORDING"],
+        "flagged_phrases": ["Design This Journey", "the terrain does its own work"],
+        "notes": "mixed complaint",
+    })
+    with patch("services.acp_produce.judge_client.boto3.client", return_value=fake_client):
+        result, audit = gate_brand_seo_audit_social("piece body", "tiktok", "brand rubric text")
+
+    assert result.passed is False
+    assert audit["failure_codes"] == ["GENERIC_AI_WORDING"]
+
+
+def test_f9_social_allowlist_drops_only_brand_wording_codes_not_others():
+    """A CTA-phrase-only complaint drops GENERIC_AI_WORDING/SUMMARY_OFF_BRAND
+    but must never touch an unrelated real failure code like
+    CTA_MISSING_OR_WEAK — the gate should still fail on that."""
+    fake_client = MagicMock()
+    fake_client.invoke_model.return_value = _bedrock_response({
+        "status": "flagged", "hook_strength": 1, "cta_clear": 0,
+        "failure_codes": ["GENERIC_AI_WORDING", "CTA_MISSING_OR_WEAK"],
+        "flagged_phrases": ["Design This Journey"],
+        "notes": "CTA phrase flagged as generic AND the CTA itself is weak",
+    })
+    with patch("services.acp_produce.judge_client.boto3.client", return_value=fake_client):
+        result, audit = gate_brand_seo_audit_social("piece body", "tiktok", "brand rubric text")
+
+    assert result.passed is False
+    assert audit["failure_codes"] == ["CTA_MISSING_OR_WEAK"]
+
+
+def test_f9_social_no_allowlist_when_flagged_phrases_missing():
+    """A judge response that doesn't comply with the new `flagged_phrases`
+    contract field (empty/absent) must fail closed, same as before this
+    change — never silently pass just because evidence wasn't provided."""
+    fake_client = MagicMock()
+    fake_client.invoke_model.return_value = _bedrock_response({
+        "status": "flagged", "hook_strength": 1, "cta_clear": 1,
+        "failure_codes": ["GENERIC_AI_WORDING"], "flagged_phrases": [],
+        "notes": "generic wording, no specific quote given",
+    })
+    with patch("services.acp_produce.judge_client.boto3.client", return_value=fake_client):
+        result, audit = gate_brand_seo_audit_social("piece body", "tiktok", "brand rubric text")
+
+    assert result.passed is False
+    assert audit["failure_codes"] == ["GENERIC_AI_WORDING"]

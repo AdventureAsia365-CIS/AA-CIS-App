@@ -64,6 +64,68 @@ _MAX_MAX_TOKENS = 4096  # same ceiling as the JSON-truncation fix elsewhere in t
 
 _SECTION_MARKER_RE = re.compile(r"===SECTION:.*?===\s*\n", re.MULTILINE)
 
+# AA-404 Part 1: F3_structural_variance (gates.py::gate_structural_variance())
+# needs (a) >=1 genuinely one-sentence paragraph SOMEWHERE in the piece and
+# (b) one section running >=1.4x longer than the second-longest, whenever the
+# piece has >=3 H2 sections. STEP 0 (docs/implementation-notes/AA-404.md §2)
+# confirmed research.py's _VARIANCE_DIRECTIVES already says both of these in
+# plain English, on every batch call -- and still 7/33 real pieces fail here,
+# because sections are drafted in independent 2-3-section batches that never
+# see each other's output. A piece-wide directive repeated identically to
+# every batch has no owner: each batch can assume another batch will handle
+# it, and (per the real data) none reliably does. Fix: give each directive to
+# exactly ONE section, deterministically, so exactly one batch call ever
+# receives it.
+_LONG_SECTION_MULTIPLIER = 1.7  # gate needs >=1.4x; margin for real writer variance
+_MIN_SECTION_WORDS = 60
+
+_ONE_SENTENCE_PARAGRAPH_NOTE = (
+    "\nRHYTHM DIRECTIVE (this section specifically -- AA-404): include, somewhere in this "
+    "section's prose, exactly one standalone paragraph that is a single short sentence (a "
+    "deliberate rhythm break). This is the ONLY section in the piece assigned this requirement -- "
+    "every other paragraph, here and elsewhere in the piece, should be normal multi-sentence prose."
+)
+_LONG_SECTION_NOTE = (
+    "\nLENGTH DIRECTIVE (this section specifically -- AA-404): this is the ONE section in the "
+    "piece assigned to run notably longer than the others -- develop it in real depth, do not "
+    "compress it to match a typical section's length."
+)
+
+# AA-404 Part 3: F8_framework's AIDA rubric ("attention hook first" / "single
+# clear action (CTA)") failed in real week=3 data (docs/implementation-notes/
+# AA-404.md §1) because this writer prompt only ever passed the bare
+# framework NAME ("AIDA") with zero explanation of what it requires -- a
+# total gap, not a weak one. hook_story_cta (facebook, adapt.py) already
+# proves the fix shape: its "first line is the hook" / single-CTA criteria
+# pass cleanly in all 33 real pieces because adapt.py spells out exactly
+# where the hook/CTA must sit, in positional terms. Mirrored here for AIDA's
+# two failing criteria specifically -- not copied verbatim (adapt.py's
+# facebook piece is one single short paragraph with one obvious first/last
+# sentence; a blog piece is drafted across several independently-batched H2
+# sections, so the hook/CTA requirement has to be pinned to whichever section
+# is actually first/last in the OUTLINE, not to "the first/last sentence of
+# this batch's response"). hub/PAS have the same bare-label gap but no real
+# failure yet -- deliberately not touched here, flagged as a follow-up in the
+# AA-404 PR description rather than guessed at ahead of data (same
+# Mistake-to-Rule stance ADR-2026-009 already established for F9-social).
+_AIDA_FRAMEWORK_GUIDANCE = (
+    "AIDA FRAMEWORK (Attention-Interest-Desire-Action): the piece as a whole must move through all "
+    "four beats in order -- open on Attention, build Interest with specifics, build Desire on "
+    "concrete sensory moments (not abstract claims), and close on Action. Whichever section(s) "
+    "you're drafting, write the right beat for their position in that arc."
+)
+_AIDA_OPENING_HOOK_NOTE = (
+    "\nATTENTION-HOOK REQUIREMENT (this is the piece's OPENING section): the very first sentence "
+    "you write must be a genuine attention hook -- a specific, concrete, surprising detail or a real "
+    "question that earns the next sentence. Never open with a generic scene-setting line."
+)
+_AIDA_SINGLE_CTA_NOTE = (
+    "\nSINGLE-CTA REQUIREMENT (this is the piece's CLOSING section): end on exactly ONE clear call "
+    "to action. Do not offer more than one distinct ask (e.g. do not both invite booking AND suggest "
+    "reading another article, or CTA both mid-section and again at the very end) -- one unambiguous "
+    "action, once."
+)
+
 _DRAFT_SYSTEM_PROMPT = (
     "You are the Adventure Asia content writer for N7 (blog/social) pieces.\n\n"
     + AA_BRAND_IDENTITY_PROMPT.strip() +
@@ -129,17 +191,27 @@ def generate_draft(brief: Brief, outline: list[OutlineSection], atom_text_by_id:
     H2 headings from the outline (code, never the model), and joins the
     result into one `body_tagged` string in outline order. Raises
     `DraftGenerationFailed` rather than ever emitting an empty/fabricated
-    section."""
+    section.
+
+    AA-404 Part 1/3: `long_title`/`short_para_title` give the F3 variance
+    directives a single deterministic owner section each (see module-level
+    comment above `_LONG_SECTION_MULTIPLIER`); `extra_directives` folds that
+    together with AIDA's opening-hook/closing-CTA notes (Part 3) into one
+    per-section-title -> [extra prompt lines] map, computed once per piece
+    (not per batch) so every batch call sees a consistent, non-duplicated
+    plan."""
     if not outline:
         raise ValueError("generate_draft() requires a non-empty outline — run build_outline() first")
 
-    words_mid = sum(brief.word_range) // 2
-    words_per_section = max(words_mid // len(outline), 100)
+    long_title, short_para_title = _select_variance_owners(outline)
+    words_per_section = _compute_words_per_section(brief, outline, long_title)
+    extra_directives = _build_extra_section_directives(brief, outline, long_title, short_para_title)
 
     section_bodies: dict[str, str] = {}
     for batch in _batch_sections(outline):
-        prompt = _build_batch_prompt(brief, batch, atom_text_by_id)
-        max_tokens = min(max(int(words_per_section * len(batch) * 1.6) + 150, _MIN_MAX_TOKENS), _MAX_MAX_TOKENS)
+        prompt = _build_batch_prompt(brief, batch, atom_text_by_id, words_per_section, extra_directives)
+        batch_words = sum(words_per_section.get(s.title, 0) for s in batch)
+        max_tokens = min(max(int(batch_words * 1.6) + 150, _MIN_MAX_TOKENS), _MAX_MAX_TOKENS)
 
         result = _invoke_sonnet_with_retry(prompt, max_tokens)
         logger.info(
@@ -174,10 +246,84 @@ def _batch_sections(sections: list[OutlineSection], target: int = _TARGET_BATCH_
     return batches
 
 
-def _build_batch_prompt(brief: Brief, batch: list[OutlineSection], atom_text_by_id: dict[str, str]) -> str:
+def _select_variance_owners(outline: list[OutlineSection]) -> tuple[str, str]:
+    """AA-404 Part 1: picks exactly one section to own the "notably longer"
+    directive and exactly one (different, when possible) section to own the
+    "include a one-sentence paragraph" directive — deterministic, not random,
+    so the same Brief always produces the same assignment.
+
+    `long`: the section with the MOST assigned atoms — the section with the
+    most material to develop, so asking it to run longer is a natural fit
+    rather than an arbitrary constraint the model has to invent content to
+    satisfy. `short_para`: the section with the FEWEST atoms, excluded from
+    being the same section as `long` whenever more than one section exists —
+    a light/transitional section is a natural place for one short, punchy
+    standalone sentence. Ties broken by outline order (Python's `max`/`min`
+    keep the first-encountered maximal/minimal item), so the choice is fully
+    reproducible for a given outline."""
+    if not outline:
+        raise ValueError("_select_variance_owners() requires a non-empty outline")
+    n = len(outline)
+    long_idx = max(range(n), key=lambda i: len(outline[i].atom_ids))
+    remaining = [i for i in range(n) if i != long_idx] or [long_idx]
+    short_idx = min(remaining, key=lambda i: len(outline[i].atom_ids))
+    return outline[long_idx].title, outline[short_idx].title
+
+
+def _compute_words_per_section(brief: Brief, outline: list[OutlineSection], long_title: str) -> dict[str, int]:
+    """AA-404 Part 1: F3's section-length check only fires with >=3 H2
+    sections (`gates.py::gate_structural_variance()`) — below that, don't
+    distort section sizing for a rule that can't even apply. At >=3
+    sections, `long_title` gets `_LONG_SECTION_MULTIPLIER`x the uniform
+    baseline and every other section is shrunk to compensate, so the TOTAL
+    stays close to the original `words_mid` budget — `F4_brief_compliance`'s
+    word-count check (±30%) still has to pass; only the distribution across
+    sections changes, not the sum."""
+    n = len(outline)
+    words_mid = sum(brief.word_range) // 2
+    base = max(words_mid // n, 100)
+    if n < 3:
+        return {s.title: base for s in outline}
+    long_target = int(base * _LONG_SECTION_MULTIPLIER)
+    extra = long_target - base
+    others = [s for s in outline if s.title != long_title]
+    reduction_each = extra // len(others) if others else 0
+    result: dict[str, int] = {}
+    for s in outline:
+        if s.title == long_title:
+            result[s.title] = long_target
+        else:
+            result[s.title] = max(base - reduction_each, _MIN_SECTION_WORDS)
+    return result
+
+
+def _build_extra_section_directives(
+    brief: Brief, outline: list[OutlineSection], long_title: str, short_para_title: str,
+) -> dict[str, list[str]]:
+    """AA-404 Part 1 + Part 3: one map, title -> extra prompt lines for that
+    section, computed once per piece from the full outline (not per batch —
+    every batch call sees the same, already-decided plan)."""
+    directives: dict[str, list[str]] = {s.title: [] for s in outline}
+    if len(outline) >= 3:
+        directives[long_title].append(_LONG_SECTION_NOTE)
+    directives[short_para_title].append(_ONE_SENTENCE_PARAGRAPH_NOTE)
+    if brief.framework == "AIDA" and outline:
+        directives[outline[0].title].append(_AIDA_OPENING_HOOK_NOTE)
+        directives[outline[-1].title].append(_AIDA_SINGLE_CTA_NOTE)
+    return directives
+
+
+def _build_batch_prompt(
+    brief: Brief, batch: list[OutlineSection], atom_text_by_id: dict[str, str],
+    words_per_section: dict[str, int], extra_directives: dict[str, list[str]],
+) -> str:
     lines = [
         f"KEYWORD: {brief.keyword}",
         f"FRAMEWORK: {brief.framework}",
+    ]
+    if brief.framework == "AIDA":
+        lines.append(_AIDA_FRAMEWORK_GUIDANCE)
+    lines += [
         f"CTA TARGET: {brief.cta_target}",
         "VARIANCE DIRECTIVES (apply across the whole piece): " + "; ".join(brief.variance_directives),
         "",
@@ -186,6 +332,8 @@ def _build_batch_prompt(brief: Brief, batch: list[OutlineSection], atom_text_by_
     for s in batch:
         lines.append(f"\nSECTION: {s.title}")
         lines.append(f"GOAL: {s.goal}")
+        lines.append(f"TARGET LENGTH: approximately {words_per_section.get(s.title, 0)} words.")
+        lines.extend(extra_directives.get(s.title, []))
         if s.atom_ids:
             lines.append("ATOMS (cite each factual claim with [R:atom_id]):")
             lines += [f"- {aid}: {atom_text_by_id.get(aid, '')}" for aid in s.atom_ids]

@@ -525,6 +525,32 @@ _SOCIAL_RUBRIC_FIELDS: dict[str, list[str]] = {
 }
 
 
+# AA-404 Part 4b: real week=1 data showed the judge flagging the literal,
+# brand-MANDATED CTA phrase itself ("Design This Journey" -- required exactly
+# as-is, brand_standards.py:12/AA_BRAND_IDENTITY_PROMPT's CTA line) as
+# GENERIC_AI_WORDING (docs/implementation-notes/AA-404.md §3 quotes the real
+# round-2 audit: "the summary uses phrases like 'Design This Journey' which
+# ... feels somewhat generic"). Required brand language cannot be simultaneously
+# off-brand -- this is a rubric bug, not a writer-prompt gap the writer could
+# ever fix by rewriting. NOTE (risk flag for review, AA-404 PR description):
+# this changes the EVALUATION CRITERIA of a rubric Ms. Thu originally wrote,
+# not just a prompt -- narrowly scoped to the one confirmed false-positive
+# shape (CTA phrase mistaken for generic wording), not a rewrite of
+# GENERIC_AI_WORDING/SUMMARY_OFF_BRAND's broader (still uncalibrated, see
+# gate_brand_seo_audit_social()'s own docstring) definition.
+_CTA_PHRASE_ONLY_CODES = {"SUMMARY_OFF_BRAND", "GENERIC_AI_WORDING"}
+
+
+def _is_cta_phrase_only_evidence(flagged_phrases: list[str]) -> bool:
+    """True only when EVERY quoted phrase offered as evidence is itself the
+    brand CTA phrase — a judge response quoting the CTA phrase ALONGSIDE a
+    genuinely different off-brand phrase does not qualify (that's still a
+    real complaint, not a CTA-phrase false positive) — `all()` over an empty
+    list would vacuously be True, which is why this also requires
+    `flagged_phrases` to be non-empty."""
+    return bool(flagged_phrases) and all(_CTA_PHRASE_RE.search(p) for p in flagged_phrases)
+
+
 def gate_brand_seo_audit_social(
     piece_body: str, channel: str, brand_rubric_text: str,
 ) -> tuple[GateResult, Optional[dict]]:
@@ -553,14 +579,19 @@ def gate_brand_seo_audit_social(
         "status": "pass|flagged|manual_check",
         **{f: "1|0" for f in fields},
         "failure_codes": [f"subset of {SOCIAL_SEO_FAILURE_CODES}"],
+        "flagged_phrases": ["exact quoted phrase from the piece for each SUMMARY_OFF_BRAND/"
+                             "GENERIC_AI_WORDING code above -- [] if neither code is used"],
         "notes": "str",
     }, indent=1)
     user_prompt = (
         f"PIECE ({channel}):\n{piece_body}\n\n"
         f"BRAND RUBRIC:\n{brand_rubric_text}\n\n"
         "Score every field 1 or 0. Use ONLY the listed failure codes: "
-        f"{SOCIAL_SEO_FAILURE_CODES}. When uncertain about a factual claim: "
-        "status=manual_check + FACT_CHECK_MANUAL_CHECK.\n\n"
+        f"{SOCIAL_SEO_FAILURE_CODES}. If you use SUMMARY_OFF_BRAND or GENERIC_AI_WORDING, you MUST "
+        "quote the exact offending phrase in `flagged_phrases` -- one entry per phrase. The brand's "
+        "own mandated CTA phrase (\"Design This Journey\") is REQUIRED language, never grounds for "
+        "SUMMARY_OFF_BRAND or GENERIC_AI_WORDING on its own -- do not flag it. When uncertain about "
+        "a factual claim: status=manual_check + FACT_CHECK_MANUAL_CHECK.\n\n"
         f"Output ONLY JSON matching this contract:\n{contract}"
     )
     try:
@@ -572,10 +603,22 @@ def gate_brand_seo_audit_social(
 
     status = data.get("status", "manual_check")
     failure_codes = [c for c in (data.get("failure_codes") or []) if c in SOCIAL_SEO_FAILURE_CODES]
+    flagged_phrases = [p for p in (data.get("flagged_phrases") or []) if isinstance(p, str) and p.strip()]
+
+    # AA-404 Part 4b allowlist (see _is_cta_phrase_only_evidence()'s own
+    # comment above): drop SUMMARY_OFF_BRAND/GENERIC_AI_WORDING ONLY when the
+    # CTA phrase is the sole quoted evidence for them -- any other flagged
+    # code (CTA_MISSING_OR_WEAK, HOOK_WEAK, FACT_CHECK_MANUAL_CHECK) is left
+    # exactly as the judge returned it.
+    if _is_cta_phrase_only_evidence(flagged_phrases) and _CTA_PHRASE_ONLY_CODES & set(failure_codes):
+        failure_codes = [c for c in failure_codes if c not in _CTA_PHRASE_ONLY_CODES]
+        if not failure_codes and status == "flagged":
+            status = "pass"
+
     audit = {
         "status": status, "channel": channel,
         **{f: data.get(f) for f in fields},
-        "failure_codes": failure_codes, "notes": data.get("notes"),
+        "failure_codes": failure_codes, "flagged_phrases": flagged_phrases, "notes": data.get("notes"),
     }
     passed = status == "pass"
     violations = []
