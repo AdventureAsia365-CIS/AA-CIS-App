@@ -69,6 +69,92 @@ def test_gate_grounding_passes_faithful_grounded_body():
     assert result.violations == []
 
 
+def test_gate_grounding_does_not_merge_faq_markdown_bold_into_preceding_sentence():
+    """AA-405: real week=2 CloudWatch fabrication alarm, shape reproduced from the
+    actual held piece (slot_b30a9406...:blog) — citation sits on an earlier,
+    plain-punctuation sentence boundary, exactly as in the real body ("...marks
+    the border [R:atom_dmz]. It is the kind of place..."), not directly against
+    the markdown-link/heading run that follows. Before the fix, `_SENT_SPLIT_RE`
+    didn't split before `**Q:` (markdown bold doesn't match the old lookahead
+    character class), so an itinerary sentence's citation several sentences
+    earlier could get merged across the CTA-link/`## FAQ`/FAQ-question run and
+    blamed for an unrelated FAQ answer's numbers. The DMZ atom has nothing to do
+    with a "52 hour rule" labor-law question; a correctly-split gate must not
+    reach across the FAQ boundary to blame it.
+
+    NOTE (AA-405/AA-409): markdown *links* (`[text](url)`) and `##` headings
+    still don't match the split lookahead either — same class of gap, not fixed
+    by this change. It didn't fire in production because no real citation sits
+    directly against a link/heading boundary in the corpus seen so far, but a
+    body that put one there would still merge. Flagging for AA-409 or a
+    follow-up, not fixed here (scope: the `**` FAQ-marker case that actually
+    fired the alarm)."""
+    body = (
+        "The Freedom Bridge marks the border between North and South Korea "
+        "[R:atom_dmz]. It is the kind of place that needs no embellishment. "
+        "It allows each element to settle.\n\n"
+        "[Design This Journey](https://aa-cis.lumiguides.it.com/)\n\n"
+        "## FAQ\n\n"
+        "**Q: Is South Korea bike friendly?**\n"
+        "A: South Korea accommodates cycling, with routes through Seoul [R:atom_seoul].\n\n"
+        "**Q: What is the 52 hour rule in South Korea?**\n"
+        "A: The given fact does not address the 52-hour rule.\n\n"
+        "**Q: Can someone live for $2000 a month in South Korea?**\n"
+        "A: The given fact does not address living costs in South Korea."
+    )
+    result = gate_grounding(
+        body,
+        {"atom_dmz", "atom_seoul"},
+        {
+            "atom_dmz": "Day 2 is a car transfer to the Demilitarised Zone and the Freedom Bridge.",
+            "atom_seoul": "The itinerary opens with cycling etiquette before heading into Seoul.",
+        },
+    )
+    assert result.passed is True, result.violations
+    assert result.violations == []
+
+
+def test_gate_grounding_faq_merge_bug_is_real_under_the_old_split_regex():
+    """Companion to the test above: proves the reproduction is real, not a
+    tautology — the exact same body/ids/text WOULD have been flagged under the
+    pre-fix `_SENT_SPLIT_RE` (module-patched here, not asserting on the real
+    fix), because `?**\\nA:` and `.\\n\\n**Q` never split, chaining the whole
+    FAQ block (including atom_seoul's legitimate citation) into one blob that
+    also contains '52' and '2000' -- numbers atom_seoul's text never states."""
+    import re
+    import services.acp_produce.gates as gates_module
+
+    old_split_re = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'‘’“”])")
+    body = (
+        "The Freedom Bridge marks the border between North and South Korea "
+        "[R:atom_dmz]. It is the kind of place that needs no embellishment. "
+        "It allows each element to settle.\n\n"
+        "[Design This Journey](https://aa-cis.lumiguides.it.com/)\n\n"
+        "## FAQ\n\n"
+        "**Q: Is South Korea bike friendly?**\n"
+        "A: South Korea accommodates cycling, with routes through Seoul [R:atom_seoul].\n\n"
+        "**Q: What is the 52 hour rule in South Korea?**\n"
+        "A: The given fact does not address the 52-hour rule.\n\n"
+        "**Q: Can someone live for $2000 a month in South Korea?**\n"
+        "A: The given fact does not address living costs in South Korea."
+    )
+    original = gates_module._SENT_SPLIT_RE
+    gates_module._SENT_SPLIT_RE = old_split_re
+    try:
+        result = gate_grounding(
+            body,
+            {"atom_dmz", "atom_seoul"},
+            {
+                "atom_dmz": "Day 2 is a car transfer to the Demilitarised Zone and the Freedom Bridge.",
+                "atom_seoul": "The itinerary opens with cycling etiquette before heading into Seoul.",
+            },
+        )
+    finally:
+        gates_module._SENT_SPLIT_RE = original
+    assert result.passed is False
+    assert any("52" in v and "2000" in v for v in result.violations)
+
+
 # ── run_gates: P0-3 repair loop re-runs the WHOLE stack, not just the failed gate ──
 
 def _fake_gate_f1_grounded_marker(body: str) -> GateResult:
