@@ -12,9 +12,10 @@ from unittest.mock import patch
 
 import pytest
 
-from services.acp_produce.gates import gate_grounding
-from services.acp_produce.generation import (DraftGenerationFailed, build_outline,
-                                              generate_draft)
+from services.acp_produce.gates import gate_grounding, gate_structural_variance
+from services.acp_produce.generation import (DraftGenerationFailed, _build_extra_section_directives,
+                                              _compute_words_per_section, _select_variance_owners,
+                                              build_outline, generate_draft)
 from services.acp_produce.models import Brief, KeywordRecord, OutlineSection
 from shared.llm_client.bedrock_satellite import BedrockInvokeResult, BedrockUnavailable
 
@@ -195,3 +196,185 @@ def test_e2_shaped_output_fails_f1_grounding_on_fabricated_number():
     result = gate_grounding(body, set(_atom_text()), _atom_text())
     assert result.passed is False
     assert any("22" in v for v in result.violations)
+
+
+# ---------------------------------------------------------------- AA-404 Part 1: F3 variance ownership
+
+def test_select_variance_owners_picks_most_atoms_as_long_fewest_as_short():
+    outline = [
+        OutlineSection(title="A", atom_ids=["a1"], goal="g"),
+        OutlineSection(title="B", atom_ids=["b1", "b2", "b3"], goal="g"),
+        OutlineSection(title="C", atom_ids=[], goal="g"),
+    ]
+    long_title, short_title = _select_variance_owners(outline)
+    assert long_title == "B"
+    assert short_title == "C"
+
+
+def test_select_variance_owners_ties_break_by_first_occurrence():
+    outline = [
+        OutlineSection(title="A", atom_ids=["a1"], goal="g"),
+        OutlineSection(title="B", atom_ids=["b1"], goal="g"),
+    ]
+    long_title, short_title = _select_variance_owners(outline)
+    assert long_title == "A"
+    assert short_title == "B"  # excluded from being the same as "long" since len(outline) > 1
+
+
+def test_select_variance_owners_single_section_owns_both_directives():
+    outline = [OutlineSection(title="Solo", atom_ids=[], goal="g")]
+    long_title, short_title = _select_variance_owners(outline)
+    assert long_title == short_title == "Solo"
+
+
+def test_select_variance_owners_empty_outline_raises():
+    with pytest.raises(ValueError):
+        _select_variance_owners([])
+
+
+def test_compute_words_per_section_uniform_when_fewer_than_3_sections():
+    outline = [OutlineSection(title="A", atom_ids=[], goal="g"),
+               OutlineSection(title="B", atom_ids=[], goal="g")]
+    result = _compute_words_per_section(_brief(), outline, "A")
+    assert result["A"] == result["B"]
+
+
+def test_compute_words_per_section_inflates_long_by_at_least_the_gate_threshold():
+    """gates.py::gate_structural_variance() requires the longest section to
+    be >=1.4x the second-longest whenever there are >=3 H2 sections."""
+    outline = [OutlineSection(title=t, atom_ids=[], goal="g") for t in ("A", "B", "C")]
+    result = _compute_words_per_section(_brief(), outline, "B")
+    assert result["B"] >= result["A"] * 1.4
+    assert result["B"] >= result["C"] * 1.4
+
+
+def test_compute_words_per_section_total_stays_within_f4_word_range():
+    """The redistribution must not blow past F4_brief_compliance's ±30%
+    word-count tolerance (gates.py::gate_brief_compliance()) — only the
+    DISTRIBUTION across sections should change, not the total."""
+    outline = [OutlineSection(title=t, atom_ids=[], goal="g") for t in ("A", "B", "C", "D")]
+    brief = _brief(word_range=(900, 1400))
+    result = _compute_words_per_section(brief, outline, "B")
+    words_mid = sum(brief.word_range) // 2
+    assert sum(result.values()) <= words_mid * 1.3
+
+
+def test_build_extra_section_directives_long_and_short_get_the_right_notes():
+    outline = [OutlineSection(title="A", atom_ids=["a1", "a2"], goal="g"),
+               OutlineSection(title="B", atom_ids=[], goal="g"),
+               OutlineSection(title="C", atom_ids=["c1"], goal="g")]
+    directives = _build_extra_section_directives(_brief(framework="hub"), outline, "A", "B")
+    assert any("LENGTH DIRECTIVE" in d for d in directives["A"])
+    assert any("RHYTHM DIRECTIVE" in d for d in directives["B"])
+    assert directives["C"] == []
+
+
+def test_build_extra_section_directives_no_length_note_below_3_sections():
+    outline = [OutlineSection(title="A", atom_ids=["a1"], goal="g"),
+               OutlineSection(title="B", atom_ids=[], goal="g")]
+    directives = _build_extra_section_directives(_brief(framework="hub"), outline, "A", "B")
+    assert not any("LENGTH DIRECTIVE" in d for d in directives["A"])
+    assert any("RHYTHM DIRECTIVE" in d for d in directives["B"])
+
+
+def test_build_extra_section_directives_aida_adds_hook_and_cta_notes_to_first_and_last():
+    outline = [OutlineSection(title=t, atom_ids=[], goal="g") for t in ("Open", "Mid", "Close")]
+    directives = _build_extra_section_directives(_brief(framework="AIDA"), outline, "Mid", "Open")
+    assert any("ATTENTION-HOOK REQUIREMENT" in d for d in directives["Open"])
+    assert any("SINGLE-CTA REQUIREMENT" in d for d in directives["Close"])
+    assert not any("ATTENTION-HOOK" in d or "SINGLE-CTA" in d for d in directives["Mid"])
+
+
+def test_build_extra_section_directives_non_aida_gets_no_hook_cta_notes():
+    outline = [OutlineSection(title=t, atom_ids=[], goal="g") for t in ("Open", "Mid", "Close")]
+    directives = _build_extra_section_directives(_brief(framework="hub"), outline, "Mid", "Open")
+    assert not any("ATTENTION-HOOK" in d for d in directives["Open"])
+    assert not any("SINGLE-CTA" in d for d in directives["Close"])
+
+
+def test_generate_draft_prompt_carries_targeted_directives_and_aida_guidance():
+    brief = _brief(framework="AIDA", required_h2s=[
+        "Opening hook section", "Middle detail section", "Closing CTA section", "FAQ",
+    ], atoms_by_section={
+        "Opening hook section": ["atom_a"],
+        "Middle detail section": ["atom_a", "atom_b", "atom_c"],
+        "Closing CTA section": [],
+        "FAQ": [],
+    })
+    outline = build_outline(brief)
+    calls = []
+
+    def _fake_invoke(prompt, model, max_tokens, system, account=None):
+        calls.append(prompt)
+        titles = [ln.split("SECTION: ")[1] for ln in prompt.splitlines() if ln.startswith("SECTION: ")]
+        text = "".join(_marker_block(t, f"body for {t} [R:atom_a]") for t in titles)
+        return _sonnet_result(text)
+
+    with patch("services.acp_produce.generation.invoke_claude", side_effect=_fake_invoke):
+        generate_draft(brief, outline, {"atom_a": "x", "atom_b": "y", "atom_c": "z"})
+
+    full_prompt = "\n".join(calls)
+    assert "AIDA FRAMEWORK (Attention-Interest-Desire-Action)" in full_prompt
+    assert "ATTENTION-HOOK REQUIREMENT" in full_prompt
+    assert "SINGLE-CTA REQUIREMENT" in full_prompt
+    assert "LENGTH DIRECTIVE" in full_prompt
+    assert "RHYTHM DIRECTIVE" in full_prompt
+
+
+def test_generate_draft_non_aida_prompt_has_no_aida_guidance():
+    outline = build_outline(_brief(framework="hub"))
+    calls = []
+
+    def _fake_invoke(prompt, model, max_tokens, system, account=None):
+        calls.append(prompt)
+        titles = [ln.split("SECTION: ")[1] for ln in prompt.splitlines() if ln.startswith("SECTION: ")]
+        text = "".join(_marker_block(t, f"body for {t} [R:atom_a]") for t in titles)
+        return _sonnet_result(text)
+
+    with patch("services.acp_produce.generation.invoke_claude", side_effect=_fake_invoke):
+        generate_draft(_brief(framework="hub"), outline, _atom_text())
+
+    full_prompt = "\n".join(calls)
+    assert "AIDA FRAMEWORK" not in full_prompt
+    assert "ATTENTION-HOOK REQUIREMENT" not in full_prompt
+
+
+def test_generate_draft_output_can_pass_f3_when_writer_follows_targeted_directives():
+    """AA-404 Part 1 mechanism check: when the model follows the per-section
+    directives it's given, the resulting body passes F3 — this is not a
+    claim that a real LLM WILL follow them, only that doing so is sufficient
+    to satisfy the gate (docs/implementation-notes/AA-404.md §2's root-cause
+    finding was that the OLD blanket directive gave the model no reliable
+    way to know whether it had already been satisfied by another batch)."""
+    brief = _brief(framework="hub", required_h2s=[
+        "Section One", "Section Two", "Section Three", "FAQ",
+    ], atoms_by_section={
+        "Section One": [], "Section Two": ["atom_a", "atom_b", "atom_c"],
+        "Section Three": [], "FAQ": [],
+    })
+    outline = build_outline(brief)
+    long_title, short_title = _select_variance_owners(outline)
+    assert long_title == "Section Two"
+    assert short_title == "Section One"
+
+    def _fake_invoke(prompt, model, max_tokens, system, account=None):
+        titles = [ln.split("SECTION: ")[1] for ln in prompt.splitlines() if ln.startswith("SECTION: ")]
+        parts = []
+        for t in titles:
+            if t == short_title:
+                body = ("Short and true.\n\n"
+                         "A longer paragraph with several full sentences follows here. "
+                         "It continues for a bit longer to add more context. "
+                         "This is a third sentence for good measure.")
+            elif t == long_title:
+                body = "This longer section develops the topic in real depth. " * 12
+            else:
+                body = "A normal paragraph with two full sentences. Here is the second one."
+            parts.append(_marker_block(t, body))
+        return _sonnet_result("".join(parts))
+
+    with patch("services.acp_produce.generation.invoke_claude", side_effect=_fake_invoke):
+        body = generate_draft(brief, outline, {"atom_a": "x", "atom_b": "y", "atom_c": "z"})
+
+    result = gate_structural_variance(body, "blog")
+    assert result.passed is True, result.violations
