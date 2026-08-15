@@ -72,8 +72,11 @@ _ADAPT_SYSTEM_PROMPT_BASE = (
 _FACEBOOK_INSTRUCTIONS = (
     "\nFACEBOOK CAPTION FORMAT — this is the hook_story_cta framework (hook, then story/atom\n"
     "detail, then a call to action) — output ONLY this, nothing else:\n"
-    "- One short paragraph, 50-120 words, brand voice, at least one [R:atom_id] citation carried\n"
-    "  over from the blog text.\n"
+    "- One short paragraph, 50-120 words, brand voice, citing the ONE atom given to you below\n"
+    "  (see \"ATOMS YOU MAY CITE\") with [R:atom_id].\n"
+    "- Build the ENTIRE caption around that one atom/moment — one experience, one emotion. Do not\n"
+    "  reference other experiences, shift between locations, or try to summarize the whole trip;\n"
+    "  hook_story_cta is a single-atom format, not a highlights reel.\n"
     "- The paragraph's FIRST sentence must be a hook — a striking detail or question that earns\n"
     "  the next sentence, not a generic opener.\n"
     "- The paragraph's LAST sentence must invite the reader to \"Design This Journey\" (the exact\n"
@@ -123,14 +126,41 @@ def adapt_channels(blog_piece: Piece, atom_text_by_id: dict[str, str]) -> list[P
 
     pieces: list[Piece] = []
     for channel in ("facebook", "tiktok"):
+        channel_atom_text = _select_atoms_for_channel(cited_atom_text, channel)
         try:
-            body = _invoke_channel_with_retry(blog_piece.body_tagged, cited_atom_text, channel)
+            body = _invoke_channel_with_retry(blog_piece.body_tagged, channel_atom_text, channel)
         except AdaptChannelFailed as e:
             logger.error("e3_adapt_channel_failed", channel=channel,
                          blog_piece_id=blog_piece.piece_id, error=str(e))
             continue
         pieces.append(Piece(piece_id=f"{blog_piece.piece_id}#{channel}", body_tagged=body, channel=channel))
     return pieces
+
+
+def _select_atoms_for_channel(cited_atom_text: dict[str, str], channel: ChannelName) -> dict[str, str]:
+    """AA-404 Part 2: hook_story_cta's "one atom, one emotion" F8 criterion
+    (facebook only) fails in real production data because the writer was
+    handed EVERY atom the blog cited, with `_FACEBOOK_INSTRUCTIONS` giving
+    only a citation FLOOR ("at least one") — never a ceiling
+    (docs/implementation-notes/AA-404.md §1/§4, a held piece cited 4 distinct
+    atoms in what's supposed to be a single-atom post). Fixed at the DATA
+    layer, not just the prompt: facebook only ever SEES one atom, so it
+    cannot cite more even if the wording above were ignored. tiktok keeps
+    every cited atom unchanged — hook_beats_payoff (its framework) has no
+    single-atom constraint, and its SCRIPT format legitimately spans
+    multiple timed beats.
+
+    Atom choice is deterministic: `cited_atom_text` iterates in
+    `atom_ids_cited()`'s first-seen-in-body order (atom_usage.py's own
+    docstring), so this picks the FIRST atom the blog piece cites — the
+    theory being that whatever the writer led with is the moment most
+    load-bearing for the piece, not an arbitrary pick."""
+    if channel != "facebook":
+        return cited_atom_text
+    if not cited_atom_text:
+        return {}
+    first_id = next(iter(cited_atom_text))
+    return {first_id: cited_atom_text[first_id]}
 
 
 def _build_prompt(blog_body: str, cited_atom_text: dict[str, str], channel: ChannelName) -> str:

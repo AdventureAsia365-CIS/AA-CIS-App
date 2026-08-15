@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
-from services.acp_produce.adapt import AdaptChannelFailed, adapt_channels
+from services.acp_produce.adapt import AdaptChannelFailed, _select_atoms_for_channel, adapt_channels
 from services.acp_produce.faq import (FAQAnswerFailed, answer_faq, apply_faq,
                                        build_faq_jsonld, render_faq_section)
 from services.acp_produce.gates import gate_grounding
@@ -40,6 +40,24 @@ def _brief(**overrides) -> Brief:
     )
     defaults.update(overrides)
     return Brief(**defaults)
+
+
+# =================================================================== AA-404 Part 2: _select_atoms_for_channel
+
+def test_select_atoms_for_channel_facebook_keeps_only_first_cited_atom():
+    cited = {"atom_a": "text a", "atom_b": "text b", "atom_c": "text c"}
+    result = _select_atoms_for_channel(cited, "facebook")
+    assert result == {"atom_a": "text a"}
+
+
+def test_select_atoms_for_channel_tiktok_keeps_every_cited_atom():
+    cited = {"atom_a": "text a", "atom_b": "text b", "atom_c": "text c"}
+    result = _select_atoms_for_channel(cited, "tiktok")
+    assert result == cited
+
+
+def test_select_atoms_for_channel_facebook_empty_when_nothing_cited():
+    assert _select_atoms_for_channel({}, "facebook") == {}
 
 
 # =================================================================== E3 adapt_channels
@@ -85,15 +103,41 @@ def test_adapt_channels_both_succeed():
 
 
 def test_adapt_channels_only_passes_cited_atoms_in_prompt():
+    """AA-404 Part 2 note: facebook's call is checked separately below
+    (test_adapt_channels_facebook_prompt_has_only_one_atom) now that facebook
+    gets a single-atom ceiling — this test covers tiktok, which still gets
+    every cited atom, plus confirms neither call ever leaks an uncited atom."""
     blog = _blog_piece(_BLOG_BODY)
     with patch("services.acp_produce.adapt.invoke_claude",
                side_effect=[_fb_response(), _tiktok_response()]) as mock_invoke:
         adapt_channels(blog, _ATOM_TEXT)
 
-    for call in mock_invoke.call_args_list:
-        prompt = call.args[0] if call.args else call.kwargs["prompt"]
-        assert "atom_unused" not in prompt
-        assert "atom_a" in prompt and "atom_b" in prompt
+    fb_call, tiktok_call = mock_invoke.call_args_list
+    fb_prompt = fb_call.args[0] if fb_call.args else fb_call.kwargs["prompt"]
+    tiktok_prompt = tiktok_call.args[0] if tiktok_call.args else tiktok_call.kwargs["prompt"]
+
+    assert "atom_unused" not in fb_prompt and "atom_unused" not in tiktok_prompt
+    assert "atom_a" in tiktok_prompt and "atom_b" in tiktok_prompt
+
+
+def test_adapt_channels_facebook_prompt_has_only_one_atom():
+    """AA-404 Part 2: hook_story_cta's "one atom, one emotion" F8 criterion
+    fails in real production data because facebook was handed every atom the
+    blog cited. Fixed at the data layer — the "ATOMS YOU MAY CITE" listing in
+    the facebook prompt must only ever contain the FIRST cited atom (atom_a,
+    per _BLOG_BODY's citation order), never a listing line for atom_b — even
+    though the raw BLOG TEXT block (given for context, unchanged) still shows
+    the original [R:atom_b] tag as part of the source article being adapted."""
+    blog = _blog_piece(_BLOG_BODY)
+    with patch("services.acp_produce.adapt.invoke_claude",
+               side_effect=[_fb_response(), _tiktok_response()]) as mock_invoke:
+        adapt_channels(blog, _ATOM_TEXT)
+
+    fb_call = mock_invoke.call_args_list[0]
+    fb_prompt = fb_call.args[0] if fb_call.args else fb_call.kwargs["prompt"]
+    atoms_section = fb_prompt.split("ATOMS YOU MAY CITE")[1]
+    assert "- atom_a:" in atoms_section
+    assert "- atom_b:" not in atoms_section
 
 
 def test_adapt_channels_model_is_sonnet_never_palmyra():
