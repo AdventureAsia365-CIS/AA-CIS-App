@@ -62,15 +62,17 @@ async def test_topic_rejected_returns_empty_no_further_calls(mock_research):
 
 @pytest.mark.asyncio
 @patch("services.acp_produce.slot_runner.log_unknown", new_callable=AsyncMock)
+@patch("services.acp_produce.slot_runner.fetch_brand_rubric_text", new_callable=AsyncMock)
 @patch("services.acp_produce.slot_runner.generate_draft")
 @patch("services.acp_produce.slot_runner.build_outline", return_value=[])
 @patch("services.acp_produce.slot_runner.fetch_slot_atoms", new_callable=AsyncMock)
 @patch("services.acp_produce.slot_runner.run_slot_research", new_callable=AsyncMock)
 async def test_draft_generation_failed_logs_unknown_and_returns_empty(
-    mock_research, mock_atoms, mock_outline, mock_draft, mock_log,
+    mock_research, mock_atoms, mock_outline, mock_draft, mock_rubric, mock_log,
 ):
     mock_research.return_value = _brief()
     mock_atoms.return_value = [{"atom_id": "atom_1", "text": "fact one"}]
+    mock_rubric.return_value = "REAL AA_INTERNAL BRAND RUBRIC"
     mock_draft.side_effect = DraftGenerationFailed("sonnet exhausted retries")
     db = AsyncMock()
 
@@ -79,10 +81,15 @@ async def test_draft_generation_failed_logs_unknown_and_returns_empty(
     assert result == []
     mock_log.assert_awaited_once()
     assert mock_log.call_args.args[2] == "other"
+    # AA-404 writer-side wire — the fetch happens once, BEFORE E2, so a failed
+    # draft call still proves the rubric was already fetched and threaded in.
+    mock_draft.assert_called_once_with(mock_research.return_value, [], {"atom_1": "fact one"},
+                                        "REAL AA_INTERNAL BRAND RUBRIC")
 
 
 @pytest.mark.asyncio
 @patch("services.acp_produce.slot_runner.log_unknown", new_callable=AsyncMock)
+@patch("services.acp_produce.slot_runner.fetch_brand_rubric_text", new_callable=AsyncMock)
 @patch("services.acp_produce.slot_runner.apply_faq")
 @patch("services.acp_produce.slot_runner.adapt_channels", return_value=[])
 @patch("services.acp_produce.slot_runner.generate_draft", return_value="draft body")
@@ -90,10 +97,11 @@ async def test_draft_generation_failed_logs_unknown_and_returns_empty(
 @patch("services.acp_produce.slot_runner.fetch_slot_atoms", new_callable=AsyncMock)
 @patch("services.acp_produce.slot_runner.run_slot_research", new_callable=AsyncMock)
 async def test_faq_answer_failed_logs_unknown_and_returns_empty(
-    mock_research, mock_atoms, mock_outline, mock_draft, mock_adapt, mock_faq, mock_log,
+    mock_research, mock_atoms, mock_outline, mock_draft, mock_adapt, mock_faq, mock_rubric, mock_log,
 ):
     mock_research.return_value = _brief()
     mock_atoms.return_value = []
+    mock_rubric.return_value = "REAL AA_INTERNAL BRAND RUBRIC"
     mock_faq.side_effect = FAQAnswerFailed("sonnet exhausted retries")
     db = AsyncMock()
 
@@ -125,7 +133,7 @@ async def test_happy_path_fans_out_blog_plus_channel_pieces_through_gates(
     fb_piece = Piece(piece_id=f"{RUN_ID}:slot-1:blog#facebook", body_tagged="fb body", channel="facebook")
     tt_piece = Piece(piece_id=f"{RUN_ID}:slot-1:blog#tiktok", body_tagged="tt body", channel="tiktok")
     mock_adapt.return_value = [fb_piece, tt_piece]
-    mock_faq.side_effect = lambda piece, brief_, atom_text: piece  # no-op mutate
+    mock_faq.side_effect = lambda piece, brief_, atom_text, brand_rubric_text: piece  # no-op mutate
 
     mock_gates.side_effect = lambda piece, **kw: _held_piece(piece.piece_id, piece.channel)
 
@@ -146,6 +154,15 @@ async def test_happy_path_fans_out_blog_plus_channel_pieces_through_gates(
         assert call.kwargs["brand_rubric_text"] == "REAL AA_INTERNAL BRAND RUBRIC"
     mock_rubric.assert_awaited_once_with(db, TENANT)
 
+    # AA-404 writer-side wire — E2/E3/E4 must ALL receive the SAME fetched
+    # rubric as F9 above, not just the judge.
+    mock_draft.assert_called_once()
+    assert mock_draft.call_args.args[3] == "REAL AA_INTERNAL BRAND RUBRIC"
+    mock_adapt.assert_called_once()
+    assert mock_adapt.call_args.args[2] == "REAL AA_INTERNAL BRAND RUBRIC"
+    mock_faq.assert_called_once()
+    assert mock_faq.call_args.args[3] == "REAL AA_INTERNAL BRAND RUBRIC"
+
 
 @pytest.mark.asyncio
 @patch("services.acp_produce.slot_runner.fetch_brand_rubric_text", new_callable=AsyncMock)
@@ -162,7 +179,7 @@ async def test_no_trip_id_passes_none_tour_id(
 ):
     mock_research.return_value = _brief()
     mock_atoms.return_value = []
-    mock_faq.side_effect = lambda piece, brief_, atom_text: piece
+    mock_faq.side_effect = lambda piece, brief_, atom_text, brand_rubric_text: piece
     mock_gates.side_effect = lambda piece, **kw: _held_piece(piece.piece_id, piece.channel)
     mock_rubric.return_value = "REAL AA_INTERNAL BRAND RUBRIC"
 

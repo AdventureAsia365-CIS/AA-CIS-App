@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from services.acp_produce.repair import PieceInvariants, RepairFailed, repair_piece
+from services.content_generation.brand_standards import AA_BRAND_IDENTITY_PROMPT
 from shared.llm_client.bedrock_satellite import BedrockInvokeResult, BedrockUnavailable
 
 
@@ -277,3 +278,40 @@ def test_repair_piece_backward_compatible_positional_call_still_works():
     with patch("services.acp_produce.repair.invoke_claude", return_value=_sonnet_result("fixed body")):
         result = repair_piece("body", ["v1"])
     assert result == "fixed body"
+
+
+# =================================================================== AA-404 writer-side wire: brand_rubric_text
+
+def test_repair_piece_defaults_to_generic_brand_prompt_when_no_invariants():
+    """No `invariants` (every pre-AA-404 caller/test) must reproduce the
+    exact pre-AA-404 system prompt -- the generic `AA_BRAND_IDENTITY_PROMPT`
+    constant."""
+    with patch("services.acp_produce.repair.invoke_claude", return_value=_sonnet_result("fixed body")) as mock_invoke:
+        repair_piece("some body", ["v1"])
+
+    assert AA_BRAND_IDENTITY_PROMPT.strip() in mock_invoke.call_args.kwargs["system"]
+
+
+def test_repair_piece_defaults_to_generic_brand_prompt_when_invariants_has_no_rubric():
+    """`PieceInvariants()` with no `brand_rubric_text` override must also
+    fall back to the generic constant (the field's own default)."""
+    invariants = PieceInvariants(channel="tiktok")
+    with patch("services.acp_produce.repair.invoke_claude", return_value=_sonnet_result("fixed body")) as mock_invoke:
+        repair_piece("some body", ["v1"], invariants=invariants)
+
+    assert AA_BRAND_IDENTITY_PROMPT.strip() in mock_invoke.call_args.kwargs["system"]
+
+
+def test_repair_piece_uses_real_tenant_brand_rubric_from_invariants():
+    """AA-404 F9 deep-dive TL;DR #1: E5 repair must rewrite against the SAME
+    real per-tenant rubric F9's judge scores the repaired piece against —
+    reuses the existing `PieceInvariants` mechanism (PR #154), not a new
+    disconnected parameter."""
+    real_rubric = "REAL AA_INTERNAL BRAND RUBRIC — calm, assured, curated."
+    invariants = PieceInvariants(channel="blog", brand_rubric_text=real_rubric)
+    with patch("services.acp_produce.repair.invoke_claude", return_value=_sonnet_result("fixed body")) as mock_invoke:
+        repair_piece("some body", ["v1"], invariants=invariants)
+
+    system = mock_invoke.call_args.kwargs["system"]
+    assert real_rubric in system
+    assert AA_BRAND_IDENTITY_PROMPT.strip() not in system

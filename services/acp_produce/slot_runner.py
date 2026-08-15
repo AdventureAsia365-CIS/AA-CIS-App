@@ -58,7 +58,6 @@ assembly itself (it currently does not — packet assembly is AA-367's own
 """
 from __future__ import annotations
 
-import json
 from typing import Optional
 
 import asyncpg
@@ -66,71 +65,22 @@ import structlog
 
 from services.acp_planning.models import Slot
 from services.acp_produce.adapt import adapt_channels
+from services.acp_produce.brand import fetch_brand_rubric_text
 from services.acp_produce.faq import FAQAnswerFailed, apply_faq
 from services.acp_produce.generation import DraftGenerationFailed, build_outline, generate_draft
 from services.acp_produce.models import Piece
 from services.acp_produce.pipeline import run_piece_through_produce_gates
 from services.acp_produce.research import fetch_slot_atoms, log_unknown, run_slot_research
-from services.content_generation.brand_standards import AA_BRAND_IDENTITY_PROMPT
 from services.seo_intelligence.dataforseo_client import DataForSEOClient
 
 logger = structlog.get_logger()
 
-
-async def fetch_brand_rubric_text(db: asyncpg.Connection, tenant_id: str) -> str:
-    """AA-404 F9 fix #1 — real per-tenant brand voice from `shared.tenant_brand_rules`,
-    replacing the hardcoded `AA_BRAND_IDENTITY_PROMPT` constant every F9 call used until now
-    (see `gate_brand_seo_audit()`'s docstring, `gates.py`, for the full history of why that was
-    the case up to this point).
-
-    Same default-brand resolution shape as `api/routers/admin_pipeline.py::_resolve_brand_rule()`'s
-    no-`brand_identity_id`/no-`brand_name` branch (`tenant_id` + `brand_name = 'default'` +
-    `is_active = true`) — reused, not reinvented; this codebase's multi-brand resolver (AA-198)
-    already established this exact convention. A standalone query rather than importing that
-    router-private function directly: `api.routers.*` is a higher layer than `services.
-    acp_produce.*` (importing downward would invert the dependency direction every other module
-    in this package already follows, and risks the same api/__init__.py import-cycle trap
-    `admin_produce.py`'s own module docstring already documents for `slot_runner`).
-
-    Falls back to `AA_BRAND_IDENTITY_PROMPT` (unchanged) if no active 'default' row exists for
-    `tenant_id`, or its `system_prompt` is empty — e.g. a tenant onboarded before its brand
-    content was populated. Logged as a warning, not silent (L6 convention, same as every other
-    "hold visible" gap in this pipeline) — a tenant silently running on the generic fallback is
-    a real thing a human should notice, not an assumed-fine default."""
-    row = await db.fetchrow(
-        """
-        SELECT system_prompt, style_guide, forbidden_words, good_examples
-        FROM shared.tenant_brand_rules
-        WHERE tenant_id = $1::uuid AND brand_name = 'default' AND is_active = true
-        LIMIT 1
-        """,
-        tenant_id,
-    )
-    system_prompt = (row["system_prompt"] if row else None) or ""
-    if not system_prompt.strip():
-        logger.warning(
-            "brand_rubric_fallback_generic", tenant_id=tenant_id,
-            reason="no active 'default' shared.tenant_brand_rules row, or system_prompt empty",
-        )
-        return AA_BRAND_IDENTITY_PROMPT
-
-    forbidden_words = row["forbidden_words"]
-    if isinstance(forbidden_words, str):
-        # asyncpg jsonb gap (no codec registered, AA-300/AA-314) — comes back as JSON text.
-        forbidden_words = json.loads(forbidden_words) if forbidden_words else []
-    forbidden_words = forbidden_words or []
-
-    parts = [system_prompt.strip()]
-    if row["style_guide"]:
-        parts.append(f"STYLE GUIDE:\n{row['style_guide'].strip()}")
-    if forbidden_words:
-        parts.append("FORBIDDEN WORDS/PHRASES: " + ", ".join(forbidden_words))
-    if row["good_examples"]:
-        parts.append(
-            "GOOD EXAMPLES (real, on-brand — do not flag writing like this as generic):\n"
-            f"{row['good_examples'].strip()}"
-        )
-    return "\n\n".join(parts)
+# AA-404 writer-side wire: fetch_brand_rubric_text() now lives in brand.py (a
+# shared leaf module every E2-E5/F9 caller can import without a layering
+# problem — see brand.py's own module docstring) — imported here, not
+# reimplemented, so this module's existing `@patch("services.acp_produce.
+# slot_runner.fetch_brand_rubric_text", ...)` test call sites keep working
+# unchanged (the name is still resolvable in THIS module's namespace).
 
 
 async def run_slot_production(
@@ -169,9 +119,17 @@ async def run_slot_production(
     atoms = await fetch_slot_atoms(slot.atom_ids, db)
     atom_text_by_id = {a["atom_id"]: a["text"] for a in atoms}
 
+    # AA-404 writer-side wire: fetched ONCE per slot, BEFORE E2 — same tenant,
+    # same rubric for every writer/repair call this slot makes (E2/E3/E4 draft
+    # calls below, plus E5 repair and F9 judge inside
+    # run_piece_through_produce_gates()) — 5 identical queries would be
+    # redundant (this was already true for F9 alone since PR #158; now true
+    # for the whole E2-E5+F9 chain, not just F9).
+    brand_rubric_text = await fetch_brand_rubric_text(db, tenant_id)
+
     outline = build_outline(brief)
     try:
-        blog_body = generate_draft(brief, outline, atom_text_by_id)
+        blog_body = generate_draft(brief, outline, atom_text_by_id, brand_rubric_text)
     except DraftGenerationFailed as e:
         await log_unknown(
             db, tenant_id, "other", f"Slot {slot.slot_id}: E2 draft generation failed: {e}",
@@ -185,10 +143,10 @@ async def run_slot_production(
 
     # E3 before E4 — adapt.py's own call-order contract (cite blog's own
     # atoms before FAQ appends more citations to body_tagged).
-    channel_pieces = adapt_channels(blog_piece, atom_text_by_id)
+    channel_pieces = adapt_channels(blog_piece, atom_text_by_id, brand_rubric_text)
 
     try:
-        blog_piece = apply_faq(blog_piece, brief, atom_text_by_id)
+        blog_piece = apply_faq(blog_piece, brief, atom_text_by_id, brand_rubric_text)
     except FAQAnswerFailed as e:
         await log_unknown(
             db, tenant_id, "other", f"Slot {slot.slot_id}: E4 FAQ answer failed: {e}",
@@ -197,9 +155,6 @@ async def run_slot_production(
         return []
 
     tour_id = str(slot.trip_id) if slot.trip_id else None
-    # Fetched once per slot (not per-piece) — same tenant, same rubric for every piece this
-    # slot produces; 3 identical queries would be redundant.
-    brand_rubric_text = await fetch_brand_rubric_text(db, tenant_id)
     results: list[Piece] = []
     for piece in [blog_piece] + channel_pieces:
         result = await run_piece_through_produce_gates(
