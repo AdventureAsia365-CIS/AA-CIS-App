@@ -58,6 +58,7 @@ assembly itself (it currently does not — packet assembly is AA-367's own
 """
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 import asyncpg
@@ -74,6 +75,62 @@ from services.content_generation.brand_standards import AA_BRAND_IDENTITY_PROMPT
 from services.seo_intelligence.dataforseo_client import DataForSEOClient
 
 logger = structlog.get_logger()
+
+
+async def fetch_brand_rubric_text(db: asyncpg.Connection, tenant_id: str) -> str:
+    """AA-404 F9 fix #1 — real per-tenant brand voice from `shared.tenant_brand_rules`,
+    replacing the hardcoded `AA_BRAND_IDENTITY_PROMPT` constant every F9 call used until now
+    (see `gate_brand_seo_audit()`'s docstring, `gates.py`, for the full history of why that was
+    the case up to this point).
+
+    Same default-brand resolution shape as `api/routers/admin_pipeline.py::_resolve_brand_rule()`'s
+    no-`brand_identity_id`/no-`brand_name` branch (`tenant_id` + `brand_name = 'default'` +
+    `is_active = true`) — reused, not reinvented; this codebase's multi-brand resolver (AA-198)
+    already established this exact convention. A standalone query rather than importing that
+    router-private function directly: `api.routers.*` is a higher layer than `services.
+    acp_produce.*` (importing downward would invert the dependency direction every other module
+    in this package already follows, and risks the same api/__init__.py import-cycle trap
+    `admin_produce.py`'s own module docstring already documents for `slot_runner`).
+
+    Falls back to `AA_BRAND_IDENTITY_PROMPT` (unchanged) if no active 'default' row exists for
+    `tenant_id`, or its `system_prompt` is empty — e.g. a tenant onboarded before its brand
+    content was populated. Logged as a warning, not silent (L6 convention, same as every other
+    "hold visible" gap in this pipeline) — a tenant silently running on the generic fallback is
+    a real thing a human should notice, not an assumed-fine default."""
+    row = await db.fetchrow(
+        """
+        SELECT system_prompt, style_guide, forbidden_words, good_examples
+        FROM shared.tenant_brand_rules
+        WHERE tenant_id = $1::uuid AND brand_name = 'default' AND is_active = true
+        LIMIT 1
+        """,
+        tenant_id,
+    )
+    system_prompt = (row["system_prompt"] if row else None) or ""
+    if not system_prompt.strip():
+        logger.warning(
+            "brand_rubric_fallback_generic", tenant_id=tenant_id,
+            reason="no active 'default' shared.tenant_brand_rules row, or system_prompt empty",
+        )
+        return AA_BRAND_IDENTITY_PROMPT
+
+    forbidden_words = row["forbidden_words"]
+    if isinstance(forbidden_words, str):
+        # asyncpg jsonb gap (no codec registered, AA-300/AA-314) — comes back as JSON text.
+        forbidden_words = json.loads(forbidden_words) if forbidden_words else []
+    forbidden_words = forbidden_words or []
+
+    parts = [system_prompt.strip()]
+    if row["style_guide"]:
+        parts.append(f"STYLE GUIDE:\n{row['style_guide'].strip()}")
+    if forbidden_words:
+        parts.append("FORBIDDEN WORDS/PHRASES: " + ", ".join(forbidden_words))
+    if row["good_examples"]:
+        parts.append(
+            "GOOD EXAMPLES (real, on-brand — do not flag writing like this as generic):\n"
+            f"{row['good_examples'].strip()}"
+        )
+    return "\n\n".join(parts)
 
 
 async def run_slot_production(
@@ -140,12 +197,15 @@ async def run_slot_production(
         return []
 
     tour_id = str(slot.trip_id) if slot.trip_id else None
+    # Fetched once per slot (not per-piece) — same tenant, same rubric for every piece this
+    # slot produces; 3 identical queries would be redundant.
+    brand_rubric_text = await fetch_brand_rubric_text(db, tenant_id)
     results: list[Piece] = []
     for piece in [blog_piece] + channel_pieces:
         result = await run_piece_through_produce_gates(
             piece, run_id=run_id, tenant_id=tenant_id, channel=piece.channel,
             valid_ids=set(atom_text_by_id), text_by_id=atom_text_by_id,
-            framework=brief.framework, brand_rubric_text=AA_BRAND_IDENTITY_PROMPT,
+            framework=brief.framework, brand_rubric_text=brand_rubric_text,
             stage=None, slot_id=slot.slot_id, brief=brief, tour_id=tour_id, db=db,
         )
         logger.info(
@@ -156,4 +216,4 @@ async def run_slot_production(
     return results
 
 
-__all__ = ["run_slot_production"]
+__all__ = ["run_slot_production", "fetch_brand_rubric_text"]
