@@ -48,6 +48,7 @@ interface RunDetail {
   run_id: string;
   tenant_id: string;
   year: number;
+  month: number;
   week: number;
   status: string; // allocated | producing | completed | failed
   created_at: string | null;
@@ -68,6 +69,11 @@ interface PendingPacket {
 }
 
 const POLL_INTERVAL_MS = 8000;
+
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
 
 const labelStyle: React.CSSProperties = {
   display: "block", fontSize: 11, fontWeight: 600, color: A.muted,
@@ -110,6 +116,7 @@ export default function ProducePage() {
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [tenantId, setTenantId] = useState("");
   const [year, setYear] = useState(new Date().getFullYear());
+  const [month, setMonth] = useState(new Date().getMonth() + 1); // AA-410 — backend default is the same date.today().month
   const [week, setWeek] = useState(1);
 
   const [triggering, setTriggering] = useState(false);
@@ -171,7 +178,7 @@ export default function ProducePage() {
       const res = await fetch("/api/admin/produce/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tenant_id: tenantId, year, week }),
+        body: JSON.stringify({ tenant_id: tenantId, year, month, week }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -179,7 +186,7 @@ export default function ProducePage() {
         return;
       }
       setRun({
-        run_id: data.run_id, tenant_id: data.tenant_id, year: data.year, week: data.week,
+        run_id: data.run_id, tenant_id: data.tenant_id, year: data.year, month: data.month, week: data.week,
         status: data.status, created_at: null, completed_at: null, slots: [], pieces: [], packet: null,
       });
       pollRun(data.run_id);
@@ -248,6 +255,15 @@ export default function ProducePage() {
                 style={{ ...inputStyle, width: 90, minWidth: 90 }} />
             </div>
             <div>
+              <label style={labelStyle}>Month</label>
+              <select value={month} onChange={e => setMonth(Number(e.target.value))}
+                style={{ ...inputStyle, width: 150, minWidth: 150 }}>
+                {MONTH_NAMES.map((name, i) => (
+                  <option key={i + 1} value={i + 1}>{String(i + 1).padStart(2, "0")} — {name}</option>
+                ))}
+              </select>
+            </div>
+            <div>
               <label style={labelStyle}>Week (1-4)</label>
               <select value={week} onChange={e => setWeek(Number(e.target.value))}
                 style={{ ...inputStyle, width: 90, minWidth: 90 }}>
@@ -262,7 +278,8 @@ export default function ProducePage() {
             Only tenants with an approved Quarter Plan (Gate B) can be produced for. If a tenant
             has no approved plan yet, the run will fail with a clear message below — approve one
             first via Quarter Plan (Gate B). &ldquo;Week&rdquo; is the 1-4 week-of-month slot
-            numbering used by the production schedule, not an ISO week.
+            numbering used by the production schedule, not an ISO week — Month + Week together
+            identify one specific production slot (AA-410).
           </div>
           {triggerError && (
             <div style={{
@@ -281,7 +298,8 @@ export default function ProducePage() {
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
               <RunStatusBadge status={run.status} />
               <span style={{ fontSize: 12, color: A.muted }}>
-                Run {run.run_id.slice(0, 8)}… — tenant {run.tenant_id.slice(0, 8)}… — {run.year} week {run.week}
+                Run {run.run_id.slice(0, 8)}… — tenant {run.tenant_id.slice(0, 8)}… —
+                {" "}{run.year}-{String(run.month).padStart(2, "0")} week {run.week}
               </span>
             </div>
 
