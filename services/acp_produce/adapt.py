@@ -70,10 +70,17 @@ _ADAPT_SYSTEM_PROMPT_BASE = (
 )
 
 _FACEBOOK_INSTRUCTIONS = (
-    "\nFACEBOOK CAPTION FORMAT — output ONLY this, nothing else:\n"
+    "\nFACEBOOK CAPTION FORMAT — this is the hook_story_cta framework (hook, then story/atom\n"
+    "detail, then a call to action) — output ONLY this, nothing else:\n"
     "- One short paragraph, 50-120 words, brand voice, at least one [R:atom_id] citation carried\n"
     "  over from the blog text.\n"
-    "- Then a final line starting with \"HASHTAGS:\" followed by 3-5 relevant hashtags.\n"
+    "- The paragraph's FIRST sentence must be a hook — a striking detail or question that earns\n"
+    "  the next sentence, not a generic opener.\n"
+    "- The paragraph's LAST sentence must invite the reader to \"Design This Journey\" (the exact\n"
+    "  brand CTA phrase — never \"Book Now\", never a markdown link or bare URL, written as\n"
+    "  conversational prose the way a real Facebook caption ends).\n"
+    "- Then, on the line immediately after (no blank line before it), a line starting with\n"
+    "  \"HASHTAGS:\" followed by 3-5 relevant hashtags.\n"
 )
 
 _TIKTOK_INSTRUCTIONS = (

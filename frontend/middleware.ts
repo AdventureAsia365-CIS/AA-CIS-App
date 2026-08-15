@@ -65,6 +65,11 @@ const PROTECTED_ROUTES: { prefix: string; roles: string[] }[] = [
   // Gate A (/admin/tenants). Learned from AA-384's own gap in this file's header:
   // a page without an entry here 404s-to-login even with a valid admin session.
   { prefix: "/admin/quarter-plan", roles: ["admin"] },
+  // AA-405: N7 Produce trigger + N8 Gate C approve — admin-only, same shape as Gate A/Gate B
+  // above (a real approval/trigger action, not a general staff/reviewer page). Learned from
+  // AA-384's own gap documented in this file's header: added here from the start, not after
+  // the page silently 404s-to-login.
+  { prefix: "/admin/produce", roles: ["admin"] },
   // Internal staff pages (was INTERNAL_PATHS) — admin/reviewer get real JWT
   // verification; content is the known-limitation carve-out described above.
   { prefix: "/admin/dashboard", roles: ["admin", "reviewer", "content"] },

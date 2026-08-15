@@ -3,7 +3,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Sparkles, ShoppingBag, CalendarCheck, Boxes } from "lucide-react";
+import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Sparkles, ShoppingBag, CalendarCheck, Boxes, PlayCircle } from "lucide-react";
 import { A, serif, sans } from "./adminUi";
 
 interface Notif {
@@ -208,6 +208,11 @@ export default function AdminSidebar() {
             <NavItem active={active("/admin/quarter-plan")} accent={A.red}
               icon={<CalendarCheck size={15} />} label="Quarter Plan (Gate B)"
               onClick={() => router.push("/admin/quarter-plan")} />
+            {/* AA-405: N7 Produce trigger + N8 Gate C review — next real step in the N-flow
+                after Quarter Plan (Gate B) approves what N6 allocates from. */}
+            <NavItem active={active("/admin/produce")} accent={A.red}
+              icon={<PlayCircle size={15} />} label="Produce & Deliver (N7/N8)"
+              onClick={() => router.push("/admin/produce")} />
             <NavItem active={active("/admin/run-health")} accent={A.red}
               icon={<Activity size={15} />} label="Run Health"
               onClick={() => router.push("/admin/run-health")} />
