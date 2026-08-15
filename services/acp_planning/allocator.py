@@ -71,15 +71,27 @@ from .models import (AtomRecord, QuarterPlan, QuarterPlanNotApprovedError,
                      RunwayMap, Slot, SlotGrid, Trip)
 
 
-def _deterministic_slot_id(tenant_id: UUID, week: int, trip_id: Optional[UUID], channel: str) -> str:
+def _deterministic_slot_id(
+    tenant_id: UUID, year: int, month: int, week: int, trip_id: Optional[UUID], channel: str,
+) -> str:
     """AA-377 fix — was uuid.uuid4().hex[:10] (a new id every allocate_month() call, so
     persisting or retrying a slot always produced a fresh row instead of resuming the same
-    one). Hashes the 4 fields that actually identify 'this slot' within one weekly allocation:
-    re-allocating the same (tenant, week, trip, channel) now always yields the same slot_id,
-    which is what makes persist_slot_grid()'s `ON CONFLICT (slot_id) DO NOTHING` an idempotent
-    no-op on retry instead of a duplicate row / duplicate content. Not used for reactive_hold
-    slots (trip_id is always None there) — see module docstring / AA-377.md Tradeoffs."""
-    raw = f"{tenant_id}|{week}|{trip_id}|{channel}"
+    one). Hashes the fields that actually identify 'this slot': re-allocating the same
+    (tenant, year, month, week, trip, channel) now always yields the same slot_id, which is
+    what makes persist_slot_grid()'s `ON CONFLICT (slot_id) DO NOTHING` an idempotent no-op on
+    retry instead of a duplicate row / duplicate content. Not used for reactive_hold slots
+    (trip_id is always None there) — see module docstring / AA-377.md Tradeoffs.
+
+    AA-410 fix — `year` and `month` were BOTH missing from this hash. `year` was missing from
+    day one: the original AA-377 spec (migration 096 header comment, AA-377.md Decision #3)
+    documented `sha256(tenant_id|year|week|tour_id|channel)`, but the shipped code never
+    included it. `month` was never in the spec at all because acp_v2_runs/acp_v2_slots had no
+    `month` column until this migration (103) — without it, the same (tenant, week, trip,
+    channel) in two different calendar months collided onto ONE slot_id, so
+    `ON CONFLICT (slot_id) DO NOTHING` would silently drop the second month's slot instead of
+    creating it (AA-410's actual live-blocking symptom, plus a time-bomb for any future month
+    once the run-level UNIQUE constraint below stopped masking it)."""
+    raw = f"{tenant_id}|{year}|{month}|{week}|{trip_id}|{channel}"
     return f"slot_{hashlib.sha256(raw.encode()).hexdigest()[:20]}"
 
 
@@ -210,7 +222,8 @@ def compute_slot_grid(
             tour_name=t.name,
         ) or None
         return Slot(
-            slot_id=_deterministic_slot_id(tenant_id, week, trip_id, channel), week=week, channel=channel, kind=kind,
+            slot_id=_deterministic_slot_id(tenant_id, year, month, week, trip_id, channel),
+            week=week, channel=channel, kind=kind,
             trip_id=trip_id, atom_ids=[a.atom_id for a in chosen],
             funnel_stage=stage, framework=fw, cta_target=cta,
             topic_hint=top_atom.text[:80],
@@ -293,29 +306,35 @@ def _row_to_slot(payload) -> Slot:
     return Slot(**data)
 
 
-async def create_weekly_produce_run(pool, tenant_id: str, year: int, week: int) -> str:
+async def create_weekly_produce_run(pool, tenant_id: str, year: int, month: int, week: int) -> str:
     """AA-378 — creates (or reuses) the N7 weekly acp_shared.acp_v2_runs row for
-    (tenant_id, year, week). `week` is the SlotGrid's own week-of-month numbering (1-4, see
-    compute_slot_grid()'s `weeks = [1, 2, 3, 4]`), not an ISO week. Calling this twice for the
-    same (tenant, year, week) returns the SAME run_id (ON CONFLICT DO NOTHING + re-select) — a
-    retry of whatever eventually triggers this weekly must resume the same run, never fork a
-    second one silently."""
+    (tenant_id, year, month, week). `week` is the SlotGrid's own week-of-month numbering (1-4,
+    see compute_slot_grid()'s `weeks = [1, 2, 3, 4]`), not an ISO week. Calling this twice for
+    the same (tenant, year, month, week) returns the SAME run_id (ON CONFLICT DO NOTHING +
+    re-select) — a retry of whatever eventually triggers this weekly must resume the same run,
+    never fork a second one silently.
+
+    AA-410 fix — `month` used to be dropped entirely (INSERT only wrote tenant_id/year/week),
+    so the UNIQUE(tenant_id, year, week) constraint collapsed every calendar month onto the
+    SAME 4 rows per tenant/year: once week 1-4 were 'produced' for ANY month, every later
+    month's week 1-4 looked already-done and no new run/slot could ever be created (migration
+    103 both adds this column and re-scopes that UNIQUE constraint to include it)."""
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
                 """
-                INSERT INTO acp_shared.acp_v2_runs (tenant_id, year, week)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (tenant_id, year, week) DO NOTHING
+                INSERT INTO acp_shared.acp_v2_runs (tenant_id, year, month, week)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (tenant_id, year, month, week) DO NOTHING
                 """,
-                tenant_id, year, week,
+                tenant_id, year, month, week,
             )
             run_id = await conn.fetchval(
                 """
                 SELECT run_id FROM acp_shared.acp_v2_runs
-                WHERE tenant_id = $1 AND year = $2 AND week = $3
+                WHERE tenant_id = $1 AND year = $2 AND month = $3 AND week = $4
                 """,
-                tenant_id, year, week,
+                tenant_id, year, month, week,
             )
     return str(run_id)
 
@@ -328,19 +347,25 @@ async def persist_slot_grid(pool, run_id: str, tenant_id: str, week: int, slot_g
     (slot_id) DO NOTHING` — re-running allocation for a slot that's already persisted is a
     no-op, not a duplicate. Returns the Slot objects in scope for this week (whether newly
     inserted or already existing), same shape fetch_due_slots() returns, so a caller doesn't
-    need a second read to get them."""
+    need a second read to get them.
+
+    AA-410 fix — `month` used to be dropped entirely even though `slot_grid.month` was always
+    right there on the caller-supplied SlotGrid; acp_v2_slots.month (migration 103) is read
+    from it here so every persisted slot row is self-describing (same convention `week` already
+    followed) without a join back to acp_v2_runs."""
     candidates = [s for s in slot_grid.slots if s.kind != "reactive_hold" and s.week == week]
+    month = slot_grid.month
     async with pool.acquire() as conn:
         async with conn.transaction():
             for s in candidates:
                 await conn.execute(
                     """
                     INSERT INTO acp_shared.acp_v2_slots
-                        (slot_id, run_id, tenant_id, week, channel, kind, tour_id, payload)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+                        (slot_id, run_id, tenant_id, week, month, channel, kind, tour_id, payload)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
                     ON CONFLICT (slot_id) DO NOTHING
                     """,
-                    s.slot_id, run_id, tenant_id, week, s.channel, s.kind,
+                    s.slot_id, run_id, tenant_id, week, month, s.channel, s.kind,
                     str(s.trip_id) if s.trip_id else None,
                     json.dumps(s.model_dump(mode="json")),
                 )
@@ -398,7 +423,7 @@ async def allocate_and_persist_week(
     cron/EventBridge, see AA-377.md) would call. allocate_month() itself is untouched — still
     computes the whole month's grid; this is the new layer on top that persists one week's
     slice of it under a stable run_id."""
-    run_id = await create_weekly_produce_run(pool, str(tenant_id), year, week)
+    run_id = await create_weekly_produce_run(pool, str(tenant_id), year, month, week)
     slot_grid = await allocate_month(
         tenant_id, year, month, channels, capacity_posts_per_week, quarter_plan, runway,
         primary_market, pool,
