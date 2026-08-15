@@ -447,6 +447,11 @@ async def test_facebook_piece_fails_only_f9_then_repair_round_passes():
     assert invariants.channel == "facebook"
     assert invariants.cta_required is True
     assert invariants.single_atom_required is True
+    # AA-404 writer-side wire: E5 repair must see the SAME real per-tenant
+    # rubric text F9's judge (mocked above via fake_bedrock) is scored
+    # against — threaded via PieceInvariants.brand_rubric_text, not a
+    # separate disconnected parameter.
+    assert invariants.brand_rubric_text == FACEBOOK_KWARGS["brand_rubric_text"]
 
 
 @pytest.mark.asyncio

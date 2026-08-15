@@ -18,6 +18,7 @@ from services.acp_produce.faq import (FAQAnswerFailed, answer_faq, apply_faq,
                                        build_faq_jsonld, render_faq_section)
 from services.acp_produce.gates import gate_grounding
 from services.acp_produce.models import Brief, FAQCandidate, FAQItem, KeywordRecord, Piece
+from services.content_generation.brand_standards import AA_BRAND_IDENTITY_PROMPT
 from shared.llm_client.bedrock_satellite import BedrockInvokeResult, BedrockUnavailable
 
 
@@ -324,3 +325,66 @@ def test_apply_faq_output_fails_f1_grounding_on_fabricated_number():
 
     gate_result = gate_grounding(result.body_tagged, set(_ATOM_TEXT), _ATOM_TEXT)
     assert gate_result.passed is False
+
+
+# =================================================================== AA-404 writer-side wire: brand_rubric_text
+
+_REAL_RUBRIC = "REAL AA_INTERNAL BRAND RUBRIC — calm, assured, curated."
+
+
+def test_adapt_channels_defaults_to_generic_brand_prompt_when_not_passed():
+    """No `brand_rubric_text` argument (every pre-AA-404 caller/test) must
+    reproduce the exact pre-AA-404 system prompt for both channels."""
+    blog = _blog_piece(_BLOG_BODY)
+    with patch("services.acp_produce.adapt.invoke_claude",
+               side_effect=[_fb_response(), _tiktok_response()]) as mock_invoke:
+        adapt_channels(blog, _ATOM_TEXT)
+
+    for call in mock_invoke.call_args_list:
+        assert AA_BRAND_IDENTITY_PROMPT.strip() in call.kwargs["system"]
+
+
+def test_adapt_channels_uses_real_tenant_brand_rubric_when_passed():
+    """AA-404 F9 deep-dive TL;DR #1: E3 must adapt against the SAME real
+    per-tenant rubric F9's judge scores it against, for BOTH channels, once
+    the caller (slot_runner.py) has one to pass."""
+    blog = _blog_piece(_BLOG_BODY)
+    with patch("services.acp_produce.adapt.invoke_claude",
+               side_effect=[_fb_response(), _tiktok_response()]) as mock_invoke:
+        adapt_channels(blog, _ATOM_TEXT, _REAL_RUBRIC)
+
+    for call in mock_invoke.call_args_list:
+        assert _REAL_RUBRIC in call.kwargs["system"]
+        assert AA_BRAND_IDENTITY_PROMPT.strip() not in call.kwargs["system"]
+
+
+def test_answer_faq_defaults_to_generic_brand_prompt_when_not_passed():
+    candidates = [FAQCandidate(question="Is it safe for beginners?", source_id="atom_a")]
+    response_text = _faq_marker_block(0, "Yes [R:atom_a].")
+    with patch("services.acp_produce.faq.invoke_claude", return_value=_sonnet_result(response_text)) as mock_invoke:
+        answer_faq(candidates, _ATOM_TEXT)
+
+    assert AA_BRAND_IDENTITY_PROMPT.strip() in mock_invoke.call_args.kwargs["system"]
+
+
+def test_answer_faq_uses_real_tenant_brand_rubric_when_passed():
+    """AA-404 F9 deep-dive TL;DR #1: E4 must answer against the SAME real
+    per-tenant rubric F9's judge scores it against."""
+    candidates = [FAQCandidate(question="Is it safe for beginners?", source_id="atom_a")]
+    response_text = _faq_marker_block(0, "Yes [R:atom_a].")
+    with patch("services.acp_produce.faq.invoke_claude", return_value=_sonnet_result(response_text)) as mock_invoke:
+        answer_faq(candidates, _ATOM_TEXT, _REAL_RUBRIC)
+
+    system = mock_invoke.call_args.kwargs["system"]
+    assert _REAL_RUBRIC in system
+    assert AA_BRAND_IDENTITY_PROMPT.strip() not in system
+
+
+def test_apply_faq_threads_real_rubric_through_to_answer_faq():
+    blog = _blog_piece(_BLOG_BODY)
+    brief = _brief(faq_candidates=[FAQCandidate(question="Is it safe?", source_id="atom_a")])
+    response_text = _faq_marker_block(0, "Yes, the trail is well-guided [R:atom_a].")
+    with patch("services.acp_produce.faq.invoke_claude", return_value=_sonnet_result(response_text)) as mock_invoke:
+        apply_faq(blog, brief, _ATOM_TEXT, _REAL_RUBRIC)
+
+    assert _REAL_RUBRIC in mock_invoke.call_args.kwargs["system"]

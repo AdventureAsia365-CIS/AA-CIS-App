@@ -570,16 +570,18 @@ def gate_brand_seo_audit(piece_body: str, brand_rubric_text: str) -> tuple[GateR
     valid_ids/text_by_id).
 
     `brand_rubric_text` source (AA-404 F9 fix #1, docs/implementation-notes/AA-404.md): the real
-    caller (`slot_runner.py::fetch_brand_rubric_text()`) now reads `shared.tenant_brand_rules`'s
-    `'default'` row for the tenant — the hardcoded, generic `AA_BRAND_IDENTITY_PROMPT` constant
-    is now only a fallback for a tenant with no populated brand content, not the live path for
-    `aa_internal` anymore. This corrects two earlier states of this docstring: it originally
-    (incorrectly) claimed `shared.tenant_brand_rules` was already the source before any wiring
-    existed at all; a later pass corrected that to say the opposite (hardcoded-only) after an
-    investigation found `aa_internal`'s `'default'` row empty and its other 6 rows mis-attached
-    test/demo data for other (fictional B2B demo) tenants — that content has since been (a)
-    populated with `aa_internal`'s real brand voice on the `'default'` row and (b) had the 6
-    mis-attached rows removed (same session as this wiring). See `_GENERIC_AI_WORDING_ANCHOR`
+    caller (`brand.py::fetch_brand_rubric_text()`, originally written in `slot_runner.py` for F9
+    fix #1, moved to a shared leaf module in the writer-side wire follow-up so E2/E3/E4/E5 could
+    import it too without a layering problem) now reads `shared.tenant_brand_rules`'s `'default'`
+    row for the tenant — the hardcoded, generic `AA_BRAND_IDENTITY_PROMPT` constant is now only a
+    fallback for a tenant with no populated brand content, not the live path for `aa_internal`
+    anymore. This corrects two earlier states of this docstring: it originally (incorrectly)
+    claimed `shared.tenant_brand_rules` was already the source before any wiring existed at all;
+    a later pass corrected that to say the opposite (hardcoded-only) after an investigation found
+    `aa_internal`'s `'default'` row empty and its other 6 rows mis-attached test/demo data for
+    other (fictional B2B demo) tenants — that content has since been (a) populated with
+    `aa_internal`'s real brand voice on the `'default'` row and (b) had the 6 mis-attached rows
+    removed (same session as this wiring). See `_GENERIC_AI_WORDING_ANCHOR`
     above for the concrete good/bad examples still injected directly into the prompt regardless
     of rubric source — that mitigation stays, this is additive on top of it, not a replacement.
 

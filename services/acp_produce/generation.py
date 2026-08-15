@@ -23,9 +23,17 @@ STEP 0 (Linear AA-370 comment, 06/08/2026) confirmed the design executed here:
   (no Facts pack exists anywhere in this repo, AA-369 scope note) so the tag
   would have nothing real to reference.
 
-This module intentionally reuses `services.content_generation.brand_standards
-.AA_BRAND_IDENTITY_PROMPT` (S1's real brand rubric) instead of inventing a
-second brand-voice text that could drift from it.
+This module used to hardcode `services.content_generation.brand_standards
+.AA_BRAND_IDENTITY_PROMPT` (S1's generic brand rubric) into every draft call.
+AA-404's F9 deep-dive (`docs/implementation-notes/AA-404-F9-deep-dive.md`,
+TL;DR #1) found that gap: F9's judge (PR #158) had already moved on to a real
+per-tenant rubric (`services.acp_produce.brand.fetch_brand_rubric_text()`)
+while every writer module, this one included, kept aiming at the old, vaguer
+generic target. `generate_draft()` now takes `brand_rubric_text` as a
+parameter — `AA_BRAND_IDENTITY_PROMPT` is still imported here, but only as
+that parameter's default (the fallback value `fetch_brand_rubric_text()`
+itself already returns for a tenant with no populated brand row), not as a
+hardcoded constant baked into the module.
 
 `generation.py` is the name every existing forward-reference in this package
 already anticipates (`judge_client.py`, `pipeline.py`, `reliability.py`,
@@ -126,9 +134,15 @@ _AIDA_SINGLE_CTA_NOTE = (
     "action, once."
 )
 
-_DRAFT_SYSTEM_PROMPT = (
-    "You are the Adventure Asia content writer for N7 (blog/social) pieces.\n\n"
-    + AA_BRAND_IDENTITY_PROMPT.strip() +
+# AA-404 writer-side wire (F9 deep-dive TL;DR #1): this used to be a
+# module-level constant built once at import time from the generic
+# `AA_BRAND_IDENTITY_PROMPT` — E2 was one of the 4 writer modules still doing
+# this while F9's judge (PR #158) had already moved on to a real per-tenant
+# rubric (`brand.py::fetch_brand_rubric_text()`). Now built per-call from
+# `generate_draft()`'s own `brand_rubric_text` parameter, which defaults to
+# `AA_BRAND_IDENTITY_PROMPT` — every pre-AA-404 caller/test that doesn't pass
+# it keeps drafting against exactly the prompt it always has.
+_DRAFT_SYSTEM_PROMPT_RULES = (
     "\n\nADDITIONAL RULES FOR THIS DRAFT TASK:\n"
     "- You will be given one or more sections to write. For EACH section, output a line\n"
     "  \"===SECTION:<title>===\" followed by that section's body prose — nothing else on\n"
@@ -141,6 +155,13 @@ _DRAFT_SYSTEM_PROMPT = (
     "- If a section lists no atoms, write no factual claims in it — keep it brief and\n"
     "  transitional (e.g. a bridge into the next section), not padded with invented detail."
 )
+
+
+def _build_draft_system_prompt(brand_rubric_text: str) -> str:
+    return (
+        "You are the Adventure Asia content writer for N7 (blog/social) pieces.\n\n"
+        + brand_rubric_text.strip() + _DRAFT_SYSTEM_PROMPT_RULES
+    )
 
 
 class DraftGenerationFailed(Exception):
@@ -186,7 +207,10 @@ def _section_goal(title: str, atom_ids: list[str]) -> str:
 
 # ---------------------------------------------------------------- E2 draft (Sonnet, batched)
 
-def generate_draft(brief: Brief, outline: list[OutlineSection], atom_text_by_id: dict[str, str]) -> str:
+def generate_draft(
+    brief: Brief, outline: list[OutlineSection], atom_text_by_id: dict[str, str],
+    brand_rubric_text: str = AA_BRAND_IDENTITY_PROMPT,
+) -> str:
     """E2. Drafts `outline` in batches of 2-3 sections/Sonnet call, inserts
     H2 headings from the outline (code, never the model), and joins the
     result into one `body_tagged` string in outline order. Raises
@@ -199,13 +223,20 @@ def generate_draft(brief: Brief, outline: list[OutlineSection], atom_text_by_id:
     together with AIDA's opening-hook/closing-CTA notes (Part 3) into one
     per-section-title -> [extra prompt lines] map, computed once per piece
     (not per batch) so every batch call sees a consistent, non-duplicated
-    plan."""
+    plan.
+
+    `brand_rubric_text` (AA-404 writer-side wire): the real per-tenant rubric
+    F9's judge is scored against (`brand.py::fetch_brand_rubric_text()`),
+    threaded down by `slot_runner.py`'s one per-slot fetch — defaults to the
+    generic `AA_BRAND_IDENTITY_PROMPT` for any caller/test that doesn't have
+    one (unchanged pre-AA-404 behavior)."""
     if not outline:
         raise ValueError("generate_draft() requires a non-empty outline — run build_outline() first")
 
     long_title, short_para_title = _select_variance_owners(outline)
     words_per_section = _compute_words_per_section(brief, outline, long_title)
     extra_directives = _build_extra_section_directives(brief, outline, long_title, short_para_title)
+    system_prompt = _build_draft_system_prompt(brand_rubric_text)
 
     section_bodies: dict[str, str] = {}
     for batch in _batch_sections(outline):
@@ -213,7 +244,7 @@ def generate_draft(brief: Brief, outline: list[OutlineSection], atom_text_by_id:
         batch_words = sum(words_per_section.get(s.title, 0) for s in batch)
         max_tokens = min(max(int(batch_words * 1.6) + 150, _MIN_MAX_TOKENS), _MAX_MAX_TOKENS)
 
-        result = _invoke_sonnet_with_retry(prompt, max_tokens)
+        result = _invoke_sonnet_with_retry(prompt, max_tokens, system_prompt)
         logger.info(
             "e2_draft_batch_success", model_used=result.model_used,
             sections=[s.title for s in batch], latency_ms=result.latency_ms, usage=result.usage,
@@ -342,12 +373,12 @@ def _build_batch_prompt(
     return "\n".join(lines)
 
 
-def _invoke_sonnet_with_retry(prompt: str, max_tokens: int) -> BedrockInvokeResult:
+def _invoke_sonnet_with_retry(prompt: str, max_tokens: int, system: str) -> BedrockInvokeResult:
     last_err: Optional[BedrockUnavailable] = None
     for attempt in range(1, _MAX_INVOKE_ATTEMPTS + 1):
         try:
             return invoke_claude(
-                prompt, model="sonnet", max_tokens=max_tokens, system=_DRAFT_SYSTEM_PROMPT, account="acc3"
+                prompt, model="sonnet", max_tokens=max_tokens, system=system, account="acc3"
             )
         except BedrockUnavailable as e:
             last_err = e

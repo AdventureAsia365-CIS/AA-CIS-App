@@ -12,6 +12,9 @@ pure/synchronous (no DB, no LLM), so these tests need no mocks at all.
 """
 from services.acp_produce.models import Brief, KeywordRecord
 from services.acp_produce.pipeline import _build_repair_invariants
+from services.content_generation.brand_standards import AA_BRAND_IDENTITY_PROMPT
+
+_RUBRIC = "REAL AA_INTERNAL BRAND RUBRIC"
 
 
 def _brief(**overrides) -> Brief:
@@ -38,7 +41,7 @@ def test_facebook_hook_story_cta_sets_single_atom_and_cta_required_no_blog_field
     by `_resolve_framework()` upstream), never the caller's raw blog
     `framework` string. No section-ownership/required_h2s -- F3/F4 are
     blog-only gates, nothing to protect on a facebook piece."""
-    inv = _build_repair_invariants("facebook", "hook_story_cta", _brief())
+    inv = _build_repair_invariants("facebook", "hook_story_cta", _brief(), _RUBRIC)
 
     assert inv.channel == "facebook"
     assert inv.single_atom_required is True
@@ -53,7 +56,7 @@ def test_tiktok_channel_sets_no_facebook_only_invariants():
     """hook_beats_payoff (tiktok's framework) has no single-atom ceiling and
     no literal-CTA-phrase requirement -- both flags must stay False, unlike
     facebook's hook_story_cta."""
-    inv = _build_repair_invariants("tiktok", "hook_beats_payoff", _brief())
+    inv = _build_repair_invariants("tiktok", "hook_beats_payoff", _brief(), _RUBRIC)
 
     assert inv.single_atom_required is False
     assert inv.cta_required is False
@@ -66,9 +69,10 @@ def test_blog_hub_framework_sets_section_ownership_and_required_h2s():
     _select_variance_owners() would have picked (most atoms = long, fewest
     = short), plus required_h2s minus the synthetic "FAQ" entry. hub isn't
     AIDA, so no opening/closing notes."""
-    inv = _build_repair_invariants("blog", "hub", _brief())
+    inv = _build_repair_invariants("blog", "hub", _brief(), _RUBRIC)
 
     assert inv.channel == "blog"
+    assert inv.brand_rubric_text == _RUBRIC
     assert inv.long_section_title == "Middle"  # most atoms (3)
     assert inv.short_para_section_title == "Wrap-up"  # fewest atoms (0)
     assert inv.required_h2s == ["Intro", "Middle", "Wrap-up"]  # FAQ excluded
@@ -83,7 +87,7 @@ def test_blog_aida_framework_also_sets_opening_closing_section_titles():
     aida_opening_section_title/aida_closing_section_title from the outline's
     first/last section (matching the same positional notes generate_draft()
     gives the opening/closing batch at generation time)."""
-    inv = _build_repair_invariants("blog", "AIDA", _brief(framework="AIDA"))
+    inv = _build_repair_invariants("blog", "AIDA", _brief(framework="AIDA"), _RUBRIC)
 
     assert inv.aida_opening_section_title == "Intro"  # outline[0]
     assert inv.aida_closing_section_title == "Wrap-up"  # outline[-1]
@@ -96,7 +100,9 @@ def test_brief_none_for_blog_channel_produces_empty_invariants():
     """`brief=None` is documented as legitimate (pipeline.py's own
     docstring, e.g. a caller that never resolved a Brief) -- must degrade
     to an all-empty PieceInvariants, never raise."""
-    inv = _build_repair_invariants("blog", "hub", None)
+    inv = _build_repair_invariants("blog", "hub", None, AA_BRAND_IDENTITY_PROMPT)
+
+    assert inv.brand_rubric_text == AA_BRAND_IDENTITY_PROMPT
 
     assert inv.long_section_title is None
     assert inv.short_para_section_title is None
@@ -110,7 +116,7 @@ def test_facebook_with_shared_parent_brief_still_skips_blog_only_fields():
     a facebook piece just because a Brief object happens to be present;
     those are blog-only concerns gated on `channel`, not on `brief is not
     None` alone."""
-    inv = _build_repair_invariants("facebook", "hook_story_cta", _brief())
+    inv = _build_repair_invariants("facebook", "hook_story_cta", _brief(), _RUBRIC)
 
     assert inv.required_h2s == []
     assert inv.long_section_title is None
@@ -121,7 +127,7 @@ def test_empty_required_h2s_produces_no_section_ownership_crash():
     must not crash _select_variance_owners() (which raises ValueError on an
     empty outline) -- _build_repair_invariants() must guard this, same as
     generate_draft()'s own non-empty-outline check."""
-    inv = _build_repair_invariants("blog", "hub", _brief(required_h2s=[], atoms_by_section={}))
+    inv = _build_repair_invariants("blog", "hub", _brief(required_h2s=[], atoms_by_section={}), _RUBRIC)
 
     assert inv.long_section_title is None
     assert inv.short_para_section_title is None

@@ -17,6 +17,7 @@ from services.acp_produce.generation import (DraftGenerationFailed, _build_extra
                                               _compute_words_per_section, _select_variance_owners,
                                               build_outline, generate_draft)
 from services.acp_produce.models import Brief, KeywordRecord, OutlineSection
+from services.content_generation.brand_standards import AA_BRAND_IDENTITY_PROMPT
 from shared.llm_client.bedrock_satellite import BedrockInvokeResult, BedrockUnavailable
 
 
@@ -165,6 +166,57 @@ def test_generate_draft_raises_on_unparseable_response():
                return_value=_sonnet_result("no markers here, just prose.")):
         with pytest.raises(DraftGenerationFailed):
             generate_draft(_brief(), outline, _atom_text())
+
+
+# ---------------------------------------------------------------- AA-404 writer-side wire: brand_rubric_text
+
+def test_generate_draft_defaults_to_generic_brand_prompt_when_not_passed():
+    """No `brand_rubric_text` argument (every pre-AA-404 caller/test) must
+    reproduce the exact pre-AA-404 system prompt — the generic
+    `AA_BRAND_IDENTITY_PROMPT` constant, not an empty/missing brand block."""
+    outline = build_outline(_brief())[1:2]
+    response_text = _marker_block(outline[0].title, "Grounded body [R:atom_a].")
+    with patch("services.acp_produce.generation.invoke_claude",
+               return_value=_sonnet_result(response_text)) as mock_invoke:
+        generate_draft(_brief(), outline, _atom_text())
+
+    system = mock_invoke.call_args.kwargs["system"]
+    assert AA_BRAND_IDENTITY_PROMPT.strip() in system
+
+
+def test_generate_draft_uses_real_tenant_brand_rubric_when_passed():
+    """AA-404 F9 deep-dive TL;DR #1: E2 must draft against the SAME real
+    per-tenant rubric text F9's judge scores it against
+    (`brand.py::fetch_brand_rubric_text()`), not the generic constant, once
+    the caller (slot_runner.py) has one to pass."""
+    outline = build_outline(_brief())[1:2]
+    response_text = _marker_block(outline[0].title, "Grounded body [R:atom_a].")
+    real_rubric = "REAL AA_INTERNAL BRAND RUBRIC — calm, assured, curated."
+    with patch("services.acp_produce.generation.invoke_claude",
+               return_value=_sonnet_result(response_text)) as mock_invoke:
+        generate_draft(_brief(), outline, _atom_text(), real_rubric)
+
+    system = mock_invoke.call_args.kwargs["system"]
+    assert real_rubric in system
+    assert AA_BRAND_IDENTITY_PROMPT.strip() not in system
+
+
+def test_generate_draft_threads_real_rubric_to_every_batch_call():
+    """Every batch call in a multi-batch draft must see the SAME real rubric
+    — not just the first."""
+    outline = [OutlineSection(title=f"Section {i}", atom_ids=[], goal="g") for i in range(5)]
+    real_rubric = "REAL AA_INTERNAL BRAND RUBRIC"
+
+    def _fake_invoke(prompt, model, max_tokens, system, account=None):
+        assert real_rubric in system
+        batch_titles = [ln.split("SECTION: ")[1] for ln in prompt.splitlines() if ln.startswith("SECTION: ")]
+        text = "".join(_marker_block(t, f"body for {t} [R:atom_a]") for t in batch_titles)
+        return _sonnet_result(text)
+
+    with patch("services.acp_produce.generation.invoke_claude", side_effect=_fake_invoke) as mock_invoke:
+        generate_draft(_brief(), outline, {"atom_a": "x"}, real_rubric)
+
+    assert mock_invoke.call_count == 2
 
 
 def test_generate_draft_empty_outline_raises_value_error():

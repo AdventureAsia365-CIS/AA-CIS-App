@@ -200,7 +200,7 @@ async def run_piece_through_produce_gates(
         cta_target = brief.cta_target if brief else None
         url_alive = await _fetch_url_alive(db, tenant_id, tour_id) if tour_id else None
         effective_framework = _resolve_framework(channel, framework)
-        invariants = _build_repair_invariants(channel, effective_framework, brief)
+        invariants = _build_repair_invariants(channel, effective_framework, brief, brand_rubric_text)
 
         def _f1(body: str) -> GateResult:
             return gate_grounding(body, valid_ids, text_by_id)
@@ -263,7 +263,9 @@ def _resolve_framework(channel: str, framework: str) -> str:
     return fw_cfg["framework"] if fw_cfg else framework
 
 
-def _build_repair_invariants(channel: str, effective_framework: str, brief: Optional[Brief]) -> PieceInvariants:
+def _build_repair_invariants(
+    channel: str, effective_framework: str, brief: Optional[Brief], brand_rubric_text: str,
+) -> PieceInvariants:
     """AA-404 (repair.py blind spot general fix, docs/implementation-notes/
     AA-404.md's "mở rộng" STEP 0 §4/§5): builds this piece's
     `PieceInvariants` ONCE per gate-stack run, the same "closure captures
@@ -274,7 +276,16 @@ def _build_repair_invariants(channel: str, effective_framework: str, brief: Opti
     (`build_outline`/`_select_variance_owners`) — no new `Piece` field, no
     new DB column, no new state storage, exactly the doc's own
     recommendation (adding a stored field was explicitly rejected there in
-    favor of re-derivation)."""
+    favor of re-derivation).
+
+    `brand_rubric_text` (AA-404 writer-side wire, F9 deep-dive TL;DR #1): the
+    SAME real per-tenant rubric string this call's own `brand_rubric_text`
+    parameter already threads to F9's judge (`_f9` closure above) — folded
+    into `invariants` so E5 repair rounds judge/rewrite against the real
+    rubric too, not the generic `AA_BRAND_IDENTITY_PROMPT` `repair.py`
+    hardcoded before this fix. Reuses the existing `PieceInvariants`
+    mechanism (one more field) rather than adding a second, disconnected
+    parameter to `repair_piece()`."""
     long_title: Optional[str] = None
     short_para_title: Optional[str] = None
     aida_opening: Optional[str] = None
@@ -302,6 +313,7 @@ def _build_repair_invariants(channel: str, effective_framework: str, brief: Opti
         cta_required=(effective_framework == "hook_story_cta"),
         aida_opening_section_title=aida_opening,
         aida_closing_section_title=aida_closing,
+        brand_rubric_text=brand_rubric_text,
     )
 
 
