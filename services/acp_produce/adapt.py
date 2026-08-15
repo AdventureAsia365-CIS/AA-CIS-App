@@ -67,6 +67,10 @@ _ADAPT_SYSTEM_PROMPT_BASE = (
     "  never cite an id not in that list.\n"
     "- Do not add any factual claim that isn't already in the blog text given to you.\n"
     "- Do NOT use [F:...] tags anywhere.\n"
+    "- Even under this channel's tight word budget, naturally work in at least one of the REQUIRED\n"
+    "  language words above (Design / Curated / Refined / Tailored / Journey) — never drop brand\n"
+    "  voice just to save words. A short piece still has to sound like this brand, not a generic\n"
+    "  travel caption that happens to be about this trip.\n"
 )
 
 _FACEBOOK_INSTRUCTIONS = (
@@ -93,6 +97,10 @@ _TIKTOK_INSTRUCTIONS = (
     "  over from the blog text.\n"
     "\"VISUAL:\" 1-2 lines of shot/visual direction notes (no video/image is generated — this is\n"
     "  text guidance only for whoever films it).\n"
+    "- \"Spoken/conversational\" means natural sentence rhythm and contractions, not casual slang —\n"
+    "  the brand voice (calm, assured, selective, precise, curated, composed, premium) still has to\n"
+    "  come through when SCRIPT is read aloud. Write it the way a calm, well-traveled person would\n"
+    "  actually talk about this trip, not a hype-y ad read.\n"
 )
 
 _CHANNEL_INSTRUCTIONS: dict[ChannelName, str] = {
