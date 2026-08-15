@@ -56,10 +56,15 @@ _MAX_MAX_TOKENS = 4096
 
 _FAQ_MARKER_RE = re.compile(r"===FAQ:\d+===\s*\n")
 
-_FAQ_SYSTEM_PROMPT = (
-    "You are answering a set of already-researched reader questions, each backed by exactly one\n"
-    "given fact.\n\n"
-    + AA_BRAND_IDENTITY_PROMPT.strip() +
+# AA-404 writer-side wire (F9 deep-dive TL;DR #1): this used to be a
+# module-level constant built once at import time from the generic
+# `AA_BRAND_IDENTITY_PROMPT` — E4 was one of the 4 writer modules still doing
+# this while F9's judge (PR #158) had already moved on to a real per-tenant
+# rubric (`brand.py::fetch_brand_rubric_text()`). Now built per-call from
+# `answer_faq()`'s own `brand_rubric_text` parameter, which defaults to
+# `AA_BRAND_IDENTITY_PROMPT` — every pre-AA-404 caller/test that doesn't pass
+# it keeps answering against exactly the prompt it always has.
+_FAQ_SYSTEM_PROMPT_RULES = (
     "\n\nRULES:\n"
     "- For EACH question below, output a line \"===FAQ:<n>===\" (n = the question's number) followed\n"
     "  by a 1-3 sentence answer, in the exact order given — nothing else on that line.\n"
@@ -71,6 +76,14 @@ _FAQ_SYSTEM_PROMPT = (
 )
 
 
+def _build_faq_system_prompt(brand_rubric_text: str) -> str:
+    return (
+        "You are answering a set of already-researched reader questions, each backed by exactly one\n"
+        "given fact.\n\n"
+        + brand_rubric_text.strip() + _FAQ_SYSTEM_PROMPT_RULES
+    )
+
+
 class FAQAnswerFailed(Exception):
     """A batch's Sonnet invoke kept failing after retries, or its response
     didn't parse into one answer per requested question. Same "never guess
@@ -80,19 +93,29 @@ class FAQAnswerFailed(Exception):
 
 # ---------------------------------------------------------------- answer (Sonnet, batched)
 
-def answer_faq(faq_candidates: list[FAQCandidate], atom_text_by_id: dict[str, str]) -> list[FAQItem]:
+def answer_faq(
+    faq_candidates: list[FAQCandidate], atom_text_by_id: dict[str, str],
+    brand_rubric_text: str = AA_BRAND_IDENTITY_PROMPT,
+) -> list[FAQItem]:
     """E4 answer step. Batches `faq_candidates` 2-3/call (reuses
     `generation._batch_sections`) and returns one `FAQItem` per candidate,
-    in input order. Empty input returns `[]` with zero Sonnet calls."""
+    in input order. Empty input returns `[]` with zero Sonnet calls.
+
+    `brand_rubric_text` (AA-404 writer-side wire): the real per-tenant rubric
+    F9's judge is scored against (`brand.py::fetch_brand_rubric_text()`),
+    threaded down by `slot_runner.py`'s one per-slot fetch — defaults to the
+    generic `AA_BRAND_IDENTITY_PROMPT` for any caller/test that doesn't have
+    one (unchanged pre-AA-404 behavior)."""
     if not faq_candidates:
         return []
 
+    system_prompt = _build_faq_system_prompt(brand_rubric_text)
     items: list[FAQItem] = []
     for batch in _batch_sections(faq_candidates):
         prompt = _build_batch_prompt(batch, atom_text_by_id)
         max_tokens = min(max(120 * len(batch) + 150, _MIN_MAX_TOKENS), _MAX_MAX_TOKENS)
 
-        result = _invoke_sonnet_with_retry(prompt, max_tokens)
+        result = _invoke_sonnet_with_retry(prompt, max_tokens, system_prompt)
         logger.info("e4_faq_batch_success", model_used=result.model_used,
                      questions=[c.question for c in batch], latency_ms=result.latency_ms, usage=result.usage)
 
@@ -114,12 +137,12 @@ def _build_batch_prompt(batch: list[FAQCandidate], atom_text_by_id: dict[str, st
     return "\n".join(lines)
 
 
-def _invoke_sonnet_with_retry(prompt: str, max_tokens: int) -> BedrockInvokeResult:
+def _invoke_sonnet_with_retry(prompt: str, max_tokens: int, system: str) -> BedrockInvokeResult:
     last_err: Optional[BedrockUnavailable] = None
     for attempt in range(1, _MAX_INVOKE_ATTEMPTS + 1):
         try:
             return invoke_claude(
-                prompt, model="sonnet", max_tokens=max_tokens, system=_FAQ_SYSTEM_PROMPT, account="acc3"
+                prompt, model="sonnet", max_tokens=max_tokens, system=system, account="acc3"
             )
         except BedrockUnavailable as e:
             last_err = e
@@ -189,7 +212,10 @@ def build_faq_jsonld(faq_items: list[FAQItem]) -> Optional[dict]:
 
 # ---------------------------------------------------------------- orchestration
 
-def apply_faq(blog_piece: Piece, brief: Brief, atom_text_by_id: dict[str, str]) -> Piece:
+def apply_faq(
+    blog_piece: Piece, brief: Brief, atom_text_by_id: dict[str, str],
+    brand_rubric_text: str = AA_BRAND_IDENTITY_PROMPT,
+) -> Piece:
     """E4 end-to-end against `blog_piece`: answers `brief.faq_candidates`,
     appends the rendered FAQ section to `body_tagged`, and sets
     `faq_items`/`faq_jsonld`. Mutates and returns the same `Piece` (same
@@ -198,11 +224,14 @@ def apply_faq(blog_piece: Piece, brief: Brief, atom_text_by_id: dict[str, str]) 
     matches E1's existing behavior of only ever appending "FAQ" when
     `fw_cfg.get("faq")` produced at least the section, never an empty one.
     Raises `FAQAnswerFailed` (propagated from `answer_faq()`) rather than
-    ever splicing in a partial/empty FAQ block."""
+    ever splicing in a partial/empty FAQ block.
+
+    `brand_rubric_text` (AA-404 writer-side wire): passed straight through to
+    `answer_faq()` — see its docstring."""
     if not brief.faq_candidates:
         return blog_piece
 
-    faq_items = answer_faq(brief.faq_candidates, atom_text_by_id)
+    faq_items = answer_faq(brief.faq_candidates, atom_text_by_id, brand_rubric_text)
     blog_piece.body_tagged = blog_piece.body_tagged.rstrip() + "\n\n" + render_faq_section(faq_items)
     blog_piece.faq_items = faq_items
     blog_piece.faq_jsonld = build_faq_jsonld(faq_items)

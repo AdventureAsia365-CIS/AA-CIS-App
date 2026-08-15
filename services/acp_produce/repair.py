@@ -56,9 +56,17 @@ _RETRY_BACKOFF_SECONDS = 2.0
 # the project-wide "max_tokens = 4096, NOT 2000" rule (JSON-truncation fix).
 _MAX_TOKENS = 4096
 
-_REPAIR_SYSTEM_PROMPT = (
-    "You are repairing an ALREADY-WRITTEN piece that failed a QA check.\n\n"
-    + AA_BRAND_IDENTITY_PROMPT.strip() +
+# AA-404 writer-side wire (F9 deep-dive TL;DR #1): the brand block used to be
+# baked into a module-level constant built once at import time from the
+# generic `AA_BRAND_IDENTITY_PROMPT` — repair.py was one of the 4 writer
+# modules (with generation.py/adapt.py/faq.py) still doing this while F9's
+# judge (PR #158) had already moved on to a real per-tenant rubric. Now built
+# per-call from `PieceInvariants.brand_rubric_text` (see `_build_repair_
+# system_prompt()` below) so a repair round judges/rewrites against the SAME
+# rubric text F9 scores it against — `AA_BRAND_IDENTITY_PROMPT` stays as the
+# hard default for the no-`invariants` call shape every pre-AA-404 caller/test
+# still uses.
+_REPAIR_HARD_RULES = (
     "\n\nHARD RULES FOR THIS REPAIR TASK:\n"
     "- Fix ONLY the violations listed below. Do not rewrite anything else.\n"
     "- Preserve the existing structure, voice, and length as closely as possible.\n"
@@ -71,6 +79,13 @@ _REPAIR_SYSTEM_PROMPT = (
     "- Output ONLY the full repaired text, same format as the input — no commentary, no\n"
     "  explanation, no markdown fence.\n"
 )
+
+
+def _build_repair_system_prompt(brand_rubric_text: str) -> str:
+    return (
+        "You are repairing an ALREADY-WRITTEN piece that failed a QA check.\n\n"
+        + brand_rubric_text.strip() + _REPAIR_HARD_RULES
+    )
 
 
 # AA-396 (piece-7 class): a real Sonnet repair call, confused by the
@@ -168,6 +183,13 @@ class PieceInvariants:
     # its own follow-up patch once real data eventually exercises it.
     aida_opening_section_title: Optional[str] = None
     aida_closing_section_title: Optional[str] = None
+    # AA-404 writer-side wire: the SAME real per-tenant rubric text F9's judge
+    # (gate_brand_seo_audit()/gate_brand_seo_audit_social(), gates.py) scores
+    # this piece against — see brand.py::fetch_brand_rubric_text(). Defaults
+    # to the generic constant so every pre-AA-404 `PieceInvariants(...)` call
+    # site (this repo's own tests included) that doesn't set this field keeps
+    # repairing against exactly the prompt it always has.
+    brand_rubric_text: str = AA_BRAND_IDENTITY_PROMPT
 
 
 def _currently_cited_atom_ids(body_tagged: str) -> list[str]:
@@ -308,11 +330,13 @@ def repair_piece(body_tagged: str, violations: list[str], *, invariants: Optiona
     reproduces the exact pre-AA-404 prompt shape — this parameter is
     strictly additive."""
     prompt = _build_prompt(body_tagged, violations, invariants)
+    brand_rubric_text = invariants.brand_rubric_text if invariants is not None else AA_BRAND_IDENTITY_PROMPT
+    system_prompt = _build_repair_system_prompt(brand_rubric_text)
     last_err: BedrockUnavailable | None = None
     for attempt in range(1, _MAX_INVOKE_ATTEMPTS + 1):
         try:
             result = invoke_claude(
-                prompt, model="sonnet", max_tokens=_MAX_TOKENS, system=_REPAIR_SYSTEM_PROMPT, account="acc3"
+                prompt, model="sonnet", max_tokens=_MAX_TOKENS, system=system_prompt, account="acc3"
             )
         except BedrockUnavailable as e:
             last_err = e

@@ -59,9 +59,15 @@ _MAX_TOKENS = 1024  # both channel outputs are short-form, well under E2's per-b
 
 ChannelName = Literal["facebook", "tiktok"]
 
-_ADAPT_SYSTEM_PROMPT_BASE = (
-    "You are adapting an ALREADY-WRITTEN blog piece into a shorter channel-specific format.\n\n"
-    + AA_BRAND_IDENTITY_PROMPT.strip() +
+# AA-404 writer-side wire (F9 deep-dive TL;DR #1): this used to be a
+# module-level constant built once at import time from the generic
+# `AA_BRAND_IDENTITY_PROMPT` — E3 was one of the 4 writer modules still doing
+# this while F9's judge (PR #158) had already moved on to a real per-tenant
+# rubric (`brand.py::fetch_brand_rubric_text()`). Now built per-call from
+# `adapt_channels()`'s own `brand_rubric_text` parameter, which defaults to
+# `AA_BRAND_IDENTITY_PROMPT` — every pre-AA-404 caller/test that doesn't pass
+# it keeps adapting against exactly the prompt it always has.
+_ADAPT_SYSTEM_PROMPT_RULES = (
     "\n\nHARD RULES FOR THIS ADAPT TASK:\n"
     "- You may ONLY cite [R:atom_id] ids from the ATOM LIST given below — never invent a new id,\n"
     "  never cite an id not in that list.\n"
@@ -72,6 +78,13 @@ _ADAPT_SYSTEM_PROMPT_BASE = (
     "  voice just to save words. A short piece still has to sound like this brand, not a generic\n"
     "  travel caption that happens to be about this trip.\n"
 )
+
+
+def _build_adapt_system_prompt_base(brand_rubric_text: str) -> str:
+    return (
+        "You are adapting an ALREADY-WRITTEN blog piece into a shorter channel-specific format.\n\n"
+        + brand_rubric_text.strip() + _ADAPT_SYSTEM_PROMPT_RULES
+    )
 
 _FACEBOOK_INSTRUCTIONS = (
     "\nFACEBOOK CAPTION FORMAT — this is the hook_story_cta framework (hook, then story/atom\n"
@@ -124,11 +137,19 @@ class AdaptChannelFailed(Exception):
     `adapt_channels()` — never propagates out of this module."""
 
 
-def adapt_channels(blog_piece: Piece, atom_text_by_id: dict[str, str]) -> list[Piece]:
+def adapt_channels(
+    blog_piece: Piece, atom_text_by_id: dict[str, str], brand_rubric_text: str = AA_BRAND_IDENTITY_PROMPT,
+) -> list[Piece]:
     """E3. Returns 0, 1, or 2 new `Piece` objects (channel="facebook" /
     "tiktok") adapted from `blog_piece.body_tagged`. A channel that fails
     after retries is logged and omitted — never raises, never blocks the
-    other channel."""
+    other channel.
+
+    `brand_rubric_text` (AA-404 writer-side wire): the real per-tenant rubric
+    F9's judge is scored against (`brand.py::fetch_brand_rubric_text()`),
+    threaded down by `slot_runner.py`'s one per-slot fetch — defaults to the
+    generic `AA_BRAND_IDENTITY_PROMPT` for any caller/test that doesn't have
+    one (unchanged pre-AA-404 behavior)."""
     cited_ids = atom_ids_cited(blog_piece)
     cited_atom_text = {aid: atom_text_by_id[aid] for aid in cited_ids if aid in atom_text_by_id}
 
@@ -136,7 +157,7 @@ def adapt_channels(blog_piece: Piece, atom_text_by_id: dict[str, str]) -> list[P
     for channel in ("facebook", "tiktok"):
         channel_atom_text = _select_atoms_for_channel(cited_atom_text, channel)
         try:
-            body = _invoke_channel_with_retry(blog_piece.body_tagged, channel_atom_text, channel)
+            body = _invoke_channel_with_retry(blog_piece.body_tagged, channel_atom_text, channel, brand_rubric_text)
         except AdaptChannelFailed as e:
             logger.error("e3_adapt_channel_failed", channel=channel,
                          blog_piece_id=blog_piece.piece_id, error=str(e))
@@ -182,8 +203,10 @@ def _build_prompt(blog_body: str, cited_atom_text: dict[str, str], channel: Chan
     return "\n".join(lines)
 
 
-def _invoke_channel_with_retry(blog_body: str, cited_atom_text: dict[str, str], channel: ChannelName) -> str:
-    system = _ADAPT_SYSTEM_PROMPT_BASE + _CHANNEL_INSTRUCTIONS[channel]
+def _invoke_channel_with_retry(
+    blog_body: str, cited_atom_text: dict[str, str], channel: ChannelName, brand_rubric_text: str,
+) -> str:
+    system = _build_adapt_system_prompt_base(brand_rubric_text) + _CHANNEL_INSTRUCTIONS[channel]
     prompt = _build_prompt(blog_body, cited_atom_text, channel)
     required_markers = _CHANNEL_REQUIRED_MARKERS[channel]
 
