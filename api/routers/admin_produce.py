@@ -241,7 +241,8 @@ async def get_produce_run(run_id: str, request: Request, x_admin_secret: str = H
         run_id,
     )
     packet_row = await pool.fetchrow(
-        "SELECT packet_id::text, status, publish_mode FROM acp_deliver.packets WHERE tenant_id = $1 AND year = $2 AND week = $3",
+        "SELECT packet_id::text, status, publish_mode FROM acp_deliver.packets "
+        "WHERE tenant_id = $1 AND year = $2 AND week = $3",
         run_row["tenant_id"], run_row["year"], run_row["week"],
     )
 
