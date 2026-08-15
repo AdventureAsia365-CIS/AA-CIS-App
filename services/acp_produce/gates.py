@@ -459,12 +459,71 @@ BRAND_SEO_FAILURE_CODES = [
 ]
 
 
+# AA-404 F9 STEP 0 follow-up fix #2 (docs/implementation-notes/AA-404.md's F9
+# root-cause section): neither BRAND_SEO_FAILURE_CODES nor
+# SOCIAL_SEO_FAILURE_CODES ever defined what "GENERIC_AI_WORDING"/
+# "SUMMARY_OFF_BRAND" concretely mean -- the judge was free to invent a fresh
+# definition every round, which real data confirmed (3 different phrases
+# flagged across 3 repair rounds on the same piece, never converging). Same
+# "concrete contrast anchor" pattern already used for S1 rewrites
+# (graph.py::_build_brand_diff_block()'s "GENERIC PHRASING TO AVOID" block) --
+# a negative example plus a positive one, not just an abstract instruction.
+# The GOOD example below is not invented: it is the exact sentence a real F9
+# audit (week=1 retrigger, 15/08/2026, piece
+# de8337ba...:slot_845eb6ec83cdf1f082ec:blog#facebook) flagged as
+# GENERIC_AI_WORDING/SUMMARY_OFF_BRAND -- confirmed on inspection to be
+# specific, verifiable, on-brand prose, not generic filler. Using the judge's
+# own real false positive as the calibration anchor is deliberate: it targets
+# the exact miscalibration observed, not a guessed-at one.
+_GENERIC_AI_WORDING_ANCHOR = (
+    "\n\nWHAT COUNTS AS GENERIC_AI_WORDING (concrete anchor, not a vague vibe check):\n"
+    "- BAD (generic -- flag this): \"Experience the best of South Korea's rich culture and stunning "
+    "landscapes on this unforgettable journey.\" -- templated superlatives, no concrete detail, "
+    "swappable onto any destination or any brand with a find-and-replace.\n"
+    "- GOOD (specific, on-brand -- do NOT flag this): \"A bullet train departing Seoul southward "
+    "delivers you to Gyeongju -- ancient capital of the Silla Kingdom -- in under two hours, arriving "
+    "at a city where royal burial mounds still rise from the centre of residential streets.\" -- a "
+    "concrete, verifiable detail (place name, real fact, specific geography); calm and precise, no "
+    "adjective padding, no superlatives.\n"
+    "A sentence built from a SPECIFIC, concrete, verifiable detail is NOT generic, even when its "
+    "register is quiet or understated -- do not flag calm, precise, unhurried writing as \"too "
+    "abstract\", \"too poetic\", or \"not curated enough\" just because it lacks superlatives or "
+    "sounds evocative. Reserve GENERIC_AI_WORDING for templated filler that could be copy-pasted "
+    "onto any other brand's any other trip unchanged.\n\n"
+    "WHAT COUNTS AS SUMMARY_OFF_BRAND: the text violates a REQUIRED or FORBIDDEN word from the brand "
+    "rubric above, or contradicts a stated voice attribute outright (e.g. reads salesy/urgent when "
+    "the rubric calls for calm and unhurried) -- not merely \"could have been phrased differently.\" "
+    "The brand's own REQUIRED language (including its mandated CTA phrase, if the rubric states one) "
+    "is never grounds for SUMMARY_OFF_BRAND or GENERIC_AI_WORDING on its own -- required language "
+    "cannot simultaneously be a violation.\n"
+)
+
+
 def gate_brand_seo_audit(piece_body: str, brand_rubric_text: str) -> tuple[GateResult, dict | None]:
     """F9 brand/SEO audit — LLM, Nova Pro, cross-weight (same isolation
     guarantee as F8, see gate_framework() and judge_client.py). Caller
     supplies `brand_rubric_text` already fetched (this function does no DB
     I/O itself, same convention as gate_grounding() taking pre-fetched
-    valid_ids/text_by_id) — real source is shared.tenant_brand_rules.
+    valid_ids/text_by_id).
+
+    `brand_rubric_text` source (AA-404 F9 STEP 0, docs/implementation-notes/
+    AA-404.md): the real caller (slot_runner.py) passes the generic, S1-era
+    `AA_BRAND_IDENTITY_PROMPT` constant, NOT `shared.tenant_brand_rules` —
+    despite this docstring previously (incorrectly) claiming the latter.
+    Corrected here after a real-data investigation found `shared.
+    tenant_brand_rules` unsuitable to wire in as-is for `aa_internal`: its
+    one legitimate "default" row (matching AA_BRAND_IDENTITY_PROMPT's own
+    stated identity) has empty system_prompt/style_guide/forbidden_words,
+    and its 4 content-rich rows are confirmed test/demo data for OTHER
+    (fictional B2B demo) tenants — WanderLux/Trail Pulse/Terra Family
+    Expeditions/Atlas & Hearth/WildKind Travel's own brand_name rows,
+    mistakenly created against aa_internal's tenant_id, complete with
+    Sri Lanka example content unrelated to this tenant's real trips. Wiring
+    in the real per-tenant rubric is a separate, larger follow-up (needs the
+    "default" row's content actually populated first) — out of scope here.
+    See `_GENERIC_AI_WORDING_ANCHOR` above for this session's mitigation:
+    concrete good/bad examples injected directly into the prompt instead.
+
     Binary 1/0 fields, fixed failure-code vocabulary — never a free-text
     verdict that can't be tracked or trended. Returns (GateResult, audit_dict
     | None) — audit_dict is None only when the judge call itself failed."""
@@ -473,14 +532,19 @@ def gate_brand_seo_audit(piece_body: str, brand_rubric_text: str) -> tuple[GateR
         "brand_fit": "1|0", "human_read": "1|0", "seo_fit": "1|0",
         "trip_type_accuracy": "1|0", "publish_readiness": "1|0",
         "failure_codes": [f"subset of {BRAND_SEO_FAILURE_CODES}"],
+        "flagged_phrases": ["exact quoted phrase from the piece for each SUMMARY_OFF_BRAND/"
+                             "GENERIC_AI_WORDING code above -- [] if neither code is used"],
         "notes": "str",
     }, indent=1)
     user_prompt = (
         f"PIECE:\n{piece_body}\n\n"
-        f"BRAND RUBRIC:\n{brand_rubric_text}\n\n"
+        f"BRAND RUBRIC:\n{brand_rubric_text}\n"
+        f"{_GENERIC_AI_WORDING_ANCHOR}\n"
         "Audit in this order: product truth -> brand fit -> trip type -> highlights -> "
         "readability -> SEO -> publish readiness. Score every field 1 or 0. Use ONLY the "
-        f"listed failure codes: {BRAND_SEO_FAILURE_CODES}. When uncertain about a factual "
+        f"listed failure codes: {BRAND_SEO_FAILURE_CODES}. If you use SUMMARY_OFF_BRAND or "
+        "GENERIC_AI_WORDING, you MUST quote the exact offending phrase in `flagged_phrases` -- one "
+        "entry per phrase; never use either code without a quote. When uncertain about a factual "
         "claim: status=manual_check + FACT_CHECK_MANUAL_CHECK.\n\n"
         f"Output ONLY JSON matching this contract:\n{contract}"
     )
@@ -493,12 +557,13 @@ def gate_brand_seo_audit(piece_body: str, brand_rubric_text: str) -> tuple[GateR
 
     status = data.get("status", "manual_check")
     failure_codes = [c for c in (data.get("failure_codes") or []) if c in BRAND_SEO_FAILURE_CODES]
+    flagged_phrases = [p for p in (data.get("flagged_phrases") or []) if isinstance(p, str) and p.strip()]
     audit = {
         "status": status,
         "brand_fit": data.get("brand_fit"), "human_read": data.get("human_read"),
         "seo_fit": data.get("seo_fit"), "trip_type_accuracy": data.get("trip_type_accuracy"),
         "publish_readiness": data.get("publish_readiness"),
-        "failure_codes": failure_codes, "notes": data.get("notes"),
+        "failure_codes": failure_codes, "flagged_phrases": flagged_phrases, "notes": data.get("notes"),
     }
     passed = status == "pass"
     violations = []
@@ -585,7 +650,8 @@ def gate_brand_seo_audit_social(
     }, indent=1)
     user_prompt = (
         f"PIECE ({channel}):\n{piece_body}\n\n"
-        f"BRAND RUBRIC:\n{brand_rubric_text}\n\n"
+        f"BRAND RUBRIC:\n{brand_rubric_text}\n"
+        f"{_GENERIC_AI_WORDING_ANCHOR}\n"
         "Score every field 1 or 0. Use ONLY the listed failure codes: "
         f"{SOCIAL_SEO_FAILURE_CODES}. If you use SUMMARY_OFF_BRAND or GENERIC_AI_WORDING, you MUST "
         "quote the exact offending phrase in `flagged_phrases` -- one entry per phrase. The brand's "
