@@ -54,7 +54,17 @@ logger = structlog.get_logger()
 TAG_RE = re.compile(r"\[(?:R|F):([^\]]+)\]")
 # Same sentence-boundary heuristic used to build the real-data test fixture
 # (tests/unit/fixtures/aa325_grounding_units.json) and s1_from_atom.py's gate.
-_SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'‘’“”])")
+#
+# AA-405: tolerate up to 2 markdown bold asterisks (`**`) immediately around the
+# whitespace boundary. Without this, `**Q: ...**` / `**A:` FAQ markers (faq.py::
+# render_faq_section()'s real format) never split from the sentence before them
+# -- "...into Seoul [R:atom_x].\n\n**Q: What is the 52 hour rule...**" stayed ONE
+# "sentence" carrying a citation from the itinerary paragraph and numbers from an
+# unrelated FAQ answer, so gate_grounding() blamed the wrong citation for numbers
+# it never claimed. Confirmed via re.split() test and the real week=2 fabrication
+# alarm (docs/implementation-notes/AA-405.md). `{0,2}` matches real markdown's `**`
+# exactly; it does not touch the common non-bold case (`\*{0,2}` matches empty).
+_SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\*{0,2}\s+\*{0,2}(?=[A-Z\"'‘’“”])")
 
 
 def gate_grounding(body_tagged: str, valid_ids: set[str], text_by_id: dict[str, str]) -> GateResult:
