@@ -227,6 +227,17 @@ above stands as the only real comparison point so far.
   `nghiep_aa365` admin profile directly (not through the ECS task role) — this is a one-time,
   human-initiated account action, not something the app itself ever needs to call.
 
+## Follow-up (16/08/2026, AA-351-03) — GPT-4.1 tried while GPT-5.6 stayed blocked
+
+See `docs/implementation-notes/AA-351-gpt41-judge-trial.md` for the full writeup — short
+version: `invoke_judge_gpt41()` was added (same feature-flag pattern, `JUDGE_MODEL=gpt41`),
+code-complete and unit-tested, but the real comparison run also came back with 0 usable
+data points — this time because the OpenAI API key has **zero billing credits**, a
+finding with production impact beyond this trial (S1's brand-fit judge, `judge_node.py`,
+is silently failing every call right now for the same reason). Judge comparison across
+all 3 alternative backends (this file's Nova Pro baseline + GPT-5.6 + GPT-4.1) is still
+just the 1 real data point — see that file's comparison table.
+
 ## Next steps (for Nghiep to decide — not done here)
 
 1. **Retry access** — re-run `aws bedrock-runtime converse --model-id us.openai.gpt-5.6-sol
