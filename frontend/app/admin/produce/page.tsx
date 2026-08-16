@@ -12,10 +12,12 @@
 // week (up to 4 slots) can take 10+ minutes — the polling UI below is built around that being
 // expected, not a sign anything is broken.
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { PlayCircle, RefreshCw } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
-import { A, serif, sans, Card, SLabel, Btn, Badge, Spinner, TH, TD } from "../_components/adminUi";
+import { A, serif, sans, Card, SLabel, Btn, Badge, Spinner, TabBar, TH, TD } from "../_components/adminUi";
+import PieceReviewModal from "./PieceReviewModal";
+import HistoryTab from "./HistoryTab";
 
 interface Tenant {
   tenant_id: string;
@@ -66,6 +68,7 @@ interface PendingPacket {
   status: string;
   publish_mode: string;
   piece_count: number;
+  approved_count: number;
 }
 
 const POLL_INTERVAL_MS = 8000;
@@ -106,12 +109,6 @@ function SlotStatusBadge({ status }: { status: string }) {
   return <Badge color={s.color}>{s.label}</Badge>;
 }
 
-function getCookieUser(): string {
-  if (typeof document === "undefined") return "admin";
-  const n = document.cookie.split(";").find(c => c.trim().startsWith("cis_user="))?.split("=")[1];
-  return n ? decodeURIComponent(n) : "admin";
-}
-
 export default function ProducePage() {
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [tenantId, setTenantId] = useState("");
@@ -127,14 +124,24 @@ export default function ProducePage() {
 
   const [packets, setPackets] = useState<PendingPacket[]>([]);
   const [packetsError, setPacketsError] = useState("");
-  const [approvingId, setApprovingId] = useState<string | null>(null);
+  const [reviewingPacketId, setReviewingPacketId] = useState<string | null>(null);
+
+  const [activeTab, setActiveTab] = useState<"live" | "history">("live");
 
   useEffect(() => {
+    // Loaded unfiltered (not just is_active) so History's tenant name lookup also resolves
+    // packets/runs belonging to a since-deactivated tenant, not just live ones.
     fetch("/api/admin/tenants")
       .then(r => r.ok ? r.json() : Promise.reject(r))
-      .then(d => setTenants((d.tenants ?? []).filter((t: Tenant) => t.is_active)))
+      .then(d => setTenants(d.tenants ?? []))
       .catch(() => setTriggerError("Failed to load tenants."));
   }, []);
+
+  const tenantNameById = useMemo(
+    () => Object.fromEntries(tenants.map(t => [t.tenant_id, t.name])),
+    [tenants],
+  );
+  const activeTenants = useMemo(() => tenants.filter(t => t.is_active), [tenants]);
 
   const loadPendingPackets = useCallback(() => {
     fetch("/api/admin/produce/packets")
@@ -197,26 +204,9 @@ export default function ProducePage() {
     }
   }
 
-  async function handleApprove(packetId: string) {
-    setApprovingId(packetId);
-    setPacketsError("");
-    try {
-      const res = await fetch(`/api/admin/produce/packets/${packetId}/gate-c/approve`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "approve_to_publish", actor: getCookieUser() }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setPacketsError(data.detail || "Approval failed.");
-        return;
-      }
-      loadPendingPackets();
-    } catch {
-      setPacketsError("Could not reach the server. Please try again.");
-    } finally {
-      setApprovingId(null);
-    }
+  function handlePacketAdvanced() {
+    setReviewingPacketId(null);
+    loadPendingPackets();
   }
 
   const isRunning = run !== null && (run.status === "producing" || run.status === "allocated");
@@ -232,10 +222,22 @@ export default function ProducePage() {
             Produce &amp; Deliver (N7 / N8)
           </h1>
           <p style={{ fontSize: 13, color: A.muted, marginTop: 4 }}>
-            Manually trigger a weekly production run (N7) and review packets ready for delivery (N8 Gate C).
+            Manually trigger a weekly production run (N7), review packet pieces before approving
+            them (N8 Gate C), and look back at past runs.
           </p>
         </div>
 
+        <div style={{ marginBottom: 24 }}>
+          <TabBar
+            tabs={[{ key: "live", label: "Trigger & Gate C" }, { key: "history", label: "Run History" }]}
+            active={activeTab}
+            onChange={k => setActiveTab(k as "live" | "history")}
+          />
+        </div>
+
+        {activeTab === "history" && <HistoryTab tenantNameById={tenantNameById} />}
+
+        {activeTab === "live" && <>
         {/* Trigger form */}
         <Card style={{ marginBottom: 24 }}>
           <SLabel>Trigger a Production Run</SLabel>
@@ -244,7 +246,7 @@ export default function ProducePage() {
               <label style={labelStyle}>Tenant</label>
               <select value={tenantId} onChange={e => setTenantId(e.target.value)} style={inputStyle}>
                 <option value="">Select a tenant…</option>
-                {tenants.map(t => (
+                {activeTenants.map(t => (
                   <option key={t.tenant_id} value={t.tenant_id}>{t.name}</option>
                 ))}
               </select>
@@ -395,7 +397,8 @@ export default function ProducePage() {
           </Card>
         )}
 
-        {/* Gate C section */}
+        {/* Gate C section — overview table; per-piece content + approve/reject lives in the
+            PieceReviewModal opened by "Review Pieces" below (AA-412). */}
         <Card>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
             <SLabel style={{ marginBottom: 0 }}>Gate C — Packets Ready for Review</SLabel>
@@ -416,21 +419,26 @@ export default function ProducePage() {
                 <thead>
                   <tr>
                     <th style={TH}>Packet</th><th style={TH}>Tenant</th><th style={TH}>Week</th>
-                    <th style={TH}>Pieces</th><th style={TH}>Publish Mode</th><th style={TH}></th>
+                    <th style={TH}>Pieces</th><th style={TH}>Reviewed</th>
+                    <th style={TH}>Publish Mode</th><th style={TH}></th>
                   </tr>
                 </thead>
                 <tbody>
                   {packets.map(p => (
                     <tr key={p.packet_id}>
                       <td style={TD}>{p.packet_id.slice(0, 8)}…</td>
-                      <td style={TD}>{p.tenant_id.slice(0, 8)}…</td>
+                      <td style={TD}>{tenantNameById[p.tenant_id] ?? `${p.tenant_id.slice(0, 8)}…`}</td>
                       <td style={TD}>{p.year} / W{p.week}</td>
                       <td style={TD}>{p.piece_count}</td>
+                      <td style={TD}>
+                        <Badge color={p.approved_count === p.piece_count ? "green" : "gray"}>
+                          {p.approved_count}/{p.piece_count} approved
+                        </Badge>
+                      </td>
                       <td style={TD}>{p.publish_mode}</td>
                       <td style={TD}>
-                        <Btn size="sm" variant="primary" disabled={approvingId === p.packet_id}
-                          onClick={() => handleApprove(p.packet_id)}>
-                          {approvingId === p.packet_id ? "Approving…" : "Approve"}
+                        <Btn size="sm" variant="primary" onClick={() => setReviewingPacketId(p.packet_id)}>
+                          Review Pieces
                         </Btn>
                       </td>
                     </tr>
@@ -440,6 +448,15 @@ export default function ProducePage() {
             </div>
           )}
         </Card>
+        </>}
+
+        {reviewingPacketId && (
+          <PieceReviewModal
+            packetId={reviewingPacketId}
+            onClose={() => setReviewingPacketId(null)}
+            onPacketAdvanced={handlePacketAdvanced}
+          />
+        )}
       </div>
     </div>
   );

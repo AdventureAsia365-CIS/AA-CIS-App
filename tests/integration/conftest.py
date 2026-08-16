@@ -69,6 +69,29 @@ def _apply_schema(conn):
             END IF;
         END $$;
     """)
+    # AA-412: pre-create acp_deliver/acp_contract (real owner: migration 078) so migrations that
+    # depend on them (094/096/102/105 — acp_deliver.packets/pieces + this issue's review columns)
+    # can apply even though 078 itself fails locally (its v_trip_registry view selects
+    # pt.content_embedding, a pgvector column this local test DB was never given — unrelated to
+    # AA-412, not fixed here). 078's own CREATE SCHEMA statements never survive because that
+    # whole file runs in one transaction that rolls back on its later error; pre-creating the
+    # schemas here (idempotent, same "PATCHING" convention as the 004/005/006 special-cases
+    # below) unblocks every acp_deliver/acp_contract migration without touching 078 itself.
+    cur.execute("CREATE SCHEMA IF NOT EXISTS acp_deliver;")
+    cur.execute("CREATE SCHEMA IF NOT EXISTS acp_contract;")
+    # AA-412 (2nd gap, same root cause): migration 094's acp_deliver.pieces FK originally pointed
+    # at acp_shared.acp_runs (re-pointed to acp_shared.acp_v2_runs only later, migration 096 — see
+    # that file's own "Re-point..." comment) — but acp_shared.acp_runs itself was created as
+    # `shared.acp_runs` by migration 009 (wrong schema name, a pre-existing bug independent of
+    # AA-412: acpcore's ACPv1 lineage, migrations 019/025/026/028/031/055/064/065, has referenced
+    # the never-created `acp_shared.acp_runs` throughout). This never surfaced before because
+    # nothing under acp_deliver/acp_contract had ever successfully applied locally (see the
+    # schema-creation patch above) to reach the point of needing this FK target to exist. A
+    # minimal compatibility stub (just the PK column the FK constraint needs) is enough — 094's
+    # real FK gets re-pointed away from this table 2 migrations later (096) and never touches it
+    # again.
+    cur.execute("CREATE SCHEMA IF NOT EXISTS acp_shared;")
+    cur.execute("CREATE TABLE IF NOT EXISTS acp_shared.acp_runs (run_id UUID PRIMARY KEY);")
 
     migration_files = sorted([
         f for f in os.listdir(migrations_dir)
