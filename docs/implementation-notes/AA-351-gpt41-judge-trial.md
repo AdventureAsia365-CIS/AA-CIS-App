@@ -1,8 +1,73 @@
-# AA-351-03 — GPT-4.1 as an alternative F8/F9 judge (trial, feature-flagged)
+# AA-351-03/05 — GPT-4.1 as an alternative F8/F9 judge (trial, feature-flagged)
 
 Task: `docs/claude_tasks/AA-351-03-gpt41-judge-f8-f9.md`. Branch
 `feature/aa-351-gpt41-judge-trial`. Follows `docs/implementation-notes/AA-351-gpt56-judge-
 trial.md` (AA-351-02, GPT-5.6 Sol — still blocked on AWS access as of this session).
+
+## UPDATE 17/08/2026 (AA-351-05) — credits restored, real F8/F9 data + S1 judge recovery confirmed
+
+Task: `docs/claude_tasks/AA-351-05-run-comparison-credits-restored.md`. No branch (docs-only,
+main). Nghiep confirmed via OpenAI Billing Console: new Credit Grant $10.00 (16/08/2026, expires
+09/2027), balance $5.10/$15.00 available. Re-ran with real credits — this session spent ≈$0.07
+total (Part A + Part B combined), well inside the $5.10 available.
+
+**Part A — S1 production judge (`judge_node.py`) recovery: CONFIRMED, not assumed.** Called the
+exact client construction `judge_node.py` uses in production
+(`openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])`, model `gpt-4.1`) from inside the live ECS
+Dev container. Real success: HTTP 200, `model: gpt-4.1-2025-04-14`, latency 2.522s, usage
+85 in / 53 out tokens, response parsed cleanly as the judge's expected JSON shape
+(`brand_fit_score`/`cross_brand_distinct`/`mission_present`/`feedback`). Not a 429 quota error —
+credits are real and the judge path works end-to-end again.
+
+**Part A2 — outage-window estimate: attempted, inconclusive, not a real bound.** Queried the 200
+most recent `silver_aa_internal.generated_content` rows for presence of `metadata->'judge'`
+(the block `admin_pipeline.py::_build_metadata` only writes when `judge_brand_fit is not None`).
+105/200 rows in that sample lack it, spanning `created_at` from 2026-05-22 to 2026-08-13 — i.e.
+**this signal does NOT isolate the credit-outage window**: `judge_node.py`'s own
+`has_brand_signals` guard skips the judge (same "no judge block written" outcome) for any tour
+with no brand differentiation profile, completely independent of OpenAI credits, and that skip
+condition is scattered across 3 months of the sample, not clustered near a plausible
+credit-exhaustion date. Reporting this honestly as **not usable** to bound AA-419's scope
+estimate — a real answer needs either the OpenAI dashboard's own usage/error history (Nghiep-side,
+not available to this session) or a DB query that also joins tenant brand-profile completeness to
+separate the two "no judge block" causes, which this task did not build.
+
+**Part B — F8/F9 real comparison, same 9 pieces as the Nova Pro baseline (run
+`88f094b1-3e0a-4b28-9abb-205cb7d21287`, 2026 W2), pinned explicitly (not "latest completed run")
+so this is the same content AA-351-02 measured:**
+
+- **F9: Nova Pro 1/9 (11%) vs GPT-4.1 9/9 (100%).** Every one of the 8 pieces Nova Pro failed
+  (all `GENERIC_AI_WORDING`/`SUMMARY_OFF_BRAND`/`BODY_EXPERIENCE_DETAILS_TOO_GENERIC`-type flags,
+  with specific quoted phrases) GPT-4.1 passed clean, zero violations.
+- **F8: Nova Pro 5/6 vs GPT-4.1 5/6** — identical outcome, same single piece failed for both.
+- **Real cost/call** (from actual `usage` fields, not estimated): Nova Pro $0.002272/call
+  (28,298 in / 3,577 out tokens across 15 calls), GPT-4.1 $0.004658/call (27,254 in / 1,920 out
+  tokens across 15 calls) — **≈2.05x** Nova Pro, in line with the ≈2.5x paper estimate from
+  AA-351-03 (GPT-4.1 uses noticeably fewer output tokens per call, which pulls the real multiplier
+  below the raw per-token rate ratio).
+- **Real latency/call**: GPT-4.1 averaged 1.45s, Nova Pro 1.73s — GPT-4.1 slightly faster, not
+  slower, on this sample.
+- **0 errors, 0 `judge unavailable` fallbacks on either side** — both backends fully functional
+  for all 30 real calls this session made (15 F9 + 6 F8, ×2 models, minus the 3 pieces with no
+  social framework).
+
+**held_reason consistency (AA-382's actual question) — NOT answered by this data, and the raw
+pass-rate gap is a yellow flag, not a green one.** AA-382's question is whether a judge keeps
+re-flagging a *new* phrase every *repair round* even after the previous flagged phrase was fixed
+— i.e. consistency across multiple judging passes of evolving content. This trial ran each judge
+exactly **once** per piece, on the original (already-scored-by-production) content — it does not
+touch repair rounds at all, so it cannot confirm or rule out GPT-4.1 fixing the moving-target
+problem. What it DOES show: GPT-4.1 passing 9/9 pieces that Nova Pro found real, quotable,
+specific violations in in 8/9 cases reads at least as plausibly as **GPT-4.1 judging more
+leniently** (near rubber-stamp on this sample) as it does "GPT-4.1 is a more accurate judge."
+Nothing in this session's data distinguishes those two explanations — an actual test of AA-382's
+question would need the SAME piece re-judged across ≥2 real repair rounds under each backend,
+which this harness does not do. Recommend NOT reading the F9 pass-rate gap as a resolved answer to
+AA-382 without that follow-up.
+
+**Not done, deliberately, per task scope**: no change to production `JUDGE_MODEL` (still unset in
+the ECS task def — Nova Pro remains default everywhere). No re-judging of historical published
+content. No further balance-burning calls beyond what the 9-piece comparison needed.
 
 ## ⚠️ Headline finding — NOT what this trial set out to measure
 
@@ -126,23 +191,24 @@ piece's own `f9_nova_pro` numbers, not real GPT-4.1 numbers (there are none — 
 never got token-billed). Flagging this so nobody later reads those fields as real GPT-4.1
 latency data.
 
-## Comparison table — all 3 alternative judge backends
+## Comparison table — all 3 alternative judge backends (updated 17/08/2026, AA-351-05)
 
-| | Nova Pro (production default) | GPT-5.6 Sol (AA-351-02) | GPT-4.1 (AA-351-03, this session) |
+| | Nova Pro (production default) | GPT-5.6 Sol (AA-351-02) | GPT-4.1 (AA-351-05, real data) |
 |---|---|---|---|
-| **Status** | ✅ real data (2 independent runs, same numbers) | ⚠️ blocked — AWS access denied ~1h+ after agreement accepted + console-confirmed Active (AA-351-04 recheck) | ⚠️ blocked — OpenAI account has 0 credits |
-| **F9 pass rate** (9 channels) | 1/9 (11%) | not measured | not measured (0/9 calls succeeded) |
-| **F8 pass rate** (fb+tiktok, 6 channels) | 5/6 (83%) | not measured | not measured (0/6 calls succeeded) |
-| **held_reason consistency** (AA-382's core question) | not yet re-tested across repair rounds in this trial | not measured | not measured |
-| **Real latency/call** | 0.8–3.1s (measured, see AA-351-02's table) | not measured | not measured (calls rejected before generation) |
-| **Real cost** (per real rate cards, verified not guessed) | ~$0.80/1M in, $3.20/1M out (AA-404 CloudWatch-derived) | $5.50/1M in, $33/1M out (Sol, standard tier, accepted rate card) — ~6x Nova Pro | $2.00/1M in, $8.00/1M out (verified 16/08/2026 via web search — matches this repo's own `client.py::COST_TABLE["gpt-4.1"]` exactly) — ~2.5x Nova Pro on paper, but $0 actually spent this session (every call rejected pre-billing) |
-| **Blocker type** | none | AWS-side (Bedrock model-access authorization gap, console/runtime state mismatch — see AA-351-02's evidence block for an AWS Support case) | Billing (OpenAI org has zero credits — a Nghiep action, not an AWS/code issue) |
-| **Next unblock step** | n/a | File AWS Support case (evidence already collected in AA-351-02's notes) | Add credits at platform.openai.com/settings/organization/billing |
+| **Status** | ✅ real data (3 independent runs, same numbers) | ⚠️ still blocked — AWS Support case 178689930800206 open, pending AWS reply | ✅ real data — credits restored 16/08/2026, verified live |
+| **F9 pass rate** (9 channels) | 1/9 (11%) | not measured | **9/9 (100%)** — see leniency caveat below |
+| **F8 pass rate** (fb+tiktok, 6 channels) | 5/6 (83%) | not measured | **5/6 (83%)** — identical outcome, same piece failed both |
+| **held_reason consistency** (AA-382's core question) | not yet re-tested across repair rounds in this trial | not measured | **not answered** — this trial is single-shot per piece, not across repair rounds; the 9/9 F9 pass rate is at least as consistent with "judges more leniently" as "judges more accurately" — see AA-351-05 section above, do not treat as resolved |
+| **Real latency/call** | 0.8–3.1s (measured, see AA-351-02's table); this session's 15-call subset averaged 1.73s | not measured | **1.45s avg** (15 calls, real) — slightly faster than Nova Pro on this sample |
+| **Real cost** (per real rate cards, verified not guessed) | ~$0.80/1M in, $3.20/1M out (AA-404 CloudWatch-derived); real **$0.002272/call** this session | $5.50/1M in, $33/1M out (Sol, standard tier, accepted rate card) — ~6x Nova Pro | $2.00/1M in, $8.00/1M out; real **$0.004658/call** this session (≈2.05x Nova Pro on actual usage, both backends' real token counts differ from the raw rate-card ratio) |
+| **Blocker type** | none | AWS-side (Bedrock model-access authorization gap, console/runtime state mismatch — see AA-351-02's evidence block for an AWS Support case) | none — resolved (was OpenAI billing, credits added by Nghiep 16/08/2026) |
+| **Next unblock step** | n/a | Wait on AWS Support case 178689930800206 | n/a — unblocked; open question is AA-382 consistency-across-repair-rounds, not access |
 
-**Net result: still only 1 real comparison point (Nova Pro) after 2 trial sessions.**
-Both alternative backends are code-complete, unit-tested, and feature-flagged behind
-`JUDGE_MODEL` — ready to produce real numbers the moment either external blocker
-(AWS access / OpenAI billing) clears, with no further code changes needed.
+**Net result: 2 of 3 backends now have real comparison data.** GPT-5.6 Sol remains the only
+still-blocked backend (AWS-side, out of this session's control). GPT-4.1's F9/F8 numbers are
+real, but the headline 9/9 pass rate should be read as "needs a leniency check," not as a
+finished answer to AA-382 — see the leniency caveat above before using this table to argue for
+a `JUDGE_MODEL` change.
 
 ## Verify
 
@@ -175,17 +241,23 @@ Both alternative backends are code-complete, unit-tested, and feature-flagged be
 
 ## Next steps (for Nghiep to decide — not done here)
 
-1. **Add OpenAI credits** (see headline finding above) — this is the actual blocker on
-   BOTH this trial's GPT-4.1 data AND a live, currently-silent gap in S1's production
-   brand-fit judging. Recommend treating this with more urgency than the trial itself.
-2. **Once credits are added**: re-run the already-uploaded, already-extended
-   `aa351_compare.py` on the ECS Dev container with `COMPARE_MODELS=nova_pro,gpt41` (same
-   S3-mediated exec + daemonize pattern documented here and in AA-351-02) — no code
-   changes needed, just credits + a re-trigger. I can do this the moment credits exist.
-3. **GPT-5.6 Sol** — still blocked on the AWS-side issue AA-351-02/04 already documented
-   in detail; that path is unrelated to this session's OpenAI finding.
-4. **Do not change the production `JUDGE_MODEL` default** regardless of what any future
+1. ~~Add OpenAI credits~~ — **DONE 16/08/2026** (Nghiep). Verified live 17/08/2026 (AA-351-05
+   Part A) — S1's `judge_node.py` is confirmed working again with real credits.
+2. ~~Re-run `aa351_compare.py`/equivalent once credits exist~~ — **DONE 17/08/2026** (AA-351-05
+   Part B), real F8/F9 numbers now in the comparison table above.
+3. **GPT-5.6 Sol** — still blocked, AWS Support case 178689930800206 open, waiting on AWS reply.
+   Unrelated to the OpenAI credit issue.
+4. **AA-382's actual question (held_reason consistency across repair rounds) is still open** —
+   this session's data does not answer it; see the leniency caveat in the comparison table. If
+   GPT-4.1 as judge is worth pursuing further, the next real test is re-judging the SAME piece
+   across ≥2 repair rounds with each backend, not another single-shot pass-rate comparison.
+5. **Do not change the production `JUDGE_MODEL` default** regardless of what any future
    comparison shows — reserved for Nghiep, unchanged from AA-351-02's own constraint.
+6. **AA-419** (S1 judge silent-failure bug) — Part A of AA-351-05 confirms recovery; the
+   outage-window scope estimate (Part A2) is inconclusive per the caveat above and needs either
+   OpenAI's own usage-history dashboard or a better DB query (joined to brand-profile
+   completeness) to actually bound. Comment posted on AA-419 with this data; status left for
+   Nghiep to decide.
 
 ## Merge + deploy (16/08/2026, on Nghiep's go-ahead — "ci green thì merge luôn")
 
