@@ -235,14 +235,15 @@ async def main() -> None:
         _step("AA-367: create_packet -> assemble_packet -> maybe_mark_packet_ready -> deliver_packet")
         today = await db.fetchval("SELECT CURRENT_DATE")
         iso_year, iso_week, _ = today.isocalendar()
+        iso_month = today.month
         try:
-            packet_id = await packets.create_packet(db, TENANT_ID, iso_year, iso_week)
+            packet_id = await packets.create_packet(db, TENANT_ID, iso_year, iso_month, iso_week)
         except asyncpg.UniqueViolationError:
             packet_id = await db.fetchval(
-                "SELECT packet_id FROM acp_deliver.packets WHERE tenant_id=$1 AND year=$2 AND week=$3",
-                TENANT_ID, iso_year, iso_week,
+                "SELECT packet_id FROM acp_deliver.packets WHERE tenant_id=$1 AND year=$2 AND month=$3 AND week=$4",
+                TENANT_ID, iso_year, iso_month, iso_week,
             )
-        print(f"packet_id={packet_id} (year={iso_year} week={iso_week})")
+        print(f"packet_id={packet_id} (year={iso_year} month={iso_month} week={iso_week})")
 
         status_row = await db.fetchrow(
             "SELECT status, publish_mode FROM acp_deliver.packets WHERE packet_id=$1", packet_id)

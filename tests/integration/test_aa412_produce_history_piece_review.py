@@ -89,7 +89,7 @@ def seeded_run(db_conn):
          datetime(2026, 8, 16, 2, 45, 2, tzinfo=timezone.utc)),
     )
     cur.execute(
-        "INSERT INTO acp_deliver.packets (packet_id, tenant_id, year, week) VALUES (%s, %s, 2026, 2)",
+        "INSERT INTO acp_deliver.packets (packet_id, tenant_id, year, month, week) VALUES (%s, %s, 2026, 9, 2)",
         (packet_id, TENANT_ID),
     )
 
