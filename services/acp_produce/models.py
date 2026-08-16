@@ -89,6 +89,11 @@ class Piece(BaseModel):
     # AA-396 follow-up (option C, dynamic repair budget): set once by
     # run_gates() from the piece's FIRST gate-stack run, never recomputed
     # mid-loop -- see gates.py::compute_repair_budget()/run_gates().
+    # `repair_budget` below is the one exception (AA-415): it MAY be
+    # extended by +1 (capped at REPAIR_BUDGET_CAP) when a gate absent from
+    # this initial count is discovered failing mid-loop -- see run_gates()'s
+    # own AA-415 docstring paragraph for why. `initial_failing_gate_count`
+    # itself never changes after this line runs, only `repair_budget` can.
     initial_failing_gate_count: Optional[int] = None
     repair_budget: Optional[int] = None
     repair_log: list[RepairRoundLog] = Field(default_factory=list)
