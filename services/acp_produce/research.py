@@ -27,6 +27,7 @@ Scope boundaries kept on purpose (see docs/implementation-notes/AA-369.md):
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import date
 from typing import Literal, Optional
@@ -286,7 +287,10 @@ async def compile_brief(
         section = required_h2s[min(i, len(required_h2s) - 1)]
         atoms_by_section.setdefault(section, []).append(a["atom_id"])
 
-    gap_statement = build_gap_statement(top_pages or [], atoms, demand.keyword)
+    # AA-416: build_gap_statement() calls invoke_claude() (sync boto3, blocking) — off the
+    # event loop via to_thread so this coroutine's caller (and /health, sharing the same
+    # single ECS task's event loop) doesn't stall for the call's duration.
+    gap_statement = await asyncio.to_thread(build_gap_statement, top_pages or [], atoms, demand.keyword)
 
     return Brief(
         brief_id=_new_brief_id(), slot_id=slot.slot_id, keyword=demand.keyword,

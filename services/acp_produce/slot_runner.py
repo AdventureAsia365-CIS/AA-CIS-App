@@ -58,6 +58,7 @@ assembly itself (it currently does not — packet assembly is AA-367's own
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Optional
 
 import asyncpg
@@ -129,7 +130,10 @@ async def run_slot_production(
 
     outline = build_outline(brief)
     try:
-        blog_body = generate_draft(brief, outline, atom_text_by_id, brand_rubric_text)
+        # AA-416: generate_draft() (E2) calls invoke_claude() (sync boto3, blocking) —
+        # off the event loop via to_thread. DraftGenerationFailed still propagates
+        # through the awaited coroutine unchanged, so the except below is unaffected.
+        blog_body = await asyncio.to_thread(generate_draft, brief, outline, atom_text_by_id, brand_rubric_text)
     except DraftGenerationFailed as e:
         await log_unknown(
             db, tenant_id, "other", f"Slot {slot.slot_id}: E2 draft generation failed: {e}",
@@ -143,10 +147,14 @@ async def run_slot_production(
 
     # E3 before E4 — adapt.py's own call-order contract (cite blog's own
     # atoms before FAQ appends more citations to body_tagged).
-    channel_pieces = adapt_channels(blog_piece, atom_text_by_id, brand_rubric_text)
+    # AA-416: adapt_channels() (E3, up to 2 invoke_claude() calls — facebook/tiktok) off
+    # the event loop via to_thread, same reasoning as E2 above.
+    channel_pieces = await asyncio.to_thread(adapt_channels, blog_piece, atom_text_by_id, brand_rubric_text)
 
     try:
-        blog_piece = apply_faq(blog_piece, brief, atom_text_by_id, brand_rubric_text)
+        # AA-416: apply_faq() (E4) calls invoke_claude() (sync boto3, blocking) — off the
+        # event loop via to_thread. FAQAnswerFailed still propagates unchanged.
+        blog_piece = await asyncio.to_thread(apply_faq, blog_piece, brief, atom_text_by_id, brand_rubric_text)
     except FAQAnswerFailed as e:
         await log_unknown(
             db, tenant_id, "other", f"Slot {slot.slot_id}: E4 FAQ answer failed: {e}",
