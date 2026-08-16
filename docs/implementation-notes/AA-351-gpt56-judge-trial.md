@@ -154,6 +154,48 @@ per the error message, then re-running `aa351_compare.py` (already uploaded to
 `s3://aa-cis-bronze-005097885195/scripts/aa351_compare.py`, already proven correct end-to-end
 against Nova Pro) without `DRY_RUN=1`. See "Next steps" below.
 
+### Recheck 16/08/2026 ~23:30 UTC+7 (task AA-351-04) — subscription confirmed ACTIVE in console, invoke STILL denied
+
+Nghiep confirmed via email + the Bedrock console's "Manage Subscriptions" page that the GPT-5.6
+Sol subscription (Amazon Bedrock Edition) shows **Active**, agreement
+`agmt-c7xh4ar8elze4dp2pbq9z4hpj`, service start 2026-08-16 22:23 UTC+7 — i.e. the account-level
+state AWS shows the human is different from what the runtime API enforces. Retried immediately
+(~1h after the original acceptance, ~1h07m after the console-reported service start):
+
+- `aws bedrock-runtime converse --model-id us.openai.gpt-5.6-sol --profile nghiep_aa365
+  --region us-west-1` → still `AccessDeniedException: openai.gpt-5.6-sol is not available for
+  this account. ... contact AWS Sales ...` — byte-identical message to every prior attempt.
+- Also tried `global.openai.gpt-5.6-sol` (the inference-profile prefix this repo's own
+  `invoke_judge_gpt56()` uses) — same denial.
+- `list-foundation-model-agreement-offers --model-id openai.gpt-5.6-sol` on acc3 still lists the
+  offer (`offer-gnqokrqqvdbgw`) as available to accept — this API does not distinguish
+  accepted/active from not-yet-accepted (confirmed both before AND after acceptance across two
+  sessions now), so it is **not a useful signal either way** for this specific denial; not worth
+  querying again as evidence.
+- `service-quotas list-service-quotas --service-code bedrock` on acc3: still 0 GPT/OpenAI quota
+  entries.
+- Identity re-verified: `sts get-caller-identity` → account `786888028788` (acc3), user
+  `nghiep_aa365_admin_acc3` — same account the subscription confirmation applies to, no mix-up.
+
+**Evidence for an AWS Support ticket, if Nghiep wants to file one:**
+- Agreement ID: `agmt-c7xh4ar8elze4dp2pbq9z4hpj`
+- Account: `786888028788` (acc3)
+- Model: `openai.gpt-5.6-sol` (tried both `us.` and `global.` inference-profile prefixes)
+- Request ID (most recent failed Converse call): `55efe945-3b44-408f-b234-79470e4fae15`
+- Timestamp: 2026-08-16 16:30:27 UTC (2026-08-16 23:30:27 UTC+7)
+- Error: `AccessDeniedException: openai.gpt-5.6-sol is not available for this account. You can
+  explore other available models on Amazon Bedrock. For additional access options, contact AWS
+  Sales at https://aws.amazon.com/contact-us/sales-support/`
+- Symptom: console shows the subscription as Active (agreement ID above, service start
+  2026-08-16 22:23 UTC+7); the Bedrock runtime API denies access with the exact same error text
+  it gave before the subscription existed. This is either a longer-than-expected propagation gap
+  between the Marketplace subscription system and Bedrock's runtime authorization, or a real
+  provisioning bug on AWS's side for this specific (very new, 3-day-old at survey time) model.
+
+**Not retrying further in this session** — per the task's own instruction, stopping here rather
+than continuing to poll indefinitely. GPT-5.6 comparison data remains unavailable; Nova Pro data
+above stands as the only real comparison point so far.
+
 ### Not done (blocked by the above)
 
 1. GPT-5.6 pass rate for F8/F9 on the same 9 pieces.
@@ -188,10 +230,14 @@ against Nova Pro) without `DRY_RUN=1`. See "Next steps" below.
 ## Next steps (for Nghiep to decide — not done here)
 
 1. **Retry access** — re-run `aws bedrock-runtime converse --model-id us.openai.gpt-5.6-sol
-   --profile nghiep_aa365 --region us-west-1 ...` (or ask me to) after more time has passed. If
-   still denied after several hours, the error message's own suggestion is to contact AWS Sales
-   (link in the error text above) — this may be a real support-ticket case, not just a propagation
-   delay.
+   --profile nghiep_aa365 --region us-west-1 ...` (or ask me to) after more time has passed. As of
+   the 16/08/2026 ~23:30 UTC+7 recheck (task AA-351-04), the console-confirmed-Active subscription
+   (agreement `agmt-c7xh4ar8elze4dp2pbq9z4hpj`) still does NOT unblock the runtime API — same
+   denial, ~1h07m after the console's own reported service start. Given the console/runtime state
+   mismatch, this now looks more like a genuine AWS-side provisioning gap than propagation delay.
+   **Recommended next action: file an AWS Support case** using the evidence block in the "Recheck"
+   section above (agreement ID, account, request ID, timestamp, exact error) rather than continuing
+   to poll blind.
 2. **Once access works**: re-run the already-uploaded `aa351_compare.py` on the ECS Dev container
    WITHOUT `DRY_RUN=1` (same S3-mediated exec + daemonize pattern documented above) — it will
    automatically re-judge the same 9 pieces with both Nova Pro and GPT-5.6 Sol and upload
