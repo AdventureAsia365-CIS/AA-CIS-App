@@ -22,6 +22,7 @@ be re-addressed anyway. `run_id` below embeds that same 8-char prefix
 """
 import json
 import os
+import sys
 import uuid
 from datetime import datetime, timezone
 
@@ -29,7 +30,13 @@ import asyncpg
 import pytest
 import pytest_asyncio
 
-from api.routers import admin_produce
+# tests/integration/ has no __init__.py, so the repo root is never on sys.path here — api.*
+# isn't importable without this. Same fix, same place, as
+# test_compiled_graph_state_propagation.py's own module-level comment explains (conftest.py's
+# sys.path.insert(0, dirname(__file__)) only covers this directory, for `_constants`).
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+from api.routers import admin_produce  # noqa: E402 — must follow the sys.path fix above
 
 DB_HOST = os.environ.get("CIS_TEST_DB_HOST", "127.0.0.1")
 DB_PORT = int(os.environ.get("CIS_TEST_DB_PORT", "5432"))
