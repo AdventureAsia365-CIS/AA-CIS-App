@@ -186,3 +186,21 @@ Both alternative backends are code-complete, unit-tested, and feature-flagged be
    in detail; that path is unrelated to this session's OpenAI finding.
 4. **Do not change the production `JUDGE_MODEL` default** regardless of what any future
    comparison shows — reserved for Nghiep, unchanged from AA-351-02's own constraint.
+
+## Merge + deploy (16/08/2026, on Nghiep's go-ahead — "ci green thì merge luôn")
+
+PR #175 merged (squash, commit `a2ff3dd`) once all 5 required CI checks passed. `Deploy
+Dev` workflow (run [31960090188](https://github.com/AdventureAsia365-CIS/AA-CIS-App/actions/runs/31960090188))
+ran clean on the push: ECR build+push, ECS deploy (`Wait stable` + `Smoke test` both
+passed), Lambda deploy, Vercel — all 4 jobs green. Confirmed live:
+- `aws ecs describe-services`: task def `aa-cis-dev-api:106`, rollout `COMPLETED`,
+  desired=1/running=1.
+- Running task's image digest — `sha256:e5d289c5...fdb5ef` — matches `ecr:latest`
+  exactly, tagged `dev-a2ff3dd3...` (the merge commit hash).
+- `curl https://api-cis.lumiguides.it.com/health` → `200 {"status":"ok",...}` in 0.79s,
+  task `healthStatus=HEALTHY`.
+
+This is a feature-flagged, additive change (`JUDGE_MODEL` still unset in the ECS task
+def) — the deploy carries zero production behavior change; it's confirmed live purely so
+the `gpt41` backend is available to re-trigger the comparison the moment OpenAI credits
+are restored, without needing another deploy cycle first.
