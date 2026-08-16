@@ -339,7 +339,16 @@ export default function ProducePage() {
   return (
     <div style={{ display: "flex", minHeight: "100vh", background: A.bg }}>
       <AdminSidebar />
-      <div style={{ flex: 1, padding: "28px 36px", maxWidth: 1100 }}>
+      {/* AA-412 follow-up (layout fixes round) — `maxWidth: 1100` used to cap this content area
+          well short of the real available width next to the sidebar, leaving dead whitespace on
+          any screen wider than ~1320px total. Removed to match the full-width pattern every other
+          `/admin/*` page already uses (dashboard/tenants: flex-1 content column, no page-level
+          max-width). `minWidth: 0` is the actual fix for the Run History table's overlap bug
+          reported in the same session — a flex item's default `min-width: auto` refuses to shrink
+          below its content's intrinsic width, so a wide `table-layout: fixed` table inside an
+          unconstrained flex child can force this whole column wider than the viewport instead of
+          respecting it, which is what produced the column-overlap symptom at narrower viewports. */}
+      <div style={{ flex: 1, minWidth: 0, padding: "28px 36px" }}>
         <div style={{ marginBottom: 24 }}>
           <h1 style={{ fontFamily: serif, fontSize: 24, fontWeight: 500, color: A.ink, margin: 0 }}>
             Produce &amp; Deliver (N7 / N8)
@@ -400,11 +409,8 @@ export default function ProducePage() {
             </Btn>
           </div>
           <div style={{ fontSize: 11.5, color: A.muted2, marginTop: 10 }}>
-            Only tenants with an approved Quarter Plan (Gate B) can be produced for. If a tenant
-            has no approved plan yet, the run will fail with a clear message below — approve one
-            first via Quarter Plan (Gate B). &ldquo;Week&rdquo; is the 1-4 week-of-month slot
-            numbering used by the production schedule, not an ISO week — Month + Week together
-            identify one specific production slot (AA-410).
+            Requires an approved Quarter Plan (Gate B) for the tenant. Week = 1st–4th week of
+            the selected month, not an ISO week.
           </div>
           {triggerError && (
             <div style={{

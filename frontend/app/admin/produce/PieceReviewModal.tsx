@@ -32,7 +32,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { X, Check, XCircle, ChevronRight } from "lucide-react";
-import { A, sans, mono, Btn, Badge, Spinner, TH, TD } from "../_components/adminUi";
+import { A, sans, mono, SIDEBAR_WIDTH, Btn, Badge, Spinner, TH, TD } from "../_components/adminUi";
 
 interface GateResult {
   gate: string;
@@ -349,8 +349,17 @@ export default function PieceReviewModal({ packetId, focusPieceId, onClose, onPa
   const allApproved = pieces.length > 0 && approvedCount === pieces.length;
 
   return (
+    // AA-412 follow-up (layout fixes round) — was `inset: 0`, which covers the ENTIRE viewport
+    // including AdminSidebar (a plain `position: sticky` flex child, not itself `position: fixed`
+    // — nothing about the page layout stops a `position: fixed` element from painting over it,
+    // since `fixed` positions relative to the viewport regardless of DOM nesting). `left:
+    // SIDEBAR_WIDTH` instead of `left: 0` confines the overlay to the content area to the right of
+    // the sidebar, which stays visible and clickable the whole time the modal is open. Everything
+    // else about this overlay (full-bleed within that region, 3-row sticky header/footer dialog
+    // inside it) is unchanged.
     <div style={{
-      position: "fixed", inset: 0, background: "rgba(31,41,51,0.55)", zIndex: 100,
+      position: "fixed", top: 0, left: SIDEBAR_WIDTH, right: 0, bottom: 0,
+      background: "rgba(31,41,51,0.55)", zIndex: 100,
       display: "flex", padding: 16,
     }}>
       {/* Full-screen dialog: 3-row flex column. Header/footer are ordinary flex items (never

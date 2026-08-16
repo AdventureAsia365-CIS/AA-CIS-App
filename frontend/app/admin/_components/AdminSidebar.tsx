@@ -4,7 +4,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Sparkles, ShoppingBag, CalendarCheck, Boxes, PlayCircle } from "lucide-react";
-import { A, serif, sans } from "./adminUi";
+import { A, serif, sans, SIDEBAR_WIDTH } from "./adminUi";
 
 interface Notif {
   id: number;
@@ -101,7 +101,7 @@ export default function AdminSidebar() {
 
   return (
     <aside style={{
-      width: 220, flexShrink: 0, background: A.ink, color: "#C9CFD8",
+      width: SIDEBAR_WIDTH, flexShrink: 0, background: A.ink, color: "#C9CFD8",
       padding: "22px 14px 24px", display: "flex", flexDirection: "column",
       gap: 28, position: "sticky", top: 0, height: "100vh", overflowY: "auto",
     }}>
