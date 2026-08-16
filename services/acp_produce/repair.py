@@ -27,6 +27,27 @@ all (F6's "no cta_target"/"url_alive not True" — external DB/caller-supplied
 state, not content) must never reach this function — `run_gates()` filters
 those out and holds immediately instead of wasting a repair round + a Sonnet
 call on a violation this module cannot possibly fix by rewriting text.
+
+AA-382 (F8/F9 rubric-context fix, docs/implementation-notes/AA-382-repair-rubric-context.md):
+before this change, an F8/F9 (LLM-judge) violation reached this module as a SHORT string only —
+F9's failure code(s) + free-text `notes` (gates.py::_format_audit_reason()), F8's one failing
+criterion's bare 3-6 word name — never the rubric those judges actually scored against. Real
+evidence this mattered (docs/claude_audit/AA-404-n7-run6-results.md,
+F9_brand_seo_audit_social): 3 repair rounds on the same piece flagged 3 DIFFERENT phrases,
+never converging. `brand_rubric_text` (AA-404) already closed part of this gap for F9 — this
+fix closes the rest: (1) F9's `flagged_phrases` (the judge's own exact quote of the offending
+text, captured into the audit dict since AA-404 PR #153 fix #3 but never threaded past it) now
+rides along inside the violation string itself (`_format_audit_reason()`), so repair knows
+WHICH phrase, not just which failure code; (2) `GENERIC_AI_WORDING_ANCHOR` (gates.py's own
+concrete good/bad calibration example) is now in repair's system prompt too, not just the
+judge's; (3) F8's full framework rubric (`FRAMEWORK_RUBRICS`, gates.py) is now carried in
+`PieceInvariants.framework_rubric_items` alongside the one-criterion violation string, the same
+"gate's own rubric reaches repair, not just a narrow violation string" shape AA-404 already
+established for F9. F8 currently has no `GENERIC_AI_WORDING_ANCHOR`-equivalent concrete
+good/bad anchor — deliberately not fabricated here (no real F8 false-positive/convergence data
+to calibrate one from yet, unlike F9's, which was built from an observed real case; same
+Mistake-to-Rule/ADR-2026-009 discipline gates.py's own F9-social docstring already cites: extend
+from real failures, don't guess ahead of data).
 """
 from __future__ import annotations
 
@@ -38,6 +59,7 @@ from typing import Optional
 import structlog
 
 from services.acp_produce.atom_usage import ATOM_CITE_RE
+from services.acp_produce.gates import DEFAULT_FRAMEWORK_RUBRIC, FRAMEWORK_RUBRICS, GENERIC_AI_WORDING_ANCHOR
 from services.content_generation.brand_standards import AA_BRAND_IDENTITY_PROMPT
 from shared.llm_client.bedrock_satellite import BedrockUnavailable, invoke_claude
 
@@ -81,10 +103,21 @@ _REPAIR_HARD_RULES = (
 )
 
 
+# AA-382: F9's judge (gates.py::gate_brand_seo_audit()/gate_brand_seo_audit_social()) has
+# scored GENERIC_AI_WORDING/SUMMARY_OFF_BRAND against this same concrete good/bad anchor since
+# AA-404 fix #2 -- but only the JUDGE prompt ever saw it (gates.py's own two call sites).
+# repair.py had NO calibration for what counts as "generic" beyond the bare failure code name,
+# so a repair round could easily rewrite a flagged phrase into different prose the NEXT judge
+# round would ALSO consider generic (root-cause half of the "3 rounds, 3 different phrases
+# flagged, never converges" pattern -- see GENERIC_AI_WORDING_ANCHOR's own docstring in gates.py
+# for the real piece this anchor was calibrated from). Appended unconditionally alongside
+# brand_rubric_text (not gated on which gate's violations this round targets) because the same
+# "don't write templated filler" principle applies to every repair round's NEW prose, not just
+# an F9-triggered one -- matches the existing HARD RULES block's own unconditional scope.
 def _build_repair_system_prompt(brand_rubric_text: str) -> str:
     return (
         "You are repairing an ALREADY-WRITTEN piece that failed a QA check.\n\n"
-        + brand_rubric_text.strip() + _REPAIR_HARD_RULES
+        + brand_rubric_text.strip() + "\n" + GENERIC_AI_WORDING_ANCHOR + _REPAIR_HARD_RULES
     )
 
 
@@ -208,6 +241,20 @@ class PieceInvariants:
     # pre-AA-415 call site produces no grounding guidance, same
     # additive-only contract every other field here already follows.
     atom_text_by_id: dict[str, str] = field(default_factory=dict)
+    # AA-382: F8_framework's full rubric for THIS piece's resolved framework (gates.py::
+    # FRAMEWORK_RUBRICS[effective_framework]) — an F8 violation previously reached repair as
+    # only the ONE failing criterion's bare name (e.g. "framework criterion failed: one atom,
+    # one emotion"), with no visibility into the framework's OTHER criteria a fix must not
+    # break, and no elaboration of what the failing criterion itself means beyond its own
+    # 3-6 word phrase. Same class of gap AA-404 already fixed for F9's brand_rubric_text (a
+    # gate's judge-side rubric now also reaches repair, not just the terse per-round
+    # violation string) — this is the same fix applied to F8. `framework` is the resolved
+    # key (pipeline.py's `effective_framework` — facebook/tiktok's rubric key, never the
+    # caller's raw blog `framework` string, same resolution `_f8`'s own closure already
+    # uses) so the rubric shown here always matches what F8's judge actually scored against.
+    # Defaults to `None`/`[]` so every pre-AA-382 call site produces no framework block.
+    framework: Optional[str] = None
+    framework_rubric_items: list[str] = field(default_factory=list)
 
 
 def _currently_cited_atom_ids(body_tagged: str) -> list[str]:
@@ -324,6 +371,15 @@ def _build_structural_context(body_tagged: str, invariants: Optional[PieceInvari
         )
     if invariants.atom_text_by_id:
         lines.append(_build_grounding_note(body_tagged, invariants))
+
+    if invariants.framework_rubric_items:
+        items = "\n".join(f"  - {c}" for c in invariants.framework_rubric_items)
+        fw_label = f' "{invariants.framework}"' if invariants.framework else ""
+        lines.append(
+            f"- This piece's framework{fw_label} (F8_framework gate) is judged against ALL of these "
+            f"rubric criteria, not just whichever one is named in the violation above — a fix for "
+            f"one criterion must not break any of the others:\n{items}"
+        )
 
     if not lines:
         return ""
