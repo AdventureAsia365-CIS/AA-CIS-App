@@ -26,13 +26,13 @@ def _make_db(fetchrow_return=None):
 async def test_create_packet_inserts_and_returns_packet_id():
     db = _make_db(fetchrow_return={"packet_id": "22222222-2222-2222-2222-222222222222"})
 
-    packet_id = await create_packet(db, TENANT, year=2026, week=32)
+    packet_id = await create_packet(db, TENANT, year=2026, month=8, week=32)
 
     assert packet_id == "22222222-2222-2222-2222-222222222222"
     db.fetchrow.assert_called_once()
     sql, *params = db.fetchrow.call_args.args
     assert "INSERT INTO acp_deliver.packets" in sql
-    assert params == [TENANT, 2026, 32]
+    assert params == [TENANT, 2026, 8, 32]
     # publish_mode/status are NOT in the INSERT column list at all — left to
     # the DB defaults ('propose_only' / 'assembling', migration 094), not
     # re-asserted in Python where they could silently drift from the schema.

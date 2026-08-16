@@ -17,9 +17,20 @@
 // sticky` needed for them — only the middle row scrolls), and each PieceCard's own header (badges
 // + Approve/Reject) is `position: sticky; top: 0` *within that scrolling middle row*, so it stays
 // pinned while its piece's content scrolls underneath, then hands off to the next piece's sticky
-// header. No content was removed or collapsed by default to make this fit — see PieceCard.
+// header.
+//
+// AA-412 follow-up (Phần 3, this change): the Gate Ledger (pass/fail per gate) now renders
+// UNCONDITIONALLY — it's the fast go/no-go signal a reviewer scans first, no reason to hide it
+// behind a click. Content and Brand/SEO Audit (the long parts — full article text, raw JSON) stay
+// collapsed by default and expand via the same chevron as before, EXCEPT a piece with any FAILED
+// gate auto-expands (the reviewer needs the content to understand *why* it failed) — a piece that
+// passed every gate stays collapsed, nothing hidden that the task didn't ask to hide.
+//
+// AA-412 follow-up (Phần 2, this change): `focusPieceId` (from the new piece-level Gate C table
+// in page.tsx) scrolls this modal straight to one piece on open instead of making the reviewer
+// find it themselves — that piece also starts expanded regardless of its gate outcome.
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { X, Check, XCircle, ChevronRight } from "lucide-react";
 import { A, sans, mono, Btn, Badge, Spinner, TH, TD } from "../_components/adminUi";
 
@@ -86,11 +97,17 @@ function GateLedgerTable({ ledger }: { ledger: GateResult[] }) {
   );
 }
 
-function PieceCard({ piece, onReview }: {
+function PieceCard({ piece, onReview, autoFocus }: {
   piece: PieceDetail;
   onReview: (pieceId: string, decision: "approve" | "reject", note?: string) => Promise<void>;
+  autoFocus: boolean; // AA-412 follow-up — true when this is Gate C's focusPieceId target
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const hasFailedGate = piece.gate_ledger.some(g => !g.passed);
+  // Phần 3: content/audit auto-expand when there's a gate failure to explain, or when this piece
+  // was opened directly from the Phần 2 piece-level table (autoFocus) — everything else starts
+  // collapsed. Gate Ledger itself is no longer gated by `expanded` at all (rendered unconditionally
+  // below).
+  const [expanded, setExpanded] = useState(hasFailedGate || autoFocus);
   const [busy, setBusy] = useState<"approve" | "reject" | null>(null);
   const [rejectNote, setRejectNote] = useState("");
   const [showRejectInput, setShowRejectInput] = useState(false);
@@ -109,10 +126,13 @@ function PieceCard({ piece, onReview }: {
   }
 
   return (
-    <div style={{
-      border: `1px solid ${A.line}`, borderRadius: 12, marginBottom: 16,
-      background: A.card, overflow: "hidden",
-    }}>
+    <div
+      id={`piece-card-${piece.piece_id}`}
+      style={{
+        border: `1px solid ${autoFocus ? A.red : A.line}`, borderRadius: 12, marginBottom: 16,
+        background: A.card, overflow: "hidden",
+      }}
+    >
       {/* Sticky per-piece header — stays pinned to the top of the scrolling content area while
           this piece's body/gate-ledger/audit scroll underneath, so Approve/Reject is always
           reachable without scrolling back up. Next piece's own sticky header takes over the
@@ -182,6 +202,24 @@ function PieceCard({ piece, onReview }: {
           </div>
         )}
 
+        {/* Phần 3: Gate Ledger is the fast go/no-go signal — always visible, never gated behind
+            the expand chevron. */}
+        <div style={{ marginBottom: expanded ? 16 : 0 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
+            Gate Ledger
+          </div>
+          <GateLedgerTable ledger={piece.gate_ledger} />
+        </div>
+
+        {!expanded && (
+          <button onClick={() => setExpanded(true)} style={{
+            background: "none", border: "none", cursor: "pointer", color: A.muted,
+            fontSize: 11.5, fontFamily: sans, padding: 0, textDecoration: "underline",
+          }}>
+            Show content &amp; brand/SEO audit
+          </button>
+        )}
+
         {expanded && (
           <div>
             <div style={{ fontSize: 11, fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
@@ -195,14 +233,9 @@ function PieceCard({ piece, onReview }: {
               {piece.body_tagged || "(empty)"}
             </div>
 
-            <div style={{ fontSize: 11, fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
-              Gate Ledger
-            </div>
-            <GateLedgerTable ledger={piece.gate_ledger} />
-
             {piece.brand_seo_audit && (
               <>
-                <div style={{ fontSize: 11, fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.08em", margin: "16px 0 6px" }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.08em", margin: "0 0 6px" }}>
                   Brand / SEO Audit
                 </div>
                 <pre style={{
@@ -213,6 +246,13 @@ function PieceCard({ piece, onReview }: {
                 </pre>
               </>
             )}
+
+            <button onClick={() => setExpanded(false)} style={{
+              background: "none", border: "none", cursor: "pointer", color: A.muted,
+              fontSize: 11.5, fontFamily: sans, padding: 0, textDecoration: "underline", marginTop: 12,
+            }}>
+              Hide content &amp; brand/SEO audit
+            </button>
           </div>
         )}
       </div>
@@ -220,8 +260,9 @@ function PieceCard({ piece, onReview }: {
   );
 }
 
-export default function PieceReviewModal({ packetId, onClose, onPacketAdvanced }: {
+export default function PieceReviewModal({ packetId, focusPieceId, onClose, onPacketAdvanced }: {
   packetId: string;
+  focusPieceId?: string | null; // AA-412 follow-up (Phần 2) — scroll straight to this piece on open
   onClose: () => void;
   onPacketAdvanced: () => void;
 }) {
@@ -230,6 +271,7 @@ export default function PieceReviewModal({ packetId, onClose, onPacketAdvanced }
   const [error, setError] = useState("");
   const [advancing, setAdvancing] = useState(false);
   const [advanceError, setAdvanceError] = useState("");
+  const scrolledRef = useRef(false);
 
   const loadPieces = useCallback(() => {
     // No synchronous setLoading(true) here — called from the mount effect below too, and
@@ -245,6 +287,19 @@ export default function PieceReviewModal({ packetId, onClose, onPacketAdvanced }
   }, [packetId]);
 
   useEffect(() => { loadPieces(); }, [loadPieces]);
+
+  // AA-412 follow-up (Phần 2) — once pieces have loaded, scroll straight to focusPieceId (opened
+  // from the piece-level Gate C table) instead of leaving the reviewer to find it themselves.
+  // Only runs once per modal open (scrolledRef), so a later loadPieces() (e.g. after an
+  // approve/reject) doesn't yank the scroll position back.
+  useEffect(() => {
+    if (!focusPieceId || loading || scrolledRef.current) return;
+    const el = document.getElementById(`piece-card-${focusPieceId}`);
+    if (el) {
+      el.scrollIntoView({ block: "center" });
+      scrolledRef.current = true;
+    }
+  }, [focusPieceId, loading, pieces]);
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -330,7 +385,7 @@ export default function PieceReviewModal({ packetId, onClose, onPacketAdvanced }
             </div>
           )}
           {!loading && pieces.map(p => (
-            <PieceCard key={p.piece_id} piece={p} onReview={handleReview} />
+            <PieceCard key={p.piece_id} piece={p} onReview={handleReview} autoFocus={p.piece_id === focusPieceId} />
           ))}
           {!loading && pieces.length === 0 && !error && (
             <div style={{ fontSize: 13, color: A.muted, padding: "16px 0" }}>No pieces in this packet.</div>

@@ -97,21 +97,28 @@ async def _mark_run_status(pool, run_id: str, status: str) -> None:
     )
 
 
-async def _get_or_create_packet(conn, tenant_id: str, year: int, week: int) -> str:
-    """create_packet() has no ON CONFLICT — a packet for (tenant_id, year, week) may already
-    exist from a prior run against the same week, so select-first rather than let the
-    UNIQUE constraint (migration 094) raise."""
+async def _get_or_create_packet(conn, tenant_id: str, year: int, month: int, week: int) -> str:
+    """create_packet() has no ON CONFLICT — a packet for (tenant_id, year, month, week) may
+    already exist from a prior run against the same slot, so select-first rather than let the
+    UNIQUE constraint (migration 106) raise.
+
+    AA-412 follow-up (docs/implementation-notes/AA-412-produce-page-usability.md D1): `month` was
+    MISSING from this lookup until now — the old (tenant_id, year, week)-only query matched
+    migration 094's original (also month-less) UNIQUE constraint, so two different months' Week-N
+    runs for the same tenant silently reused and merged into the SAME packet row. Confirmed live
+    and repaired by migration 106; this is the code-side half of that fix — do not drop `month`
+    from this WHERE clause again."""
     existing = await conn.fetchval(
-        "SELECT packet_id FROM acp_deliver.packets WHERE tenant_id = $1 AND year = $2 AND week = $3",
-        tenant_id, year, week,
+        "SELECT packet_id FROM acp_deliver.packets WHERE tenant_id = $1 AND year = $2 AND month = $3 AND week = $4",
+        tenant_id, year, month, week,
     )
     if existing:
         return str(existing)
-    return await create_packet(conn, tenant_id, year, week)
+    return await create_packet(conn, tenant_id, year, month, week)
 
 
 async def _produce_slots_background(
-    pool, due_slots: list[Slot], tenant_id: str, year: int, week: int, run_id: str, market: str,
+    pool, due_slots: list[Slot], tenant_id: str, year: int, month: int, week: int, run_id: str, market: str,
 ) -> None:
     """The slow part — real per-slot production (multiple Bedrock calls per piece), run outside
     the request/response cycle since API Gateway's 29s integration timeout can't survive it (see
@@ -150,7 +157,7 @@ async def _produce_slots_background(
                 )
 
             if passed_piece_ids:
-                packet_id = await _get_or_create_packet(conn, tenant_id, year, week)
+                packet_id = await _get_or_create_packet(conn, tenant_id, year, month, week)
                 await assemble_packet(conn, packet_id, passed_piece_ids)
                 became_ready = await maybe_mark_packet_ready(conn, packet_id)
                 logger.info(
@@ -209,7 +216,7 @@ async def trigger_produce_run(
 
     background_tasks.add_task(
         _produce_slots_background,
-        pool, due_slots, tenant_id_str, body.year, body.week, run_id, config.markets[0],
+        pool, due_slots, tenant_id_str, body.year, month, body.week, run_id, config.markets[0],
     )
 
     logger.info(
@@ -261,8 +268,8 @@ async def get_produce_run(run_id: str, request: Request, x_admin_secret: str = H
     )
     packet_row = await pool.fetchrow(
         "SELECT packet_id::text, status, publish_mode FROM acp_deliver.packets "
-        "WHERE tenant_id = $1 AND year = $2 AND week = $3",
-        run_row["tenant_id"], run_row["year"], run_row["week"],
+        "WHERE tenant_id = $1 AND year = $2 AND month = $3 AND week = $4",
+        run_row["tenant_id"], run_row["year"], run_row["month"], run_row["week"],
     )
 
     return {
@@ -305,7 +312,7 @@ async def list_pending_packets(request: Request, x_admin_secret: str = Header(No
 
     rows = await pool.fetch(
         """
-        SELECT p.packet_id::text, p.tenant_id, p.year, p.week, p.status, p.publish_mode,
+        SELECT p.packet_id::text, p.tenant_id, p.year, p.month, p.week, p.status, p.publish_mode,
                (SELECT count(*) FROM acp_deliver.pieces pc WHERE pc.packet_id = p.packet_id) AS piece_count,
                (SELECT count(*) FROM acp_deliver.pieces pc
                 WHERE pc.packet_id = p.packet_id AND pc.review_status = 'approved') AS approved_count

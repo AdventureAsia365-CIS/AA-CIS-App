@@ -15,7 +15,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { PlayCircle, RefreshCw } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
-import { A, serif, sans, Card, SLabel, Btn, Badge, Spinner, TabBar, TH, TD } from "../_components/adminUi";
+import { A, serif, sans, mono, Card, SLabel, Btn, Badge, Spinner, TabBar, TH, TD } from "../_components/adminUi";
 import PieceReviewModal from "./PieceReviewModal";
 import HistoryTab from "./HistoryTab";
 
@@ -46,6 +46,27 @@ interface PacketInfo {
   publish_mode: string;
 }
 
+// AA-412 follow-up — Phần 2a: `month` was missing entirely from this shape until migration 106 +
+// the backend fix added it (acp_deliver.packets had no `month` column at all — two different
+// months' Week-N runs for the same tenant were silently merged into ONE packet; see
+// docs/implementation-notes/AA-412-produce-page-usability.md D1). Always render year/month/week
+// together below — never year+week alone — so two different months never look identical again.
+interface GateLedgerEntry { gate: string; passed: boolean; violations: string[]; }
+
+// AA-412 follow-up — Phần 2: one row per piece, not per packet. Fetched via the existing
+// GET /packets/{id}/pieces (no new endpoint — see D4) once per ready packet, then flattened here
+// with the parent packet's identity attached so the table can group visually by packet while the
+// row unit stays the piece.
+interface PacketPieceRow {
+  packet_id: string;
+  piece_id: string;
+  channel: string;
+  status: string; // gate outcome: in_progress | passed | held
+  gate_ledger: GateLedgerEntry[];
+  review_status: string; // pending | approved | rejected
+  reviewed_by: string | null;
+}
+
 interface RunDetail {
   run_id: string;
   tenant_id: string;
@@ -64,11 +85,17 @@ interface PendingPacket {
   packet_id: string;
   tenant_id: string;
   year: number;
+  month: number; // AA-412 follow-up — added by migration 106, see PacketPieceRow comment above
   week: number;
   status: string;
   publish_mode: string;
   piece_count: number;
   approved_count: number;
+}
+
+// Shared year/month/week label — always all three together, never year+week alone (Phần 2a).
+function slotLabel(year: number, month: number, week: number): string {
+  return `${year}-${String(month).padStart(2, "0")} W${week}`;
 }
 
 const POLL_INTERVAL_MS = 8000;
@@ -109,6 +136,80 @@ function SlotStatusBadge({ status }: { status: string }) {
   return <Badge color={s.color}>{s.label}</Badge>;
 }
 
+function PieceGateBadge({ ledger }: { ledger: GateLedgerEntry[] }) {
+  if (ledger.length === 0) return <span style={{ color: A.muted2, fontSize: 11.5 }}>—</span>;
+  const failed = ledger.filter(g => !g.passed).length;
+  return failed === 0
+    ? <Badge color="green">All pass</Badge>
+    : <Badge color="red">{failed} fail</Badge>;
+}
+
+function PieceReviewBadge({ status }: { status: string }) {
+  const map: Record<string, { color: "green" | "red" | "gray"; label: string }> = {
+    approved: { color: "green", label: "Approved" },
+    rejected: { color: "red", label: "Rejected" },
+    pending: { color: "gray", label: "Pending" },
+  };
+  const s = map[status] ?? { color: "gray" as const, label: status };
+  return <Badge color={s.color}>{s.label}</Badge>;
+}
+
+// AA-412 follow-up — Phần 2: a packet-level header row (id/tenant/week/reviewed-count — the "one
+// point into the packet overview" the task asked to keep) followed by one row per piece. The
+// header row is the only place packet-level identity is shown; piece rows below it are the real
+// review unit and open PieceReviewModal focused on exactly that piece.
+function PacketPieceGroup({ packet, pieces, groupBg, tenantName, onOpenPacket, onOpenPiece }: {
+  packet: PendingPacket;
+  pieces: PacketPieceRow[];
+  groupBg: string;
+  tenantName: string;
+  onOpenPacket: () => void;
+  onOpenPiece: (pieceId: string) => void;
+}) {
+  return (
+    <>
+      <tr style={{ background: A.line2 }}>
+        <td colSpan={8} style={{ padding: "10px 14px", borderBottom: `1px solid ${A.line}` }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <span style={{ fontFamily: mono, fontSize: 11, color: A.muted }}>{packet.packet_id.slice(0, 8)}…</span>
+            <strong style={{ fontSize: 12.5, color: A.ink }}>{tenantName}</strong>
+            <span style={{ fontSize: 12, color: A.muted }}>{slotLabel(packet.year, packet.month, packet.week)}</span>
+            <Badge color={packet.approved_count === packet.piece_count ? "green" : "gray"}>
+              {packet.approved_count}/{packet.piece_count} approved
+            </Badge>
+            <span style={{ fontSize: 11.5, color: A.muted2 }}>{packet.publish_mode}</span>
+            <div style={{ flex: 1 }} />
+            <Btn size="sm" variant="ghost" onClick={onOpenPacket}>Open Packet</Btn>
+          </div>
+        </td>
+      </tr>
+      {pieces.length === 0 ? (
+        <tr style={{ background: groupBg }}>
+          <td colSpan={8} style={{ ...TD, color: A.muted, fontSize: 12 }}>No pieces loaded for this packet.</td>
+        </tr>
+      ) : pieces.map(piece => (
+        <tr
+          key={piece.piece_id} style={{ background: groupBg, cursor: "pointer" }}
+          onClick={() => onOpenPiece(piece.piece_id)}
+        >
+          <td style={TD}></td>
+          <td style={TD}>{tenantName}</td>
+          <td style={TD}>{slotLabel(packet.year, packet.month, packet.week)}</td>
+          <td style={TD}><Badge color="blue">{piece.channel}</Badge></td>
+          <td style={TD}>{piece.status === "passed" ? <Badge color="green">Passed</Badge> : <Badge color="amber">Held</Badge>}</td>
+          <td style={TD}><PieceGateBadge ledger={piece.gate_ledger} /></td>
+          <td style={TD}><PieceReviewBadge status={piece.review_status} /></td>
+          <td style={{ ...TD, textAlign: "right" }}>
+            <Btn size="sm" variant="primary" onClick={() => onOpenPiece(piece.piece_id)}>
+              Review
+            </Btn>
+          </td>
+        </tr>
+      ))}
+    </>
+  );
+}
+
 export default function ProducePage() {
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [tenantId, setTenantId] = useState("");
@@ -123,8 +224,10 @@ export default function ProducePage() {
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const [packets, setPackets] = useState<PendingPacket[]>([]);
+  const [packetPieces, setPacketPieces] = useState<Record<string, PacketPieceRow[]>>({});
+  const [piecesLoading, setPiecesLoading] = useState(false);
   const [packetsError, setPacketsError] = useState("");
-  const [reviewingPacketId, setReviewingPacketId] = useState<string | null>(null);
+  const [reviewTarget, setReviewTarget] = useState<{ packetId: string; pieceId: string | null } | null>(null);
 
   const [activeTab, setActiveTab] = useState<"live" | "history">("live");
 
@@ -143,10 +246,30 @@ export default function ProducePage() {
   );
   const activeTenants = useMemo(() => tenants.filter(t => t.is_active), [tenants]);
 
+  // AA-412 follow-up — Phần 2: after loading the packet-level overview, also fetch each ready
+  // packet's pieces (existing GET /packets/{id}/pieces, no new endpoint — D4) so the table below
+  // can render one row per piece. Packet count is small (Gate C review queue, not the full piece
+  // history), so N+1 fetches here is the same shape PieceReviewModal already uses per-packet.
   const loadPendingPackets = useCallback(() => {
     fetch("/api/admin/produce/packets")
       .then(r => r.ok ? r.json() : Promise.reject(r))
-      .then((d: PendingPacket[]) => { setPackets(d); setPacketsError(""); })
+      .then(async (d: PendingPacket[]) => {
+        setPackets(d);
+        setPacketsError("");
+        setPiecesLoading(true);
+        const entries = await Promise.all(d.map(async (p): Promise<[string, PacketPieceRow[]]> => {
+          try {
+            const res = await fetch(`/api/admin/produce/packets/${p.packet_id}/pieces`);
+            if (!res.ok) return [p.packet_id, []];
+            const pieces = await res.json();
+            return [p.packet_id, pieces.map((pc: PacketPieceRow) => ({ ...pc, packet_id: p.packet_id }))];
+          } catch {
+            return [p.packet_id, []];
+          }
+        }));
+        setPacketPieces(Object.fromEntries(entries));
+        setPiecesLoading(false);
+      })
       .catch(() => setPacketsError("Failed to load pending packets."));
   }, []);
 
@@ -205,7 +328,7 @@ export default function ProducePage() {
   }
 
   function handlePacketAdvanced() {
-    setReviewingPacketId(null);
+    setReviewTarget(null);
     loadPendingPackets();
   }
 
@@ -397,8 +520,12 @@ export default function ProducePage() {
           </Card>
         )}
 
-        {/* Gate C section — overview table; per-piece content + approve/reject lives in the
-            PieceReviewModal opened by "Review Pieces" below (AA-412). */}
+        {/* Gate C section — AA-412 follow-up (Phần 2): one row per PIECE, not per packet, so
+            channel/status/gate result are visible without opening the modal first. Rows are
+            grouped visually under a sticky-ish packet header (id/tenant/week/reviewed count) —
+            the review unit is still the piece; clicking a piece row opens PieceReviewModal
+            already scrolled/focused to that exact piece. Packet identity travels with each piece
+            row via PacketPieceRow.packet_id, same convention as HistoryTab's run grouping. */}
         <Card>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
             <SLabel style={{ marginBottom: 0 }}>Gate C — Packets Ready for Review</SLabel>
@@ -413,36 +540,36 @@ export default function ProducePage() {
             <div style={{ fontSize: 13, color: A.muted, padding: "16px 0" }}>
               No packets ready for review.
             </div>
+          ) : piecesLoading ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "16px 0" }}>
+              <Spinner size={16} /> <span style={{ fontSize: 12.5, color: A.muted }}>Loading pieces…</span>
+            </div>
           ) : (
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead>
                   <tr>
                     <th style={TH}>Packet</th><th style={TH}>Tenant</th><th style={TH}>Week</th>
-                    <th style={TH}>Pieces</th><th style={TH}>Reviewed</th>
-                    <th style={TH}>Publish Mode</th><th style={TH}></th>
+                    <th style={TH}>Channel</th><th style={TH}>Status</th><th style={TH}>Gate</th>
+                    <th style={TH}>Review</th><th style={TH}></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {packets.map(p => (
-                    <tr key={p.packet_id}>
-                      <td style={TD}>{p.packet_id.slice(0, 8)}…</td>
-                      <td style={TD}>{tenantNameById[p.tenant_id] ?? `${p.tenant_id.slice(0, 8)}…`}</td>
-                      <td style={TD}>{p.year} / W{p.week}</td>
-                      <td style={TD}>{p.piece_count}</td>
-                      <td style={TD}>
-                        <Badge color={p.approved_count === p.piece_count ? "green" : "gray"}>
-                          {p.approved_count}/{p.piece_count} approved
-                        </Badge>
-                      </td>
-                      <td style={TD}>{p.publish_mode}</td>
-                      <td style={TD}>
-                        <Btn size="sm" variant="primary" onClick={() => setReviewingPacketId(p.packet_id)}>
-                          Review Pieces
-                        </Btn>
-                      </td>
-                    </tr>
-                  ))}
+                  {packets.map((p, packetIdx) => {
+                    const pieces = packetPieces[p.packet_id] ?? [];
+                    const groupBg = packetIdx % 2 === 1 ? A.bg : "transparent";
+                    return (
+                      <PacketPieceGroup
+                        key={p.packet_id}
+                        packet={p}
+                        pieces={pieces}
+                        groupBg={groupBg}
+                        tenantName={tenantNameById[p.tenant_id] ?? `${p.tenant_id.slice(0, 8)}…`}
+                        onOpenPacket={() => setReviewTarget({ packetId: p.packet_id, pieceId: null })}
+                        onOpenPiece={pieceId => setReviewTarget({ packetId: p.packet_id, pieceId })}
+                      />
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -450,10 +577,11 @@ export default function ProducePage() {
         </Card>
         </>}
 
-        {reviewingPacketId && (
+        {reviewTarget && (
           <PieceReviewModal
-            packetId={reviewingPacketId}
-            onClose={() => setReviewingPacketId(null)}
+            packetId={reviewTarget.packetId}
+            focusPieceId={reviewTarget.pieceId}
+            onClose={() => setReviewTarget(null)}
             onPacketAdvanced={handlePacketAdvanced}
           />
         )}

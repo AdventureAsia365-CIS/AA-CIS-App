@@ -60,19 +60,22 @@ class PublishModeBlockedError(Exception):
     allowed (AA-365, 14/08/2026). Never catch-and-ignore this."""
 
 
-async def create_packet(db: asyncpg.Connection, tenant_id: str, year: int, week: int) -> str:
-    """Creates a new, empty `acp_deliver.packets` row for one ISO week —
+async def create_packet(db: asyncpg.Connection, tenant_id: str, year: int, month: int, week: int) -> str:
+    """Creates a new, empty `acp_deliver.packets` row for one week-of-month slot —
     `status='assembling'`, `publish_mode='propose_only'` (both DB defaults,
     not overridden here). Returns the new `packet_id`. Raises on a
-    duplicate (tenant_id, year, week) — the UNIQUE constraint (migration
-    094) is the actual guarantee; this function doesn't pre-check."""
+    duplicate (tenant_id, year, month, week) — the UNIQUE constraint
+    (migration 106, AA-412 follow-up — added `month`, migration 094's original
+    constraint was `(tenant_id, year, week)` only, see that migration's own
+    docstring for why) is the actual guarantee; this function doesn't
+    pre-check."""
     row = await db.fetchrow(
         """
-        INSERT INTO acp_deliver.packets (tenant_id, year, week)
-        VALUES ($1, $2, $3)
+        INSERT INTO acp_deliver.packets (tenant_id, year, month, week)
+        VALUES ($1, $2, $3, $4)
         RETURNING packet_id
         """,
-        tenant_id, year, week,
+        tenant_id, year, month, week,
     )
     return str(row["packet_id"])
 

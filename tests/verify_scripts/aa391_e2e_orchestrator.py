@@ -396,7 +396,7 @@ async def main() -> None:
 
         # ============================================================ STEP 11: N8 assemble + deliver (or hold)
         _step("STEP 11: N8 — create_packet -> assemble_packet (passed pieces only) -> ready -> deliver")
-        packet_id = await create_packet(db, TENANT_ID, year, WEEK)
+        packet_id = await create_packet(db, TENANT_ID, year, month, WEEK)
         packet_row = await db.fetchrow(
             "SELECT packet_id, status, publish_mode FROM acp_deliver.packets WHERE packet_id = $1", packet_id,
         )
