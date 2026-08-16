@@ -151,6 +151,51 @@ async def maybe_mark_packet_ready(db: asyncpg.Connection, packet_id: str) -> boo
     return result == "UPDATE 1"
 
 
+class PieceNotFoundError(Exception):
+    """Raised by `set_piece_review_status()` for an unknown `piece_id`."""
+
+
+async def set_piece_review_status(
+    db: asyncpg.Connection, piece_id: str, decision: str, actor: str, note: str | None = None,
+) -> None:
+    """AA-412: records a human's per-piece Gate C decision. Independent of `pieces.status`
+    (the GATE outcome, written only by `gates.py::run_gates()`) -- this is the new, separate
+    `review_status` column (migration 105). `decision` must be 'approved' or 'rejected' (the
+    caller maps a request body's 'approve'/'reject' verb to these before calling this). Raises
+    `PieceNotFoundError` for an unknown `piece_id` rather than silently no-op'ing (result ==
+    'UPDATE 0' check, same defensive style as `maybe_mark_packet_ready()`'s own guard)."""
+    if decision not in ("approved", "rejected"):
+        raise ValueError(f"set_piece_review_status: decision must be 'approved'/'rejected', got {decision!r}")
+    result = await db.execute(
+        """
+        UPDATE acp_deliver.pieces
+        SET review_status = $1, reviewed_by = $2, reviewed_at = now(), review_note = $3
+        WHERE piece_id = $4
+        """,
+        decision, actor, note, piece_id,
+    )
+    if result == "UPDATE 0":
+        raise PieceNotFoundError(f"set_piece_review_status: no piece {piece_id}")
+
+
+async def packet_pieces_review_complete(db: asyncpg.Connection, packet_id: str) -> bool:
+    """AA-412 (docs/implementation-notes/AA-412.md D2): True only if `packet_id` has >=1 piece
+    AND every piece assigned to it has `review_status='approved'`. Used to gate
+    `admin_produce.py::approve_gate_c()` before it calls `trust_ramp.confirm_ramp_transition()`
+    for any mode past 'propose_only' -- the ramp mechanism itself is untouched, this is a
+    pre-check one layer above it, same shape as the BOFU check `trust_ramp.py` already does
+    before its own `set_publish_mode()` call."""
+    row = await db.fetchrow(
+        """
+        SELECT count(*) AS total,
+               count(*) FILTER (WHERE review_status = 'approved') AS approved
+        FROM acp_deliver.pieces WHERE packet_id = $1
+        """,
+        packet_id,
+    )
+    return bool(row) and row["total"] > 0 and row["total"] == row["approved"]
+
+
 class PacketNotReadyError(Exception):
     """Raised by `deliver_packet()` when the packet isn't `status='ready'`
     — delivery must go through the `assembling` -> `ready` gate
@@ -204,5 +249,7 @@ async def deliver_packet(db: asyncpg.Connection, pool: asyncpg.Pool, packet_id: 
 
 __all__ = [
     "ALLOWED_PUBLISH_MODES_UNTIL_F6", "PublishModeBlockedError", "PacketNotReadyError",
+    "PieceNotFoundError",
     "create_packet", "set_publish_mode", "assemble_packet", "maybe_mark_packet_ready", "deliver_packet",
+    "set_piece_review_status", "packet_pieces_review_complete",
 ]
