@@ -145,3 +145,78 @@ liệu trên, và/hoặc tự chụp nếu cần bằng chứng hình ảnh.**
   chưa đọc body thật để xác nhận).
 - Không tạo Linear issue con mới cho 2 việc đề xuất ở Bước 5 — để Nghiệp quyết.
 - Không tự đổi status AA-415 trên Linear.
+
+---
+
+# UPDATE 16/08/2026 — verify PR #171 (repair-budget-late-gate fix), N7 run thật thứ 3
+
+PR #171 merged `f84a12e`, deployed Dev — digest ECR `:latest` khớp TRỰC TIẾP tag
+`dev-f84a12e0c66c73a317f4a8e66d6a564d3083b273` (merge commit `f84a12e`), ECS running task
+cùng digest `sha256:d1dc1ab0...` tại thời điểm trigger.
+
+Verify run: **`d776a047-0aa8-4175-a252-3084cd4f3d3d`**, tenant `aa_internal`, **2026-09 W4** —
+tuần kế tiếp chưa từng chạy (xác nhận trước khi trigger).
+
+## Số liệu F1_grounding — cải thiện thêm rõ rệt
+
+| Run | F1 pass | F1 fail |
+|---|---:|---:|
+| Run #6 (baseline, trước PR #170) | 5/9 (55.6%) | 4/9 (44.4%) |
+| `363f22c9` (sau PR #170, trước #171) | 9/12 (75%) | 3/12 (25%) |
+| **`d776a047` (sau PR #171)** | **11/12 (91.7%)** | **1/12 (8.3%)** |
+
+## Cơ chế late-gate-budget mà PR #171 nhắm sửa — KHÔNG còn xuất hiện lần nào trong run này
+
+Đọc `repair_log` đầy đủ cả 12 piece: **0/12 piece nào cho thấy hình dạng "gate xuất hiện muộn,
+hết ngân sách trước khi kịp sửa"** — đúng chữ ký AA-415 gốc. 1 piece duy nhất còn fail F1
+(`slot_f20e87cc4207a3673f02:blog`) có `initial_failing_gate_count=3`, **F1 fail NGAY TỪ ĐẦU**
+(round 1 đã target F1), được cấp đủ 5/5 vòng repair dành riêng (`repair_budget=5`), không hội
+tụ — đúng loại "stuck từ đầu" đã thấy ở run trước (`slot_3485...blog`/`slot_efb6...blog`), KHÔNG
+PHẢI cơ chế PR #171 sửa.
+
+## Xác nhận lần 3: ĐÚNG bug sentence-split, không phải hallucination
+
+Đọc `body_tagged` thật của piece còn fail — **cùng cơ chế regex y hệt 2 case trước** (citation
+tag `[R:id]` nằm giữa dấu câu và FAQ marker tiếp theo phá vỡ ranh giới câu):
+
+```
+...isn't available from this source. [R:atom_b12bdb857e]
+
+**Q: What is the 52 hour rule in South Korea?**
+A: The given fact covers a Day 2 visit to the Demilitarised Zone...
+```
+
+Citation `atom_b12bdb857e` (về chủ đề DMZ/food) bị merge với câu hỏi FAQ TIẾP THEO ("52 hour
+rule"), số "52" bị kiểm tra sai atom nguồn. **Đây là lần thứ 3 độc lập xác nhận CÙNG root
+cause** (Ride 99 / "3 day rule" / "52 hour rule" — cả 3 đều FAQ hoặc heading merge với citation
+liền trước). Với PR #171 đã đóng cơ chế late-gate-budget, **bug sentence-split này giờ là
+NGUYÊN NHÂN DUY NHẤT còn lại** của mọi F1 fail quan sát được qua cả 2 run verify — đáng để
+Nghiệp cân nhắc lại việc tách issue riêng (trước đó quyết giữ trong AA-415 khi mới có 2 case,
+giờ đã có 3, cùng root cause, và là block cuối cùng còn lại).
+
+## Sự cố hạ tầng (AA-416) — LẦN THỨ 3 và 4 xảy ra ngay trong lúc verify run này
+
+Run này bị gián đoạn bởi container/ALB health-check timeout **2 lần liên tiếp** (tổng cộng lần
+thứ 3 và thứ 4 quan sát được, sau 2 lần ở run #6 và run `363f22c9`):
+- Lần 1: ngay đầu run, 0 piece nào bị mất (chưa kịp persist gì) — resume qua re-POST.
+- Lần 2: giữa lúc piece `slot_f20e87cc...:blog` đang ở vòng repair 4 (F1_grounding) — task bị
+  kill, `/health` chính nó cũng trả 504 (29.7s) TRƯỚC KHI task bị đánh dấu unhealthy — bằng
+  chứng trực tiếp khớp cơ chế đã nêu trong `docs/claude_audit/AA-418-parallel-cost-investigation.md`
+  §A.2(d): lệnh Bedrock đồng bộ (`invoke_claude()`) chặn event loop đơn luồng đủ lâu để chính
+  health check thất bại — không phải giả thuyết nữa, quan sát trực tiếp lần này (log thấy
+  `n7_repair_round_attempt round=4` ngay trước dòng "Shutting down"). Resume qua re-POST lần
+  2, không mất data (slot đã produced trước đó giữ nguyên).
+- Tổng thời gian chạy thật: ~23 phút (12:58:33 → 13:21:42), có 2 lần gián đoạn + 2 lần
+  re-POST thủ công.
+
+## Kết luận verify PR #171
+
+**Đạt mục tiêu chính: cơ chế late-gate-budget-exhausted (đúng thứ AA-415/PR#171 nhắm sửa)
+KHÔNG còn xuất hiện trong run thật này (0/12).** F1 pass rate tiếp tục cải thiện 75%→91.7%.
+1 piece còn fail F1 là do bug KHÁC (sentence-split, đã xác nhận 3 lần, ngoài scope AA-415 gốc).
+
+**Đề xuất cho Nghiệp:** AA-415 (cả 2 phần: PieceInvariants atom_text_by_id + repair-budget
+late-gate) có thể coi là Done thật — mục tiêu ban đầu ("F1 không còn bất ngờ xuất hiện sau
+F5/F9 mà không có cơ hội sửa riêng") đã đạt, đo bằng dữ liệu production thật qua 2 lần merge.
+Phần còn lại (sentence-split bug) là vấn đề khác, đáng 1 issue riêng nếu Nghiệp đồng ý (đã đủ
+bằng chứng, không còn "chưa chắc") — nhưng không tự tạo, không tự đổi status AA-415.
