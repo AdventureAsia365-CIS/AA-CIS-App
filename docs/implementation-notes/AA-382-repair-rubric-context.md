@@ -206,6 +206,101 @@ lời") — số liệu thật nên lấy từ CloudWatch/AA-418 cost tracking s
 Đây là giới hạn thật của việc "không tự merge" kết hợp "phải verify bằng N7 thật" — 2 yêu cầu
 này không thể cùng thoả trong 1 session không merge. Ghi rõ thay vì tự bịa số liệu "sau" giả.
 
+---
+
+# UPDATE 16/08/2026 — merge + deploy + verify N7 thật (theo yêu cầu Nghiệp: "CI green thì merge luôn")
+
+PR #172 merged `0cb7d87` (5/5 required check pass, không có migration). Deploy Dev qua CI
+chạy tự động trên push — ECR `:latest` digest `sha256:279a99b1...` (tag
+`dev-0cb7d87e2a9522433447a076d26d9f46ec4b258d`, khớp TRỰC TIẾP merge commit) — ECS running
+task xác nhận CÙNG digest, `RUNNING`/`HEALTHY`.
+
+## Trigger N7 thật — Gate B chặn tuần dự định ban đầu
+
+Dự định trigger `2026-10 W1` (tháng chưa từng chạy) nhưng bị chặn: `400 — No approved quarter
+plan for tenant=... year=2026 quarter=4 — Gate B: quarter plan must be approved by a human (Ms.
+Thu) before allocation — never auto.` Q4 (tháng 10-12) chưa được approve. Chuyển sang tuần chưa
+từng chạy NHƯNG vẫn trong quarter đã approve (Q3 = tháng 7-9): xác nhận trước khi trigger qua
+query `acp_shared.acp_v2_runs` — tháng 7 chỉ có week 1 đã chạy, weeks 2-4 còn trống. Chọn
+**`2026-07 W2`** (chưa từng chạy).
+
+Verify run: **`88f094b1-3e0a-4b28-9abb-205cb7d21287`**, tenant `aa_internal`, 2026-07 W2, 3 slot
+due.
+
+## Sự cố hạ tầng THẬT xảy ra 2 lần trong lúc chạy — đúng pattern đã ghi nhận 4 lần trước (AA-404/AA-415)
+
+- Lần 1 (~13:59Z): ECS task bị kill/thay (`78ce6214...` → `06628d99...`) giữa lúc 1/3 slot đã
+  xong (4 piece đã persist, KHÔNG mất data) — job background (`_produce_slots_background`)
+  chết theo task cũ, run kẹt ở `status=producing`. **Recovery: re-POST đúng body cũ** —
+  `create_weekly_produce_run()`'s `ON CONFLICT DO NOTHING` cho lại đúng `run_id`,
+  `due_slot_count: 2` (2 slot còn `due`) — xác nhận LẦN THỨ 3 (độc lập, sau run #6 và
+  `363f22c9`) cơ chế resume an toàn hoạt động đúng.
+- Lần 2 (~14:57-15:00Z): API trả response rỗng liên tục ~5 phút (không phải lỗi HTTP, timeout
+  client-side) — job production TỰ PHỤC HỒI, không cần re-POST lần 2 (khác lần 1 — có thể chỉ
+  là health-check chậm tạm thời, không tới mức ECS kill task lần này).
+- Tổng thời gian thật: ~66 phút (13:56:10 → 15:01:48), gồm 1 lần gián đoạn cần can thiệp thủ
+  công + 1 lần tự phục hồi.
+
+## Kết quả F8/F9 — cơ chế fix HOẠT ĐỘNG ĐÚNG THIẾT KẾ, nhưng KHÔNG tự nó nâng pass rate
+
+**Pass rate run mới (9 piece) so với baseline (trước fix, 4 run gần nhất):**
+
+| | Baseline (trước AA-382) | Run mới `88f094b1` (sau AA-382) |
+|---|---:|---:|
+| F8 pass | 8/12, 9/12, 8/9, 9/12 (67-89%) | **8/9 (89%)** |
+| F9 pass | 0/12, 0/12, 0/9, 2/12 (0-17%) | **1/9 (11%)** |
+
+Không có bước nhảy rõ rệt — ĐÚNG NHƯ DỰ ĐOÁN trong report gốc: fix này sửa INPUT repair nhận
+(có `flagged_phrases`/rubric đầy đủ hay không), không sửa việc JUDGE có tiếp tục tìm ra vi
+phạm MỚI mỗi vòng hay không — 2 việc khác nhau.
+
+**Xác nhận CƠ CHẾ hoạt động đúng (đọc `repair_log` đầy đủ, không chỉ pass/fail cuối)** — MỌI
+vòng repair target F9 trong run này (7 vòng, trải trên 5 piece) đều có
+`"exact flagged phrase(s): ..."` trong violation string — xác nhận `flagged_phrases` đang thật
+sự chảy tới repair trong production, không phải chỉ đúng trên unit test.
+
+**Nhưng vẫn thấy "moving target" — nguyên nhân giờ đã rõ, KHÔNG PHẢI THIẾU CONTEXT nữa:**
+
+Ví dụ `slot_9afc9ee...:blog#tiktok` (held sau 3 vòng, hết ngân sách): round 1 flag phrase A
+("This one's built differently"), repair sửa ĐÚNG phrase A (có exact quote, không phải đoán) —
+nhưng round 2 judge flag phrase B HOÀN TOÀN KHÁC ("The standard South Korea itinerary runs
+Seoul to Busan to Jeju...") — không phải vì repair sửa sai, mà vì JUDGE chấm lại TOÀN BỘ piece
+mỗi vòng và có thể tìm ra 1 câu KHÁC để flag là "generic" mà vòng trước nó chưa từng nhắc tới.
+Đây là hành vi JUDGE (Nova Pro over-sensitive/không ổn định), KHÔNG PHẢI gap về context nữa —
+đúng ranh giới đã nêu rõ trong report gốc ("không đổi logic judge") và khớp quan sát phụ đã ghi
+("một số câu bị flag đọc thực tế lại đạt chuẩn GOOD của chính rubric"). Repair giờ luôn sửa
+ĐÚNG câu được chỉ ra — vấn đề còn lại nằm ở phía JUDGE liên tục di chuyển mục tiêu, xứng đáng 1
+issue riêng (đề xuất, không tự tạo).
+
+**1 case F8 đáng chú ý — CHÍNH LÀ case dẫn chứng gốc trong Linear AA-382:**
+`slot_9afc9ee...:blog#facebook` held nguyên 4/4 vòng trên `"framework criterion failed: ends
+with CTA"` — dù có hint xác định (`_VIOLATION_HINTS`, có từ trước AA-382) VÀ giờ có thêm full
+rubric list. Đây đúng là case Nghiệp đã mô tả trong issue gốc ("đổi CTA 3 kiểu khác nhau vẫn
+không qua"), verify được LẶP LẠI THẬT trong run này — gợi ý nguyên nhân KHÔNG PHẢI thiếu rubric
+context (giờ đã có đủ) mà là 1 giới hạn CẤU TRÚC khác (có thể định dạng facebook luôn cần 1
+dòng sau CTA — vd HASHTAGS — mâu thuẫn với "CTA phải là câu cuối cùng" của
+`_ends_with_cta()`). KHÔNG sửa trong task này (ngoài scope, cần đọc `body_tagged` thật để xác
+nhận giả thuyết trước khi quyết định hướng fix) — ghi lại làm bằng chứng cho 1 issue con nếu
+Nghiệp muốn theo đuổi.
+
+## Kết luận verify
+
+✅ Fix hoạt động ĐÚNG như thiết kế — `flagged_phrases`/`GENERIC_AI_WORDING_ANCHOR`/framework
+rubric đầy đủ ĐÃ tới repair trong mọi vòng, xác nhận bằng data thật, không phải giả lập.
+⚠️ Pass rate F8/F9 KHÔNG cải thiện rõ rệt trong 1 sample nhỏ (N=9) — đúng dự đoán, vì nguyên
+nhân pass-rate thấp phần lớn nằm ở JUDGE (moving target) + 1 case cấu trúc F8 riêng, không
+phải context-gap AA-382 nhắm sửa. AA-382 tự nó hoàn thành đúng scope ("repair có đủ context
+để BIẾT sửa gì" — xác nhận đúng); "sửa được câu đúng có giúp piece pass không" phụ thuộc thêm
+vào việc JUDGE có ngừng di chuyển mục tiêu hay không, đó là câu hỏi khác.
+
+**Đề xuất cho Nghiệp (không tự tạo issue, không tự đổi status AA-382):**
+1. Issue riêng cho JUDGE calibration (F9 Nova Pro tiếp tục flag phrase mới mỗi vòng dù phrase
+   trước đã sửa đúng, một số phrase bị flag đọc lại đạt chuẩn GOOD) — dữ liệu thật đã đủ trong
+   report này.
+2. Issue riêng cho F8 facebook "ends with CTA" case cụ thể (`slot_9afc9ee...`) — đọc
+   `body_tagged` thật để xác nhận giả thuyết HASHTAGS/format-conflict trước khi quyết định
+   hướng fix.
+
 ## Không làm trong task này
 
 - Không sửa logic chấm điểm F8/F9 (giữ đúng scope).
