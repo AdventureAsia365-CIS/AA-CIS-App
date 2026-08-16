@@ -89,6 +89,14 @@ stays OUTSIDE this repair loop entirely — it runs before `run_gates()` is
 even called and short-circuits straight to `held` on failure; that gap is
 tracked separately (AA-381), not touched here.
 
+AA-416 (event-loop-blocking fix): `run_gates()` itself is called via
+`asyncio.to_thread()`, not bare — see the comment at that call site below for
+why (it, and every other synchronous boto3 Bedrock call in the N7 hot path —
+E2/E3/E4 in `slot_runner.py`, the C3 gap statement in `research.py` — used to
+block this ECS task's single shared event loop, causing real ALB
+health-check timeouts). Purely an execution-mechanism change: no retry/
+timeout/repair-budget logic here changed.
+
 `gate_fns` normalization (the gap AA-364.md D5 flagged): none of the real
 gate functions match `run_gates()`'s `Callable[[str], GateResult]` signature
 as-is — each needs extra brief/tenant-specific context bound first. Done
@@ -109,6 +117,7 @@ scope note).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Optional
 
@@ -250,8 +259,29 @@ async def run_piece_through_produce_gates(
         def _repair(body: str, violations: list[str]) -> str:
             return repair_piece(body, violations, invariants=invariants)
 
-        run_gates(piece, [_f1, _f5, _f2, _f3, _f4, _f6, _f7, _f8, _f9],
-                  _repair, max_repairs=REPAIR_TOTAL_MAX, is_repairable=_is_f6_content_fixable)
+        # AA-416: run_gates() is a synchronous while-loop that can call invoke_judge()
+        # (F8/F9) and, transitively via _repair -> repair_piece(), invoke_claude() (E5)
+        # up to repair_budget times per piece — each a blocking boto3 call (real measured
+        # latency: 13.8s for one E5 repair round, docs/claude_audit/AA-418-parallel-cost-
+        # investigation.md). Called bare (no await/to_thread), this used to block the
+        # WHOLE event loop for that entire duration — including /health, sharing this
+        # single ECS task's event loop with N7's BackgroundTask (api/main.py, api/routers/
+        # admin_produce.py::_produce_slots_background). asyncio.to_thread() moves the
+        # whole gate+repair loop for THIS piece onto a worker thread; none of its closures
+        # (_f1.._f9, _repair) touch `db`/`conn` (asyncpg, not thread-safe for concurrent
+        # use) — only this function's own awaited statements before/after do — so no
+        # connection is ever touched off the event loop thread. The piece loop in
+        # slot_runner.py::run_slot_production() stays sequential (one `await` per piece,
+        # not asyncio.gather()) — this fixes the blocking-call bug (AA-416) without
+        # attempting piece-level concurrency, which AA-418's investigation separately
+        # found unsafe today (shared connection, unverified acc3 quota — not this issue's
+        # scope). `piece` is mutated in place by run_gates() (status/gate_ledger/etc.) and
+        # read again immediately below (audit_holder) only after this await completes, so
+        # there is no concurrent access to it either.
+        await asyncio.to_thread(
+            run_gates, piece, [_f1, _f5, _f2, _f3, _f4, _f6, _f7, _f8, _f9],
+            _repair, max_repairs=REPAIR_TOTAL_MAX, is_repairable=_is_f6_content_fixable,
+        )
         piece.gate_ledger = [rule_result] + piece.gate_ledger
         audit = audit_holder["audit"]
 
