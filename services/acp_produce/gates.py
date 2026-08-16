@@ -891,9 +891,34 @@ def run_gates(
     extract_and_save_rule()`) is keyed on a human reviewer's rejection note
     tied to a real `acp_hitl_requests` row, which an auto-repair-exhausted
     N7 piece never has; wiring N7 into that path is a separate follow-up,
-    not built here."""
+    not built here.
+
+    AA-415 (verify-real-run follow-up, docs/implementation-notes/AA-415-
+    verify-real-run.md): `repair_budget` is still computed ONCE from the
+    piece's first gate-stack run (unchanged) but MAY be extended by exactly
+    +1, capped at `REPAIR_BUDGET_CAP`, the first time a repair round targets
+    a gate that was NOT among that first run's failing gates. Real evidence
+    (run `363f22c9`, `slot_efb6c6d175e23bad4767:blog#tiktok`):
+    `initial_failing_gate_count=1` (only F9_social) gave `repair_budget=3`;
+    rounds 1-2 targeted F9_social, and by the time F1_grounding appeared for
+    the first time in round 3 (a real side effect of the F9 repair rewrite,
+    the exact class of regression PR #170's `atom_text_by_id` narrows but
+    does not eliminate — see that doc's Step 4), only ONE round of budget
+    was left for it, which failed, and the piece held with F1 never having
+    gotten a fair, `compute_repair_budget()`-sized share of rounds. Treating
+    a late-discovered gate as "one more distinct failing gate this piece has
+    had to deal with" is the SAME additive spirit `compute_repair_budget()`
+    already applies to gates failing simultaneously at the start — this
+    reuses that spirit for gates discovered mid-loop instead of inventing a
+    second budget mechanism. The extension is keyed per DISTINCT late gate
+    (tracked in `late_gates_extended` below), not per round, so a late gate
+    that keeps failing round after round doesn't re-trigger the bump every
+    time — `REPAIR_BUDGET_CAP` remains the one hard ceiling against
+    pathological Sonnet spend, same as before this change."""
     repair_budget: int | None = None
     pending_round: RepairRoundLog | None = None
+    initial_failing_gates: set[str] = set()
+    late_gates_extended: set[str] = set()
 
     while True:
         piece.gate_ledger = []
@@ -911,6 +936,7 @@ def run_gates(
             repair_budget = compute_repair_budget(failing_count, base_repairs=max_repairs)
             piece.initial_failing_gate_count = failing_count
             piece.repair_budget = repair_budget
+            initial_failing_gates = {g.gate for g in piece.gate_ledger if not g.passed}
             logger.info("n7_repair_budget_computed", piece_id=piece.piece_id,
                         initial_failing_gate_count=failing_count, repair_budget=repair_budget)
 
@@ -931,6 +957,25 @@ def run_gates(
             _hold(piece, first_failure)
             _log_repair_loop_summary(piece, "held")
             return piece
+
+        # AA-415: a gate that was passing on the first gate-stack run but is
+        # failing NOW is a late-discovered failure (most often a side effect
+        # of an earlier round's repair targeting a DIFFERENT gate) — give it
+        # the same one-extra-round headroom compute_repair_budget() already
+        # gives a gate that was simultaneously failing from the start,
+        # rather than letting it get squeezed by whatever budget the
+        # ORIGINAL failing gates already used up. Only the first round
+        # targeting a given late gate extends the budget — a late gate that
+        # keeps failing across several rounds doesn't get a fresh +1 every
+        # time, and REPAIR_BUDGET_CAP still bounds the total regardless.
+        if (first_failure.gate not in initial_failing_gates
+                and first_failure.gate not in late_gates_extended
+                and repair_budget < REPAIR_BUDGET_CAP):
+            late_gates_extended.add(first_failure.gate)
+            repair_budget = min(repair_budget + 1, REPAIR_BUDGET_CAP)
+            piece.repair_budget = repair_budget
+            logger.info("n7_repair_budget_extended_for_late_gate", piece_id=piece.piece_id,
+                        gate=first_failure.gate, new_repair_budget=repair_budget)
 
         if piece.repair_count >= repair_budget:
             _hold(piece, first_failure)
