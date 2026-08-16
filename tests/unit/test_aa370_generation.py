@@ -344,6 +344,28 @@ def test_build_extra_section_directives_non_aida_gets_no_hook_cta_notes():
     assert not any("SINGLE-CTA" in d for d in directives["Close"])
 
 
+def test_build_extra_section_directives_pas_adds_problem_resolve_notes_to_first_and_last():
+    """AA-404 N0-N8 audit follow-up: PAS's F8 rubric ("opens with the reader's problem" /
+    "resolves with the trip as solve") is positional, same class of gap as AIDA's — same fix
+    shape (opening/closing notes pinned to the OUTLINE's first/last section)."""
+    outline = [OutlineSection(title=t, atom_ids=[], goal="g") for t in ("Open", "Mid", "Close")]
+    directives = _build_extra_section_directives(_brief(framework="PAS"), outline, "Mid", "Open")
+    assert any("PROBLEM-OPENING REQUIREMENT" in d for d in directives["Open"])
+    assert any("RESOLVE REQUIREMENT" in d for d in directives["Close"])
+    assert not any("PROBLEM-OPENING" in d or "RESOLVE REQUIREMENT" in d for d in directives["Mid"])
+
+
+def test_build_extra_section_directives_hub_gets_no_positional_notes():
+    """Hub's F8 rubric ("covers comprehensively" / "each section distinct sub-question") is
+    a whole-piece/every-section property, not positional — no first/last section gets a
+    special note the way AIDA/PAS do (the general HUB FRAMEWORK line, asserted separately
+    below, covers it instead)."""
+    outline = [OutlineSection(title=t, atom_ids=[], goal="g") for t in ("Open", "Mid", "Close")]
+    directives = _build_extra_section_directives(_brief(framework="hub"), outline, "Mid", "Open")
+    assert not any("PROBLEM-OPENING" in d or "RESOLVE REQUIREMENT" in d for d in directives["Open"])
+    assert not any("PROBLEM-OPENING" in d or "RESOLVE REQUIREMENT" in d for d in directives["Close"])
+
+
 def test_generate_draft_prompt_carries_targeted_directives_and_aida_guidance():
     brief = _brief(framework="AIDA", required_h2s=[
         "Opening hook section", "Middle detail section", "Closing CTA section", "FAQ",
@@ -389,6 +411,61 @@ def test_generate_draft_non_aida_prompt_has_no_aida_guidance():
     full_prompt = "\n".join(calls)
     assert "AIDA FRAMEWORK" not in full_prompt
     assert "ATTENTION-HOOK REQUIREMENT" not in full_prompt
+
+
+def test_generate_draft_hub_prompt_carries_hub_guidance():
+    """AA-404 N0-N8 audit follow-up: hub used to get only the bare 'FRAMEWORK: hub' label —
+    now carries the real F8 rubric criteria (comprehensive coverage, distinct sub-questions)
+    on every batch call."""
+    outline = build_outline(_brief(framework="hub"))
+    calls = []
+
+    def _fake_invoke(prompt, model, max_tokens, system, account=None):
+        calls.append(prompt)
+        titles = [ln.split("SECTION: ")[1] for ln in prompt.splitlines() if ln.startswith("SECTION: ")]
+        text = "".join(_marker_block(t, f"body for {t} [R:atom_a]") for t in titles)
+        return _sonnet_result(text)
+
+    with patch("services.acp_produce.generation.invoke_claude", side_effect=_fake_invoke):
+        generate_draft(_brief(framework="hub"), outline, _atom_text())
+
+    full_prompt = "\n".join(calls)
+    assert "HUB FRAMEWORK (comprehensive topic coverage)" in full_prompt
+    assert "distinct sub-question" in full_prompt
+    # hub has no positional first/last notes (see test_build_extra_section_directives_hub_
+    # gets_no_positional_notes) -- confirm that holds at the full prompt level too
+    assert "PROBLEM-OPENING REQUIREMENT" not in full_prompt
+    assert "RESOLVE REQUIREMENT" not in full_prompt
+
+
+def test_generate_draft_pas_prompt_carries_pas_guidance_and_positional_notes():
+    """AA-404 N0-N8 audit follow-up: PAS used to get only the bare 'FRAMEWORK: PAS' label —
+    now carries the real F8 rubric criteria, with problem/resolve notes pinned to the
+    OUTLINE's actual first/last section (same positional-fix shape as AIDA)."""
+    brief = _brief(framework="PAS", required_h2s=[
+        "Opening problem section", "Middle detail section", "Closing resolve section", "FAQ",
+    ], atoms_by_section={
+        "Opening problem section": ["atom_a"],
+        "Middle detail section": ["atom_a", "atom_b", "atom_c"],
+        "Closing resolve section": [],
+        "FAQ": [],
+    })
+    outline = build_outline(brief)
+    calls = []
+
+    def _fake_invoke(prompt, model, max_tokens, system, account=None):
+        calls.append(prompt)
+        titles = [ln.split("SECTION: ")[1] for ln in prompt.splitlines() if ln.startswith("SECTION: ")]
+        text = "".join(_marker_block(t, f"body for {t} [R:atom_a]") for t in titles)
+        return _sonnet_result(text)
+
+    with patch("services.acp_produce.generation.invoke_claude", side_effect=_fake_invoke):
+        generate_draft(brief, outline, {"atom_a": "x", "atom_b": "y", "atom_c": "z"})
+
+    full_prompt = "\n".join(calls)
+    assert "PAS FRAMEWORK (Problem-Agitate-Solve)" in full_prompt
+    assert "PROBLEM-OPENING REQUIREMENT" in full_prompt
+    assert "RESOLVE REQUIREMENT" in full_prompt
 
 
 def test_generate_draft_output_can_pass_f3_when_writer_follows_targeted_directives():

@@ -88,6 +88,26 @@ def _tiktok_response():
     )
 
 
+def test_tiktok_system_prompt_requires_timed_beats_and_payoff():
+    """AA-404 N0-N8 audit follow-up: TikTok's writer prompt used to only ask for a bare HOOK
+    line — F8's hook_beats_payoff rubric (gates.py::FRAMEWORK_RUBRICS) also scores "timed
+    beats present" and "payoff lands", neither of which the writer was ever told to produce.
+    Same class of gap AA-404 already fixed for AIDA/facebook — closed here for tiktok's SCRIPT
+    block."""
+    blog = _blog_piece(_BLOG_BODY)
+    with patch("services.acp_produce.adapt.invoke_claude",
+               side_effect=[_fb_response(), _tiktok_response()]) as mock_invoke:
+        adapt_channels(blog, _ATOM_TEXT)
+
+    _, tiktok_call = mock_invoke.call_args_list
+    tiktok_system = tiktok_call.kwargs["system"]
+    assert "TIMED BEATS" in tiktok_system
+    assert "PAYOFF" in tiktok_system
+    # facebook's system prompt must NOT pick up tiktok-only instructions
+    fb_call, _ = mock_invoke.call_args_list
+    assert "TIMED BEATS" not in fb_call.kwargs["system"]
+
+
 def test_adapt_channels_both_succeed():
     blog = _blog_piece(_BLOG_BODY)
     with patch("services.acp_produce.adapt.invoke_claude",
