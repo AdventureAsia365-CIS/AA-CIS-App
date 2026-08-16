@@ -33,6 +33,16 @@ read per-call (not at import) so it can be overridden per-invocation for a side-
 side comparison script without mutating process-wide state. Nova Pro's code path is
 UNCHANGED — this is additive, not a replacement; every existing caller (gates.py's 3
 call sites) is untouched and still defaults to Nova Pro in production.
+
+AA-351-03 (16/08/2026) — added invoke_judge_gpt41() as a THIRD feature-flagged judge
+backend (GPT-4.1, direct OpenAI API, no Bedrock/AWS at all), while GPT-5.6 Sol
+(AA-351-02) stayed blocked on an AWS-side access denial ~50+ min after the agreement
+was accepted (see docs/implementation-notes/AA-351-gpt56-judge-trial.md) — GPT-4.1 was
+already live infrastructure (services/content_generation/judge_node.py, ADR-2026-031
+T3) so this backend needed no new AWS setup and could run immediately. JUDGE_MODEL now
+accepts "nova_pro" (default) | "gpt56" | "gpt41". Same additive guarantee as AA-351:
+Nova Pro's code path is untouched, GPT-5.6's is untouched, every gates.py call site
+still defaults to Nova Pro in production.
 """
 from __future__ import annotations
 
@@ -64,6 +74,19 @@ GPT56_SOL_INFERENCE_PROFILE = (
     "arn:aws:bedrock:us-west-1:786888028788:inference-profile/global.openai.gpt-5.6-sol"
 )
 
+# AA-351-03 (16/08/2026) — GPT-4.1, direct OpenAI API, NOT Bedrock/AWS at all. Reuses the
+# exact client pattern services/content_generation/judge_node.py already runs in production
+# for S1's brand-fit judge (openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"]), ADR-2026-031
+# T3) — same env var, same SDK call shape. Deliberately NOT routed through
+# shared/llm_client/client.py's LLMClient.generate() (that class's T1-T3 chain tries Bedrock
+# Sonnet/Haiku FIRST and only reaches GPT-4.1 as a last resort) — this backend is a direct,
+# single-shot OpenAI call every time it's selected, no Bedrock fallback attempted first, the
+# same "no fallback, just this one backend" shape invoke_judge_gpt56() above already uses for
+# its satellite call. Real OpenAI pricing verified 16/08/2026 (not guessed): $2.00/1M input,
+# $8.00/1M output — matches this repo's own shared/llm_client/client.py::COST_TABLE["gpt-4.1"]
+# exactly (0.002/0.008 per 1K tokens).
+GPT41_MODEL = "gpt-4.1"
+
 
 def invoke_judge(
     system_prompt: str, user_prompt: str, max_tokens: int = 2048, model: str | None = None,
@@ -76,12 +99,14 @@ def invoke_judge(
     output_tokens}.
 
     `model`: explicit override for AA-351's comparison script ("nova_pro" |
-    "gpt56"). None (the default — every gates.py call site) falls back to the
-    JUDGE_MODEL env var, itself defaulting to "nova_pro" — production
-    behavior is unchanged unless JUDGE_MODEL is set."""
+    "gpt56" | "gpt41"). None (the default — every gates.py call site) falls
+    back to the JUDGE_MODEL env var, itself defaulting to "nova_pro" —
+    production behavior is unchanged unless JUDGE_MODEL is set."""
     model = model or os.environ.get("JUDGE_MODEL", "nova_pro")
     if model == "gpt56":
         return invoke_judge_gpt56(system_prompt, user_prompt, max_tokens)
+    if model == "gpt41":
+        return invoke_judge_gpt41(system_prompt, user_prompt, max_tokens)
 
     client = boto3.client("bedrock-runtime", region_name=AWS_REGION)
     body = {
@@ -138,6 +163,43 @@ def invoke_judge_gpt56(system_prompt: str, user_prompt: str, max_tokens: int = 2
         "provider": "bedrock-satellite-acc3",
         "input_tokens": usage.get("inputTokens", 0),
         "output_tokens": usage.get("outputTokens", 0),
+    }
+
+
+def invoke_judge_gpt41(system_prompt: str, user_prompt: str, max_tokens: int = 2048) -> dict:
+    """AA-351-03 trial judge backend — GPT-4.1, direct OpenAI API (no Bedrock, no AWS
+    account/IAM chain at all). Uses the same `openai.OpenAI(api_key=os.environ
+    ["OPENAI_API_KEY"])` client construction services/content_generation/judge_node.py
+    already runs in production for S1's brand-fit judge -- not a new client library, not
+    a new env var. `temperature=0` matches the deterministic-judge convention the Nova
+    Pro and GPT-5.6 backends above both already use (their `inferenceConfig`); OpenAI's
+    Chat Completions API takes it as a top-level kwarg instead. Deliberately NOT imported
+    by anything in generation.py/content_generation — same isolation guarantee (module
+    docstring, ADR-2026-014/027 L3) the other two judge backends already honor."""
+    import openai
+
+    client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    resp = client.chat.completions.create(
+        model=GPT41_MODEL,
+        max_tokens=max_tokens,
+        temperature=0,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    )
+    text = resp.choices[0].message.content
+    usage = resp.usage
+    in_tok = usage.prompt_tokens if usage else 0
+    out_tok = usage.completion_tokens if usage else 0
+    logger.info("judge_llm_success", model=GPT41_MODEL, provider="openai",
+                in_tokens=in_tok, out_tokens=out_tok)
+    return {
+        "text": text,
+        "model_used": GPT41_MODEL,
+        "provider": "openai",
+        "input_tokens": in_tok,
+        "output_tokens": out_tok,
     }
 
 
