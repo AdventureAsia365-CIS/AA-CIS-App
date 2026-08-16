@@ -26,6 +26,7 @@ field instead of a new table, since that field already exists and was otherwise 
 """
 from __future__ import annotations
 
+import json
 from datetime import date
 from typing import Optional
 from uuid import UUID
@@ -46,10 +47,13 @@ from services.acp_planning.models import QuarterPlanNotApprovedError, Slot
 from services.acp_planning.runway import runway_map
 from services.acp_planning.tenant_config import TenantNotFoundError, fetch_tenant_planning_config
 from services.acp_produce.packets import (
+    PieceNotFoundError,
     PublishModeBlockedError,
     assemble_packet,
     create_packet,
     maybe_mark_packet_ready,
+    packet_pieces_review_complete,
+    set_piece_review_status,
 )
 from services.acp_produce.trust_ramp import BofuVetoBlockedError, confirm_ramp_transition
 
@@ -63,6 +67,19 @@ from services.acp_produce.trust_ramp import BofuVetoBlockedError, confirm_ramp_t
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/admin/produce", tags=["admin-produce"])
+
+
+def _parse_jsonb(value, default):
+    """AA-412: same defensive parse admin.py's own `_parse_jsonb()` uses — asyncpg may hand back
+    a jsonb column as an already-decoded dict/list or as a raw JSON string, depending on codec
+    setup; never assume one or the other."""
+    if value is None:
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        return json.loads(value)
+    return default
 
 
 class RunRequest(BaseModel):
@@ -236,7 +253,8 @@ async def get_produce_run(run_id: str, request: Request, x_admin_secret: str = H
     )
     pieces = await pool.fetch(
         """
-        SELECT piece_id, channel, status, held_reason, repair_count
+        SELECT piece_id, channel, status, held_reason, repair_count,
+               gate_ledger, brand_seo_audit, review_status, reviewed_by, reviewed_at
         FROM acp_deliver.pieces WHERE run_id = $1::uuid ORDER BY piece_id
         """,
         run_id,
@@ -257,7 +275,21 @@ async def get_produce_run(run_id: str, request: Request, x_admin_secret: str = H
         "created_at": run_row["created_at"].isoformat() if run_row["created_at"] else None,
         "completed_at": run_row["completed_at"].isoformat() if run_row["completed_at"] else None,
         "slots": [dict(s) for s in slots],
-        "pieces": [dict(p) for p in pieces],
+        "pieces": [
+            {
+                "piece_id": p["piece_id"],
+                "channel": p["channel"],
+                "status": p["status"],
+                "held_reason": p["held_reason"],
+                "repair_count": p["repair_count"],
+                "gate_ledger": _parse_jsonb(p["gate_ledger"], []),
+                "brand_seo_audit": _parse_jsonb(p["brand_seo_audit"], None),
+                "review_status": p["review_status"],
+                "reviewed_by": p["reviewed_by"],
+                "reviewed_at": p["reviewed_at"].isoformat() if p["reviewed_at"] else None,
+            }
+            for p in pieces
+        ],
         "packet": dict(packet_row) if packet_row else None,
     }
 
@@ -266,20 +298,98 @@ async def get_produce_run(run_id: str, request: Request, x_admin_secret: str = H
 async def list_pending_packets(request: Request, x_admin_secret: str = Header(None)):
     """Gate C review queue — packets with status='ready', not yet delivered. Read-only; the
     approve action below calls the real trust_ramp.confirm_ramp_transition() (AA-365), no gate
-    logic is reimplemented here."""
+    logic is reimplemented here. `approved_count` (AA-412) lets the overview table show review
+    progress ("2/4 approved") without a second round-trip per row."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
 
     rows = await pool.fetch(
         """
         SELECT p.packet_id::text, p.tenant_id, p.year, p.week, p.status, p.publish_mode,
-               (SELECT count(*) FROM acp_deliver.pieces pc WHERE pc.packet_id = p.packet_id) AS piece_count
+               (SELECT count(*) FROM acp_deliver.pieces pc WHERE pc.packet_id = p.packet_id) AS piece_count,
+               (SELECT count(*) FROM acp_deliver.pieces pc
+                WHERE pc.packet_id = p.packet_id AND pc.review_status = 'approved') AS approved_count
         FROM acp_deliver.packets p
         WHERE p.status = 'ready'
         ORDER BY p.created_at DESC
         """
     )
     return [dict(r) for r in rows]
+
+
+@router.get("/packets/{packet_id}/pieces")
+async def list_packet_pieces(packet_id: str, request: Request, x_admin_secret: str = Header(None)):
+    """AA-412: the content a Gate C reviewer actually needs to see before approving — real
+    `body_tagged`/`gate_ledger`/`brand_seo_audit` per piece, read from `acp_deliver.pieces`
+    (NOT `silver_aa_internal.review_queue` — that's the older N0-N6 HITL table, a different data
+    source entirely; see AA-412's own "Xác nhận" section)."""
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+
+    packet_row = await pool.fetchrow(
+        "SELECT packet_id::text FROM acp_deliver.packets WHERE packet_id = $1::uuid", packet_id,
+    )
+    if packet_row is None:
+        raise HTTPException(status_code=404, detail=f"Packet {packet_id} not found")
+
+    rows = await pool.fetch(
+        """
+        SELECT piece_id, channel, status, body_tagged, gate_ledger, brand_seo_audit,
+               held_reason, repair_count, review_status, reviewed_by, reviewed_at, review_note
+        FROM acp_deliver.pieces WHERE packet_id = $1::uuid ORDER BY channel, piece_id
+        """,
+        packet_id,
+    )
+    return [
+        {
+            "piece_id": r["piece_id"],
+            "channel": r["channel"],
+            "status": r["status"],
+            "body_tagged": r["body_tagged"],
+            "gate_ledger": _parse_jsonb(r["gate_ledger"], []),
+            "brand_seo_audit": _parse_jsonb(r["brand_seo_audit"], None),
+            "held_reason": r["held_reason"],
+            "repair_count": r["repair_count"],
+            "review_status": r["review_status"],
+            "reviewed_by": r["reviewed_by"],
+            "reviewed_at": r["reviewed_at"].isoformat() if r["reviewed_at"] else None,
+            "review_note": r["review_note"],
+        }
+        for r in rows
+    ]
+
+
+class PieceReviewRequest(BaseModel):
+    decision: str  # 'approve' | 'reject'
+    actor: str
+    note: Optional[str] = None
+
+
+_DECISION_TO_REVIEW_STATUS = {"approve": "approved", "reject": "rejected"}
+
+
+@router.post("/pieces/{piece_id}/review")
+async def review_piece(
+    piece_id: str, body: PieceReviewRequest, request: Request, x_admin_secret: str = Header(None),
+):
+    """AA-412 (docs/implementation-notes/AA-412.md D1/D2): records a per-piece human decision,
+    independent of the piece's gate outcome (`status`) and independent of the packet's ramp
+    (`publish_mode`) — this does NOT itself move anything on the ramp. A packet only becomes
+    eligible for `POST /packets/{id}/gate-c/approve` past 'propose_only' once every one of its
+    pieces has `review_status='approved'` (checked there, not here)."""
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+
+    review_status = _DECISION_TO_REVIEW_STATUS.get(body.decision)
+    if review_status is None:
+        raise HTTPException(status_code=400, detail=f"decision must be 'approve'/'reject', got {body.decision!r}")
+
+    try:
+        await set_piece_review_status(pool, piece_id, review_status, body.actor, body.note)
+    except PieceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    return {"piece_id": piece_id, "review_status": review_status}
 
 
 class GateCApproveRequest(BaseModel):
@@ -293,7 +403,13 @@ async def approve_gate_c(
 ):
     """Approves a ramp transition for `packet_id`. Thin wrapper over
     trust_ramp.confirm_ramp_transition() — that function already writes the decision-log entry
-    (acp_shared.audit_log) whether it succeeds or is blocked."""
+    (acp_shared.audit_log) whether it succeeds or is blocked.
+
+    AA-412 addition (docs/implementation-notes/AA-412.md D2): for any `mode` past
+    'propose_only', every piece assigned to this packet must already be individually
+    `review_status='approved'` (POST .../pieces/{id}/review) — the ramp mechanism itself
+    (`trust_ramp.confirm_ramp_transition()`) is unchanged; this is a pre-check one layer above
+    it, same shape as the existing BOFU pre-check inside that function."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
 
@@ -302,6 +418,16 @@ async def approve_gate_c(
     )
     if packet_row is None:
         raise HTTPException(status_code=404, detail=f"Packet {packet_id} not found")
+
+    if body.mode != "propose_only" and not await packet_pieces_review_complete(pool, packet_id):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Packet {packet_id}: not every piece has been individually approved yet — "
+                "review each piece (GET .../pieces, POST .../pieces/{id}/review) before "
+                f"advancing the packet past 'propose_only'."
+            ),
+        )
 
     async with pool.acquire() as conn:
         try:
@@ -317,6 +443,70 @@ async def approve_gate_c(
             raise HTTPException(status_code=400, detail=str(exc))
 
     return {"packet_id": packet_id, "mode": body.mode, "status": "transitioned"}
+
+
+@router.get("/runs")
+async def list_produce_runs(request: Request, x_admin_secret: str = Header(None)):
+    """AA-412 Phần B — history view. Lists every N7 run with a per-gate final-state pass/fail
+    summary (F1/F3/F4/F5/F8/F9...), same "final gate_ledger entry per gate" shape
+    `docs/claude_audit/AA-404-n7-run6-results.md` used for its own by-hand analysis — safe here
+    because `gates.py::run_gates()` resets `piece.gate_ledger = []` at the top of every repair
+    round (docs/implementation-notes/AA-412.md D6), so the persisted ledger is always exactly
+    one entry per gate, never a same-gate history to dedupe."""
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+
+    runs = await pool.fetch(
+        """
+        SELECT r.run_id::text, r.tenant_id, r.year, r.month, r.week, r.status,
+               r.created_at, r.completed_at,
+               count(p.piece_id) AS piece_count,
+               count(*) FILTER (WHERE p.status = 'passed') AS passed_count,
+               count(*) FILTER (WHERE p.status = 'held') AS held_count
+        FROM acp_shared.acp_v2_runs r
+        LEFT JOIN acp_deliver.pieces p ON p.run_id = r.run_id
+        GROUP BY r.run_id, r.tenant_id, r.year, r.month, r.week, r.status, r.created_at, r.completed_at
+        ORDER BY r.created_at DESC
+        """
+    )
+    if not runs:
+        return []
+
+    gate_rows = await pool.fetch(
+        """
+        SELECT p.run_id::text AS run_id, g.gate,
+               count(*) FILTER (WHERE (g.passed)::boolean) AS passed,
+               count(*) FILTER (WHERE NOT (g.passed)::boolean) AS failed
+        FROM acp_deliver.pieces p,
+             jsonb_to_recordset(p.gate_ledger) AS g(gate text, passed boolean)
+        WHERE p.run_id = ANY($1::uuid[])
+        GROUP BY p.run_id, g.gate
+        """,
+        [r["run_id"] for r in runs],
+    )
+    gate_summary_by_run: dict[str, dict[str, dict[str, int]]] = {}
+    for g in gate_rows:
+        gate_summary_by_run.setdefault(g["run_id"], {})[g["gate"]] = {
+            "passed": g["passed"], "failed": g["failed"],
+        }
+
+    return [
+        {
+            "run_id": r["run_id"],
+            "tenant_id": r["tenant_id"],
+            "year": r["year"],
+            "month": r["month"],
+            "week": r["week"],
+            "status": r["status"],
+            "triggered_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "completed_at": r["completed_at"].isoformat() if r["completed_at"] else None,
+            "piece_count": r["piece_count"],
+            "passed_count": r["passed_count"],
+            "held_count": r["held_count"],
+            "gate_summary": gate_summary_by_run.get(r["run_id"], {}),
+        }
+        for r in runs
+    ]
 
 
 __all__ = ["router"]
