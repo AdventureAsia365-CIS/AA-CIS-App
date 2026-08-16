@@ -76,16 +76,28 @@ const GATE_SHORT_LABEL: Record<string, string> = {
 // Column widths are set entirely by each table's own <colgroup> (percentages, always summing to
 // 100%) — these two style objects are just the shared cell chrome (padding/font/border), no
 // `width` here, so they can't fight the colgroup for column sizing under table-layout: fixed.
+// AA-412 follow-up (layout fixes round) — `overflow: hidden` + `whiteSpace: nowrap` added as the
+// BASE for every cell. Under `table-layout: fixed`, a <td>'s box width is rigid regardless of its
+// content's natural size, but CSS table cells default to `overflow: visible` — a Badge or long
+// string wider than its column's allotted % doesn't wrap into a taller row, it bleeds sideways
+// past the cell boundary and paints over the next column's content. That was the real cause of
+// the reported "columns overlapping" bug at narrower viewports, not the colgroup math itself
+// (which does sum to exactly 100%, confirmed previously). Clipping is the correct fallback here —
+// a badge with its right edge cut off is far better than one overlapping the next cell — and a
+// handful of cells that are SUPPOSED to wrap (Held Reason, Gate Detail) already override
+// `whiteSpace: "normal"` below, unaffected by this base change.
 const gateTh: React.CSSProperties = {
   padding: "10px 6px", fontSize: 10.5, fontWeight: 600,
   textTransform: "uppercase", letterSpacing: "0.04em",
   color: A.muted, textAlign: "center", background: A.bg,
   borderBottom: `1px solid ${A.line}`,
+  overflow: "hidden", whiteSpace: "nowrap",
 };
 
 const gateTd: React.CSSProperties = {
   padding: "11px 6px", fontSize: 11.5, color: A.body, textAlign: "center",
   borderBottom: `1px solid ${A.line2}`,
+  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
 };
 
 function orderedGates(summary: Record<string, GateSummaryEntry>): string[] {

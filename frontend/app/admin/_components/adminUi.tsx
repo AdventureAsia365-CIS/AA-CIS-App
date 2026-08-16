@@ -32,6 +32,12 @@ export const serif = "'Fraunces', Georgia, serif";
 export const mono  = "'JetBrains Mono', 'IBM Plex Mono', monospace";
 export const sans  = "'IBM Plex Sans', system-ui, sans-serif";
 
+// AA-412 follow-up (layout fixes round) — AdminSidebar's own width was a bare `220` literal with
+// no shared constant, so a viewport-covering element (e.g. a `position: fixed` modal) had no way
+// to know how much space to leave for it without either a portal-free DOM approach or duplicating
+// the number. Single source of truth now — AdminSidebar imports this instead of hardcoding it.
+export const SIDEBAR_WIDTH = 220;
+
 // ── Card ─────────────────────────────────────────────────────────────────────
 export function Card({ children, style = {}, dark = false }: {
   children: React.ReactNode; style?: React.CSSProperties; dark?: boolean;
