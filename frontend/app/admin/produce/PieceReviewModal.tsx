@@ -9,10 +9,19 @@
 // enabled once every piece is individually approved; the backend enforces the same rule
 // independently (POST .../gate-c/approve 409s otherwise) so this is UX convenience, not the only
 // guard.
+//
+// AA-412 follow-up (readability): full-screen dialog instead of a small centered modal — a
+// packet's 4 pieces × (content + 9-gate ledger + brand/SEO audit JSON) made the old fixed-width
+// modal a very long scroll with the Approve/Reject buttons drifting out of view. Layout is now a
+// 3-row flexbox: modal header and footer are flex items that never scroll (no manual `position:
+// sticky` needed for them — only the middle row scrolls), and each PieceCard's own header (badges
+// + Approve/Reject) is `position: sticky; top: 0` *within that scrolling middle row*, so it stays
+// pinned while its piece's content scrolls underneath, then hands off to the next piece's sticky
+// header. No content was removed or collapsed by default to make this fit — see PieceCard.
 
 import { useState, useEffect, useCallback } from "react";
 import { X, Check, XCircle, ChevronRight } from "lucide-react";
-import { A, sans, mono, Card, Btn, Badge, Spinner, TH, TD } from "../_components/adminUi";
+import { A, sans, mono, Btn, Badge, Spinner, TH, TD } from "../_components/adminUi";
 
 interface GateResult {
   gate: string;
@@ -66,7 +75,7 @@ function GateLedgerTable({ ledger }: { ledger: GateResult[] }) {
             <tr key={g.gate}>
               <td style={{ ...TD, fontFamily: mono, fontSize: 12 }}>{g.gate}</td>
               <td style={TD}>{g.passed ? <Badge color="green">Pass</Badge> : <Badge color="red">Fail</Badge>}</td>
-              <td style={{ ...TD, fontSize: 11.5, color: A.muted, maxWidth: 420 }}>
+              <td style={{ ...TD, fontSize: 11.5, color: A.muted }}>
                 {g.violations.length > 0 ? g.violations.join("; ") : "—"}
               </td>
             </tr>
@@ -100,9 +109,20 @@ function PieceCard({ piece, onReview }: {
   }
 
   return (
-    <Card style={{ marginBottom: 14 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+    <div style={{
+      border: `1px solid ${A.line}`, borderRadius: 12, marginBottom: 16,
+      background: A.card, overflow: "hidden",
+    }}>
+      {/* Sticky per-piece header — stays pinned to the top of the scrolling content area while
+          this piece's body/gate-ledger/audit scroll underneath, so Approve/Reject is always
+          reachable without scrolling back up. Next piece's own sticky header takes over the
+          instant it reaches the top (native stacking-context behavior, no JS needed). */}
+      <div style={{
+        position: "sticky", top: 0, zIndex: 2, background: A.card,
+        borderBottom: `1px solid ${A.line}`, padding: "12px 18px",
+        display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <button onClick={() => setExpanded(e => !e)} style={{
             background: "none", border: "none", cursor: "pointer", color: A.muted,
             display: "flex", alignItems: "center",
@@ -128,73 +148,75 @@ function PieceCard({ piece, onReview }: {
         </div>
       </div>
 
-      {showRejectInput && (
-        <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center" }}>
-          <input
-            value={rejectNote} onChange={e => setRejectNote(e.target.value)}
-            placeholder="Optional: why is this piece rejected?"
-            style={{
-              flex: 1, padding: "7px 10px", borderRadius: 7, border: `1px solid ${A.line}`,
-              fontSize: 12.5, fontFamily: sans,
-            }}
-          />
-          <Btn size="sm" variant="danger" disabled={busy !== null} onClick={handleReject}>
-            {busy === "reject" ? "Rejecting…" : "Confirm Reject"}
-          </Btn>
-        </div>
-      )}
-
-      {piece.review_status !== "pending" && piece.reviewed_by && (
-        <div style={{ marginTop: 8, fontSize: 11.5, color: A.muted }}>
-          {piece.review_status === "approved" ? "Approved" : "Rejected"} by {piece.reviewed_by}
-          {piece.reviewed_at && ` — ${new Date(piece.reviewed_at).toLocaleString()}`}
-          {piece.review_note && ` — "${piece.review_note}"`}
-        </div>
-      )}
-
-      {piece.held_reason && (
-        <div style={{
-          marginTop: 10, fontSize: 12, color: A.red, background: A.redTint,
-          padding: "8px 12px", borderRadius: 8,
-        }}>
-          Held: {piece.held_reason} (repaired {piece.repair_count}×)
-        </div>
-      )}
-
-      {expanded && (
-        <div style={{ marginTop: 14 }}>
-          <div style={{ fontSize: 11, fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
-            Content
+      <div style={{ padding: "14px 18px 18px" }}>
+        {showRejectInput && (
+          <div style={{ marginBottom: 10, display: "flex", gap: 8, alignItems: "center" }}>
+            <input
+              value={rejectNote} onChange={e => setRejectNote(e.target.value)}
+              placeholder="Optional: why is this piece rejected?"
+              style={{
+                flex: 1, padding: "7px 10px", borderRadius: 7, border: `1px solid ${A.line}`,
+                fontSize: 12.5, fontFamily: sans,
+              }}
+            />
+            <Btn size="sm" variant="danger" disabled={busy !== null} onClick={handleReject}>
+              {busy === "reject" ? "Rejecting…" : "Confirm Reject"}
+            </Btn>
           </div>
+        )}
+
+        {piece.review_status !== "pending" && piece.reviewed_by && (
+          <div style={{ marginBottom: 8, fontSize: 11.5, color: A.muted }}>
+            {piece.review_status === "approved" ? "Approved" : "Rejected"} by {piece.reviewed_by}
+            {piece.reviewed_at && ` — ${new Date(piece.reviewed_at).toLocaleString()}`}
+            {piece.review_note && ` — "${piece.review_note}"`}
+          </div>
+        )}
+
+        {piece.held_reason && (
           <div style={{
-            background: A.bg, border: `1px solid ${A.line}`, borderRadius: 8, padding: 14,
-            maxHeight: 340, overflowY: "auto", whiteSpace: "pre-wrap", fontSize: 12.5,
-            lineHeight: 1.6, color: A.body, marginBottom: 16,
+            marginBottom: 10, fontSize: 12, color: A.red, background: A.redTint,
+            padding: "8px 12px", borderRadius: 8,
           }}>
-            {piece.body_tagged || "(empty)"}
+            Held: {piece.held_reason} (repaired {piece.repair_count}×)
           </div>
+        )}
 
-          <div style={{ fontSize: 11, fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
-            Gate Ledger
+        {expanded && (
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
+              Content
+            </div>
+            <div style={{
+              background: A.bg, border: `1px solid ${A.line}`, borderRadius: 8, padding: 14,
+              whiteSpace: "pre-wrap", fontSize: 12.5,
+              lineHeight: 1.6, color: A.body, marginBottom: 16,
+            }}>
+              {piece.body_tagged || "(empty)"}
+            </div>
+
+            <div style={{ fontSize: 11, fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
+              Gate Ledger
+            </div>
+            <GateLedgerTable ledger={piece.gate_ledger} />
+
+            {piece.brand_seo_audit && (
+              <>
+                <div style={{ fontSize: 11, fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.08em", margin: "16px 0 6px" }}>
+                  Brand / SEO Audit
+                </div>
+                <pre style={{
+                  background: A.bg, border: `1px solid ${A.line}`, borderRadius: 8, padding: 12,
+                  fontSize: 11.5, fontFamily: mono, overflowX: "auto", margin: 0,
+                }}>
+                  {JSON.stringify(piece.brand_seo_audit, null, 2)}
+                </pre>
+              </>
+            )}
           </div>
-          <GateLedgerTable ledger={piece.gate_ledger} />
-
-          {piece.brand_seo_audit && (
-            <>
-              <div style={{ fontSize: 11, fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.08em", margin: "16px 0 6px" }}>
-                Brand / SEO Audit
-              </div>
-              <pre style={{
-                background: A.bg, border: `1px solid ${A.line}`, borderRadius: 8, padding: 12,
-                fontSize: 11.5, fontFamily: mono, overflowX: "auto", margin: 0,
-              }}>
-                {JSON.stringify(piece.brand_seo_audit, null, 2)}
-              </pre>
-            </>
-          )}
-        </div>
-      )}
-    </Card>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -223,6 +245,14 @@ export default function PieceReviewModal({ packetId, onClose, onPacketAdvanced }
   }, [packetId]);
 
   useEffect(() => { loadPieces(); }, [loadPieces]);
+
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
 
   async function handleReview(pieceId: string, decision: "approve" | "reject", note?: string) {
     const res = await fetch(`/api/admin/produce/pieces/${pieceId}/review`, {
@@ -266,13 +296,18 @@ export default function PieceReviewModal({ packetId, onClose, onPacketAdvanced }
   return (
     <div style={{
       position: "fixed", inset: 0, background: "rgba(31,41,51,0.55)", zIndex: 100,
-      display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "40px 20px", overflowY: "auto",
+      display: "flex", padding: 16,
     }}>
-      <div style={{ width: "100%", maxWidth: 860 }}>
+      {/* Full-screen dialog: 3-row flex column. Header/footer are ordinary flex items (never
+          scroll); only the middle row scrolls, which is what makes header/footer effectively
+          "sticky" without fighting position:sticky across the whole page. */}
+      <div style={{
+        flex: 1, display: "flex", flexDirection: "column", minHeight: 0,
+        background: A.bg, border: `1px solid ${A.line}`, borderRadius: 12, overflow: "hidden",
+      }}>
         <div style={{
-          display: "flex", alignItems: "center", justifyContent: "space-between",
-          background: A.card, borderRadius: "12px 12px 0 0", padding: "16px 20px",
-          border: `1px solid ${A.line}`, borderBottom: "none",
+          flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "space-between",
+          background: A.card, padding: "16px 24px", borderBottom: `1px solid ${A.line}`,
         }}>
           <div>
             <div style={{ fontSize: 15, fontWeight: 600, color: A.ink }}>Review Packet Pieces</div>
@@ -283,10 +318,7 @@ export default function PieceReviewModal({ packetId, onClose, onPacketAdvanced }
           </button>
         </div>
 
-        <div style={{
-          background: A.bg, border: `1px solid ${A.line}`, borderTop: "none",
-          borderRadius: "0 0 12px 12px", padding: 20,
-        }}>
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 20 }}>
           {loading && (
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: 20 }}>
               <Spinner size={18} /> <span style={{ fontSize: 13, color: A.muted }}>Loading pieces…</span>
@@ -303,12 +335,14 @@ export default function PieceReviewModal({ packetId, onClose, onPacketAdvanced }
           {!loading && pieces.length === 0 && !error && (
             <div style={{ fontSize: 13, color: A.muted, padding: "16px 0" }}>No pieces in this packet.</div>
           )}
+        </div>
 
-          {pieces.length > 0 && (
-            <div style={{
-              marginTop: 20, paddingTop: 16, borderTop: `1px solid ${A.line}`,
-              display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10,
-            }}>
+        {pieces.length > 0 && (
+          <div style={{
+            flexShrink: 0, background: A.card, borderTop: `1px solid ${A.line}`,
+            padding: "14px 24px",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
               <span style={{ fontSize: 12.5, color: A.body }}>
                 {approvedCount} / {pieces.length} pieces individually approved
               </span>
@@ -316,13 +350,13 @@ export default function PieceReviewModal({ packetId, onClose, onPacketAdvanced }
                 {advancing ? "Advancing…" : "Advance Packet to Approve-to-Publish"}
               </Btn>
             </div>
-          )}
-          {advanceError && (
-            <div style={{ fontSize: 12.5, color: A.red, background: A.redTint, padding: "8px 12px", borderRadius: 8, marginTop: 10 }}>
-              {advanceError}
-            </div>
-          )}
-        </div>
+            {advanceError && (
+              <div style={{ fontSize: 12.5, color: A.red, background: A.redTint, padding: "8px 12px", borderRadius: 8, marginTop: 10 }}>
+                {advanceError}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
