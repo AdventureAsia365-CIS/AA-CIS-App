@@ -74,6 +74,16 @@ piece-wide facts decided at generation time (section-length ownership, the
 single-atom ceiling, the CTA requirement, required headings) now survive
 every round, not just the round that happened to target their own gate.
 
+AA-415: real N7 run #6 (docs/claude_audit/AA-404-n7-run6-results.md) hit
+the exact gap the doc above deferred rather than guessed at — an F5_atom_
+density or F9_brand_seo_audit repair round writes brand-new prose to close
+a "too generic"/"under-cited" gap with no atom/fact text to check that
+prose against, and F1_grounding then fails for the FIRST time on the
+piece's LAST gate-stack check, after the repair budget is already spent.
+`invariants.atom_text_by_id` (same `text_by_id` dict `_f1`/`_f2` above
+already close over) closes it — every repair round now carries the same
+grounding awareness F1/F2 have always had.
+
 The `output_rules` pre-check above
 stays OUTSIDE this repair loop entirely — it runs before `run_gates()` is
 even called and short-circuits straight to `held` on failure; that gap is
@@ -200,7 +210,9 @@ async def run_piece_through_produce_gates(
         cta_target = brief.cta_target if brief else None
         url_alive = await _fetch_url_alive(db, tenant_id, tour_id) if tour_id else None
         effective_framework = _resolve_framework(channel, framework)
-        invariants = _build_repair_invariants(channel, effective_framework, brief, brand_rubric_text)
+        invariants = _build_repair_invariants(
+            channel, effective_framework, brief, brand_rubric_text, text_by_id
+        )
 
         def _f1(body: str) -> GateResult:
             return gate_grounding(body, valid_ids, text_by_id)
@@ -265,6 +277,7 @@ def _resolve_framework(channel: str, framework: str) -> str:
 
 def _build_repair_invariants(
     channel: str, effective_framework: str, brief: Optional[Brief], brand_rubric_text: str,
+    text_by_id: Optional[dict[str, str]] = None,
 ) -> PieceInvariants:
     """AA-404 (repair.py blind spot general fix, docs/implementation-notes/
     AA-404.md's "mở rộng" STEP 0 §4/§5): builds this piece's
@@ -285,7 +298,18 @@ def _build_repair_invariants(
     rubric too, not the generic `AA_BRAND_IDENTITY_PROMPT` `repair.py`
     hardcoded before this fix. Reuses the existing `PieceInvariants`
     mechanism (one more field) rather than adding a second, disconnected
-    parameter to `repair_piece()`."""
+    parameter to `repair_piece()`.
+
+    `text_by_id` (AA-415): the SAME `text_by_id` this call's own caller
+    (`run_piece_through_produce_gates()`) already threads into `_f1`'s
+    `gate_grounding()` and `_f2`'s `gate_banned_patterns()` closures above —
+    already in scope at this exact call site, exactly as AA-404's own
+    deferred-not-forgotten note anticipated (see
+    docs/claude_audit/AA-404-n7-run6-results.md, Step 4 §F1_grounding).
+    Optional/default `None` (mapped to `{}`) so every AA-404-era caller/test
+    of this function that doesn't pass it keeps producing the exact same
+    `PieceInvariants` as before — additive only, same contract every other
+    field here follows."""
     long_title: Optional[str] = None
     short_para_title: Optional[str] = None
     aida_opening: Optional[str] = None
@@ -314,6 +338,7 @@ def _build_repair_invariants(
         aida_opening_section_title=aida_opening,
         aida_closing_section_title=aida_closing,
         brand_rubric_text=brand_rubric_text,
+        atom_text_by_id=text_by_id or {},
     )
 
 
