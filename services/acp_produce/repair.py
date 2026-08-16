@@ -190,6 +190,24 @@ class PieceInvariants:
     # site (this repo's own tests included) that doesn't set this field keeps
     # repairing against exactly the prompt it always has.
     brand_rubric_text: str = AA_BRAND_IDENTITY_PROMPT
+    # AA-415: the exact gap AA-404's own STEP-0-mở-rộng doc named and
+    # explicitly deferred rather than guessed at ahead of real data (see
+    # docs/claude_audit/AA-404-n7-run6-results.md) — real N7 run #6 confirmed
+    # it: a repair round targeting F5_atom_density or F9_brand_seo_audit
+    # writes brand-new prose to close a "too generic" / "under-cited" gap,
+    # but repair_piece() had no atom/fact text to check that new prose
+    # against, so it either added an untagged claim or tagged a claim the
+    # cited id's text doesn't actually support — F1_grounding then fails for
+    # the FIRST time on the piece's very last gate-stack check, after the
+    # repair budget (sized off the ORIGINAL failing-gate count) is already
+    # spent, so the piece never gets a dedicated F1 repair round. Same shape
+    # as `required_h2s`/`brand_rubric_text` above: this is the SAME `dict[str,
+    # str]` `gate_grounding()` (F1) and `gate_banned_patterns()` (F2) already
+    # take as `text_by_id` — no new data plumbing, just carried into
+    # `PieceInvariants` too. Defaults to `{}` (via `field`) so every
+    # pre-AA-415 call site produces no grounding guidance, same
+    # additive-only contract every other field here already follows.
+    atom_text_by_id: dict[str, str] = field(default_factory=dict)
 
 
 def _currently_cited_atom_ids(body_tagged: str) -> list[str]:
@@ -205,6 +223,45 @@ def _currently_cited_atom_ids(body_tagged: str) -> list[str]:
             seen_set.add(atom_id)
             seen.append(atom_id)
     return seen
+
+
+def _build_grounding_note(body_tagged: str, invariants: PieceInvariants) -> str:
+    """AA-415: the F1_grounding-awareness line, folded into STRUCTURAL
+    CONTEXT like every other invariant above rather than a separate prompt
+    section — F5's ("add a specific, verifiable detail") and F9's ("too
+    generic") violations both push repair toward writing brand-new prose,
+    and the real regression (docs/claude_audit/AA-404-n7-run6-results.md)
+    was that new prose either had no provenance tag at all or was tagged
+    with a claim its cited id's own text doesn't support. Listing the known
+    atom/fact text here lets repair pull a REAL detail instead of inventing
+    one, and lets it self-check a claim against the id it's about to cite.
+
+    When `invariants.single_atom_required` is set, only the atom(s) already
+    cited in the CURRENT body are listed — showing the full pool here would
+    directly contradict that invariant's own "cite ONLY these ids" line
+    (`_build_structural_context()` above), which fires from the same
+    `lines` list."""
+    pool = invariants.atom_text_by_id
+    if invariants.single_atom_required:
+        cited = _currently_cited_atom_ids(body_tagged)
+        pool = {aid: pool[aid] for aid in cited if aid in pool}
+        if not pool:
+            return (
+                "- Grounding (F1_grounding gate): do not add any NEW [R:atom_id]/[F:fact_id] "
+                "citation — this piece's single-atom ceiling (above) already covers which id(s) "
+                "you may cite."
+            )
+
+    atom_lines = "\n".join(f"  [R:{aid}]: {text}" for aid, text in pool.items())
+    return (
+        "- Grounding (F1_grounding gate): if a fix requires writing a NEW sentence with a number, "
+        "date, price, or other verifiable claim, that sentence MUST carry a [R:atom_id]/[F:fact_id] "
+        "tag from the list below, AND the claim must actually be supported by that id's own text — "
+        "never invent a claim with no tag, and never attach a tag to a claim its text doesn't "
+        "support. Prefer pulling a real specific detail from one of these over writing generic "
+        "prose. A sentence with no verifiable claim needs no tag. Known atoms/facts for this "
+        f"piece:\n{atom_lines}"
+    )
 
 
 def _build_structural_context(body_tagged: str, invariants: Optional[PieceInvariants]) -> str:
@@ -265,6 +322,8 @@ def _build_structural_context(body_tagged: str, invariants: Optional[PieceInvari
             "(AIDA framework) — it must end on exactly ONE clear call to action. Don't introduce a "
             "second CTA or remove the existing one while fixing an unrelated violation."
         )
+    if invariants.atom_text_by_id:
+        lines.append(_build_grounding_note(body_tagged, invariants))
 
     if not lines:
         return ""

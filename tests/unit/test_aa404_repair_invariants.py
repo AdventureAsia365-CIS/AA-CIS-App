@@ -132,3 +132,27 @@ def test_empty_required_h2s_produces_no_section_ownership_crash():
     assert inv.long_section_title is None
     assert inv.short_para_section_title is None
     assert inv.required_h2s == []
+
+
+# =================================================================== AA-415: atom_text_by_id
+
+
+def test_text_by_id_passed_through_to_atom_text_by_id():
+    """AA-415: `text_by_id` is the SAME dict `run_piece_through_produce_
+    gates()` already threads into F1/F2's closures -- this function must
+    just carry it into `PieceInvariants.atom_text_by_id` unchanged, for
+    every channel, not just blog."""
+    text_by_id = {"atom_a": "Sapa sits at 1,500m elevation.", "atom_b": "The trek covers 22km."}
+    inv = _build_repair_invariants("blog", "hub", _brief(), _RUBRIC, text_by_id)
+
+    assert inv.atom_text_by_id == text_by_id
+
+
+def test_text_by_id_omitted_defaults_to_empty_dict_not_none():
+    """Every pre-AA-415 caller/test of this function (every test above this
+    section) omits the new param -- must degrade to `{}`, never `None`, so
+    `repair.py`'s own `if invariants.atom_text_by_id:` truthiness check
+    behaves the same as "field never set" (the dataclass default)."""
+    inv = _build_repair_invariants("blog", "hub", _brief(), _RUBRIC)
+
+    assert inv.atom_text_by_id == {}

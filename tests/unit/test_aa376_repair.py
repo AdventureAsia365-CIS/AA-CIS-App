@@ -302,6 +302,97 @@ def test_repair_piece_defaults_to_generic_brand_prompt_when_invariants_has_no_ru
     assert AA_BRAND_IDENTITY_PROMPT.strip() in mock_invoke.call_args.kwargs["system"]
 
 
+# =================================================================== AA-415: atom_text_by_id grounding note
+#
+# Real N7 run #6 (docs/claude_audit/AA-404-n7-run6-results.md): a piece
+# that passed F1_grounding on its first draft failed it for the first time
+# only after 2 rounds of F9_brand_seo_audit repair + 1 round of
+# F5_atom_density repair rewrote prose with no atom text to check it
+# against. `PieceInvariants.atom_text_by_id` (the same `text_by_id` dict F1/
+# F2 already use) closes that gap for every repair round, not just F5/F9's
+# -- repair_piece() has no gate-specific code path to begin with, so the
+# fix is necessarily general (matches the AA-404 doc's own "extend it to
+# carry atom_text_by_id into every repair round regardless of which gate
+# triggered it" recommendation).
+
+def test_repair_prompt_includes_grounding_note_when_atom_text_by_id_set():
+    """An F5_atom_density violation (the real trigger in run #6) must see
+    the known atom/fact text and the provenance-tag instruction, so a new
+    "add a specific detail" sentence can be grounded instead of invented."""
+    body = "## Trail\n\nMost travellers have no idea South Korea has trails like this."
+    invariants = PieceInvariants(
+        channel="blog",
+        atom_text_by_id={"atom_x": "The Sanmani Trail spans 42km through three provinces."},
+    )
+    f5_violation = (
+        "words 0-300: zero atom/fact citations in this stretch -- add a specific, verifiable "
+        "detail or cut it"
+    )
+
+    with patch("services.acp_produce.repair.invoke_claude", return_value=_sonnet_result(body)) as mock_invoke:
+        repair_piece(body, [f5_violation], invariants=invariants)
+
+    prompt = mock_invoke.call_args.args[0]
+    assert "STRUCTURAL CONTEXT" in prompt
+    assert "Grounding (F1_grounding gate)" in prompt
+    assert "[R:atom_x]: The Sanmani Trail spans 42km through three provinces." in prompt
+    assert "never invent a claim with no tag" in prompt
+
+
+def test_repair_prompt_includes_grounding_note_when_f9_violation_triggers_round():
+    """Same note must appear when the round's OWN targeted violation is F9
+    (brand/SEO), not F5 -- the note is unconditional on
+    `atom_text_by_id`, not gated to a specific violation string, matching
+    every other STRUCTURAL CONTEXT line's "regardless of which violation"
+    contract."""
+    body = "Sunrise over the ridgeline. Design This Journey."
+    invariants = PieceInvariants(
+        channel="blog", atom_text_by_id={"atom_y": "Sunrise at Sanmani Ridge begins at 05:42 in June."},
+    )
+    f9_violation = "audit flagged: GENERIC_AI_WORDING -- lacks specific, verifiable details"
+
+    with patch("services.acp_produce.repair.invoke_claude", return_value=_sonnet_result(body)) as mock_invoke:
+        repair_piece(body, [f9_violation], invariants=invariants)
+
+    prompt = mock_invoke.call_args.args[0]
+    assert "Grounding (F1_grounding gate)" in prompt
+    assert "[R:atom_y]" in prompt
+
+
+def test_repair_prompt_no_grounding_note_when_atom_text_by_id_empty():
+    """Default `PieceInvariants()` (`atom_text_by_id={}`, every pre-AA-415
+    call site) must produce no grounding note at all -- additive-only,
+    same contract every other field follows."""
+    invariants = PieceInvariants(channel="blog")
+    with patch("services.acp_produce.repair.invoke_claude", return_value=_sonnet_result("fixed")) as mock_invoke:
+        repair_piece("some body", ["some violation"], invariants=invariants)
+
+    prompt = mock_invoke.call_args.args[0]
+    assert "Grounding (F1_grounding gate)" not in prompt
+
+
+def test_repair_prompt_grounding_note_restricted_to_cited_atom_when_single_atom_required():
+    """A facebook hook_story_cta piece (single_atom_required=True) must NOT
+    be shown atoms outside its single-atom ceiling -- that would directly
+    contradict the "cite ONLY [R:atom_1]" line from the same STRUCTURAL
+    CONTEXT block. Only the atom(s) already cited in the CURRENT body are
+    listed, even though `atom_text_by_id` carries the whole pool."""
+    body = "Sunrise over the old quarter [R:atom_1]. Design This Journey."
+    invariants = PieceInvariants(
+        channel="facebook", single_atom_required=True, cta_required=True,
+        atom_text_by_id={
+            "atom_1": "Sunrise over Hoi An's old quarter begins at 05:50.",
+            "atom_2": "The Thu Bon river floods seasonally in October.",
+        },
+    )
+    with patch("services.acp_produce.repair.invoke_claude", return_value=_sonnet_result(body)) as mock_invoke:
+        repair_piece(body, ["audit flagged: GENERIC_AI_WORDING"], invariants=invariants)
+
+    prompt = mock_invoke.call_args.args[0]
+    assert "[R:atom_1]: Sunrise over Hoi An's old quarter begins at 05:50." in prompt
+    assert "atom_2" not in prompt
+
+
 def test_repair_piece_uses_real_tenant_brand_rubric_from_invariants():
     """AA-404 F9 deep-dive TL;DR #1: E5 repair must rewrite against the SAME
     real per-tenant rubric F9's judge scores the repaired piece against —
