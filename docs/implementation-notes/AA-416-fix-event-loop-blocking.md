@@ -134,24 +134,33 @@ async-to-thread-bedrock`, off `main` @ `4092933`. Implemented 16/08/2026.
      chance to run until the full 0.5s had elapsed** (test asserts this, passes) —
      confirms the positive test is exercising a real difference in event-loop behavior,
      not a no-op.
-3. **Real N7 week run against live ECS: NOT DONE THIS SESSION — blocked on merge.**
-   Deploy only happens on push to `main` (post-ADR-2026-023, single pipeline, no separate
-   "Deploy Dev" workflow left to run ahead of merge) — and this repo's merge step is
-   explicitly reserved for Nghiep ("KHÔNG tự merge", both this issue's task prompt and
-   the repo-wide CLAUDE.md git rules). This step needs Nghiep to merge PR #174 (or
-   approve auto-merge once CI is green), after which the real-run verification (trigger
-   a new, not-yet-run week per Run History, watch ALB health-check + ECS task stability
-   throughout) can happen — either by Nghiep or by continuing this session against the
-   deployed build.
-4. **CI / deploy digest check: PENDING**, same reason as #3 — will run automatically on
-   the PR (Lint, Security Audit, Unit Tests, Integration Tests, Docker Build Check), but
-   the ECS digest / `:latest` match check only makes sense after merge+deploy.
+3. **Real N7 week run against live ECS: PENDING — deploy is live, run not yet triggered.**
+   PR #174 merged (squash, commit `50f40ff`) 16/08/2026 on Nghiep's explicit go-ahead
+   ("ci green thì merge luôn") once all 5 required checks passed. `Deploy Dev` (a real
+   dedicated pipeline does still exist for this repo, run
+   [31957253331](https://github.com/AdventureAsia365-CIS/AA-CIS-App/actions/runs/31957253331))
+   ran automatically on the push to `main` and completed clean: ECR build+push, ECS
+   deploy (`Wait stable` + `Smoke test` both passed), Lambda deploy, Vercel deploy hook —
+   all 4 jobs green. Confirmed live:
+   - `aws ecs describe-services`: task def `aa-cis-dev-api:104`, rollout `COMPLETED`,
+     desired=1/running=1.
+   - Running task's container image digest (`aws ecs describe-tasks`) —
+     `sha256:424d2fb...ea59bb6` — matches `aws ecr describe-images --image-ids
+     imageTag=latest` EXACTLY, tagged `dev-50f40ff1f69c...` (the merge commit hash) —
+     confirms the deployed build really is this fix, not a stale image.
+   - `curl https://api-cis.lumiguides.it.com/health` → `200 {"status":"ok",...}` in
+     0.76s, task `healthStatus=HEALTHY`.
+   The fix is live in Dev. What's NOT yet done: actually triggering a real N7 week run
+   against this build and watching ALB health-check/ECS task stability throughout (the
+   task's original step 3) — that's a real, paid, ~30-40 min Bedrock run and wasn't part
+   of what this session's merge-and-monitor instruction covered. Flagging as the next
+   action rather than assuming it should run unprompted.
+4. **CI / deploy digest check: DONE** — see the ECR/ECS digest match above.
 
 ## Next step for Nghiep
 
-PR #174 (branch `feature/aa-416-async-to-thread-bedrock`) is open, not merged. Once CI is
-green and you merge (or enable auto-merge), the real-N7-run verification (step 3 above)
-should be run against the newly deployed build before this issue is considered fully
-verified — I can pick that up in a follow-up session once it's deployed, or you can run
-it directly (trigger a new week's N7 run, watch for ALB timeouts same as the 4 prior
-incidents).
+Fix is merged and deployed to Dev, verified live (digest match + healthy task + working
+`/health`). The one remaining verify step from the original task is triggering a real,
+not-yet-run N7 week (check Run History first) and watching for ALB timeouts throughout —
+say the word and I'll run it, or you can trigger it yourself and I'll watch CloudWatch/
+ECS alongside.
