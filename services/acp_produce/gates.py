@@ -438,7 +438,11 @@ FRAMEWORK_RUBRICS: dict[str, list[str]] = {
     "hook_beats_payoff": ["hook stated", "timed beats present", "payoff lands"],
     "reader_as_hero": ["reader is the subject, not the brand", "single CTA"],
 }
-_DEFAULT_FRAMEWORK_RUBRIC = ["structure matches the stated framework"]
+# AA-382: exported (no leading underscore) — repair.py imports this alongside
+# FRAMEWORK_RUBRICS so a repair round targeting an F8 violation can see the
+# framework's FULL rubric, not just the one failing criterion's bare name
+# (see repair.py::PieceInvariants.framework_rubric_items).
+DEFAULT_FRAMEWORK_RUBRIC = ["structure matches the stated framework"]
 
 # AA-396 follow-up: "ends with CTA" pulled out of hook_story_cta's Nova Pro
 # rubric and made deterministic. Real N7 data (docs/implementation-notes/
@@ -477,18 +481,41 @@ def _ends_with_cta(piece_body: str) -> bool:
     last_para = body.split("\n\n")[-1]
     return bool(_CTA_PHRASE_RE.search(last_para))
 
-def _format_audit_reason(failure_codes: list[str], notes: Optional[str]) -> str:
+def _format_audit_reason(
+    failure_codes: list[str], notes: Optional[str], flagged_phrases: Optional[list[str]] = None,
+) -> str:
     """AA-396: build the repair-visible reason string for a failed F9 audit
     (blog or social). Previously `", ".join(failure_codes) or audit.get("notes")`
     dropped `notes` entirely whenever any failure_codes existed — repair_fn
     (repair.py) only ever saw the terse code list, never the judge's actual
     explanation. `notes` is now appended alongside the codes, not used only
-    as a fallback when codes is empty."""
+    as a fallback when codes is empty.
+
+    `flagged_phrases` (AA-382, keyword-only, defaults to `None` so every
+    pre-AA-382 caller keeps producing the exact same string): the judge's own
+    verbatim quote(s) of the offending text for a SUMMARY_OFF_BRAND/
+    GENERIC_AI_WORDING code (`audit["flagged_phrases"]`, AA-404 PR #153 fix
+    #3 — captured into the audit dict since then but never threaded past it
+    into `result.violations`, the only channel `repair_fn` actually reads).
+    Real evidence this gap mattered (docs/claude_audit/AA-404-n7-run6-
+    results.md, F9_brand_seo_audit_social): 3 repair rounds on the same
+    piece each flagged a DIFFERENT phrase and never converged — repair was
+    never told which exact phrase the judge meant, only a failure code name
+    plus a free-text `notes` summary, so it had to guess where to intervene.
+    Appended here (not swapped in for codes/notes) so the fix is additive:
+    every existing caller/test asserting a substring of the old format still
+    matches."""
     codes = ", ".join(failure_codes)
     notes = (notes or "").strip()
     if codes and notes:
-        return f"{codes} -- {notes}"
-    return codes or notes or "(no reason given)"
+        reason = f"{codes} -- {notes}"
+    else:
+        reason = codes or notes or "(no reason given)"
+    phrases = [p for p in (flagged_phrases or []) if p]
+    if phrases:
+        quoted = "; ".join(f'"{p}"' for p in phrases)
+        reason += f" -- exact flagged phrase(s): {quoted}"
+    return reason
 
 
 _JUDGE_SYSTEM_PROMPT = (
@@ -515,7 +542,7 @@ def gate_framework(piece_body: str, framework: str) -> GateResult:
     if framework == "hook_story_cta" and not _ends_with_cta(piece_body):
         violations.append("framework criterion failed: ends with CTA")
 
-    rubric_items = FRAMEWORK_RUBRICS.get(framework, _DEFAULT_FRAMEWORK_RUBRIC)
+    rubric_items = FRAMEWORK_RUBRICS.get(framework, DEFAULT_FRAMEWORK_RUBRIC)
     contract = json.dumps({
         "items": [{"criterion": "str", "score": "1|0",
                    "evidence": "exact quote from the piece, or empty string if score is 0"}],
@@ -590,7 +617,7 @@ BRAND_SEO_FAILURE_CODES = [
 # specific, verifiable, on-brand prose, not generic filler. Using the judge's
 # own real false positive as the calibration anchor is deliberate: it targets
 # the exact miscalibration observed, not a guessed-at one.
-_GENERIC_AI_WORDING_ANCHOR = (
+GENERIC_AI_WORDING_ANCHOR = (
     "\n\nWHAT COUNTS AS GENERIC_AI_WORDING (concrete anchor, not a vague vibe check):\n"
     "- BAD (generic -- flag this): \"Experience the best of South Korea's rich culture and stunning "
     "landscapes on this unforgettable journey.\" -- templated superlatives, no concrete detail, "
@@ -633,7 +660,7 @@ def gate_brand_seo_audit(piece_body: str, brand_rubric_text: str) -> tuple[GateR
     `aa_internal`'s `'default'` row empty and its other 6 rows mis-attached test/demo data for
     other (fictional B2B demo) tenants — that content has since been (a) populated with
     `aa_internal`'s real brand voice on the `'default'` row and (b) had the 6 mis-attached rows
-    removed (same session as this wiring). See `_GENERIC_AI_WORDING_ANCHOR`
+    removed (same session as this wiring). See `GENERIC_AI_WORDING_ANCHOR`
     above for the concrete good/bad examples still injected directly into the prompt regardless
     of rubric source — that mitigation stays, this is additive on top of it, not a replacement.
 
@@ -652,7 +679,7 @@ def gate_brand_seo_audit(piece_body: str, brand_rubric_text: str) -> tuple[GateR
     user_prompt = (
         f"PIECE:\n{piece_body}\n\n"
         f"BRAND RUBRIC:\n{brand_rubric_text}\n"
-        f"{_GENERIC_AI_WORDING_ANCHOR}\n"
+        f"{GENERIC_AI_WORDING_ANCHOR}\n"
         "Audit in this order: product truth -> brand fit -> trip type -> highlights -> "
         "readability -> SEO -> publish readiness. Score every field 1 or 0. Use ONLY the "
         f"listed failure codes: {BRAND_SEO_FAILURE_CODES}. If you use SUMMARY_OFF_BRAND or "
@@ -681,7 +708,7 @@ def gate_brand_seo_audit(piece_body: str, brand_rubric_text: str) -> tuple[GateR
     passed = status == "pass"
     violations = []
     if not passed:
-        reason = _format_audit_reason(failure_codes, audit.get("notes"))
+        reason = _format_audit_reason(failure_codes, audit.get("notes"), flagged_phrases)
         violations = [f"audit {status}: {reason}"]
     return GateResult(gate="F9_brand_seo_audit", passed=passed, violations=violations), audit
 
@@ -764,7 +791,7 @@ def gate_brand_seo_audit_social(
     user_prompt = (
         f"PIECE ({channel}):\n{piece_body}\n\n"
         f"BRAND RUBRIC:\n{brand_rubric_text}\n"
-        f"{_GENERIC_AI_WORDING_ANCHOR}\n"
+        f"{GENERIC_AI_WORDING_ANCHOR}\n"
         "Score every field 1 or 0. Use ONLY the listed failure codes: "
         f"{SOCIAL_SEO_FAILURE_CODES}. If you use SUMMARY_OFF_BRAND or GENERIC_AI_WORDING, you MUST "
         "quote the exact offending phrase in `flagged_phrases` -- one entry per phrase. The brand's "
@@ -802,7 +829,7 @@ def gate_brand_seo_audit_social(
     passed = status == "pass"
     violations = []
     if not passed:
-        reason = _format_audit_reason(failure_codes, audit.get("notes"))
+        reason = _format_audit_reason(failure_codes, audit.get("notes"), flagged_phrases)
         violations = [f"audit {status}: {reason}"]
     return GateResult(gate="F9_brand_seo_audit_social", passed=passed, violations=violations), audit
 

@@ -115,7 +115,8 @@ from typing import Optional
 import asyncpg
 
 from services.acp_planning.constants import FRAMEWORK_TABLE
-from services.acp_produce.gates import (gate_atom_density, gate_banned_patterns,
+from services.acp_produce.gates import (DEFAULT_FRAMEWORK_RUBRIC, FRAMEWORK_RUBRICS,
+                                          gate_atom_density, gate_banned_patterns,
                                           gate_brand_seo_audit, gate_brand_seo_audit_social,
                                           gate_brief_compliance, gate_faq_dedup, gate_framework,
                                           gate_grounding, gate_route_to_sellable,
@@ -309,7 +310,17 @@ def _build_repair_invariants(
     Optional/default `None` (mapped to `{}`) so every AA-404-era caller/test
     of this function that doesn't pass it keeps producing the exact same
     `PieceInvariants` as before — additive only, same contract every other
-    field here follows."""
+    field here follows.
+
+    `framework`/`framework_rubric_items` (AA-382): `effective_framework` is
+    already this function's own parameter (the resolved key, never the
+    caller's raw blog `framework` string — same value `_f8`'s own closure in
+    `run_piece_through_produce_gates()` scores against), so no new parameter
+    is needed — just look it up in `FRAMEWORK_RUBRICS` (gates.py) the same
+    way `gate_framework()` itself does. Every framework key resolves to
+    something (`DEFAULT_FRAMEWORK_RUBRIC` covers any key not in the table,
+    same fallback `gate_framework()` uses), so this is unconditional, unlike
+    the `channel == "blog"` guard above."""
     long_title: Optional[str] = None
     short_para_title: Optional[str] = None
     aida_opening: Optional[str] = None
@@ -339,6 +350,8 @@ def _build_repair_invariants(
         aida_closing_section_title=aida_closing,
         brand_rubric_text=brand_rubric_text,
         atom_text_by_id=text_by_id or {},
+        framework=effective_framework,
+        framework_rubric_items=FRAMEWORK_RUBRICS.get(effective_framework, DEFAULT_FRAMEWORK_RUBRIC),
     )
 
 
