@@ -114,10 +114,28 @@ or business-logic changes, layout/CSS/component-structure only, in
     committed to git — this repo only force-tracks `implementation-notes/*.md`, not images
     under it; same convention this note follows). Also sent inline via SendUserFile this
     session.
-- **Not done in this session (per the task's own instruction and the mid-turn amendment):**
-  live AWS ECS/RDS state was NOT changed by this task (both were already running —
-  `aws ecs describe-services`/`aws rds describe-db-instances` showed `desired=1/running=1` and
-  `available` respectively before any work started here, contrary to this repo's `CLAUDE.md`
-  header note claiming AWS was stopped after S84 — that note is stale, not corrected here,
-  out of scope). PR merge + Dev deploy monitoring is covered separately, see PR description /
-  chat summary for the digest and live-test handoff to Nghiệp.
+- **Not done in this session (per the task's own instruction):** live AWS ECS/RDS state was NOT
+  changed by this task's own verification steps (both were already running before any work
+  started here — `aws ecs describe-services`/`aws rds describe-db-instances` showed
+  `desired=1/running=1` and `available` respectively — contrary to this repo's `CLAUDE.md`
+  header note claiming AWS was stopped after S84; that note is stale, not corrected here, out
+  of scope).
+
+## PR / merge / deploy (mid-turn amendment — see task doc's "Mid-turn amendment" section)
+
+- PR #166: https://github.com/AdventureAsia365-CIS/AA-CIS-App/pull/166 — merged (squash) into
+  `main` after all 5 required checks passed green (Lint/Security Audit/Unit Tests/Integration
+  Tests/Docker Build Check), per Nghiệp's mid-turn instruction to merge once CI is green rather
+  than waiting for a manual click.
+- Deploy Dev (workflow run 31933926505) completed successfully: Vercel frontend redeploy, ECR
+  image build/push, ECS Dev rollout, Lambda redeploy — all green.
+- ECS digest verified matching `:latest` post-deploy (same pattern as AA-412):
+  - Task def: `aa-cis-dev-api:98`, image `...aa-cis-dev-api:latest`
+  - Running task's `imageDigest`: `sha256:6959a3cefa216dc04334f86d88501e67414dc64e416b6668eb3a22fd92e27604`
+  - ECR `latest` tag digest: same hash, pushed 2026-08-16T14:29:54+07:00 — confirms the running
+    task is this PR's build, not a stale cached one.
+  - `deployments[0].rolloutState`: `COMPLETED`.
+- **Still open — Nghiệp's own real-browser pass.** Deploy is live at
+  `aa-cis.lumiguides.it.com/admin/produce`; per the original task's step 5, "Done" is not
+  self-declared here. Please click through the Gate C modal and Run History tab there and let
+  me know if anything doesn't match the screenshots above.
