@@ -112,10 +112,23 @@ _LONG_SECTION_NOTE = (
 # sentence; a blog piece is drafted across several independently-batched H2
 # sections, so the hook/CTA requirement has to be pinned to whichever section
 # is actually first/last in the OUTLINE, not to "the first/last sentence of
-# this batch's response"). hub/PAS have the same bare-label gap but no real
-# failure yet -- deliberately not touched here, flagged as a follow-up in the
-# AA-404 PR description rather than guessed at ahead of data (same
-# Mistake-to-Rule stance ADR-2026-009 already established for F9-social).
+# this batch's response").
+#
+# hub/PAS originally had the same bare-label gap, deliberately left untouched
+# at the time ("no real failure yet... flagged as a follow-up," this exact
+# comment, pre-AA-404-N0-N8-audit) -- that call is revisited here per the
+# N0-N8 defense-layer audit (docs/claude_audit/AA-404-N0-N8-defense-layer-
+# audit.md, Q1's #2 finding), on real data the original deferral didn't have:
+# F8's overall repair success rate is 14.6% (41 rounds, 6 passed) -- third
+# worst of every gate in the stack, and the two gates below it (F3 2.8%, F9
+# 2.5%) are both whole-piece/multi-criterion gates the same way F8 is, not a
+# coincidence. hub/PAS pieces are a real fraction of that 41-round sample
+# (framework mix isn't logged per-round, so an exact hub/PAS-only rate isn't
+# available from existing data -- flagged as a real gap, not glossed over),
+# but the *mechanism* (bare label, LLM guessing what an unexplained framework
+# name requires) is identical to AIDA's already-confirmed-and-fixed case.
+# Closing it now rather than waiting for a hub/PAS-specific failure to
+# accumulate first.
 _AIDA_FRAMEWORK_GUIDANCE = (
     "AIDA FRAMEWORK (Attention-Interest-Desire-Action): the piece as a whole must move through all "
     "four beats in order -- open on Attention, build Interest with specifics, build Desire on "
@@ -133,6 +146,46 @@ _AIDA_SINGLE_CTA_NOTE = (
     "reading another article, or CTA both mid-section and again at the very end) -- one unambiguous "
     "action, once."
 )
+
+# AA-404 N0-N8 audit follow-up: hub's F8 rubric (gates.py::FRAMEWORK_RUBRICS["hub"]) is
+# "covers the topic comprehensively via subsections" + "each section answers a distinct
+# sub-question" -- both whole-piece/every-section properties (unlike AIDA's positional
+# opening/closing beats), so one general per-batch guidance line is the right shape here, not
+# a per-section positional note the way AIDA/PAS below get one.
+_HUB_FRAMEWORK_GUIDANCE = (
+    "HUB FRAMEWORK (comprehensive topic coverage): the piece as a whole must cover the topic "
+    "comprehensively across its sections, and EACH section must answer a genuinely distinct "
+    "sub-question -- no two sections may cover overlapping ground. Whichever section(s) you're "
+    "drafting, make sure the sub-question it answers is one the OTHER sections don't already cover."
+)
+
+# hub/PAS's own equivalent of the AIDA fix above, same reasoning (F8's rubric is real,
+# positional for PAS: "opens with the reader's problem" / "agitates concretely" / "resolves
+# with the trip as solve" -- a 3-beat arc, same class of gap as AIDA's 4-beat one, same fix
+# shape: one opening-section note + one closing-section note, pinned to whichever OUTLINE
+# section is actually first/last, not "the first/last sentence of this batch's response").
+_PAS_FRAMEWORK_GUIDANCE = (
+    "PAS FRAMEWORK (Problem-Agitate-Solve): the piece as a whole must open with the reader's real "
+    "problem, agitate it with concrete specifics (not vague hand-wringing), and resolve it with the "
+    "trip itself as the solve. Whichever section(s) you're drafting, write the right beat for their "
+    "position in that arc."
+)
+_PAS_OPENING_PROBLEM_NOTE = (
+    "\nPROBLEM-OPENING REQUIREMENT (this is the piece's OPENING section): open with the reader's "
+    "real problem or unmet want, stated concretely -- not a generic scene-setting line, and not the "
+    "trip's solution yet. Earn the agitation that follows."
+)
+_PAS_CLOSING_RESOLVE_NOTE = (
+    "\nRESOLVE REQUIREMENT (this is the piece's CLOSING section): resolve the problem raised at the "
+    "opening with the trip itself as the solve -- make the connection between problem and trip "
+    "explicit, don't just end on a generic summary or CTA with no callback to what opened the piece."
+)
+
+_FRAMEWORK_GUIDANCE: dict[str, str] = {
+    "hub": _HUB_FRAMEWORK_GUIDANCE,
+    "PAS": _PAS_FRAMEWORK_GUIDANCE,
+    "AIDA": _AIDA_FRAMEWORK_GUIDANCE,
+}
 
 # AA-404 writer-side wire (F9 deep-dive TL;DR #1): this used to be a
 # module-level constant built once at import time from the generic
@@ -341,6 +394,9 @@ def _build_extra_section_directives(
     if brief.framework == "AIDA" and outline:
         directives[outline[0].title].append(_AIDA_OPENING_HOOK_NOTE)
         directives[outline[-1].title].append(_AIDA_SINGLE_CTA_NOTE)
+    if brief.framework == "PAS" and outline:
+        directives[outline[0].title].append(_PAS_OPENING_PROBLEM_NOTE)
+        directives[outline[-1].title].append(_PAS_CLOSING_RESOLVE_NOTE)
     return directives
 
 
@@ -352,8 +408,9 @@ def _build_batch_prompt(
         f"KEYWORD: {brief.keyword}",
         f"FRAMEWORK: {brief.framework}",
     ]
-    if brief.framework == "AIDA":
-        lines.append(_AIDA_FRAMEWORK_GUIDANCE)
+    guidance = _FRAMEWORK_GUIDANCE.get(brief.framework)
+    if guidance:
+        lines.append(guidance)
     lines += [
         f"CTA TARGET: {brief.cta_target}",
         "VARIANCE DIRECTIVES (apply across the whole piece): " + "; ".join(brief.variance_directives),

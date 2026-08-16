@@ -105,9 +105,15 @@ _FACEBOOK_INSTRUCTIONS = (
 
 _TIKTOK_INSTRUCTIONS = (
     "\nTIKTOK KIT FORMAT — output ONLY these three labeled blocks, in order:\n"
-    "\"HOOK:\" one line, <=15 words, no citation needed.\n"
-    "\"SCRIPT:\" 100-150 words, spoken/conversational, at least one [R:atom_id] citation carried\n"
-    "  over from the blog text.\n"
+    "\"HOOK:\" one line, <=15 words, no citation needed — must be strong enough on its own to\n"
+    "  stop a scroll in the first second (a specific, surprising detail or a real question,\n"
+    "  never a generic opener).\n"
+    "\"SCRIPT:\" 100-150 words, spoken/conversational, structured as TIMED BEATS — 2-3 distinct\n"
+    "  moments in sequence (not one flat paragraph), each building on the last, with at least\n"
+    "  one [R:atom_id] citation carried over from the blog text. The FINAL beat must be a clear\n"
+    "  PAYOFF — the moment that delivers on what the HOOK promised (a concrete reveal, a\n"
+    "  satisfying detail, the reason this was worth watching) — never a trailing summary or a\n"
+    "  generic sign-off.\n"
     "\"VISUAL:\" 1-2 lines of shot/visual direction notes (no video/image is generated — this is\n"
     "  text guidance only for whoever films it).\n"
     "- \"Spoken/conversational\" means natural sentence rhythm and contractions, not casual slang —\n"

@@ -76,8 +76,46 @@ TAG_RE = re.compile(r"\[(?:R|F):([^\]]+)\]")
 # exactly; it does not touch the common non-bold case (`\*{0,2}` matches empty).
 _SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\*{0,2}\s+\*{0,2}(?=[A-Z\"'‘’“”])")
 
+# AA-404 N0-N8 audit follow-up, Q1's #3 finding: E1's outline assigns atoms per SECTION
+# (`Brief.atoms_by_section`, `OutlineSection.atom_ids`) but F1 has only ever checked a tag
+# against the WHOLE piece's atom pool (`valid_ids` below) — a section could cite an atom
+# genuinely valid for the piece but never assigned to THAT section, and F1 would never notice.
+# `_H2_RE` segments `body_tagged` the same way F4_brief_compliance already does
+# (`re.findall(r"^## (.+)$", body, re.MULTILINE)`) — reused, not a new convention.
+_H2_RE = re.compile(r"^## (.+)$", re.MULTILINE)
 
-def gate_grounding(body_tagged: str, valid_ids: set[str], text_by_id: dict[str, str]) -> GateResult:
+
+def _check_section_atom_scoping(body: str, atoms_by_section: dict[str, list[str]]) -> list[str]:
+    """AA-404 N0-N8 audit follow-up (opt-in — see gate_grounding()'s own docstring for why
+    this is not on by default). Within EACH H2 section, only that section's own
+    outline-assigned atom_ids are valid citations — a tag cited in a DIFFERENT section (even
+    though globally valid for the piece) is now flagged. A section title that isn't a key in
+    `atoms_by_section` (e.g. "FAQ" — `generation.py::build_outline()` never assigns it one,
+    E4/faq.py owns that section) contributes no section-scoped check for that stretch of
+    text — the existing whole-piece closed-world/entailment checks above still cover it."""
+    violations: list[str] = []
+    matches = list(_H2_RE.finditer(body))
+    for i, m in enumerate(matches):
+        title = m.group(1).strip()
+        if title not in atoms_by_section:
+            continue
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
+        section_text = body[start:end]
+        allowed = set(atoms_by_section[title])
+        cited = set(TAG_RE.findall(section_text))
+        for aid in sorted(cited - allowed):
+            violations.append(
+                f"section '{title}' cites [R:{aid}], which the outline assigned to a DIFFERENT "
+                f"section — each section may only cite its own assigned atoms"
+            )
+    return violations
+
+
+def gate_grounding(
+    body_tagged: str, valid_ids: set[str], text_by_id: dict[str, str],
+    atoms_by_section: Optional[dict[str, list[str]]] = None,
+) -> GateResult:
     """F1 grounding (DET). Two checks, both required to pass:
 
     1. Closed-world — every [R:id]/[F:id] tag references an id that actually
@@ -86,7 +124,18 @@ def gate_grounding(body_tagged: str, valid_ids: set[str], text_by_id: dict[str, 
        from the text of the id(s) it cites (see services/acp_shared/
        grounding.py for why this is narrower than plain tag-presence: a
        valid tag on a fabricated sentence used to pass this gate — that was
-       P0-1)."""
+       P0-1).
+
+    `atoms_by_section` (AA-404 N0-N8 audit follow-up, opt-in, default `None`): when given,
+    ALSO enforces that each H2 section only cites the atoms the outline actually assigned to
+    IT (see `_check_section_atom_scoping()`). Left OFF by default and not wired into
+    `pipeline.py`'s live blog call site in this PR — real-data impact analysis (23 real blog
+    pieces across all 6 N7 runs to date) found 9/23 (39%) already have at least one atom cited
+    in more than one section (mostly an overview/intro section legitimately previewing a
+    detail a later section develops in depth) — enforcing this unconditionally today would
+    likely convert some currently-passing or already-marginal pieces into new F1 failures.
+    Built and tested here so the mechanism exists and is reviewable; enabling it for real
+    traffic is a decision left to Nghiep (see the PR description for this change)."""
     violations: list[str] = []
     body = body_tagged or ""
 
@@ -94,6 +143,9 @@ def gate_grounding(body_tagged: str, valid_ids: set[str], text_by_id: dict[str, 
     unknown = sorted({t for t in tags if t not in valid_ids})
     for uid in unknown:
         violations.append(f"unknown provenance id [{uid}] — not in the atom/fact set for this brief")
+
+    if atoms_by_section:
+        violations.extend(_check_section_atom_scoping(body, atoms_by_section))
 
     for sent in _SENT_SPLIT_RE.split(body):
         cited = TAG_RE.findall(sent)

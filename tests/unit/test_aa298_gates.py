@@ -69,6 +69,90 @@ def test_gate_grounding_passes_faithful_grounded_body():
     assert result.violations == []
 
 
+# =================================== AA-404 N0-N8 audit follow-up: atoms_by_section (opt-in, off by default)
+
+def test_gate_grounding_atoms_by_section_none_is_unchanged_behavior():
+    """Backward compat: every pre-existing caller/test (no atoms_by_section arg) gets exactly
+    the old whole-piece-only check — a section citing an atom assigned to a DIFFERENT section
+    is NOT flagged when the new param is omitted."""
+    body = (
+        "## Intro\nThe rickshaw ride opens the trip [R:atom_a].\n\n"
+        "## Detail\nMore about the fort [R:atom_b]."
+    )
+    result = gate_grounding(body, {"atom_a", "atom_b"}, {"atom_a": "x", "atom_b": "y"})
+    assert result.passed is True
+
+
+def test_gate_grounding_section_scoping_passes_when_each_section_cites_only_its_own_atoms():
+    body = (
+        "## Intro\nThe rickshaw ride opens the trip [R:atom_a].\n\n"
+        "## Detail\nMore about the fort [R:atom_b]."
+    )
+    result = gate_grounding(
+        body, {"atom_a", "atom_b"}, {"atom_a": "x", "atom_b": "y"},
+        atoms_by_section={"Intro": ["atom_a"], "Detail": ["atom_b"]},
+    )
+    assert result.passed is True
+    assert result.violations == []
+
+
+def test_gate_grounding_section_scoping_flags_atom_cited_in_wrong_section():
+    """atom_b is globally valid for the piece (in `valid_ids`) but the outline assigned it to
+    'Detail', not 'Intro' — citing it in Intro must fail with atoms_by_section given."""
+    body = (
+        "## Intro\nThe rickshaw ride opens the trip [R:atom_a], with the fort ahead [R:atom_b].\n\n"
+        "## Detail\nMore about the fort [R:atom_b]."
+    )
+    result = gate_grounding(
+        body, {"atom_a", "atom_b"}, {"atom_a": "x", "atom_b": "y"},
+        atoms_by_section={"Intro": ["atom_a"], "Detail": ["atom_b"]},
+    )
+    assert result.passed is False
+    assert any("atom_b" in v and "Intro" in v for v in result.violations)
+
+
+def test_gate_grounding_section_scoping_skips_faq_section():
+    """'FAQ' is never a key in atoms_by_section (generation.py::build_outline() never assigns
+    it one, E4/faq.py owns that section) — a FAQ section reusing an atom cited elsewhere in
+    the piece must NOT be flagged, matching real 15/08 corpus data (every real cross-section
+    reuse case that involved FAQ was FAQ legitimately re-citing a body atom to answer a
+    question)."""
+    body = (
+        "## Intro\nThe rickshaw ride opens the trip [R:atom_a].\n\n"
+        "## FAQ\n**Q: What's the highlight?**\n**A:** The rickshaw ride [R:atom_a]."
+    )
+    result = gate_grounding(
+        body, {"atom_a"}, {"atom_a": "x"},
+        atoms_by_section={"Intro": ["atom_a"]},  # no "FAQ" key at all
+    )
+    assert result.passed is True
+
+
+def test_gate_grounding_section_scoping_real_corpus_case():
+    """Real case from the 15/08 corpus (piece de8337ba...:slot_845eb6ec83cdf1f082ec:blog,
+    used as the F9 fix #2 anchor sentence elsewhere) — atom_e79157604b (the Gyeongju bullet
+    train fact) was cited in BOTH the intro overview section AND its own dedicated detail
+    section. Demonstrates the mechanism actually catches the real-data pattern the impact
+    analysis found (9/23 real pieces, 39%) — not just a synthetic example."""
+    body = (
+        "## Transit In South Korea: what it's actually like\n"
+        "A bullet train reaches Gyeongju in under two hours [R:atom_e79157604b].\n\n"
+        "## Travel by bullet train from Seoul to Gyeongju, the ancient c\n"
+        "The Gyeonggi-Gyeongbu line reaches Gyeongju [R:atom_e79157604b]."
+    )
+    result = gate_grounding(
+        body, {"atom_e79157604b"}, {"atom_e79157604b": "Bullet train to Gyeongju."},
+        atoms_by_section={
+            "Transit In South Korea: what it's actually like": [],
+            "Travel by bullet train from Seoul to Gyeongju, the ancient c": ["atom_e79157604b"],
+        },
+    )
+    assert result.passed is False
+    assert any(
+        "atom_e79157604b" in v and "Transit In South Korea" in v for v in result.violations
+    )
+
+
 def test_gate_grounding_does_not_merge_faq_markdown_bold_into_preceding_sentence():
     """AA-405: real week=2 CloudWatch fabrication alarm, shape reproduced from the
     actual held piece (slot_b30a9406...:blog) — citation sits on an earlier,
