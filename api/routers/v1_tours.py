@@ -280,10 +280,26 @@ async def trigger_rewrite(
                 ORDER BY version DESC LIMIT 1
             """, tenant_id)
         if _br:
+            # AA-425 fix (found via hash-diff forensic comparison against a direct-call harness
+            # using the exact same tenant/tour): asyncpg has no jsonb codec registered on this
+            # app's connections (same gap AA-314 already found/fixed elsewhere, api/routers/
+            # v1_tours.py's own src_highlights handling) -- forbidden_words arrives as a raw
+            # JSON-encoded STRING, not a parsed list. `list(_br["forbidden_words"] or [])` was
+            # calling list() on that STRING, splitting it into individual characters
+            # (['[', '"', 'l', 'u', 'x', ...]) instead of parsing it -- every tenant rewrite's
+            # system prompt carried a garbled "FORBIDDEN WORDS: [, ", l, u, x, ..." instruction
+            # instead of the tenant's real word list. Confirmed via SHA-256 hash comparison: the
+            # user_prompt and tour_dict hashes matched byte-for-byte between this endpoint and a
+            # direct _rewrite_tour() call using identical inputs, but brand_rules.forbidden_words
+            # diverged at exactly this line.
+            import json as _json2
+            _fw_raw = _br["forbidden_words"]
+            if isinstance(_fw_raw, str):
+                _fw_raw = _json2.loads(_fw_raw) if _fw_raw else []
             brand_rules = {
                 "system_prompt":    _br["system_prompt"] or "",
                 "style_guide":      _br["style_guide"] or "",
-                "forbidden_words":  list(_br["forbidden_words"] or []),
+                "forbidden_words":  list(_fw_raw or []),
                 "rewrite_language": body.rewrite_language,
             }
     except Exception:
