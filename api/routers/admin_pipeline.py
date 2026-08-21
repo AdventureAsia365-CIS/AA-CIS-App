@@ -4177,10 +4177,17 @@ async def update_brand_identity(
         await conn.execute(
             "UPDATE shared.tenant_brand_rules SET is_active = false WHERE tenant_id = $1", tenant_id
         )
+        # AA-424 live-verify fix: brand_name is NOT NULL (migration 044) but this INSERT never
+        # set it -- 500s (NotNullViolationError) on every call, for every tenant, not just the
+        # ones this issue targets. Pre-existing bug, not introduced by this issue's auth rewire
+        # (found because this is the first time POST got exercised end-to-end against a real
+        # tenant_id here). 'default' matches the sentinel this same file already uses elsewhere
+        # for the single-brand-per-tenant case (_resolve_brand_rule, admin_pipeline.py:328).
         await conn.execute("""
             INSERT INTO shared.tenant_brand_rules
-                (tenant_id, system_prompt, style_guide, forbidden_words, version, is_active, updated_at)
-            VALUES ($1, $2, $3, $4::jsonb, $5, true, NOW())
+                (tenant_id, brand_name, system_prompt, style_guide, forbidden_words, version,
+                 is_active, updated_at)
+            VALUES ($1, 'default', $2, $3, $4::jsonb, $5, true, NOW())
         """, tenant_id, body.system_prompt, body.style_guide,
             _json.dumps(body.forbidden_words or []), current + 1)
     return {"status": "updated", "version": current + 1}
