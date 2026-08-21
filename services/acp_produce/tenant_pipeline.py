@@ -15,9 +15,12 @@ endpoint. PoolTab.tsx's existing "Rewrite" button (-> POST /pool/{id}/rewrite ->
 _rewrite_tour()) IS the entry point T1 will eventually relabel, not replace.
 
 Decisions (see docs/implementation-notes/AA-425.md for the full list):
-- T3's "structural" check reuses validate_node's OWN verdict (result["failure_codes"],
-  graph.py:448) rather than re-invoking validate_node a second time on identical
-  content — T2's graph already ran it once as the "validate" node.
+- T3's "structural" check calls validate_node (graph.py:448) fresh on the exact
+  content that gets persisted, rather than trusting T2's own result["failure_codes"]
+  — verified live (AA-425) that the two can diverge: flag_fix_node can rewrite
+  `generated` in place without revalidate_node updating the ORIGINAL failure_codes
+  list, so trusting it stale escalated a real rewrite for a forbidden word its
+  persisted content didn't actually contain.
 - T3's "grounding" check reuses find_novel_numeric_claims() (services/acp_shared/
   grounding.py) but, unlike s1_from_atom.py's citation-keyed check_grounding(),
   compares each rewritten sentence against the WHOLE T2-input corpus. graph.py's
@@ -85,10 +88,26 @@ def _t3_grounding_check(rewritten: dict, source_texts: list[str]) -> list[dict]:
     return violations
 
 
-def _t3_structural_issues(result: dict) -> list[str]:
-    """T3 structural gate — reuse validate_node's own verdict (already computed by
-    T2's graph run as the 'validate' node; see module docstring)."""
-    return list(result.get("failure_codes") or [])
+def _t3_structural_issues(generated: dict, tour_dict: dict, brand_rules: dict) -> list[str]:
+    """T3 structural gate — reuse validate_node (graph.py:448) directly on the ACTUAL
+    final content, rather than trusting `result["failure_codes"]` from T2's own graph
+    run. Verified during live testing (AA-425) that the two can diverge: graph.py's
+    internal chain runs validate -> judge -> brand_audit -> flag_fix -> revalidate, and
+    flag_fix_node can rewrite `generated` in place to clear a violation without
+    revalidate_node updating the ORIGINAL `failure_codes` list attached to the returned
+    state — a real tour rewrite escalated to review_queue for FORBIDDEN_WORD despite the
+    persisted rewritten_content containing none of graph.py's own _VALIDATE_FORBIDDEN
+    words. Calling validate_node fresh, on exactly what gets persisted, is the only way
+    this check can't go stale relative to what a human reviewer (or the tenant) actually
+    sees."""
+    from services.content_generation.graph import validate_node
+    state = {
+        "generated": generated,
+        "tour": tour_dict,
+        "brand_forbidden_words": brand_rules.get("forbidden_words") or [],
+        "retry_count": 0,
+    }
+    return list(validate_node(state).get("failure_codes") or [])
 
 
 async def run_t3_qa_gate(
@@ -112,7 +131,7 @@ async def run_t3_qa_gate(
     attempt = 0
     while True:
         generated = result.get("generated") or {}
-        structural = _t3_structural_issues(result)
+        structural = _t3_structural_issues(generated, tour_dict, brand_rules)
         grounding = _t3_grounding_check(generated, source_texts)
 
         if not structural and not grounding:
