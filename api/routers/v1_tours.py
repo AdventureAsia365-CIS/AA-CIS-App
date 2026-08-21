@@ -259,10 +259,19 @@ async def trigger_rewrite(
     }
 
     # Fetch brand rules for this tenant
+    # AA-425 fix: `br_row = await pool.acquire().__aenter__()` used to sit right before the
+    # `async with pool.acquire() as _conn2` below -- it acquired a SECOND connection from the
+    # pool and called __aenter__() directly without ever pairing it with __aexit__(), leaking
+    # one pooled connection on every single tenant rewrite (br_row itself was never even used
+    # afterward -- dead code). Pool is min_size=2/max_size=10 (api/main.py) -- found live during
+    # AA-425 verification: after ~8 real rewrite calls in one session the pool was exhausted
+    # enough that THIS query started timing out, silently falling into the except below
+    # (brand_rules = {} minus system_prompt/style_guide/forbidden_words) -- the LLM then had no
+    # brand voice guidance at all and reliably drifted into generic marketing adjectives that
+    # happen to be on graph.py's own forbidden-word list, escalating every rewrite to
+    # review_queue. Removed the leaked acquire; only the real query below remains.
     brand_rules = {}
     try:
-        import json as _json2
-        br_row = await pool.acquire().__aenter__()
         async with pool.acquire() as _conn2:
             _br = await _conn2.fetchrow("""
                 SELECT system_prompt, style_guide, forbidden_words
