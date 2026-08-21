@@ -7,6 +7,14 @@ from api.routers.auth import verify_jwt
 router = APIRouter(prefix="/v1/tours", tags=["B2B Tours"])
 security = HTTPBearer()
 
+# AA-425: strong refs to the fire-and-forget rewrite (T2 + T3 + T5) background task —
+# asyncio only keeps a weak ref to a bare create_task() result, so an unreferenced task can be
+# GC'd mid-flight (same class of bug AA-223 already found/fixed for admin_pipeline.py's
+# run-tour-async path — see that file's own comment on this pattern). T3's repair loop adds up
+# to 2 more LLM round trips and T5 adds another on top of T2's own call, so this task now runs
+# meaningfully longer than it did pre-AA-425 — worth closing this gap while touching this code.
+_background_tasks: set = set()
+
 
 def get_tenant(credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
@@ -281,6 +289,17 @@ async def trigger_rewrite(
                 is_tenant_rewrite=True,  # skips name-match check in validate_node
             )
             if result.get("status") == "success" and result.get("generated"):
+                # AA-425 T3 — QA gate (grounding + structural), self-repair up to
+                # TENANT_QA_MAX_REPAIRS rounds. source_texts is T2's OWN input (the
+                # pre-rewrite published_tours content) — the grounding baseline a
+                # tenant rewrite must not introduce new numbers/measurements beyond.
+                from services.acp_produce.tenant_pipeline import run_t3_qa_gate
+                source_texts = [str(v) for v in tour_dict.values() if v]
+                qa = await run_t3_qa_gate(
+                    tour_dict, source_texts, result, brand_rules,
+                )
+                result = qa["result"]  # possibly a later repair round's output
+
                 import json as _j3
                 gen = result["generated"]
                 rewritten = {
@@ -296,7 +315,9 @@ async def trigger_rewrite(
                 }
                 rewrite_score = float(result.get("quality_score") or 0)
                 # Status based on LLM rewrite quality
-                if rewrite_score >= 7.0:
+                if not qa["passed"]:
+                    new_status = "needs_review"   # T3 exhausted repairs — always needs a human
+                elif rewrite_score >= 7.0:
                     new_status = "ai_generated"   # ready for tenant to review
                 elif rewrite_score > 0:
                     new_status = "needs_review"   # LLM finished but low quality
@@ -309,18 +330,46 @@ async def trigger_rewrite(
                         published_tour_id
                     )
                 final_score = rewrite_score if rewrite_score else float(source_score or 0)
+                qa_status = "passed" if qa["passed"] else "escalated"
                 async with pool.acquire() as _conn3:
                     await _conn3.execute("""
                         UPDATE gold_aa_internal.tenant_tour_versions
                         SET rewritten_content = $1::jsonb,
                             status = $2,
-                            quality_score = $3
-                        WHERE id = $4::uuid
+                            quality_score = $3,
+                            qa_status = $4,
+                            qa_repair_count = $5,
+                            qa_checked_at = now()
+                        WHERE id = $6::uuid
                     """,
-                        _j3.dumps(rewritten), new_status, final_score, version_id)
+                        _j3.dumps(rewritten), new_status, final_score,
+                        qa_status, qa["attempts"], version_id)
                 import structlog as _sl2
                 _sl2.get_logger().info("tenant_rewrite_done",
-                    version_id=str(version_id), score=final_score, status=new_status)
+                    version_id=str(version_id), score=final_score, status=new_status,
+                    qa_status=qa_status, qa_attempts=qa["attempts"])
+
+                if not qa["passed"]:
+                    # T3 escalate (decision b) — review_queue, tenant-filterable. Does NOT
+                    # proceed to T5 — an unresolved grounding/structural failure has no
+                    # atoms worth decomposing yet.
+                    from services.acp_produce.tenant_pipeline import escalate_t3_failure
+                    await escalate_t3_failure(
+                        pool, tenant_id, pt["tour_id"], str(version_id),
+                        qa["structural_issues"], qa["grounding_issues"],
+                    )
+                else:
+                    # AA-425 T5 — atomize T4 output, owner_scope=tenant_id. Decision (c):
+                    # a T5 failure does NOT roll back T2-T4 — the tour already passed QA
+                    # and stays visible/usable in the tenant's pool; atomize retry is a
+                    # separate, later concern (not built in this issue — see AA-425
+                    # implementation notes), not a reason to undo an already-valid rewrite.
+                    from services.acp_produce.tenant_pipeline import run_t5_atomize
+                    t5 = await run_t5_atomize(tenant_id, pt["tour_id"], rewritten, pool)
+                    _sl2.get_logger().info("tenant_atomize_done",
+                        version_id=str(version_id), tour_id=pt["tour_id"],
+                        t5_status=t5.get("status"), atom_count=t5.get("atom_count", 0),
+                        t5_error=t5.get("error"))
         except Exception as _e:
             import structlog as _sl
             _sl.get_logger().error("tenant_rewrite_failed", error=str(_e))
@@ -335,7 +384,9 @@ async def trigger_rewrite(
             except Exception:
                 pass
 
-    _asyncio.create_task(_do_rewrite_and_save())
+    _rewrite_task = _asyncio.create_task(_do_rewrite_and_save())
+    _background_tasks.add(_rewrite_task)
+    _rewrite_task.add_done_callback(_background_tasks.discard)
 
     return {
         "version_id": str(version_id),
