@@ -1,6 +1,7 @@
 # api/routers/admin_pipeline.py
 # Admin-only pipeline endpoints — mounted at /admin/* (no Lambda Authorizer at API GW)
-# Auth: x-admin-secret header only (no tenant JWT accepted)
+# Auth: x-admin-secret header only (no tenant JWT accepted) — EXCEPT /brand-identity GET/POST
+# (see _resolve_brand_tenant_id, AA-424): those two accept a tenant JWT too, real tenant_id first.
 
 import asyncio
 import base64
@@ -12,11 +13,13 @@ from uuid import UUID
 import asyncpg
 import boto3 as _boto3
 import structlog
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from typing import Optional, List
 
 from api.routers.admin import verify_admin_secret
+from api.routers.auth import verify_jwt
 from api.routers.v1_atoms import DecomposeRequest as _V1DecomposeRequest
 from api.routers.v1_pipeline import _rewrite_tour
 from services.acp_shared.atom_constants import THIN_TRIP_ATOM_MIN
@@ -4077,13 +4080,46 @@ async def delete_brand(brand_name: str, request: Request, x_admin_secret: str = 
 
 
 # ── GET/POST /admin/brand-identity ────────────────────────────────────────────
+# AA-424: this endpoint has TWO real callers, discovered while fixing the hardcoded-tenant_id
+# bug AA-423 found —
+#   1. BrandTab.tsx ((tenant)/portal) — wants ITS OWN tenant's brand rules. Was 401ing for a real
+#      tenant session (no cis_admin_token) even before this fix; the bug this issue targets.
+#   2. frontend/app/(internal)/{brand,upload}/page.tsx, via the confusingly-named
+#      /api/tenant/pipeline/brand-identity proxy (see that file's own header comment) — genuine
+#      STAFF pages (admin/content role) that manage the AA-internal pseudo-tenant's OWN brand
+#      rules. No tenant JWT available to these pages; X-Admin-Secret is the only credential they
+#      carry. Must keep working exactly as before.
+# _resolve_brand_tenant_id() below tries a tenant JWT first (real get_tenant()-pattern, same
+# verify_jwt() used by v1_tours.py/v1_atoms.py/v1_s3.py/v1_competitors.py's get_tenant/_get_tenant)
+# — this is the rewired path AA-424 asked for, no more hardcoded UUID for a real tenant caller.
+# Only when no Bearer token is presented does it fall back to the pre-existing static-secret +
+# hardcoded AA-internal tenant_id path, preserving the two staff pages' behavior unchanged.
+_brand_identity_bearer = HTTPBearer(auto_error=False)
+_AA_INTERNAL_TENANT_ID = "00000000-0000-0000-0000-000000000001"
+
+
+def _resolve_brand_tenant_id(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_brand_identity_bearer),
+    x_admin_secret: str = Header(None),
+) -> str:
+    if credentials is not None:
+        try:
+            payload = verify_jwt(credentials.credentials)
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+        return payload["sub"]
+    verify_admin_secret(x_admin_secret)
+    return _AA_INTERNAL_TENANT_ID
+
 
 @router.get("/brand-identity")
-async def get_brand_identity(request: Request, x_admin_secret: str = Header(None)):
-    verify_admin_secret(x_admin_secret)
+async def get_brand_identity(
+    request: Request, tenant_id: str = Depends(_resolve_brand_tenant_id)
+):
     import json as _json_br
     pool = request.app.state.pool
-    tenant_id = "00000000-0000-0000-0000-000000000001"
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             SELECT system_prompt, style_guide, forbidden_words, version, updated_at, created_at
@@ -4130,12 +4166,10 @@ async def get_brand_identity(request: Request, x_admin_secret: str = Header(None
 async def update_brand_identity(
     body: BrandIdentityUpdate,
     request: Request,
-    x_admin_secret: str = Header(None),
+    tenant_id: str = Depends(_resolve_brand_tenant_id),
 ):
-    verify_admin_secret(x_admin_secret)
     import json as _json
     pool = request.app.state.pool
-    tenant_id = "00000000-0000-0000-0000-000000000001"
     async with pool.acquire() as conn:
         current = await conn.fetchval("""
             SELECT COALESCE(MAX(version), 0) FROM shared.tenant_brand_rules WHERE tenant_id = $1
