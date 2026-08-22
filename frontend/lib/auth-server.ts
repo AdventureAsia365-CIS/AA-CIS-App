@@ -51,7 +51,10 @@ export async function requireAdmin(request: NextRequest): Promise<RequireAdminRe
 }
 
 export type RequireTenantResult =
-  | { ok: true; tenantId: string }
+  // AA-427: name/planTier added (backend /auth/verify-tenant already returned
+  // them; just wasn't surfaced) so /api/tenant/me can hand the FE tenant
+  // display info without a second round trip or ever exposing the token.
+  | { ok: true; tenantId: string; name: string; planTier: string }
   | { ok: false; response: NextResponse };
 
 export async function requireTenant(request: NextRequest): Promise<RequireTenantResult> {
@@ -73,7 +76,7 @@ export async function requireTenant(request: NextRequest): Promise<RequireTenant
     }
 
     const data = await res.json();
-    return { ok: true, tenantId: data.tenant_id };
+    return { ok: true, tenantId: data.tenant_id, name: data.name, planTier: data.plan_tier };
   } catch {
     return { ok: false, response: unauthorized() };
   }
