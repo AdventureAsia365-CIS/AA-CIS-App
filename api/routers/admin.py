@@ -50,13 +50,17 @@ PLAN_LIMITS = {
 # tenant is assigned. Mirrors migration 098's own CHECK constraint — keep both in sync if this list
 # ever changes.
 ASSIGNED_ANGLES = {
-    "culinary_people":    "Ẩm thực & Con người",
-    "physical_terrain":   "Thể lực & Địa hình",
-    "culture_craft":      "Văn hoá & Thủ công",
-    "nature_wildlife":    "Thiên nhiên & Hoang dã",
-    "luxury_leisure":     "Sang trọng & Nghỉ dưỡng",
-    "family_group":       "Gia đình & Trải nghiệm nhóm",
-    "wellness_spiritual": "Tâm linh & Chữa lành",
+    # AA-401: values translated to English, matching frontend/app/admin/tenants/page.tsx's
+    # own ASSIGNED_ANGLES display-label map verbatim (that copy was already English — see
+    # AA-389's i18n fix; this dict was the one gap left, feeding Mirror tab's
+    # assigned_angle_label straight from here, untranslated until now).
+    "culinary_people":    "Culinary & people",
+    "physical_terrain":   "Physical & terrain",
+    "culture_craft":      "Culture & craft",
+    "nature_wildlife":    "Nature & wildlife",
+    "luxury_leisure":     "Luxury & leisure",
+    "family_group":       "Family & group experiences",
+    "wellness_spiritual": "Wellness & spiritual",
 }
 
 # ── Auth guard ────────────────────────────────────────────────────────────────
@@ -1067,10 +1071,10 @@ async def get_tenant_mirror(
     months = runway_months(atom_count, posts_per_week)
 
     message = (
-        f"Với nhịp đang chọn ({posts_per_week} bài/tuần), nội dung hiện có đủ dùng khoảng "
-        f"{months} tháng."
+        f"At the current pace ({posts_per_week} posts/week), existing content covers about "
+        f"{months} months."
         if months is not None
-        else "Không thể ước tính thời lượng nội dung với nhịp bài hiện tại."
+        else "Content runway cannot be estimated at the current posting pace."
     )
 
     return {

@@ -1124,7 +1124,7 @@ async def ingest_s3(
                         "status":  "blocked",
                         "reason":  "duplicate_file_hash",
                         "dry_run": True,
-                        "message": "File đã upload trước đó — nội dung và tên file trùng hoàn toàn.",
+                        "message": "This file was already uploaded before — content and filename are an exact match.",
                     }
 
             parser = _ExcelParser(tmp_path, source_file=req.s3_key)
@@ -1150,13 +1150,13 @@ async def ingest_s3(
                 if src_name.lower().strip() in duplicate_names:
                     blocked_tours.append({
                         "src_name": src_name, "country": r.get("country"),
-                        "reason": "duplicate_tour", "message": "Tour này đã tồn tại trong hệ thống.",
+                        "reason": "duplicate_tour", "message": "This tour already exists in the system.",
                     })
                 elif missing:
                     blocked_tours.append({
                         "src_name": src_name, "country": r.get("country"),
                         "reason": "missing_fields", "missing_fields": missing,
-                        "message": f"Thiếu fields: {', '.join(missing)}",
+                        "message": f"Missing fields: {', '.join(missing)}",
                     })
                 else:
                     ready_tours.append({
@@ -2117,23 +2117,23 @@ def _derive_field_failures(gc: dict, codes: list) -> list:
     if "SEO_TITLE_TOO_LONG" in seen and len(title) > 60:
         add("seo_title", "SEO_TITLE_TOO_LONG", f"title {len(title)}>60")
     if "META_INCOMPLETE_SENTENCE" in seen and meta.strip() and not meta_complete_sentence(meta):
-        add("seo_meta", "META_INCOMPLETE_SENTENCE", "meta không kết câu hoàn chỉnh")
+        add("seo_meta", "META_INCOMPLETE_SENTENCE", "meta does not end in a complete sentence")
     if "BRAND_SEO_META_VIOLATION" in seen:
         hit = next((t for t in SEO_META_FORBIDDEN if t in meta_norm), None)
         if hit:
-            add("seo_meta", "BRAND_SEO_META_VIOLATION", f"meta chứa từ off-brand: '{hit}'")
+            add("seo_meta", "BRAND_SEO_META_VIOLATION", f"meta contains an off-brand word: '{hit}'")
 
     # highlights structural
     if "HIGHLIGHTS_NOT_LIST" in seen and not isinstance(gc.get("aa_highlights"), (list, str)):
-        add("aa_highlights", "HIGHLIGHTS_NOT_LIST", "highlights không phải list")
+        add("aa_highlights", "HIGHLIGHTS_NOT_LIST", "highlights is not a list")
     if "HIGHLIGHTS_TOO_FEW" in seen and len(hl) < 3:
-        add("aa_highlights", "HIGHLIGHTS_TOO_FEW", f"chỉ {len(hl)} highlight, cần ≥3")
+        add("aa_highlights", "HIGHLIGHTS_TOO_FEW", f"only {len(hl)} highlight(s), need ≥ 3")
 
     # MISSING_FIELD — which required field is empty now
     if "MISSING_FIELD" in seen:
         for col in _required_cols:
             if not gc.get(col):
-                add(col, "MISSING_FIELD", f"{col} rỗng")
+                add(col, "MISSING_FIELD", f"{col} is empty")
 
     # FORBIDDEN_WORD — scan live text, map to the field that contains it
     if "FORBIDDEN_WORD" in seen:
@@ -2141,15 +2141,15 @@ def _derive_field_failures(gc: dict, codes: list) -> list:
             txt = (gc.get(col) or "").lower()
             hit = next((w for w in _VALIDATE_FORBIDDEN if w in txt), None)
             if hit:
-                add(col, "FORBIDDEN_WORD", f"chứa từ cấm: '{hit}'")
+                add(col, "FORBIDDEN_WORD", f"contains a forbidden word: '{hit}'")
 
     # static-label codes (no live numeric re-measure available)
     _static = {
         "SUBTITLE_GENERIC": "subtitle generic/off-brand",
         "SUMMARY_OFF_BRAND": "summary off-brand opener",
-        "HIGHLIGHTS_TOO_GENERIC": "highlight phrase quá generic",
-        "ITINERARY_STRUCTURE_WEAK": "itinerary thiếu day-structure / quá ngắn",
-        "DFS_INTENT_UNDERUSED": "SEO keyword chưa xuất hiện ở title/meta",
+        "HIGHLIGHTS_TOO_GENERIC": "highlight phrase too generic",
+        "ITINERARY_STRUCTURE_WEAK": "itinerary missing day-structure / too short",
+        "DFS_INTENT_UNDERUSED": "SEO keyword not yet present in title/meta",
     }
     for code, reason in _static.items():
         if code in seen and code in _CODE_FIELD_MAP:

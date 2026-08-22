@@ -559,7 +559,7 @@ function CurationPageInner() {
                   <StatCard
                     icon={<Star size={16} />} label={level} value={String(count)}
                     accent={count === 0 ? A.muted2 : DIST_BADGE[level] === "green" ? A.green : DIST_BADGE[level] === "amber" ? A.amber : A.muted}
-                    sub={count === 0 ? "chưa có (AA-317)" : "distinctiveness"}
+                    sub={count === 0 ? "none yet (AA-317)" : "distinctiveness"}
                   />
                 </div>
               );
@@ -788,7 +788,7 @@ function CurationPageInner() {
                 <span style={{ fontFamily: serif, fontSize: 17, color: A.ink }}>Delete {selectedIds.size} atoms?</span>
               </div>
               <p style={{ fontSize: 13, color: A.muted, marginBottom: 18 }}>
-                Không thể hoàn tác. Các atom này sẽ không bao giờ xuất hiện trong slot allocator nữa.
+                This cannot be undone. These atoms will never appear in the slot allocator again.
               </p>
               <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
                 <Btn variant="ghost" onClick={() => setShowDeleteConfirm(false)}>Cancel</Btn>
