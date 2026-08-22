@@ -7,8 +7,8 @@
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway 4ylo382khg — corrected 22/08/2026,
   AA-432; `owq9as3wjl` was stale/no longer exists, confirmed via `aws apigateway get-rest-apis`)
-- AA-432 (this session, part 2 — auth architecture, PENDING Terraform apply, see note below):
-  `/v1/*`'s API Gateway resource (`/v1/{v1_proxy+}`) is changing from `authorizationType: CUSTOM`
+- AA-432 (this session, part 2 — auth architecture) — **LIVE as of 22/08/2026, verified**:
+  `/v1/*`'s API Gateway resource (`/v1/{v1_proxy+}`) changed from `authorizationType: CUSTOM`
   (`tenant-key-authorizer`, required `X-API-Key`) to `NONE`. Root cause (STEP0,
   `docs/claude_audit/AA-432-api-gateway-401-step0.md`): the tenant-portal BFF proxy only ever
   sent `Authorization: Bearer <JWT>`, never `X-API-Key`, so every `/v1/*` call 401'd at the
@@ -29,17 +29,29 @@
   (`verify_tenant_api_key`, AA-181 — a real `X-API-Key`/`X-Admin-Secret` header FastAPI itself
   checks, independent of the gateway) — confirmed unaffected by this change either way, don't
   confuse the two auth mechanisms if touching either again.
-  **Terraform change NOT YET APPLIED as of this note** — `terraform plan` could not be run from
-  this session (the `aa365-admin` profile requires interactive MFA for AssumeRole, which
-  Terraform's AWS provider can't satisfy non-interactively in this environment) — module change
-  is in `modules/api_gateway/main.tf` (AA-CIS-Infra repo), branch
-  `pqnghiep1354/aa-432-urgentinfra-api-gateway-id-sai-lech-claudemd-vs-production-x`; Nghiep needs
-  to run `terraform plan`/`apply` himself (see
-  `docs/implementation-notes/AA-432-fix-2c-redis-ratelimit.md` for the exact commands) before any
-  of the above is actually live. The FastAPI-side change (rate_limit.py) IS mergeable/deployable
-  independently — it doesn't require the Terraform change to be safe (it just won't matter for
-  `/v1/*` traffic arriving via the gateway until the gateway change also ships, since that
-  traffic can't reach FastAPI at all right now).
+  **Terraform applied 22/08/2026** via `Terraform Apply Prod` workflow (AA-CIS-Infra, PR #30 —
+  merge triggered `Deploy Dev` here too, PR #190): `Apply complete! Resources: 1 added, 2
+  changed, 1 destroyed` (new `aws_api_gateway_deployment`, `v1_any` method, `dev` stage
+  repointed, old deployment destroyed). **Important fix bundled into the same PR**: the
+  deployment's `triggers` hash originally only covered integration URIs + the authorizer
+  resource's own id — never any method's `authorization`/`authorizer_id`. The first plan run
+  showed a clean 1-attribute method change with NO deployment/stage change, which would have
+  applied "successfully" while leaving the `dev` stage pinned to the OLD deployment (API Gateway
+  stages serve a frozen snapshot; editing a method doesn't retarget a stage by itself) — the 401
+  bug would not actually have gone away. Fixed by adding `v1_any`/`admin_any`/`auth_any`/
+  `content_any`'s `authorization` (+ `v1_any`'s `authorizer_id`, coalesced since `NONE` leaves it
+  null) to the trigger hash — if touching any of these methods' authorization again, keep them
+  in that hash or a future change can silently no-op the same way.
+  **Live-verified** (real minted tenant JWT, `test-n1-flow`, no `X-API-Key`): `GET
+  /v1/tours/pool` and `/v1/tours/my-versions` → 200 with real data (previously 401 at the
+  gateway edge, `x-amzn-errortype: UnauthorizedException`, before FastAPI ever ran — now the
+  error body when the JWT itself is bad is FastAPI's own `{"detail":"Invalid or expired
+  token"}`/`{"detail":"Not authenticated"}`, confirming requests now reach the app).
+  `X-RateLimit-Limit`/`X-RateLimit-Remaining`/`X-RateLimit-Plan` headers present and
+  decrementing per call. Revoke verified live: flipped `test-n1-flow.is_active` to `false`, next
+  request → `403 {"detail":"Tenant is deactivated"}`; flipped back to `true` afterward (tenant
+  restored to its original state). `/docs`, `/openapi.json` (unaffected NONE-auth routes)
+  still 200.
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel — AA-103 production)
 - ECS task def: api:340 (unverified, see header note) | main 38caa5f pre-AA-384 | Vercel Prod hash unverified
 - AA-384 (this session): product-direction correction on AA-309/AA-330's posts_per_week/Mirror
