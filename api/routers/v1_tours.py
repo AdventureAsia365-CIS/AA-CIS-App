@@ -339,10 +339,13 @@ async def trigger_rewrite(
                     "status":      "done",
                 }
                 rewrite_score = float(result.get("quality_score") or 0)
-                # Status based on LLM rewrite quality
-                if not qa["passed"]:
-                    new_status = "needs_review"   # T3 exhausted repairs — always needs a human
-                elif rewrite_score >= 7.0:
+                # AA-436: status is now purely score-based, same formula for a real T3 pass
+                # and an auto-pass — T3 no longer forces needs_review on its own (see
+                # qa_auto_passed below for the separate signal that a QA-gate failure
+                # happened). ADR-2026-038 §0.1 (amend §10.3): escalate-and-stop broke the
+                # single-job T2->T3->T5 chain and made the tenant fix wording themselves —
+                # both rejected 22/08.
+                if rewrite_score >= 7.0:
                     new_status = "ai_generated"   # ready for tenant to review
                 elif rewrite_score > 0:
                     new_status = "needs_review"   # LLM finished but low quality
@@ -355,7 +358,12 @@ async def trigger_rewrite(
                         published_tour_id
                     )
                 final_score = rewrite_score if rewrite_score else float(source_score or 0)
+                # qa_status keeps its migration-107 meaning unchanged (the real QA verdict,
+                # 'escalated' still means the gate did NOT actually clear) — qa_auto_passed
+                # (migration 109) is the new, separate tenant-facing badge flag: true means
+                # this version reached the pool despite qa_status='escalated'.
                 qa_status = "passed" if qa["passed"] else "escalated"
+                qa_auto_passed = not qa["passed"]
                 async with pool.acquire() as _conn3:
                     await _conn3.execute("""
                         UPDATE gold_aa_internal.tenant_tour_versions
@@ -364,37 +372,42 @@ async def trigger_rewrite(
                             quality_score = $3,
                             qa_status = $4,
                             qa_repair_count = $5,
-                            qa_checked_at = now()
-                        WHERE id = $6::uuid
+                            qa_checked_at = now(),
+                            qa_auto_passed = $6
+                        WHERE id = $7::uuid
                     """,
                         _j3.dumps(rewritten), new_status, final_score,
-                        qa_status, qa["attempts"], version_id)
+                        qa_status, qa["attempts"], qa_auto_passed, version_id)
                 import structlog as _sl2
                 _sl2.get_logger().info("tenant_rewrite_done",
                     version_id=str(version_id), score=final_score, status=new_status,
-                    qa_status=qa_status, qa_attempts=qa["attempts"])
+                    qa_status=qa_status, qa_attempts=qa["attempts"],
+                    qa_auto_passed=qa_auto_passed)
 
                 if not qa["passed"]:
-                    # T3 escalate (decision b) — review_queue, tenant-filterable. Does NOT
-                    # proceed to T5 — an unresolved grounding/structural failure has no
-                    # atoms worth decomposing yet.
+                    # AA-436: T3 no longer escalate-BLOCKS — still write the review_queue
+                    # row exactly as AA-425 did (escalate_t3_failure() itself unchanged), so
+                    # A4 (AA-437, separate issue) can see it — but the chain now continues to
+                    # T5 below unconditionally instead of stopping here.
                     from services.acp_produce.tenant_pipeline import escalate_t3_failure
                     await escalate_t3_failure(
                         pool, tenant_id, pt["tour_id"], str(version_id),
                         qa["structural_issues"], qa["grounding_issues"],
                     )
-                else:
-                    # AA-425 T5 — atomize T4 output, owner_scope=tenant_id. Decision (c):
-                    # a T5 failure does NOT roll back T2-T4 — the tour already passed QA
-                    # and stays visible/usable in the tenant's pool; atomize retry is a
-                    # separate, later concern (not built in this issue — see AA-425
-                    # implementation notes), not a reason to undo an already-valid rewrite.
-                    from services.acp_produce.tenant_pipeline import run_t5_atomize
-                    t5 = await run_t5_atomize(tenant_id, pt["tour_id"], rewritten, pool)
-                    _sl2.get_logger().info("tenant_atomize_done",
-                        version_id=str(version_id), tour_id=pt["tour_id"],
-                        t5_status=t5.get("status"), atom_count=t5.get("atom_count", 0),
-                        t5_error=t5.get("error"))
+
+                # AA-425 T5 — atomize T4 output, owner_scope=tenant_id. Decision (c):
+                # a T5 failure does NOT roll back T2-T4 — the tour already passed QA (or was
+                # auto-passed, AA-436 — same code path, no parallel branch) and stays
+                # visible/usable in the tenant's pool; atomize retry is a separate, later
+                # concern (not built in this issue — see AA-425 implementation notes), not a
+                # reason to undo an already-valid rewrite. AA-436 removed the old `else`
+                # here — T5 now always runs, real pass or auto-pass alike.
+                from services.acp_produce.tenant_pipeline import run_t5_atomize
+                t5 = await run_t5_atomize(tenant_id, pt["tour_id"], rewritten, pool)
+                _sl2.get_logger().info("tenant_atomize_done",
+                    version_id=str(version_id), tour_id=pt["tour_id"],
+                    t5_status=t5.get("status"), atom_count=t5.get("atom_count", 0),
+                    t5_error=t5.get("error"))
         except Exception as _e:
             import structlog as _sl
             _sl.get_logger().error("tenant_rewrite_failed", error=str(_e))
@@ -463,7 +476,7 @@ async def list_my_versions(
         rows = await conn.fetch(f"""
             SELECT ttv.id, ttv.version_number, ttv.status, ttv.quality_score,
                    ttv.edit_source, ttv.rewrite_language, ttv.created_at,
-                   ttv.rewritten_content,
+                   ttv.rewritten_content, ttv.qa_auto_passed,
                    pt.id AS published_tour_id, pt.aa_name, pt.quality_score AS aa_quality,
                    rt.country, rt.duration
             FROM gold_aa_internal.tenant_tour_versions ttv
