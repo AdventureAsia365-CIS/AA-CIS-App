@@ -18,10 +18,17 @@ BEGIN;
 -- ---------------------------------------------------------------------------
 -- Tenant A: "WanderLux Travel" — Growth plan
 -- Tenant B: "ExploreAsia Co." — Starter plan
--- api_key_hash = SHA256 of the raw key (raw keys stored only in Secrets Manager)
--- Raw keys (for testing only, rotate before prod):
---   Tenant A: wl_live_sk_test_wanderlux_2026
---   Tenant B: ea_live_sk_test_exploreasia_2026
+-- api_key_hash = SHA256 of the raw key
+--
+-- AA-433 (22/08/2026): the two raw keys originally seeded here were committed to git in
+-- cleartext — a real security exposure (WanderLux Travel is a live, is_active=true tenant).
+-- Both have since been rotated for real via POST /admin/tenants/{id}/generate-key
+-- (generate_api_key() in api/routers/admin.py) — the hashes below are no longer valid on the
+-- live tenant DB. Per repo convention this migration is idempotent
+-- (`ON CONFLICT (tenant_id) DO NOTHING`) and is the path a from-scratch DB rebuild replays, so
+-- the two literal keys below have been swapped for inert placeholders rather than left in
+-- place — a fresh rebuild will now seed a hash that matches nothing, instead of silently
+-- resurrecting the leaked credential. See docs/implementation-notes/AA-433-rotate-wanderlux-key.md.
 -- ---------------------------------------------------------------------------
 
 INSERT INTO shared.tenants (
@@ -37,7 +44,7 @@ INSERT INTO shared.tenants (
     'a1b2c3d4-0001-4000-8000-000000000001'::uuid,
     'WanderLux Travel',
     'growth',
-    encode(sha256('wl_live_sk_test_wanderlux_2026'::bytea), 'hex'),
+    encode(sha256('ROTATED-SEE-AA433-DO-NOT-USE-wanderlux-travel'::bytea), 'hex'),
     300,
     true,
     NOW()
@@ -46,7 +53,7 @@ INSERT INTO shared.tenants (
     'a1b2c3d4-0002-4000-8000-000000000002'::uuid,
     'ExploreAsia Co.',
     'starter',
-    encode(sha256('ea_live_sk_test_exploreasia_2026'::bytea), 'hex'),
+    encode(sha256('ROTATED-SEE-AA433-DO-NOT-USE-exploreasia-co'::bytea), 'hex'),
     60,
     true,
     NOW()
