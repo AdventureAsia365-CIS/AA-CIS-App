@@ -222,7 +222,8 @@ class TestAssignAngle:
 
         assert result["tour_rows_updated"] == 4
         assert result["assigned_angle"] == "culinary_people"
-        assert result["assigned_angle_label"] == "Ẩm thực & Con người"
+        # AA-401: ASSIGNED_ANGLES labels translated to English (were Vietnamese)
+        assert result["assigned_angle_label"] == "Culinary & people"
 
     @pytest.mark.asyncio
     async def test_no_seeded_rows_404(self):
