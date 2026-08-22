@@ -206,3 +206,29 @@ tenants (+ their brand_rules/tenant_api_usage rows), deleted after. Confirmed cl
   Review" + a blue "EXTRA QA PASS" badge on the auto-passed row only, no badge on
   the real-pass row; detail panel header shows the same badge next to the status
   badge, non-clickable, doesn't cover any other header content.
+
+## Post-deploy verify (22/08, after merge — Nghiep approved merge-on-green-CI live)
+
+PR #192 merged (squash, `71a045c`) → `Deploy Dev` workflow ran automatically: ECS
+(`aa-cis-dev-api:121`, rollout `COMPLETED`, smoke test passed), Vercel, Lambda all
+deployed clean. Re-verified fully live, **nothing mocked this time** (the FE mock
+from the pre-merge round was only needed because the backend didn't have the field
+yet):
+
+- Minted a real JWT for a fresh temp tenant (`forbidden_words=["and"]`, forces a T3
+  fail), called the **live public API** directly —
+  `POST https://api-cis.lumiguides.it.com/v1/tours/pool/{id}/rewrite` → 200, real
+  background job.
+- `GET https://api-cis.lumiguides.it.com/v1/tours/my-versions` (same live domain,
+  through the real API Gateway) →
+  `"status":"ai_generated","qa_auto_passed":true` — the field is live and correct
+  through the real gateway + real ECS + real DB, not just reachable in-container.
+- DB: `qa_status='escalated'`, `qa_repair_count=2`, `review_queue` has the escalate
+  row (`review_status='pending'`), `tour_atoms` has 6 real atoms (T5 ran) —
+  identical shape to the pre-merge test runs above, now on the actually-deployed
+  code path.
+- **Real production frontend** (`https://aa-cis.lumiguides.it.com`, Vercel) — same
+  real tenant, real login, real page load, zero API mocking — badge renders
+  correctly: "Ready to Review" + "EXTRA QA PASS".
+- Temp tenant + all its rows (review_queue, tenant_tour_versions, tour_atoms,
+  tenant_brand_rules, tenant_api_usage) deleted after. Confirmed clean.
