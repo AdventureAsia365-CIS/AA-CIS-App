@@ -1,9 +1,16 @@
 """AA-300 — curation UI backend (api/routers/admin_atoms.py).
+AA-431 update: list/summary/patch endpoints no longer take x_admin_secret
+directly — auth+scoping moved into _resolve_atom_owner_scope() (Depends),
+which either verifies a tenant Bearer JWT (returns that tenant's tenant_id
+as owner_scope) or falls back to verify_admin_secret() (returns None, no
+filter — unchanged admin/staff behavior). Tests that call these functions
+directly (bypassing real FastAPI Depends resolution, the established
+pattern in this repo) now pass owner_scope= explicitly instead of
+x_admin_secret=. preview_slotgrid is UNCHANGED (still x_admin_secret only,
+still admin-only — not part of AA-431's scope, see that issue's notes).
 
 Mocks the asyncpg pool per the pool.acquire() convention established in
-test_aa299_atom_insert.py — no live DB, no LLM. Auth is exercised against
-the real verify_admin_secret() imported unchanged from admin.py (AA-300
-PHẦN A decision — nothing in admin.py itself is touched by this issue).
+test_aa299_atom_insert.py — no live DB, no LLM.
 
 ADMIN_SECRET is a module-level constant in api/routers/admin.py, captured
 from the environment at import time — verify_admin_secret() reads that
@@ -18,13 +25,24 @@ import uuid
 from datetime import date
 from unittest.mock import AsyncMock, MagicMock
 
+import jwt
 import pytest
 from fastapi import HTTPException
 
 from api.routers import admin_atoms
+from api.routers.auth import JWT_ALG, JWT_SECRET
 
 TENANT = "00000000-0000-0000-0000-000000000001"
 _TEST_SECRET = "test-admin-secret"
+
+
+def _tenant_credentials(tenant_id: str = TENANT):
+    """A real, correctly-signed tenant JWT wrapped exactly like FastAPI's
+    HTTPBearer would hand it to _resolve_atom_owner_scope — same JWT_SECRET/
+    JWT_ALG api.routers.auth._create_jwt() uses, so verify_jwt() accepts it."""
+    from fastapi.security import HTTPAuthorizationCredentials
+    token = jwt.encode({"sub": tenant_id, "role": "tenant"}, JWT_SECRET, algorithm=JWT_ALG)
+    return HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
 
 
 @pytest.fixture(autouse=True)
@@ -89,6 +107,34 @@ class TestAuthGate:
         assert admin_atoms.verify_admin_secret is verify_admin_secret
 
 
+class TestResolveAtomOwnerScope:
+    """AA-431 — the new Depends() that replaced x_admin_secret on list/
+    summary/patch. Mirrors _resolve_brand_tenant_id's own test shape
+    (admin_pipeline.py, AA-424)."""
+
+    def test_valid_tenant_jwt_returns_tenant_id_as_owner_scope(self):
+        tenant_id = str(uuid.uuid4())
+        result = admin_atoms._resolve_atom_owner_scope(
+            credentials=_tenant_credentials(tenant_id), x_admin_secret=None)
+        assert result == tenant_id
+
+    def test_invalid_jwt_401(self):
+        from fastapi.security import HTTPAuthorizationCredentials
+        bad = HTTPAuthorizationCredentials(scheme="Bearer", credentials="not-a-real-jwt")
+        with pytest.raises(HTTPException) as exc:
+            admin_atoms._resolve_atom_owner_scope(credentials=bad, x_admin_secret=None)
+        assert exc.value.status_code == 401
+
+    def test_no_credentials_falls_back_to_admin_secret_returns_none(self):
+        result = admin_atoms._resolve_atom_owner_scope(credentials=None, x_admin_secret=_TEST_SECRET)
+        assert result is None
+
+    def test_no_credentials_wrong_secret_403(self):
+        with pytest.raises(HTTPException) as exc:
+            admin_atoms._resolve_atom_owner_scope(credentials=None, x_admin_secret="wrong")
+        assert exc.value.status_code == 403
+
+
 class TestListAtoms:
     @pytest.mark.asyncio
     async def test_default_batch_size_50(self):
@@ -101,7 +147,7 @@ class TestListAtoms:
         result = await admin_atoms.list_atoms(
             request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness=None, unreviewed_only=False,
             thin_only=False, include_deleted=False, limit=50, offset=0,
-            x_admin_secret=_TEST_SECRET,
+            owner_scope=None,
         )
         assert result["limit"] == 50
         assert len(result["atoms"]) == 50
@@ -120,7 +166,7 @@ class TestListAtoms:
         result = await admin_atoms.list_atoms(
             request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness=None, unreviewed_only=False,
             thin_only=False, include_deleted=False, limit=50, offset=0,
-            x_admin_secret=_TEST_SECRET,
+            owner_scope=None,
         )
         assert result["total"] == 137
         count_query = conn.fetchval.call_args[0][0]
@@ -136,7 +182,7 @@ class TestListAtoms:
         await admin_atoms.list_atoms(
             request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness=None, unreviewed_only=True,
             thin_only=False, include_deleted=False, limit=50, offset=0,
-            x_admin_secret=_TEST_SECRET,
+            owner_scope=None,
         )
         query = conn.fetch.call_args[0][0]
         assert "ta.updated_at = ta.created_at" in query
@@ -153,7 +199,7 @@ class TestListAtoms:
         await admin_atoms.list_atoms(
             request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness=None, unreviewed_only=False,
             thin_only=True, include_deleted=False, limit=50, offset=0,
-            x_admin_secret=_TEST_SECRET,
+            owner_scope=None,
         )
         query, *params = conn.fetch.call_args[0]
         assert "tc.atom_count <" in query
@@ -169,7 +215,7 @@ class TestListAtoms:
         await admin_atoms.list_atoms(
             request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness="HIGH", unreviewed_only=False,
             thin_only=False, include_deleted=False, limit=50, offset=0,
-            x_admin_secret=_TEST_SECRET,
+            owner_scope=None,
         )
         query, *params = conn.fetch.call_args[0]
         assert "ta.distinctiveness =" in query
@@ -185,7 +231,7 @@ class TestListAtoms:
         await admin_atoms.list_atoms(
             request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness=None, unreviewed_only=False,
             thin_only=False, include_deleted=False, limit=50, offset=0,
-            x_admin_secret=_TEST_SECRET,
+            owner_scope=None,
         )
         query = conn.fetch.call_args[0][0]
         assert "NOT ta.deleted" in query
@@ -200,7 +246,7 @@ class TestListAtoms:
         await admin_atoms.list_atoms(
             request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness=None, unreviewed_only=False,
             thin_only=False, include_deleted=True, limit=50, offset=0,
-            x_admin_secret=_TEST_SECRET,
+            owner_scope=None,
         )
         query = conn.fetch.call_args[0][0]
         assert "NOT ta.is_empty_marker" in query
@@ -217,7 +263,7 @@ class TestListAtoms:
         await admin_atoms.list_atoms(
             request, tour_id=None, tour_ids=",".join(ids), atom_ids=None, distinctiveness=None,
             unreviewed_only=False, thin_only=False, include_deleted=False,
-            limit=50, offset=0, x_admin_secret=_TEST_SECRET,
+            limit=50, offset=0, owner_scope=None,
         )
         query, *params = conn.fetch.call_args[0]
         assert "ta.tour_id = ANY(" in query
@@ -234,7 +280,7 @@ class TestListAtoms:
         await admin_atoms.list_atoms(
             request, tour_id="some-other-id", tour_ids=ids[0], atom_ids=None, distinctiveness=None,
             unreviewed_only=False, thin_only=False, include_deleted=False,
-            limit=50, offset=0, x_admin_secret=_TEST_SECRET,
+            limit=50, offset=0, owner_scope=None,
         )
         query = conn.fetch.call_args[0][0]
         assert "ta.tour_id = ANY(" in query
@@ -267,7 +313,7 @@ class TestListAtoms:
         await admin_atoms.list_atoms(
             request, tour_id=None, tour_ids=single_id, atom_ids=None, distinctiveness=None,
             unreviewed_only=False, thin_only=False, include_deleted=False,
-            limit=50, offset=0, x_admin_secret=_TEST_SECRET,
+            limit=50, offset=0, owner_scope=None,
         )
         query, *params = conn.fetch.call_args[0]
         assert "ta.tour_id = ANY(" in query
@@ -285,11 +331,44 @@ class TestListAtoms:
         await admin_atoms.list_atoms(
             request, tour_id="abc-123", tour_ids=None, atom_ids=None, distinctiveness=None,
             unreviewed_only=False, thin_only=False, include_deleted=False,
-            limit=50, offset=0, x_admin_secret=_TEST_SECRET,
+            limit=50, offset=0, owner_scope=None,
         )
         query, *params = conn.fetch.call_args[0]
         assert "ta.tour_id = $1::uuid" in query
         assert "abc-123" in params
+
+    # ── AA-431 — owner_scope filtering ──────────────────────────────────────
+    @pytest.mark.asyncio
+    async def test_tenant_owner_scope_adds_filter_clause(self):
+        conn = AsyncMock()
+        conn.fetch.return_value = []
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+        tenant_id = str(uuid.uuid4())
+
+        await admin_atoms.list_atoms(
+            request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness=None,
+            unreviewed_only=False, thin_only=False, include_deleted=False,
+            limit=50, offset=0, owner_scope=tenant_id,
+        )
+        query, *params = conn.fetch.call_args[0]
+        assert "ta.owner_scope = $" in query
+        assert tenant_id in params
+
+    @pytest.mark.asyncio
+    async def test_admin_owner_scope_none_adds_no_filter_clause(self):
+        conn = AsyncMock()
+        conn.fetch.return_value = []
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        await admin_atoms.list_atoms(
+            request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness=None,
+            unreviewed_only=False, thin_only=False, include_deleted=False,
+            limit=50, offset=0, owner_scope=None,
+        )
+        query = conn.fetch.call_args[0][0]
+        assert "ta.owner_scope" not in query
 
 
 class TestPatchAtom:
@@ -302,7 +381,7 @@ class TestPatchAtom:
 
         body = admin_atoms.AtomPatchRequest(starred=True)
         result = await admin_atoms.patch_atom(
-            "atom_abc1234567", body, request, x_admin_secret=_TEST_SECRET)
+            "atom_abc1234567", body, request, owner_scope=None)
         assert result["starred"] is True
         query, *params = conn.fetchrow.call_args[0]
         assert "starred = $1" in query
@@ -317,7 +396,7 @@ class TestPatchAtom:
 
         body = admin_atoms.AtomPatchRequest(deleted=True)
         result = await admin_atoms.patch_atom(
-            "atom_abc1234567", body, request, x_admin_secret=_TEST_SECRET)
+            "atom_abc1234567", body, request, owner_scope=None)
         assert result["deleted"] is True
 
     @pytest.mark.asyncio
@@ -329,7 +408,7 @@ class TestPatchAtom:
 
         body = admin_atoms.AtomPatchRequest(text="Corrected text")
         result = await admin_atoms.patch_atom(
-            "atom_abc1234567", body, request, x_admin_secret=_TEST_SECRET)
+            "atom_abc1234567", body, request, owner_scope=None)
         assert result["text"] == "Corrected text"
 
     @pytest.mark.asyncio
@@ -338,7 +417,7 @@ class TestPatchAtom:
         request = _make_request(pool)
         body = admin_atoms.AtomPatchRequest(text="   ")
         with pytest.raises(HTTPException) as exc:
-            await admin_atoms.patch_atom("atom_abc1234567", body, request, x_admin_secret=_TEST_SECRET)
+            await admin_atoms.patch_atom("atom_abc1234567", body, request, owner_scope=None)
         assert exc.value.status_code == 400
 
     @pytest.mark.asyncio
@@ -347,7 +426,7 @@ class TestPatchAtom:
         request = _make_request(pool)
         body = admin_atoms.AtomPatchRequest()
         with pytest.raises(HTTPException) as exc:
-            await admin_atoms.patch_atom("atom_abc1234567", body, request, x_admin_secret=_TEST_SECRET)
+            await admin_atoms.patch_atom("atom_abc1234567", body, request, owner_scope=None)
         assert exc.value.status_code == 400
 
     @pytest.mark.asyncio
@@ -358,7 +437,7 @@ class TestPatchAtom:
         request = _make_request(pool)
         body = admin_atoms.AtomPatchRequest(starred=True)
         with pytest.raises(HTTPException) as exc:
-            await admin_atoms.patch_atom("atom_nonexistent", body, request, x_admin_secret=_TEST_SECRET)
+            await admin_atoms.patch_atom("atom_nonexistent", body, request, owner_scope=None)
         assert exc.value.status_code == 404
 
     @pytest.mark.asyncio
@@ -368,18 +447,42 @@ class TestPatchAtom:
         pool = _make_pool(conn)
         request = _make_request(pool)
         body = admin_atoms.AtomPatchRequest(starred=True)
-        await admin_atoms.patch_atom("atom_abc1234567", body, request, x_admin_secret=_TEST_SECRET)
+        await admin_atoms.patch_atom("atom_abc1234567", body, request, owner_scope=None)
         query = conn.fetchrow.call_args[0][0]
         assert "NOT is_empty_marker" in query
 
+    # AA-431: secret validation moved into _resolve_atom_owner_scope() — see
+    # TestResolveAtomOwnerScope for the rejection tests (patch_atom no longer
+    # takes x_admin_secret directly, only the already-resolved owner_scope).
+
     @pytest.mark.asyncio
-    async def test_wrong_secret_rejected_on_patch(self):
-        pool = _make_pool(AsyncMock())
+    async def test_tenant_owner_scope_adds_where_clause(self):
+        conn = AsyncMock()
+        conn.fetchrow.return_value = _atom_row(starred=True)
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+        tenant_id = str(uuid.uuid4())
+        body = admin_atoms.AtomPatchRequest(starred=True)
+
+        await admin_atoms.patch_atom("atom_abc1234567", body, request, owner_scope=tenant_id)
+        query, *params = conn.fetchrow.call_args[0]
+        assert "AND owner_scope = $" in query
+        assert tenant_id in params
+
+    @pytest.mark.asyncio
+    async def test_tenant_owner_scope_mismatch_404s_not_editable(self):
+        """A tenant guessing another owner_scope's atom_id must get the same
+        404 as a nonexistent atom_id — not a successful edit (IDOR guard)."""
+        conn = AsyncMock()
+        conn.fetchrow.return_value = None  # WHERE atom_id=... AND owner_scope=... matches 0 rows
+        pool = _make_pool(conn)
         request = _make_request(pool)
         body = admin_atoms.AtomPatchRequest(starred=True)
+
         with pytest.raises(HTTPException) as exc:
-            await admin_atoms.patch_atom("atom_abc1234567", body, request, x_admin_secret="wrong")
-        assert exc.value.status_code == 403
+            await admin_atoms.patch_atom(
+                "atom_belongs_to_someone_else", body, request, owner_scope=str(uuid.uuid4()))
+        assert exc.value.status_code == 404
 
 
 class TestAtomsSummary:
@@ -399,7 +502,7 @@ class TestAtomsSummary:
         pool = _make_pool(conn)
         request = _make_request(pool)
 
-        result = await admin_atoms.atoms_summary(request, x_admin_secret=_TEST_SECRET)
+        result = await admin_atoms.atoms_summary(request, owner_scope=None)
 
         assert result["distinctiveness_breakdown"] == {"HIGH": 5, "MED": 0, "LOW": 230}
         assert result["total_count"] == 235
@@ -422,7 +525,7 @@ class TestAtomsSummary:
         pool = _make_pool(conn)
         request = _make_request(pool)
 
-        result = await admin_atoms.atoms_summary(request, x_admin_secret=_TEST_SECRET)
+        result = await admin_atoms.atoms_summary(request, owner_scope=None)
 
         by_name = {t["tour_name"]: t for t in result["by_tour"]}
         assert by_name["Ha Giang Loop"]["atom_count"] < THIN_TRIP_ATOM_MIN
@@ -446,7 +549,7 @@ class TestAtomsSummary:
         pool = _make_pool(conn)
         request = _make_request(pool)
 
-        result = await admin_atoms.atoms_summary(request, x_admin_secret=_TEST_SECRET)
+        result = await admin_atoms.atoms_summary(request, owner_scope=None)
 
         assert result["by_tour"][0]["atomized_at"] == ts.isoformat()
 
@@ -462,17 +565,30 @@ class TestAtomsSummary:
         pool = _make_pool(conn)
         request = _make_request(pool)
 
-        result = await admin_atoms.atoms_summary(request, x_admin_secret=_TEST_SECRET)
+        result = await admin_atoms.atoms_summary(request, owner_scope=None)
 
         assert result["by_tour"][0]["atomized_at"] is None
 
+    # AA-431: secret validation moved into _resolve_atom_owner_scope() — see
+    # TestResolveAtomOwnerScope.
+
     @pytest.mark.asyncio
-    async def test_wrong_secret_rejected(self):
-        pool = _make_pool(AsyncMock())
+    async def test_tenant_owner_scope_adds_filter_to_all_three_queries(self):
+        conn = AsyncMock()
+        conn.fetch.side_effect = [[], []]
+        conn.fetchrow.return_value = {"total": 0, "reviewed": 0}
+        pool = _make_pool(conn)
         request = _make_request(pool)
-        with pytest.raises(HTTPException) as exc:
-            await admin_atoms.atoms_summary(request, x_admin_secret="wrong")
-        assert exc.value.status_code == 403
+        tenant_id = str(uuid.uuid4())
+
+        await admin_atoms.atoms_summary(request, owner_scope=tenant_id)
+
+        breakdown_query, *breakdown_params = conn.fetch.call_args_list[0][0]
+        by_tour_query, *by_tour_params = conn.fetch.call_args_list[1][0]
+        totals_query, *totals_params = conn.fetchrow.call_args[0]
+        assert "owner_scope = $1" in breakdown_query and tenant_id in breakdown_params
+        assert "owner_scope = $1" in by_tour_query and tenant_id in by_tour_params
+        assert "owner_scope = $1" in totals_query and tenant_id in totals_params
 
 
 class TestBulkPatchAtoms:
@@ -487,7 +603,7 @@ class TestBulkPatchAtoms:
         request = _make_request(pool)
 
         body = admin_atoms.BulkAtomPatchRequest(atom_ids=["atom_1", "atom_2"], starred=True)
-        result = await admin_atoms.patch_atoms_bulk(body, request, x_admin_secret=_TEST_SECRET)
+        result = await admin_atoms.patch_atoms_bulk(body, request, owner_scope=None)
 
         assert result["updated_count"] == 2
         query, *params = conn.fetch.call_args[0]
@@ -506,10 +622,25 @@ class TestBulkPatchAtoms:
 
         body = admin_atoms.BulkAtomPatchRequest(
             atom_ids=[f"atom_{i}" for i in range(5)], deleted=True)
-        result = await admin_atoms.patch_atoms_bulk(body, request, x_admin_secret=_TEST_SECRET)
+        result = await admin_atoms.patch_atoms_bulk(body, request, owner_scope=None)
 
         assert result["updated_count"] == 5
         assert conn.fetch.call_count == 1  # exactly one DB round-trip
+
+    @pytest.mark.asyncio
+    async def test_tenant_owner_scope_adds_where_clause(self):
+        conn = AsyncMock()
+        conn.fetch.return_value = [_atom_row(atom_id="atom_1", starred=True)]
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+        tenant_id = str(uuid.uuid4())
+
+        body = admin_atoms.BulkAtomPatchRequest(atom_ids=["atom_1"], starred=True)
+        await admin_atoms.patch_atoms_bulk(body, request, owner_scope=tenant_id)
+
+        query, *params = conn.fetch.call_args[0]
+        assert "AND owner_scope = $" in query
+        assert tenant_id in params
 
     @pytest.mark.asyncio
     async def test_empty_atom_ids_rejected(self):
@@ -517,7 +648,7 @@ class TestBulkPatchAtoms:
         request = _make_request(pool)
         body = admin_atoms.BulkAtomPatchRequest(atom_ids=[], starred=True)
         with pytest.raises(HTTPException) as exc:
-            await admin_atoms.patch_atoms_bulk(body, request, x_admin_secret=_TEST_SECRET)
+            await admin_atoms.patch_atoms_bulk(body, request, owner_scope=None)
         assert exc.value.status_code == 400
 
     @pytest.mark.asyncio
@@ -526,17 +657,11 @@ class TestBulkPatchAtoms:
         request = _make_request(pool)
         body = admin_atoms.BulkAtomPatchRequest(atom_ids=["atom_1"])
         with pytest.raises(HTTPException) as exc:
-            await admin_atoms.patch_atoms_bulk(body, request, x_admin_secret=_TEST_SECRET)
+            await admin_atoms.patch_atoms_bulk(body, request, owner_scope=None)
         assert exc.value.status_code == 400
 
-    @pytest.mark.asyncio
-    async def test_wrong_secret_rejected(self):
-        pool = _make_pool(AsyncMock())
-        request = _make_request(pool)
-        body = admin_atoms.BulkAtomPatchRequest(atom_ids=["atom_1"], starred=True)
-        with pytest.raises(HTTPException) as exc:
-            await admin_atoms.patch_atoms_bulk(body, request, x_admin_secret="wrong")
-        assert exc.value.status_code == 403
+    # AA-431: secret validation moved into _resolve_atom_owner_scope() — see
+    # TestResolveAtomOwnerScope.
 
     def test_bulk_route_registered_before_dynamic_atom_id_route(self):
         """FastAPI route-order regression guard — this repo's own CRITICAL
