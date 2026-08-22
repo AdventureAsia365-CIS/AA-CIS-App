@@ -16,12 +16,6 @@ import ApiTab       from "./_components/ApiTab";
 import { ActivityLogTab, BillingTab, SettingsTab } from "./_components/PlaceholderTabs";
 import { T, sans } from "./_components/ui";
 
-function getCookie(n: string) {
-  if (typeof document === "undefined") return "";
-  const m = document.cookie.match(new RegExp(`(^| )${n}=([^;]+)`));
-  return m ? decodeURIComponent(m[2]) : "";
-}
-
 type ExtTab = Tab | "activity" | "billing" | "settings";
 
 const BREADCRUMBS: Record<ExtTab, string> = {
@@ -49,10 +43,15 @@ export default function PortalPage() {
   const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const n = getCookie("cis_tenant_name");
-    const p = getCookie("cis_tenant_plan");
-    if (n) setName(n);
-    if (p) setPlan(p);
+    // AA-427: cis_tenant_name / cis_tenant_plan are httpOnly now — no longer
+    // readable from document.cookie. Fetch tenant display info from /me instead.
+    fetch("/api/tenant/me")
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => {
+        if (d?.tenant_name) setName(d.tenant_name);
+        if (d?.plan_tier) setPlan(d.plan_tier);
+      })
+      .catch(() => {});
 
     Promise.all([
       fetch("/api/tenant/v1/tours/pool?page_size=1"),
