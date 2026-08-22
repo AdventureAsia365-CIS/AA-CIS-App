@@ -63,7 +63,10 @@ export async function POST(req: NextRequest) {
     response.cookies.set("cis_role", "tenant", cookieOpts);
     response.cookies.set("cis_tenant_token", data.token, cookieOpts);
     response.cookies.set("cis_tenant_id", data.tenant_id, cookieOpts);
-    response.cookies.set("cis_tenant_name", encodeURIComponent(data.tenant_name ?? ""), cookieOpts);
+    // Next.js's cookies.set() already URI-encodes the value on serialize —
+    // encodeURIComponent()-ing it here too would double-encode (verified live:
+    // produced "%2520" instead of "%20"). Pass the raw display name through.
+    response.cookies.set("cis_tenant_name", data.tenant_name ?? "", cookieOpts);
     response.cookies.set("cis_tenant_plan", data.plan_tier ?? "", cookieOpts);
     return response;
   } catch {
