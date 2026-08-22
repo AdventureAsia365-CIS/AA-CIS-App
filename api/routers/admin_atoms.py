@@ -38,10 +38,12 @@ from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 from api.routers.admin import verify_admin_secret
+from api.routers.auth import verify_jwt
 from services.acp_planning.allocator import allocate_month, allocate_month_from_db
 from services.acp_planning.quarter import (
     approve_quarter_plan, fetch_approved_quarter_plan, fetch_current_version_no,
@@ -57,6 +59,46 @@ router = APIRouter(prefix="/admin", tags=["admin-atoms"])
 # AA-301 STEP 0: 793/793 raw_tours rows). Used as the default for the preview
 # endpoint's tenant_id query param so the demo works out of the box.
 _AA_INTERNAL_TENANT_ID = UUID("00000000-0000-0000-0000-000000000001")
+
+
+# ── AA-431 — tenant-JWT auth + owner_scope filter for list/summary/patch ────────
+#
+# Before this, every endpoint here was x-admin-secret only (module header comment,
+# AA-300 STEP 0 decision) — fine while the only UI was /admin/curation (staff-only,
+# platform-owned atoms). AA-425's T5 (services/acp_produce/tenant_pipeline.py)
+# started writing atoms with owner_scope = <tenant_id> (a TENANT's own atoms, from
+# their own rewritten content) alongside the pre-existing owner_scope = 'platform'
+# rows — but nothing here ever filtered by owner_scope, and there was no tenant-JWT
+# auth path at all. Building a tenant-facing curation UI (AA-431, /portal/t6-atoms)
+# straight on top of these endpoints as they were would have let tenant A see/edit
+# tenant B's atoms (or platform's) — same class of gap AA-424 already closed for
+# brand-identity. Mirrors that fix's exact shape (_resolve_brand_tenant_id,
+# admin_pipeline.py): try a tenant Bearer JWT first, fall back to X-Admin-Secret.
+#
+# owner_scope is NEVER accepted as a client-supplied query param for a tenant
+# caller — it's derived only from the verified JWT's `sub` claim, so a tenant can't
+# request a different owner_scope than its own. An admin/staff caller (X-Admin-
+# Secret) gets owner_scope=None (no filter) — unchanged from before, staff still
+# need to see platform + every tenant's atoms for curation/support.
+_atoms_bearer = HTTPBearer(auto_error=False)
+
+
+def _resolve_atom_owner_scope(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_atoms_bearer),
+    x_admin_secret: str = Header(None),
+) -> Optional[str]:
+    """Returns the owner_scope to filter tour_atoms by (a tenant_id string), or
+    None for a staff/admin caller (no filter — sees platform + every tenant)."""
+    if credentials is not None:
+        try:
+            payload = verify_jwt(credentials.credentials)
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+        return payload["sub"]
+    verify_admin_secret(x_admin_secret)
+    return None
 
 
 def _preview_month_for_quarter(year: int, quarter: int) -> int:
@@ -151,7 +193,7 @@ async def list_atoms(
     include_deleted: bool = Query(False),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
-    x_admin_secret: str = Header(None),
+    owner_scope: Optional[str] = Depends(_resolve_atom_owner_scope),
 ):
     """List/filter atoms for curation. Defaults to a 50-atom batch (issue
     AA-300: "50 atom trên 1 màn hình", not one atom at a time). Returns a
@@ -168,8 +210,11 @@ async def list_atoms(
     INSERT, migration 079/084/085), so they stay exactly equal until the
     first PATCH touches the row. Self-chosen — see AA-300 implementation
     notes. "thin" reuses the tour_atom_count already computed in the JOIN
-    (< THIN_TRIP_ATOM_MIN, the same constant N5's B5 fix imports)."""
-    verify_admin_secret(x_admin_secret)
+    (< THIN_TRIP_ATOM_MIN, the same constant N5's B5 fix imports).
+
+    AA-431: owner_scope resolved server-side from the caller's identity (tenant JWT
+    -> that tenant's own atoms only; admin secret -> no filter) — never a query
+    param, so a tenant can't ask to see another owner_scope's atoms."""
     pool = request.app.state.pool
 
     clauses = []
@@ -178,6 +223,9 @@ async def list_atoms(
     def _add(clause: str, value) -> None:
         params.append(value)
         clauses.append(clause.format(n=len(params)))
+
+    if owner_scope is not None:
+        _add("ta.owner_scope = ${n}", owner_scope)
 
     # AA-345 round 2, Việc 4: tour_ids (comma-separated, plural) is the deep
     # link from /admin/atomize after a multi-tour decompose run — lets the
@@ -234,7 +282,7 @@ async def list_atoms(
 @router.get("/atoms/summary")
 async def atoms_summary(
     request: Request,
-    x_admin_secret: str = Header(None),
+    owner_scope: Optional[str] = Depends(_resolve_atom_owner_scope),
 ):
     """Whole-dataset counts, deliberately independent of whatever filter is
     currently applied on the paginated /atoms list — a separate endpoint
@@ -243,34 +291,39 @@ async def atoms_summary(
     bulk action), not on every filter click or load-more page fetch. Folding
     it into the list response would mean recomputing 3 extra aggregate
     queries on every single filter/pagination round-trip for no reason —
-    fewer total queries over a real editing session with this split."""
-    verify_admin_secret(x_admin_secret)
+    fewer total queries over a real editing session with this split.
+
+    AA-431: same owner_scope resolution as GET /atoms — a tenant caller only
+    ever sees counts for its own atoms."""
     pool = request.app.state.pool
+    scope_clause = "AND owner_scope = $1" if owner_scope is not None else ""
+    scope_params = [owner_scope] if owner_scope is not None else []
+    scope_clause_ta = "AND ta.owner_scope = $1" if owner_scope is not None else ""
 
     async with pool.acquire() as conn:
-        breakdown_rows = await conn.fetch("""
+        breakdown_rows = await conn.fetch(f"""
             SELECT distinctiveness, count(*) AS c
             FROM acp_contract.tour_atoms
-            WHERE NOT deleted AND NOT is_empty_marker
+            WHERE NOT deleted AND NOT is_empty_marker {scope_clause}
             GROUP BY distinctiveness
-        """)
-        totals = await conn.fetchrow("""
+        """, *scope_params)
+        totals = await conn.fetchrow(f"""
             SELECT count(*) AS total,
                    count(*) FILTER (WHERE updated_at != created_at) AS reviewed
             FROM acp_contract.tour_atoms
-            WHERE NOT deleted AND NOT is_empty_marker
-        """)
-        by_tour_rows = await conn.fetch("""
+            WHERE NOT deleted AND NOT is_empty_marker {scope_clause}
+        """, *scope_params)
+        by_tour_rows = await conn.fetch(f"""
             SELECT ta.tour_id, rt.src_name AS tour_name,
                    count(*) AS atom_count,
                    count(*) FILTER (WHERE ta.updated_at = ta.created_at) AS unreviewed_count,
                    MAX(ta.created_at) AS atomized_at
             FROM acp_contract.tour_atoms ta
             JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = ta.tour_id
-            WHERE NOT ta.deleted AND NOT ta.is_empty_marker
+            WHERE NOT ta.deleted AND NOT ta.is_empty_marker {scope_clause_ta}
             GROUP BY ta.tour_id, rt.src_name
             ORDER BY rt.src_name
-        """)
+        """, *scope_params)
 
     breakdown = {"HIGH": 0, "MED": 0, "LOW": 0}
     for r in breakdown_rows:
@@ -310,15 +363,17 @@ class BulkAtomPatchRequest(BaseModel):
 async def patch_atoms_bulk(
     body: BulkAtomPatchRequest,
     request: Request,
-    x_admin_secret: str = Header(None),
+    owner_scope: Optional[str] = Depends(_resolve_atom_owner_scope),
 ):
     """Star/soft-delete many atoms in a single UPDATE ... WHERE atom_id =
     ANY($1), not N sequential PATCH calls — for the curation UI's
     multi-select bulk actions. Only starred/deleted are supported in bulk
     (no bulk text edit — editing many atoms' text to the same value isn't
-    a real use case)."""
-    verify_admin_secret(x_admin_secret)
+    a real use case).
 
+    AA-431: a tenant caller's UPDATE is also WHERE-scoped to owner_scope, not
+    just filtered on read — an atom_id belonging to another tenant/platform
+    silently matches 0 rows instead of being editable via a guessed id (IDOR)."""
     if not body.atom_ids:
         raise HTTPException(status_code=400, detail="atom_ids must not be empty")
     if body.starred is None and body.deleted is None:
@@ -338,10 +393,15 @@ async def patch_atoms_bulk(
     sets.append("updated_at = now()")
 
     params.append(body.atom_ids)
+    atom_ids_idx = len(params)
+    scope_clause = ""
+    if owner_scope is not None:
+        params.append(owner_scope)
+        scope_clause = f" AND owner_scope = ${len(params)}"
     query = f"""
         UPDATE acp_contract.tour_atoms
         SET {", ".join(sets)}
-        WHERE atom_id = ANY(${len(params)}) AND NOT is_empty_marker
+        WHERE atom_id = ANY(${atom_ids_idx}){scope_clause} AND NOT is_empty_marker
         RETURNING atom_id, tour_id, text, distinctiveness, starred, deleted,
                   visual_potential, media, created_at, updated_at
     """
@@ -366,16 +426,18 @@ async def patch_atom(
     atom_id: str,
     body: AtomPatchRequest,
     request: Request,
-    x_admin_secret: str = Header(None),
+    owner_scope: Optional[str] = Depends(_resolve_atom_owner_scope),
 ):
     """Star / soft-delete / light text edit. `deleted=true` is the existing
     tour_atoms.deleted column (soft delete) — already excluded from the N6
     allocator's eligible pool (services/acp_planning/allocator.py's
     _eligible_atoms(): `if a.deleted ... continue`). `starred=true` is the
     existing tour_atoms.starred column — already boosted 1.5x in the same
-    allocator. No new columns, no migration (AA-300 STEP 0 finding)."""
-    verify_admin_secret(x_admin_secret)
+    allocator. No new columns, no migration (AA-300 STEP 0 finding).
 
+    AA-431: same owner_scope guard as the bulk endpoint — a tenant's UPDATE
+    is WHERE-scoped, so a guessed atom_id from outside their own scope 404s
+    (not found) instead of being editable."""
     if body.text is not None and not body.text.strip():
         raise HTTPException(status_code=400, detail="text cannot be empty")
     if body.starred is None and body.deleted is None and body.text is None:
@@ -397,10 +459,15 @@ async def patch_atom(
     sets.append("updated_at = now()")
 
     params.append(atom_id)
+    atom_id_idx = len(params)
+    scope_clause = ""
+    if owner_scope is not None:
+        params.append(owner_scope)
+        scope_clause = f" AND owner_scope = ${len(params)}"
     query = f"""
         UPDATE acp_contract.tour_atoms
         SET {", ".join(sets)}
-        WHERE atom_id = ${len(params)} AND NOT is_empty_marker
+        WHERE atom_id = ${atom_id_idx}{scope_clause} AND NOT is_empty_marker
         RETURNING atom_id, tour_id, text, distinctiveness, starred, deleted,
                   visual_potential, media, created_at, updated_at
     """

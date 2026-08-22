@@ -626,14 +626,14 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
                   {/* Score bars */}
                   {v ? (
                     <div style={{ padding: "8px 0", borderTop: `1px solid ${A.line}`, marginTop: 4 }}>
-                      <ScoreBar label="Overall (gate)"    value={v.quality_score}   tooltip="Điểm gate = min(validate, judge). Đây là điểm quyết định publish." />
+                      <ScoreBar label="Overall (gate)"    value={v.quality_score}   tooltip="Gate score = min(validate, judge). This is the score that decides publish." />
                       <ScoreBar label="Brand"             value={v.score_brand} />
                       <ScoreBar label="SEO"               value={v.score_seo} />
                       <ScoreBar label="Structure"         value={v.score_structure} />
-                      <ScoreBar label="Quality (validate)" value={v.score_quality} tooltip="Validate sub-score (rule-based, chưa qua judge cap)." />
+                      <ScoreBar label="Quality (validate)" value={v.score_quality} tooltip="Validate sub-score (rule-based, not yet capped by judge)." />
                       {/* AA-220 (G2): clarify gate vs sub-score so they're not read as the same metric */}
                       <div style={{ fontSize: 10, color: A.muted2, lineHeight: 1.5, marginTop: 4 }}>
-                        Overall = min(validate, judge) là điểm gate. Quality = validate sub-score.
+                        Overall = min(validate, judge) is the gate score. Quality = validate sub-score.
                       </div>
                     </div>
                   ) : (

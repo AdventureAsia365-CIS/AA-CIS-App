@@ -5,7 +5,8 @@
 # trust the stale numbers below without a fresh `aws ecs describe-services` / gh run check.
 
 ## LIVE STATE
-- API: https://api-cis.lumiguides.it.com ✅ (via API Gateway owq9as3wjl)
+- API: https://api-cis.lumiguides.it.com ✅ (via API Gateway 4ylo382khg — corrected 22/08/2026,
+  AA-432; `owq9as3wjl` was stale/no longer exists, confirmed via `aws apigateway get-rest-apis`)
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel — AA-103 production)
 - ECS task def: api:340 (unverified, see header note) | main 38caa5f pre-AA-384 | Vercel Prod hash unverified
 - AA-384 (this session): product-direction correction on AA-309/AA-330's posts_per_week/Mirror
@@ -61,7 +62,9 @@
 - Lambda aa-cis-dev-acp-s4-evaluate: DEPLOYED ✅ (AA-49 H-1)
 - Lambda aa-cis-dev-acp-s4-trigger: DEPLOYED ✅ | ALB_INTERNAL_URL: FIXED ✅
 - Lambda aa-cis-dev-acp-s3-campaign-planner: DEPLOYED ✅ (AA-45)
-- API Gateway: owq9as3wjl | Lambda Authorizer: aa-cis-dev-authorizer
+- API Gateway: 4ylo382khg (aa-cis-dev-api, stage `dev`; corrected 22/08/2026, AA-432 — see note
+  in LIVE STATE above) | Lambda Authorizer: aa-cis-dev-authorizer (TOKEN type, identitySource
+  `X-API-Key` ONLY — no Bearer/JWT branch, confirmed via source read, AA-432)
 - DB: PostgreSQL 15, aa_cis_dev, secret: aa-cis/dev/rds (plain DSN)
 - Models: Bedrock Haiku 4.5 (primary) → Sonnet 4.5 (quality fallback)
 

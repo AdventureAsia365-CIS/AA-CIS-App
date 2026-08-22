@@ -64,7 +64,8 @@ def test_missing_field_scans_empty_column():
 
 def test_highlights_too_few():
     out = _derive_field_failures({"aa_highlights": ["only", "two"]}, _codes("HIGHLIGHTS_TOO_FEW"))
-    assert any(f["code"] == "HIGHLIGHTS_TOO_FEW" and "cần" in f["reason"] for f in out)
+    # AA-401: reason strings translated to English (were Vietnamese)
+    assert any(f["code"] == "HIGHLIGHTS_TOO_FEW" and "need" in f["reason"] for f in out)
 
 
 def test_highlights_too_few_jsonstring_input():
