@@ -7,6 +7,39 @@
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway 4ylo382khg — corrected 22/08/2026,
   AA-432; `owq9as3wjl` was stale/no longer exists, confirmed via `aws apigateway get-rest-apis`)
+- AA-432 (this session, part 2 — auth architecture, PENDING Terraform apply, see note below):
+  `/v1/*`'s API Gateway resource (`/v1/{v1_proxy+}`) is changing from `authorizationType: CUSTOM`
+  (`tenant-key-authorizer`, required `X-API-Key`) to `NONE`. Root cause (STEP0,
+  `docs/claude_audit/AA-432-api-gateway-401-step0.md`): the tenant-portal BFF proxy only ever
+  sent `Authorization: Bearer <JWT>`, never `X-API-Key`, so every `/v1/*` call 401'd at the
+  gateway edge before FastAPI ever ran — confirmed this was NOT limited to 2 routes, it broke
+  the whole `/v1/*` surface for both tenant and staff (`(internal)/*`) traffic. Confirmed safe to
+  remove: `get_tenant()` (`api/routers/v1_tours.py`, `v1_exports.py`) decodes the JWT itself and
+  never reads any gateway-authorizer context; the `X-API-Key` gate was a redundant coarse edge
+  check, not the real auth boundary. **Do NOT re-add an `X-API-Key` requirement to the gateway
+  for `/v1/*` without re-reading STEP0 first** — this was a deliberate, reviewed removal, not an
+  oversight. JWT (verified in FastAPI) is now the only auth boundary for `/v1/*`, matching NONE
+  at the gateway for `/admin`, `/auth`, `/content` already. Per-tenant rate-limit + revoke moved
+  to the app layer: `api/middleware/rate_limit.py`'s `rate_limit_middleware` (already wired
+  globally on `/v1/*`) now reads the tenant's real `shared.tenants.rate_limit_rpm` + `is_active`
+  (Redis-cached 30s, `tenant_meta:{tenant_id}` key) instead of a hardcoded plan-tier RPM bucket
+  and a login-time-only `is_active` check — `is_active=false` now blocks within ~30s instead of
+  waiting up to 24h for the tenant's JWT to expire. **3 routers
+  (`v1_acp.py`, `v1_s1.py`, `v1_s1_from_atom.py`) use a DIFFERENT, unrelated auth dependency**
+  (`verify_tenant_api_key`, AA-181 — a real `X-API-Key`/`X-Admin-Secret` header FastAPI itself
+  checks, independent of the gateway) — confirmed unaffected by this change either way, don't
+  confuse the two auth mechanisms if touching either again.
+  **Terraform change NOT YET APPLIED as of this note** — `terraform plan` could not be run from
+  this session (the `aa365-admin` profile requires interactive MFA for AssumeRole, which
+  Terraform's AWS provider can't satisfy non-interactively in this environment) — module change
+  is in `modules/api_gateway/main.tf` (AA-CIS-Infra repo), branch
+  `pqnghiep1354/aa-432-urgentinfra-api-gateway-id-sai-lech-claudemd-vs-production-x`; Nghiep needs
+  to run `terraform plan`/`apply` himself (see
+  `docs/implementation-notes/AA-432-fix-2c-redis-ratelimit.md` for the exact commands) before any
+  of the above is actually live. The FastAPI-side change (rate_limit.py) IS mergeable/deployable
+  independently — it doesn't require the Terraform change to be safe (it just won't matter for
+  `/v1/*` traffic arriving via the gateway until the gateway change also ships, since that
+  traffic can't reach FastAPI at all right now).
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel — AA-103 production)
 - ECS task def: api:340 (unverified, see header note) | main 38caa5f pre-AA-384 | Vercel Prod hash unverified
 - AA-384 (this session): product-direction correction on AA-309/AA-330's posts_per_week/Mirror
