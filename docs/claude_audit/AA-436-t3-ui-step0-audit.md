@@ -35,11 +35,23 @@ AA-430's own implementation notes say so explicitly, twice:
   UI yet, see AA-430 implementation notes)."*
 
 So T3 has zero FE footprint today: no folder, no nav item, no breadcrumb entry, no reserved slug
-string anywhere in the frontend. **No exact route name for T3 is fixed in code.** AA-430's own
-decision log (line 5-6) states the team's convention here is "ask Nghiep for the tab→T-number
-mapping instead of guessing" — that's how T4 vs T3 got disambiguated last time (T4, not T3, for
-`catalog`). The same should apply to naming T3's route slug (`t3-review`? `t3-qa`? `t3-escalations`?
-— genuinely unpicked, not something this audit should invent).
+string anywhere in the frontend. **No exact route name for T3 is fixed in code.**
+
+**Discrepancy with the Linear issue text, checked against the actual ADR (not assumed):** the
+AA-436 Linear issue states *"ADR-2026-038 mục 10.4: route đã convention hóa `/portal/t3-review`"*.
+Fetched the real Notion page (`3c3b8a41-ec5d-8123-911f-e0c308841e79`) directly to check this — §10.4
+("Bảng scope FE cập nhật") is a status table (`Stage | Trạng thái thật | Việc cần`); its T3 row
+reads *"Không tồn tại (chỉ có `quality_score` số) → Build mới — tenant xem diagnosis structured"*.
+**The string `t3-review` does not appear anywhere in the ADR page** (§10.4, §11, or anywhere else)
+— nor in the earlier `memory.md` S153 pointer that §11 defers detail to, which this session did not
+have access to. So "`/portal/t3-review` is the ADR-convention name" is not something this audit
+could verify from the source it was attributed to; it may be correct (a reasonable slug given the
+`t0-brand`/`t1-rewrite`/`t4-pool`/`t6-atoms` pattern) but isn't *confirmed* by anything read this
+session. AA-430's own decision log (line 5-6 of its implementation notes) states the team's
+convention here is "ask Nghiep for the tab→T-number mapping instead of guessing" — that's how T4 vs
+T3 got disambiguated last time (T4, not T3, for `catalog`). Recommend the same before the next build
+task starts: confirm the exact slug with Nghiep rather than treating the Linear issue text as
+settled, since it doesn't trace back to the ADR section it cites.
 
 ---
 
@@ -220,7 +232,9 @@ PR, gated on `_resolve_atom_owner_scope()`-style real JWT derivation — see
   `WHERE tenant_id = tenant["sub"]`, and either `LEFT JOIN gold_aa_internal.tenant_tour_versions`
   (T4's own table, for tour name/content context) or no join at all — never `INNER JOIN
   generated_content_id` for this query, since it's NULL by design for every T3 row.
-- **New FE route** `/portal/t3-<slug>` (slug TBD, see §1) + a new component modeled on
+- **New FE route** `/portal/t3-review` (per the Linear issue text — confirm with Nghiep first, see
+  §1's discrepancy note; this audit could not independently trace that exact string to the ADR) + a
+  new component modeled on
   `AtomsTab.tsx`'s flat-list-with-summary pattern, wired through the existing `/api/tenant/*` proxy
   (no proxy change needed — it already forwards Bearer for any `/v1/*` path).
 - **Open question for Nghiep, not assumed here**: what action (if any) a tenant can take on an
