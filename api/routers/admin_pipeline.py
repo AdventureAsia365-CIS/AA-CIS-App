@@ -13,7 +13,7 @@ from uuid import UUID
 import asyncpg
 import boto3 as _boto3
 import structlog
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from typing import Optional, List
@@ -4193,25 +4193,54 @@ async def update_brand_identity(
     return {"status": "updated", "version": current + 1}
 
 
+_BRAND_UPLOAD_MAX_BYTES = 10 * 1024 * 1024  # 10MB — matches BrandTab.tsx's own stated limit
+_BRAND_UPLOAD_ALLOWED_CONTENT_TYPES = {
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
+}
+
+
 @router.post("/brand-identity/upload")
-async def upload_brand_file(request: Request, x_admin_secret: str = Header(None)):
-    verify_admin_secret(x_admin_secret)
+async def upload_brand_file(
+    tenant_id: str = Depends(_resolve_brand_tenant_id),
+    file: UploadFile = File(...),
+):
+    """AA-441 (bug #4): was a JSON-body endpoint that only ever handed back a presigned S3 PUT
+    URL — the client was expected to PUT the file directly to S3 afterward, but no code
+    anywhere (BrandTab.tsx included) ever took that second step, so no upload actually
+    completed regardless of auth. BrandTab.tsx has always sent the real file as multipart
+    FormData in one request; this endpoint now matches that shape directly (accepts the file,
+    uploads to S3 server-side) instead of the unused two-step presigned-URL contract. tenant_id
+    now resolves via the same _resolve_brand_tenant_id() dependency AA-424 already wired for
+    GET/POST /admin/brand-identity, instead of a hardcoded AA-internal UUID — a real tenant's
+    upload now lands under their own S3 prefix, not aa_internal's.
+
+    Does NOT parse/extract brand rules from the uploaded file (no "AI extracting rules" step
+    exists yet, per BrandTab.tsx's own aspirational copy) — tracked as a separate follow-up,
+    deliberately not built here (Nghiep, Linear AA-441 comment).
+    """
     import uuid as _uuid2
     import re as _re2
-    tenant_id    = "00000000-0000-0000-0000-000000000001"
-    body         = await request.json()
-    filename     = body.get("filename", "brand.pdf")
-    content_type = body.get("content_type", "application/pdf")
-    safe_name    = _re2.sub(r'[^a-zA-Z0-9._-]', '_', filename)
-    s3_key       = f"brand-identity/{tenant_id}/{_uuid2.uuid4()}_{safe_name}"
-    bucket       = os.environ.get("BRONZE_BUCKET", "aa-cis-bronze-867490540162")
+
+    if file.content_type not in _BRAND_UPLOAD_ALLOWED_CONTENT_TYPES:
+        raise HTTPException(status_code=415, detail=f"Unsupported file type: {file.content_type}")
+
+    contents = await file.read()
+    if len(contents) > _BRAND_UPLOAD_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="File exceeds 10MB limit")
+
+    safe_name = _re2.sub(r'[^a-zA-Z0-9._-]', '_', file.filename or "brand.pdf")
+    s3_key    = f"brand-identity/{tenant_id}/{_uuid2.uuid4()}_{safe_name}"
+    bucket    = os.environ.get("BRONZE_BUCKET", "aa-cis-bronze-867490540162")
+
     s3 = _boto3.client("s3", region_name=os.environ.get("AWS_REGION", "us-west-1"))
-    upload_url = s3.generate_presigned_url(
-        "put_object",
-        Params={"Bucket": bucket, "Key": s3_key, "ContentType": content_type},
-        ExpiresIn=300,
-    )
-    return {"upload_url": upload_url, "s3_key": s3_key}
+    try:
+        s3.put_object(Bucket=bucket, Key=s3_key, Body=contents, ContentType=file.content_type)
+    except Exception as e:
+        logger.error("brand_identity_upload_failed", tenant_id=tenant_id, s3_key=s3_key, error=str(e))
+        raise HTTPException(status_code=502, detail="Upload to storage failed")
+
+    return {"status": "uploaded", "s3_key": s3_key}
 
 
 # ── GET /admin/billing ────────────────────────────────────────────────────────

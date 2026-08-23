@@ -1,4 +1,4 @@
-import json, time, os, logging
+import json, time, os, logging, uuid
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from api.routers.auth import verify_jwt
@@ -60,7 +60,17 @@ async def _get_tenant_meta(request: Request, tenant_id: str) -> dict | None:
 
 
 async def rate_limit_middleware(request: Request, call_next):
-    if not request.url.path.startswith("/v1/"):
+    path = request.url.path
+
+    # AA-441 (bug #1, AA-438-04/AA-439-00 #13): this middleware used to unconditionally skip
+    # every non-/v1/* path before checking auth at all, so shared.tenant_api_usage — the sole
+    # data source for the admin Dashboard's "Pipeline Health" panel — never recorded a single
+    # row of admin (/admin/*) activity. /admin/* traffic is tracked (not rate-limited — staff
+    # aren't subject to a tenant RPM bucket) via a separate branch below.
+    if path.startswith("/admin/"):
+        return await _track_admin_call(request, call_next)
+
+    if not path.startswith("/v1/"):
         return await call_next(request)
 
     auth = request.headers.get("Authorization", "")
@@ -135,4 +145,50 @@ async def rate_limit_middleware(request: Request, call_next):
     response.headers["X-RateLimit-Limit"] = str(rpm_limit)
     response.headers["X-RateLimit-Remaining"] = str(max(0, rpm_limit - count))
     response.headers["X-RateLimit-Plan"] = plan_tier
+    return response
+
+
+async def _track_admin_call(request: Request, call_next):
+    """AA-441: log /admin/* activity into shared.tenant_api_usage (actor_type='admin',
+    migration 110) so the Dashboard's Pipeline Health panel reflects real admin usage instead of
+    reading permanently idle.
+
+    Only tracks requests that actually authenticate as admin (X-Admin-Secret match) — an
+    unauthenticated/invalid request is passed through untracked, same permissive pattern the
+    /v1/* branch above uses for a missing/invalid Bearer token, and still gets its real 401/403
+    from the route's own auth dependency. Not rate-limited: staff aren't subject to a tenant RPM
+    bucket, this branch only measures + records.
+    """
+    admin_secret = os.environ.get("ADMIN_SECRET", "")
+    x_admin_secret = request.headers.get("X-Admin-Secret", "")
+    if not admin_secret or x_admin_secret != admin_secret:
+        return await call_next(request)
+
+    # AA-232: verified admin identity, forwarded by the admin BFF proxy
+    # (frontend/app/api/admin/[...path]/route.ts) as x-admin-user-id — sent on every admin
+    # request already, just never read by any backend code until this fix. Legacy
+    # ADMIN_SECRET-only callers (no BFF in front of them) won't send it — tracked with
+    # admin_user_id=NULL in that case (see migration 110's actor CHECK constraint).
+    raw_admin_user_id = request.headers.get("x-admin-user-id", "")
+    admin_user_id = None
+    if raw_admin_user_id:
+        try:
+            admin_user_id = str(uuid.UUID(raw_admin_user_id))
+        except ValueError:
+            logger.warning(f"Ignoring malformed x-admin-user-id: {raw_admin_user_id!r}")
+
+    start = time.time()
+    response = await call_next(request)
+    response_ms = int((time.time() - start) * 1000)
+
+    await track_api_call(
+        request.app.state.pool,
+        tenant_id=None,
+        endpoint=request.url.path,
+        method=request.method,
+        status_code=response.status_code,
+        response_ms=response_ms,
+        actor_type="admin",
+        admin_user_id=admin_user_id,
+    )
     return response

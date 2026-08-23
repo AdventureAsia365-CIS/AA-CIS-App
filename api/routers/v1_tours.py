@@ -101,7 +101,15 @@ async def browse_pool(
     pool = request.app.state.pool
     offset = (page - 1) * page_size
 
-    conditions = ["pt.tenant_id = '00000000-0000-0000-0000-000000000001'::uuid"]
+    # AA-441 (bug #6, AA-438-00-SUMMARY #8): was missing the master_status/deleted_at gate that
+    # acp_contract.v_trip_registry already applies (migrations 078/083/090) — a tour an admin
+    # trashes/deactivates in Master Content stayed fully visible and rewritable to every tenant
+    # here. Same condition v_trip_registry uses: master_status='active' AND deleted_at IS NULL.
+    conditions = [
+        "pt.tenant_id = '00000000-0000-0000-0000-000000000001'::uuid",
+        "pt.master_status = 'active'",
+        "pt.deleted_at IS NULL",
+    ]
     params: list = []
 
     if country:
@@ -156,12 +164,15 @@ async def browse_pool(
             LIMIT ${len(params)+1} OFFSET ${len(params)+2}
         """, *params_paged)
 
-        # Countries for filter dropdown
+        # Countries for filter dropdown — same master_status/deleted_at gate as the main listing
+        # above, so a trashed/deactivated tour's country doesn't show as a filterable option.
         countries = await conn.fetch("""
             SELECT DISTINCT rt.country
             FROM gold_aa_internal.published_tours pt
             LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
             WHERE pt.tenant_id = '00000000-0000-0000-0000-000000000001'::uuid
+              AND pt.master_status = 'active'
+              AND pt.deleted_at IS NULL
               AND rt.country IS NOT NULL
             ORDER BY rt.country
         """)
