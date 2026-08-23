@@ -83,3 +83,35 @@ CI/locally, not just sit as an aspirational spec.
   `PROTECTED_ROUTES` entry, this will recur. Worth a lint/test that diffs `frontend/app/admin/*`
   page directories against `PROTECTED_ROUTES` prefixes, but that's a bigger change than this fix
   — not done here.
+
+---
+
+## Post-deploy live verification (23/08/2026, after merge)
+
+PR #198 merged to `main` (`948234d`) after all 5 required CI checks passed (Lint, Security
+Audit, Unit Tests, Integration Tests, Docker Build Check — head branch had to be updated once,
+`gh pr merge --auto --squash` then completed on its own once checks re-ran green). `Deploy Dev`
+green: Vercel deploy-hook triggered, ECR build+push, Lambda redeploy, ECS Dev rollout `COMPLETED`
+(all in one `Deploy Dev` GitHub Actions run, watched to completion).
+
+- ECS `aa-cis-dev-api`: steady state 1/1, single `PRIMARY` deployment, task def `:126`,
+  `rolloutState: COMPLETED`.
+- Running task's `imageDigest` (`sha256:89e720b4...`) confirmed **identical** to ECR `:latest`'s
+  digest — the live task is genuinely serving the just-built image, not a stale one.
+- **Real end-to-end check against the actual deployed Vercel frontend**
+  (`https://aa-cis.lumiguides.it.com`), not local — real login through the deployed
+  `/api/auth/login` BFF route (which itself calls the real, deployed
+  `https://api-cis.lumiguides.it.com/auth/admin-login`) using `e2e-test-admin`, real
+  `cis_admin_token` cookie returned by that live route, `cis_role=admin` added to match what the
+  browser's own login-page JS sets (`document.cookie`, `frontend/app/login/page.tsx:34`) — same
+  cookie shape a real browser session ends up with:
+  - `GET /admin/a4-oversight` → **200** (was 307 pre-fix) — response body contains real page
+    content ("Review Log", "Trust Ramp" headings), not an error shell.
+  - `GET /admin/dashboard` → 200, `GET /admin/tenants` → 200 — regression check, both unaffected.
+  - Same request with **no cookies at all** → still **307 → `/login`** — fail-closed behavior for
+    genuinely unauthenticated requests preserved, not accidentally opened up by this fix.
+- Local scratch files holding the JWT/cookie jar deleted after the check (shred where available).
+
+This closes the loop AA-437-02's own post-deploy note left open ("full logged-in browser render
+was not done... confidence instead comes from the clean `next build`") — this time the actual
+gap that note's own confidence-substitute logic missed is what got live-verified directly.
