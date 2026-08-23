@@ -70,6 +70,14 @@ const PROTECTED_ROUTES: { prefix: string; roles: string[] }[] = [
   // AA-384's own gap documented in this file's header: added here from the start, not after
   // the page silently 404s-to-login.
   { prefix: "/admin/produce", roles: ["admin"] },
+  // AA-437: A4 Cross-Tenant Oversight (review-log + trust-ramp, read-only) — admin-only, same
+  // shape as Gate A/Gate B/Produce above. Same gap as AA-384/AA-388/AA-405 documented in this
+  // file's header, and the exact one PR #196's own "post-deploy live verification" note missed:
+  // it tested only the unauthenticated case (307 there is expected either way — via this
+  // `!route` branch OR the `!role` branch below — so it never actually proved this entry
+  // existed). Confirmed live with a real admin session before this fix: 307 → /login even though
+  // /admin/dashboard worked fine in the same session.
+  { prefix: "/admin/a4-oversight", roles: ["admin"] },
   // Internal staff pages (was INTERNAL_PATHS) — admin/reviewer get real JWT
   // verification; content is the known-limitation carve-out described above.
   { prefix: "/admin/dashboard", roles: ["admin", "reviewer", "content"] },
