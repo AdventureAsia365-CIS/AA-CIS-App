@@ -119,8 +119,11 @@ async def create_tenant(
     silver_aa_internal.raw_tours (no code to remove here) -- that "tenant brings its own tours"
     assumption lives only in list_tenants()/get_tenant_details() below, the old ACP v1 shape N1
     deliberately does not extend: a new tenant's tours come from acp_shared.tenant_atom_state
-    (seeded from a finalized acp_shared.marketplace_portfolios row via POST .../seed-atoms), never
-    from rows the tenant uploads under its own tenant_id."""
+    (ONE-TIME seeded from a finalized acp_shared.marketplace_portfolios row via POST
+    .../seed-atoms — this is the pre-tenant onboarding seed step only, not a live source; the
+    tenant's ONGOING/current tour+atom selection, once they exist and start using T1-T6, is
+    GET /v1/marketplace, AA-444, api/routers/v1_marketplace.py), never from rows the tenant
+    uploads under its own tenant_id."""
     verify_admin_secret(x_admin_secret)
 
     if body.plan_tier not in PLAN_LIMITS:
@@ -904,7 +907,14 @@ async def seed_tenant_atoms(
     build): a tenant can be retried here without recreating the tenant row if seeding fails.
     Idempotent re-run with the SAME portfolio_id is a safe no-op (ON CONFLICT DO NOTHING on both
     inserts); a second call with a DIFFERENT portfolio_id is rejected (409) rather than silently
-    mixing two portfolios' tour lists into one tenant's atom state."""
+    mixing two portfolios' tour lists into one tenant's atom state.
+
+    AA-444 (23/08/2026): this is the ONE deliberately-kept marketplace_portfolios read site
+    left in the app after AA-444's deprecation pass — acp_shared.tenant_onboarding.portfolio_id
+    is a real NOT NULL FK into that table (migration 098), so this call cannot be removed
+    without a migration (out of scope for AA-444). Do not treat this as evidence the table is
+    still a live "current tenant state" source elsewhere — it is not; see
+    docs/implementation-notes/AA-444-marketplace-view.md."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
 
@@ -1033,7 +1043,11 @@ async def get_tenant_mirror(
     snapshot that can go stale — atoms starred/deleted/added before onboarding actually happens).
     Always a FRESH COUNT(*) against acp_contract.tour_atoms for this tenant's seeded tour_ids, and
     still calls runway_months() directly (services.acp_shared.marketplace_estimates, AA-330 Phần B)
-    with the UNCHANGED formula — AA-384 only changes how the result is presented, not computed."""
+    with the UNCHANGED formula — AA-384 only changes how the result is presented, not computed.
+
+    AA-444 (23/08/2026): this ONBOARDING-time mirror is unrelated to the tenant's ongoing
+    Marketplace view — that live rollup (tenant_tour_versions x tour_atoms, both tenant-scoped)
+    is now GET /v1/marketplace (api/routers/v1_marketplace.py), per ADR-2026-038 §0.3."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
 
