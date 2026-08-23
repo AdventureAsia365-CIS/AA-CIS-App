@@ -141,9 +141,17 @@ API proxy convention: every /admin/* page calls same-origin /api/admin/[...path]
 shared.*              → tenants, pipeline_runs, membership_plans, tenant_brand_rules
 silver_aa_internal.*  → raw_tours, generated_content, seo_context
 gold_aa_internal.*    → published_tours
-acp_shared.*          → marketplace_portfolios (097), tenant_atom_state + tenant_onboarding (098,
-                        N1 Gate A), acp_quota_ledger, audit_log
-acp_contract.*        → tour_atoms (079, platform-owned, owner_scope='platform'), v_trip_registry
+acp_shared.*          → marketplace_portfolios (097, DEPRECATED as of AA-444/23-08-2026 for
+                        "tenant's current Marketplace" purposes — kept live ONLY as the seed
+                        source for N1 pre-tenant onboarding, tenant_onboarding.portfolio_id
+                        is a real FK into it; the tenant's live Marketplace view is now
+                        GET /v1/marketplace, api/routers/v1_marketplace.py, see
+                        docs/implementation-notes/AA-444-marketplace-view.md), tenant_atom_state
+                        + tenant_onboarding (098, N1 Gate A), acp_quota_ledger, audit_log
+acp_contract.*        → tour_atoms (079; owner_scope was platform-only at 079, ADR-2026-038
+                        Hướng B (21/08/2026) changed this to per-tenant — owner_scope=tenant_id
+                        for tenant-rewritten-tour atoms (T5), owner_scope='platform' remains for
+                        admin/A1 atoms — free-text column, no migration needed), v_trip_registry
 acp_produce.* / acp_deliver.* → N7 production pipeline / N8 weekly flywheel delivery state
 
 silver_{tenant_slug}.* → per B2B tenant (same structure)
