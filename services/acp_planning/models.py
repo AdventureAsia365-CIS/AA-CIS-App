@@ -17,7 +17,17 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 FunnelStage = Literal["TOFU", "MOFU", "BOFU", "OFF"]
-Channel = Literal["blog", "facebook", "tiktok", "email"]
+# AA-449 — extended from 4 to 7 values (STEP0, docs/claude_audit/
+# AA-449-00-step0-t8-angle-gate-investigation.md §5): T8's Bang-2 channel-style reference table
+# has 7 channels; Slot.channel only supported 4 of them, and since acp_shared.tenant_config.
+# channels is unconstrained free text at the DB layer, a tenant configuring e.g. "linkedin"
+# would previously make compute_slot_grid() raise a real Pydantic ValidationError the moment it
+# tried to construct a Slot — not theoretical, confirmed by reading the code. Names match
+# services/acp_angle_gate/channel_style.py's CHANNEL_STYLE keys exactly (snake_case for the two
+# multi-word channels) — keep both in sync if either changes.
+Channel = Literal[
+    "blog", "facebook", "tiktok", "email", "linkedin", "instagram", "landing_page", "ads",
+]
 Distinctiveness = Literal["HIGH", "MED", "LOW"]
 LifecycleStage = Literal["active", "phasing_out", "retired"]
 

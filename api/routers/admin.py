@@ -1113,7 +1113,12 @@ class TenantConfigRequest(BaseModel):
     posts_per_week: int = Field(..., ge=1, le=14)
 
 
-_VALID_CHANNELS = {"blog", "facebook", "tiktok", "email"}
+# AA-449 — extended from 4 to 8 values (kept "blog" for backward compat even though it has no
+# row in T8's Bang-2 channel-style table; see services/acp_planning/models.py's Channel Literal,
+# which this set must stay in sync with — same 8 values, same names).
+_VALID_CHANNELS = {
+    "blog", "facebook", "tiktok", "email", "linkedin", "instagram", "landing_page", "ads",
+}
 
 
 @router.get("/tenants/{tenant_id}/config", summary="AA-323 — N4-N6 markets/channels/capacity for one tenant")

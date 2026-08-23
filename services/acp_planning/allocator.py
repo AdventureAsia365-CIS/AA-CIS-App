@@ -195,7 +195,17 @@ def compute_slot_grid(
         key = (trip_id, channel)
         used = used_this_month.setdefault(key, set())
         pool = _eligible_atoms(atoms, channel, used, today)
-        n_atoms = 1 if channel in ("facebook", "tiktok") else min(4, len(pool))
+        # AA-449 — extended from ("facebook","tiktok") to also cover the 3 new short-form/
+        # single-focus channels (linkedin, instagram, ads) added for T8's channel extension
+        # (STEP0 §5). Self-chosen from Bang 2's own "Structure" column: linkedin/instagram/ads
+        # are all single-idea/single-hook formats there (LinkedIn: "1 insight rõ"; Instagram:
+        # "3-5 chi tiết cụ thể" inside one short caption, not 4 separate atoms; Ads: "1 hook...1
+        # benefit...1 CTA") — same shape as facebook/tiktok's existing 1-atom treatment.
+        # landing_page stays in the multi-atom (up to 4) group with blog/email — Bang 2's own
+        # structure for it is explicitly multi-section (value prop / audience / why / what AA
+        # does / trust signal / CTA), the same "long-form, several ideas" shape blog/email
+        # already get 4 atoms for.
+        n_atoms = 1 if channel in ("facebook", "tiktok", "linkedin", "instagram", "ads") else min(4, len(pool))
         if not pool:
             _add_note(
                 notes,

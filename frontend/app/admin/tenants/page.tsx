@@ -715,7 +715,12 @@ interface TenantPlanningConfig {
   posts_per_week: number;
 }
 
-const ALL_CHANNELS = ["blog", "facebook", "tiktok", "email"];
+// AA-449 — extended from 4 to 8 values (kept "blog" for backward compat, even though it has no
+// row in T8's Bang-2 channel-style table). Must stay in sync with services/acp_planning/
+// models.py's Channel Literal and api/routers/admin.py's _VALID_CHANNELS.
+const ALL_CHANNELS = [
+  "blog", "facebook", "tiktok", "email", "linkedin", "instagram", "landing_page", "ads",
+];
 
 function PlanningTabContent({ tenantId }: { tenantId: string }) {
   const [config, setConfig] = useState<TenantPlanningConfig | null>(null);
