@@ -1,5 +1,15 @@
 # AA-441 — Fix 6 Priority Bugs from AA-438/439 Audit
 
+**Post-merge update (23/08/2026):** PR #194 merged to `main` (`17305fc`) after CI green (Nghiep's
+explicit go-ahead: "CI green thì merge luôn"). `Deploy Dev` workflow ran clean (Vercel + ECR build
++ Lambda + ECS Dev all `success`) — confirmed the running ECS task's image digest
+(`sha256:cd4f6e77...`) matches ECR `:latest` exactly, task def `aa-cis-dev-api:122`. Migration 110
+re-confirmed still applied post-deploy. With the fix now actually live, re-ran bugs #1, #2, #4,
+#5, #6 as **true HTTP calls against the real deployed endpoint**
+(`https://api-cis.lumiguides.it.com`) instead of direct function calls — strictly stronger
+evidence than the pre-merge verification below, which is kept as-is for the record. See the new
+"Post-deploy live HTTP verification" section at the bottom.
+
 Branch: `feature/aa-441-fix-priority-bugs` (off `main` @ 950a159, post AA-438/439/440 docs merge)
 Executed: 23/08/2026. Task prompt saved verbatim at
 `docs/claude_tasks/AA-441-01-fix-priority-bugs.md` (gitignored, per repo convention for that dir
@@ -192,3 +202,36 @@ functions directly — not a re-implementation, not mocked)
   in the suite touches any of the 6 changed code paths, confirmed via grep before relying on this).
 - `flake8` (project's own `.flake8` config): 0 findings on all 7 changed Python files.
 - `tsc --noEmit` (whole frontend project): 0 errors.
+
+---
+
+## Post-deploy live HTTP verification (23/08/2026, after merge)
+
+All calls below hit `https://api-cis.lumiguides.it.com` directly — real HTTPS, real deployed
+code (task def `aa-cis-dev-api:122`, image digest confirmed == ECR `:latest`), no local function
+calls, no mocks.
+
+- **Bug #1 + #2 together**: `GET /admin/acp/run-health?limit=50` with real `X-Admin-Secret` +
+  `x-admin-user-id` → **200, 12 real runs** returned (bug #2). Re-queried
+  `shared.tenant_api_usage` immediately after: newest row is `{tenant_id: null, endpoint:
+  '/admin/acp/run-health', actor_type: 'admin', admin_user_id: c26f6938-...}` — this exact live
+  call wrote the tracking row (bug #1).
+- **Bug #4**: minted a real tenant JWT for `test-n1-flow` (verified against the deployed server's
+  own `JWT_SECRET` — it accepted the token), then `POST
+  /admin/brand-identity/upload` with `Authorization: Bearer <tenant JWT>` **only** (no admin
+  secret at all) + a real multipart file → **200
+  `{"status":"uploaded","s3_key":"brand-identity/6fbaf284-.../..."}`**. Confirmed via `aws s3 ls`
+  the file actually landed under the tenant's own S3 prefix. This supersedes the pre-merge
+  attempt above, which stalled on my local debugging session's AWS credentials — the real
+  deployed backend (ECS task's own IAM role) has no such issue. Test file deleted after.
+- **Bug #5**: created a fresh synthetic hitl row, `POST
+  /v1/pipeline/review-queue/{id}/reject` with `x-admin-secret` → **200
+  `{"status":"rejected",...}`**. Re-queried the DB: `review_status='rejected'` AND
+  `generated_content.status='rejected'` (not stuck at `'hitl'`). Synthetic row deleted after.
+- **Bug #6**: created a synthetic published test tour, `GET
+  /v1/tours/pool?search=...` with a real tenant JWT → tour **visible**. Set
+  `master_status='trashed'` via DB (simulating an admin trashing it), same live call again → tour
+  **hidden**. Synthetic tour deleted after.
+- Bug #3 was not re-run live post-deploy (already exercised the real repository code directly
+  pre-merge, and re-publishing over live HTTP would require going through the full
+  review/approve chain — no additional signal for the risk).
