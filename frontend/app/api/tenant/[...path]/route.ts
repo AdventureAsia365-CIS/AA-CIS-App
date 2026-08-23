@@ -45,7 +45,7 @@ async function handler(
   const role        = cookieStore.get("cis_role")?.value ?? "";
   const isStaff     = role === "admin" || role === "content";
 
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const headers: Record<string, string> = {};
 
   if (isStaff) {
     const auth = await requireAdmin(req);
@@ -69,17 +69,31 @@ async function handler(
   const search = req.nextUrl.search;
   const url = `${API_URL}/${pathStr}${search}`;
 
-  let body: string | undefined;
+  // AA-441: was unconditionally forcing Content-Type: application/json + reading the body as
+  // .text() — silently mangled any multipart/form-data request (e.g. BrandTab.tsx's brand-guide
+  // file upload, which always sent real file bytes this way). Mirrors the admin proxy's
+  // (/api/admin/[...path]/route.ts) existing multipart pass-through instead of re-encoding.
+  const contentType = req.headers.get("content-type") ?? "";
+  const isMultipart = contentType.includes("multipart/form-data");
+
+  let body: ArrayBuffer | string | undefined;
   if (req.method !== "GET" && req.method !== "HEAD") {
-    try { body = await req.text(); } catch { /* empty body */ }
+    if (isMultipart) {
+      headers["Content-Type"] = contentType;
+      body = await req.arrayBuffer();
+    } else {
+      headers["Content-Type"] = "application/json";
+      try { body = await req.text(); } catch { /* empty body */ }
+    }
   }
 
   try {
     const res = await fetch(url, { method: req.method, headers, body });
-    const data = await res.text();
+    const resContentType = res.headers.get("content-type") ?? "application/json";
+    const data = await res.arrayBuffer();
     return new NextResponse(data, {
       status: res.status,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": resContentType },
     });
   } catch {
     return NextResponse.json({ detail: "Upstream connection error" }, { status: 502 });

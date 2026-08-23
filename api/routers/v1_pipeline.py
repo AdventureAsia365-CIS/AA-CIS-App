@@ -521,6 +521,13 @@ async def reject_review(
 
     AA-212: atomic-claim the pending row (pending→rejected in one statement). A second call
     claims nothing → 409. No export on the reject path.
+
+    AA-441 (bug #5, AA-438-00-SUMMARY #5): this used to only flip review_queue.review_status,
+    never generated_content.status — a rejected tour stayed stuck at 'hitl' forever, invisible
+    to the Review Queue's default "pending" filter (it's neither pending nor approved) while
+    also not reading as rejected anywhere. Mirrors approve_review()'s own pattern just above
+    (which does update generated_content.status = 'approved' on its claim) — content_status_enum
+    already has a 'rejected' value (migration 002) for exactly this.
     """
     pool = request.app.state.pool
     # AA-229: CIS is single-tenant; review_queue rows are enqueued under master
@@ -533,13 +540,20 @@ async def reject_review(
             UPDATE silver_aa_internal.review_queue
             SET review_status = 'rejected', reviewed_at = NOW()
             WHERE id = $1::uuid AND tenant_id = $2::uuid AND review_status = 'pending'
-            RETURNING step_fn_task_token
+            RETURNING step_fn_task_token, generated_content_id
         """, review_id, tenant_id)
 
         if not claimed:
             raise HTTPException(status_code=409, detail="Review already processed or not found")
 
         task_token = claimed["step_fn_task_token"]
+        generated_content_id = str(claimed["generated_content_id"])
+
+        await conn.execute("""
+            UPDATE silver_aa_internal.generated_content
+            SET status = 'rejected'
+            WHERE id = $1::uuid
+        """, generated_content_id)
 
     # Send task failure to Step Functions only when a real token exists (is None → no SF, no export).
     if task_token is not None:

@@ -204,7 +204,10 @@ async def test_reject_claims_then_409_and_never_exports():
     from api.routers import v1_pipeline
 
     conn = AsyncMock()
-    conn.fetchrow = AsyncMock(side_effect=[{"step_fn_task_token": None}, None])
+    # AA-441: reject_review now also RETURNING generated_content_id (to reset
+    # generated_content.status to 'rejected' — bug #5) and issues a second conn.execute() for
+    # that UPDATE, alongside the pre-existing one the claim itself does.
+    conn.fetchrow = AsyncMock(side_effect=[{"step_fn_task_token": None, "generated_content_id": GCID}, None])
     conn.execute = AsyncMock(return_value="UPDATE 1")
     req = _make_request(_make_pool(conn))
 
@@ -226,7 +229,7 @@ async def test_reject_with_token_sends_task_failure():
     from api.routers import v1_pipeline
 
     conn = AsyncMock()
-    conn.fetchrow = AsyncMock(return_value={"step_fn_task_token": "tok-9"})
+    conn.fetchrow = AsyncMock(return_value={"step_fn_task_token": "tok-9", "generated_content_id": GCID})
     conn.execute = AsyncMock(return_value="UPDATE 1")
     req = _make_request(_make_pool(conn))
 

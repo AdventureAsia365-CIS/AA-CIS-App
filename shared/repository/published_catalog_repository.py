@@ -28,8 +28,22 @@ class PublishedCatalogRepository:
             )
             ON CONFLICT (tour_id) DO UPDATE SET
                 generated_content_id = EXCLUDED.generated_content_id,
+                tenant_id            = EXCLUDED.tenant_id,
                 aa_name              = EXCLUDED.aa_name,
+                aa_subtitle          = EXCLUDED.aa_subtitle,
+                aa_summary           = EXCLUDED.aa_summary,
+                aa_description       = EXCLUDED.aa_description,
+                aa_highlights        = EXCLUDED.aa_highlights,
+                aa_itineraries       = EXCLUDED.aa_itineraries,
+                mobile_card_text     = EXCLUDED.mobile_card_text,
+                seo_title            = EXCLUDED.seo_title,
+                seo_meta             = EXCLUDED.seo_meta,
+                seo_keywords_used    = EXCLUDED.seo_keywords_used,
+                og_tags              = EXCLUDED.og_tags,
                 quality_score        = EXCLUDED.quality_score,
+                quality_score_id     = EXCLUDED.quality_score_id,
+                s3_gold_path         = EXCLUDED.s3_gold_path,
+                approved_by          = EXCLUDED.approved_by,
                 published_at         = NOW()
             RETURNING id::text
         """,

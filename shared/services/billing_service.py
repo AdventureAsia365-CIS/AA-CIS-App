@@ -5,21 +5,31 @@ logger = logging.getLogger(__name__)
 
 async def track_api_call(
     pool,
-    tenant_id: str,
-    endpoint: str,
-    method: str,
-    status_code: int,
+    tenant_id: str = None,
+    endpoint: str = None,
+    method: str = None,
+    status_code: int = None,
     response_ms: int = None,
+    actor_type: str = "tenant",
+    admin_user_id: str = None,
 ):
-    """Log API call to tenant_api_usage for billing metrics."""
+    """Log API call to tenant_api_usage for billing/usage metrics.
+
+    AA-441 (migration 110): actor_type distinguishes tenant (/v1/*) vs admin (/admin/*)
+    traffic in this shared table — tenant_id is nullable now, admin_user_id is the admin-side
+    counterpart (FK to shared.admin_users, resolved from the x-admin-user-id header). Default
+    stays actor_type='tenant' so every existing caller (rate_limit_middleware's /v1/* path)
+    keeps writing rows exactly as before, unchanged.
+    """
     try:
         async with pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO shared.tenant_api_usage
-                    (tenant_id, endpoint, method, status_code, response_ms, called_at)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                    (tenant_id, endpoint, method, status_code, response_ms, called_at,
+                     actor_type, admin_user_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             """, tenant_id, endpoint, method, status_code, response_ms,
-                datetime.now(timezone.utc))
+                datetime.now(timezone.utc), actor_type, admin_user_id)
     except Exception as e:
         logger.error(f"Billing track error: {e}")
         # Non-blocking — never fail request due to billing error

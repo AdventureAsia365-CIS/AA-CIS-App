@@ -115,32 +115,48 @@ async def get_run_health(
     Live run-health for all ACP runs (admin) or own runs (tenant JWT).
     Emits CloudWatch metrics: acp/stuck_runs, acp/cost_usd_per_run,
     acp/evaluator_score, acp/gate_sla_breached.
+
+    AA-441 (bug #2, AA-439-00-SUMMARY #14): this endpoint used to read
+    `acp_shared.acp_runs` — the legacy, deliberately-unlinked ACP v1 (S1-S4 blog/social)
+    run table, 0 live rows — instead of `acp_shared.acp_v2_runs`, which is what the real,
+    live N7/N8 weekly-flywheel pipeline actually writes to (migration 096, AA-377/378).
+    v2's schema is materially different (no `country`/`total_llm_cost_usd`/`error_message`
+    columns, `tenant_id` is TEXT not UUID, `started_at` doesn't exist — `created_at` is the
+    run-start timestamp) — mapped below rather than aliased blindly. Per-run stage-like
+    detail now comes from `acp_shared.acp_v2_slots` (real per-slot channel/kind/status data)
+    instead of the v1-only `acp_stage_runs` table, which v2 runs never write to. The v1-only
+    `acp_hitl_requests`/`acp_silver_s4.blog_drafts` joins (gate SLA + evaluator score) have no
+    v2 equivalent yet — dropped rather than left querying a table that structurally can never
+    match a v2 run_id; `gate_statuses` stays all-None and `evaluator_score` stays null for
+    every run, same as before, just no longer a wasted always-empty query.
     """
     pool = request.app.state.pool
 
     conditions = ["1=1"]
     params: list = []
 
-    # RLS: non-admin tenants see only their own runs
+    # RLS: non-admin tenants see only their own runs. acp_v2_runs.tenant_id is TEXT holding
+    # str(tenant_uuid) (see admin_produce.py's trigger-run path) — no ::uuid cast, plain compare.
     if caller["role"] != "admin" and caller["sub"]:
         params.append(caller["sub"])
-        conditions.append(f"r.tenant_id = ${len(params)}::uuid")
+        conditions.append(f"r.tenant_id = ${len(params)}")
     elif tenant_id:
         params.append(tenant_id)
-        conditions.append(f"r.tenant_id = ${len(params)}::uuid")
+        conditions.append(f"r.tenant_id = ${len(params)}")
 
-    if country:
-        params.append(country)
-        conditions.append(f"LOWER(r.country) = LOWER(${len(params)})")
+    # NOTE: `country` query param is accepted for FE backward-compat but not applied as a
+    # filter — acp_v2_runs has no country column (a run spans one tenant's whole weekly slot
+    # grid, not one country). Not resolved via a slots→raw_tours join here; out of this fix's
+    # scope (table-swap bug, not a redesign) — flagged in docs/implementation-notes.
     if status:
         params.append(status)
         conditions.append(f"r.status = ${len(params)}")
     if date_from:
         params.append(date_from)
-        conditions.append(f"r.started_at >= ${len(params)}::timestamptz")
+        conditions.append(f"r.created_at >= ${len(params)}::timestamptz")
     if date_to:
         params.append(date_to)
-        conditions.append(f"r.started_at <= ${len(params)}::timestamptz")
+        conditions.append(f"r.created_at <= ${len(params)}::timestamptz")
 
     params.append(limit)
     limit_param = len(params)
@@ -149,11 +165,11 @@ async def get_run_health(
     async with pool.acquire() as conn:
         run_rows = await conn.fetch(f"""
             SELECT
-                r.run_id::text, r.tenant_id::text, r.country, r.status,
-                r.total_llm_cost_usd, r.started_at, r.completed_at, r.error_message
-            FROM acp_shared.acp_runs r
+                r.run_id::text, r.tenant_id, r.status,
+                r.created_at AS started_at, r.completed_at
+            FROM acp_shared.acp_v2_runs r
             WHERE {where}
-            ORDER BY r.started_at DESC NULLS LAST
+            ORDER BY r.created_at DESC NULLS LAST
             LIMIT ${limit_param}
         """, *params)
 
@@ -162,44 +178,25 @@ async def get_run_health(
 
         run_ids = [r["run_id"] for r in run_rows]
 
-        stage_rows = await conn.fetch("""
+        slot_rows = await conn.fetch("""
             SELECT
-                run_id::text, stage, status, started_at, completed_at, error_msg,
-                llm_cost_usd
-            FROM acp_shared.acp_stage_runs
+                run_id::text, slot_id, channel, kind, status, due_at, produced_at,
+                skipped_reason
+            FROM acp_shared.acp_v2_slots
             WHERE run_id = ANY($1::uuid[])
-            ORDER BY run_id, started_at NULLS LAST
-        """, run_ids)
-
-        hitl_rows = await conn.fetch("""
-            SELECT
-                run_id::text, stage, status, created_at, resolved_at, auto_approved,
-                confidence_score
-            FROM acp_shared.acp_hitl_requests
-            WHERE run_id = ANY($1::uuid[])
-            ORDER BY run_id, stage
-        """, run_ids)
-
-        eval_rows = await conn.fetch("""
-            SELECT run_id::text, AVG(evaluator_score) AS avg_score
-            FROM acp_silver_s4.blog_drafts
-            WHERE run_id = ANY($1::uuid[])
-              AND evaluator_score IS NOT NULL
-            GROUP BY run_id
+            ORDER BY run_id, due_at NULLS LAST
         """, run_ids)
 
     # Index by run_id
     stages_by_run: dict[str, list] = {}
-    for s in stage_rows:
+    for s in slot_rows:
         stages_by_run.setdefault(s["run_id"], []).append(s)
 
+    # No v2 equivalent yet for hitl-gate/evaluator-score data (see docstring) — kept as empty
+    # dicts so the existing per-run loop below (gate_statuses all-None, evaluator_score null)
+    # needs no further changes.
     hitl_by_run: dict[str, list] = {}
-    for h in hitl_rows:
-        hitl_by_run.setdefault(h["run_id"], []).append(h)
-
-    eval_by_run: dict[str, Optional[float]] = {
-        r["run_id"]: _dec(r["avg_score"]) for r in eval_rows
-    }
+    eval_by_run: dict[str, Optional[float]] = {}
 
     result = []
     total_stuck = 0
@@ -207,16 +204,22 @@ async def get_run_health(
 
     for run in run_rows:
         run_id = run["run_id"]
-        cost = _dec(run["total_llm_cost_usd"]) or 0.0
+        # acp_v2_runs has no cost column (see docstring) — no per-run LLM cost tracking exists
+        # yet for the N7/N8 pipeline; 0.0 here means "not tracked", not "confirmed zero cost".
+        cost = 0.0
 
-        # ── Stage records ──────────────────────────────────────────────────
+        # ── Stage records (from acp_v2_slots — real per-run slot production state) ──────────
         stages_out = []
         run_stuck = False
 
         for s in stages_by_run.get(run_id, []):
-            dur = _duration_seconds(s["started_at"], s["completed_at"])
-            stage_name = s["stage"] or ""
-            is_running = (s["status"] or "").lower() in ("running", "pending")
+            dur = _duration_seconds(s["due_at"], s["produced_at"])
+            stage_name = f"{s['channel']}:{s['kind']}"
+            is_running = (s["status"] or "").lower() == "due"
+            # check_stage_slo() only knows v1 stage-name keys (s2/s3/s4_blog/s4_social) — a v2
+            # channel:kind name never matches, so this always returns False today. Left wired
+            # (not hardcoded False) so a future v2-specific SLO table drops in without another
+            # audit round.
             slo_breached = (
                 dur is not None
                 and is_running
@@ -228,10 +231,10 @@ async def get_run_health(
             stages_out.append({
                 "stage":            stage_name,
                 "status":           s["status"],
-                "started_at":       _iso(s["started_at"]),
-                "completed_at":     _iso(s["completed_at"]),
+                "started_at":       _iso(s["due_at"]),
+                "completed_at":     _iso(s["produced_at"]),
                 "duration_seconds": round(dur, 1) if dur is not None else None,
-                "error_msg":        s["error_msg"],
+                "error_msg":        s["skipped_reason"],
                 "slo_breached":     slo_breached,
             })
 
@@ -273,7 +276,7 @@ async def get_run_health(
         result.append({
             "run_id":           run_id,
             "tenant_id":        run["tenant_id"],
-            "country":          run["country"],
+            "country":          None,  # acp_v2_runs has no country column — see docstring
             "status":           run["status"],
             "started_at":       _iso(run["started_at"]),
             "completed_at":     _iso(run["completed_at"]),
