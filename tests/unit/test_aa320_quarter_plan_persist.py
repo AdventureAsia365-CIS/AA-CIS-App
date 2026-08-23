@@ -48,12 +48,14 @@ class _AsyncCM:
 
 
 class FakeDB:
-    """In-memory mirror of acp_shared.quarter_plan / quarter_plan_version."""
+    """In-memory mirror of acp_shared.quarter_plan / quarter_plan_version /
+    year_plan (AA-448 round 6 — Shape 1)."""
 
     def __init__(self):
         self.plans: dict[tuple, uuid.UUID] = {}          # (tenant_id, year, quarter) -> plan_id
         self.current_version: dict[uuid.UUID, uuid.UUID] = {}  # plan_id -> version_id
         self.versions: dict[uuid.UUID, dict] = {}         # version_id -> row dict
+        self.year_plans: dict[tuple, uuid.UUID] = {}      # (tenant_id, year) -> year_plan_id
 
 
 class FakeConn:
@@ -65,8 +67,14 @@ class FakeConn:
 
     async def execute(self, query, *params):
         q = " ".join(query.split())
-        if "INSERT INTO acp_shared.quarter_plan (tenant_id, year, quarter)" in q:
-            tenant_id, year, quarter = params
+        if "INSERT INTO acp_shared.year_plan (tenant_id, year)" in q:
+            tenant_id, year = params
+            key = (tenant_id, year)
+            if key not in self.db.year_plans:
+                self.db.year_plans[key] = uuid.uuid4()
+            return "INSERT 0 1"
+        if "INSERT INTO acp_shared.quarter_plan (tenant_id, year, quarter, year_plan_id)" in q:
+            tenant_id, year, quarter, year_plan_id = params
             key = (tenant_id, year, quarter)
             if key not in self.db.plans:
                 self.db.plans[key] = uuid.uuid4()
@@ -86,6 +94,9 @@ class FakeConn:
 
     async def fetchval(self, query, *params):
         q = " ".join(query.split())
+        if "SELECT year_plan_id FROM acp_shared.year_plan" in q:
+            tenant_id, year = params
+            return self.db.year_plans.get((tenant_id, year))
         if "SELECT plan_id FROM acp_shared.quarter_plan" in q:
             tenant_id, year, quarter = params
             return self.db.plans.get((tenant_id, year, quarter))

@@ -23,8 +23,12 @@ LifecycleStage = Literal["active", "phasing_out", "retired"]
 
 
 class QuarterPlanNotApprovedError(Exception):
-    """Gate B: a QuarterPlan must be human-approved (Ms. Thu) before N6 can
-    allocate from it. Preserves the old Gate 2 rule — REQUIRED, NEVER auto."""
+    """Gate B: a QuarterPlan must be 'approved' (approved=True on the model) before N6 can
+    allocate from it. AA-448 Option A: for a tenant-created plan this happens automatically the
+    instant they finalize it (no human approval step) — the check/type is kept exactly as-is
+    (admin_atoms.py/admin_produce.py both still depend on it), only the old "human (Ms. Thu)
+    must approve" semantics changed. See docs/implementation-notes/
+    AA-448-t7-content-planning.md."""
 
 
 # ---------------------------------------------------------------- inputs (read from DB, not computed)
@@ -101,6 +105,8 @@ class TripScore(BaseModel):
     runway_fit: float
     richness: float
     distinctiveness_score: float
+    dfs_relevance_score: float = 0.5  # AA-448 round 1 — 4th scoring term; 0.5 = SIGNAL_SCORE_MAP["MED"]
+    engagement_adjustment_score: float = 0.5  # AA-448 round 6 — 5th term; 0.5 = no feedback data yet
     forced: bool
     selected: bool
     reason: str
@@ -118,7 +124,8 @@ class QuarterPlan(BaseModel):
     capacity_note: Optional[str] = None
     trips_hash: Optional[str] = None
     trip_scores: list[TripScore] = Field(default_factory=list)
-    # Gate B — Ms. Thu must approve before N6 can allocate (REQUIRED, NEVER auto)
+    # Gate B — must be True before N6 can allocate. AA-448 Option A: a tenant's own plan sets
+    # this automatically the instant they finalize (approved_by="tenant:<id>"), no human step.
     approved: bool = False
     approved_by: Optional[str] = None
 

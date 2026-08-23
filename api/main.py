@@ -17,6 +17,7 @@ from api.routers.auth import (
 )
 from api.routers.v1_tours import router as v1_tours_router
 from api.routers.v1_marketplace import router as v1_marketplace_router
+from api.routers.v1_planning import router as v1_planning_router
 from api.routers.v1_exports import router as v1_exports_router
 from api.routers.v1_pipeline import router as v1_pipeline_router
 from api.routers.v1_acp import router as v1_acp_router
@@ -175,6 +176,7 @@ app.add_middleware(
 
 app.include_router(v1_tours_router)
 app.include_router(v1_marketplace_router)  # AA-444 — tenant Marketplace view
+app.include_router(v1_planning_router)  # AA-448 — T7 Content Planning (preview only so far)
 app.include_router(v1_exports_router)
 app.include_router(v1_pipeline_router)
 app.include_router(v1_acp_router)

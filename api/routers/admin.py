@@ -15,9 +15,6 @@ from pydantic import BaseModel, Field
 
 from services.notifications import NotificationService, EventType
 from services.acp_planning.quarter import (
-    QuarterPlanVersionNotFoundError,
-    QuarterPlanVersionNotPendingError,
-    approve_quarter_plan_version,
     plan_quarter,
     save_quarter_plan_version,
 )
@@ -1819,52 +1816,13 @@ async def preview_quarter_plan(
     return {"plan": plan.model_dump(mode="json")}
 
 
-# ── GET /admin/quarter-plan/pending — Gate B queue: all pending versions ──────
-
-
-@router.get("/quarter-plan/pending", summary="Gate B — list all pending quarter plan versions (AA-388)")
-async def list_pending_quarter_plans(
-    request: Request,
-    x_admin_secret: str = Header(None),
-):
-    """No prior endpoint listed pending versions across tenants (AA-320 only shipped
-    a per-tenant/year/quarter GET) -- confirmed with Nghiep during AA-388 STEP 0
-    before adding this. Lists newest-first; joins shared.tenants for a display name
-    since quarter_plan_version has no tenant column of its own (tenant_id lives on
-    quarter_plan)."""
-    verify_admin_secret(x_admin_secret)
-    pool = request.app.state.pool
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT qpv.version_id, qpv.plan_id, qpv.version_no, qpv.source, qpv.created_at,
-                   qp.tenant_id, qp.year, qp.quarter, t.name AS tenant_name
-            FROM acp_shared.quarter_plan_version qpv
-            JOIN acp_shared.quarter_plan qp ON qp.plan_id = qpv.plan_id
-            JOIN shared.tenants t ON t.tenant_id = qp.tenant_id
-            WHERE qpv.approval_status = 'pending'
-            ORDER BY qpv.created_at DESC
-            """
-        )
-    return {
-        "items": [
-            {
-                "version_id": str(r["version_id"]),
-                "plan_id": str(r["plan_id"]),
-                "version_no": r["version_no"],
-                "source": r["source"],
-                "created_at": r["created_at"].isoformat(),
-                "tenant_id": str(r["tenant_id"]),
-                "tenant_name": r["tenant_name"],
-                "year": r["year"],
-                "quarter": r["quarter"],
-            }
-            for r in rows
-        ]
-    }
-
-
 # ── GET /admin/quarter-plan/{tenant_id}/{year}/{quarter} — latest version for review ──
+# AA-448 round 6: /admin/quarter-plan/pending (Gate B queue across all tenants) and
+# /admin/quarter-plan/{version_id}/approve (human approval action) are RETIRED here — Gate B
+# Option A means a tenant's own plan auto-approves the instant they finalize it (v1_planning.py),
+# so there is no longer a pending-awaiting-a-human queue for any admin to work. This
+# GET (read one tenant/year/quarter's latest version) and the /history endpoint below are kept
+# unchanged — still useful staff-side viewing tools, not part of the retired approval workflow.
 
 
 @router.get("/quarter-plan/{tenant_id}/{year}/{quarter}",
@@ -1965,49 +1923,6 @@ async def get_quarter_plan_history(
         })
     return {"versions": versions}
 
-
-# ── POST /admin/quarter-plan/{version_id}/approve — Gate B human approval ──────
-
-
-class ApproveQuarterPlanRequest(BaseModel):
-    approved_by: str
-
-
-@router.post("/quarter-plan/{version_id}/approve", summary="Gate B — human approval of a quarter plan version (AA-320)")
-async def approve_quarter_plan_endpoint(
-    version_id: UUID,
-    body: ApproveQuarterPlanRequest,
-    request: Request,
-    x_admin_secret: str = Header(None),
-):
-    verify_admin_secret(x_admin_secret)
-    pool = request.app.state.pool
-
-    try:
-        await approve_quarter_plan_version(version_id, body.approved_by, pool)
-    except QuarterPlanVersionNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except QuarterPlanVersionNotPendingError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT version_id, plan_id, version_no, source,
-                   approval_status, approved_by, approved_at, created_at
-            FROM acp_shared.quarter_plan_version
-            WHERE version_id = $1
-            """,
-            version_id,
-        )
-
-    return {
-        "version_id": str(row["version_id"]),
-        "plan_id": str(row["plan_id"]),
-        "version_no": row["version_no"],
-        "source": row["source"],
-        "approval_status": row["approval_status"],
-        "approved_by": row["approved_by"],
-        "approved_at": row["approved_at"].isoformat() if row["approved_at"] else None,
-        "created_at": row["created_at"].isoformat(),
-    }
+# AA-448 round 6: POST /admin/quarter-plan/{version_id}/approve retired here — see the note
+# above GET /admin/quarter-plan/{tenant_id}/{year}/{quarter} for why (Gate B Option A, no more
+# human-approval step to perform for a tenant's own plan).

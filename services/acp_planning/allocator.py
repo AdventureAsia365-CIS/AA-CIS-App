@@ -126,8 +126,18 @@ def compute_slot_grid(
 ) -> SlotGrid:
     """Pure computation — no DB, no LLM, 100% unit-testable."""
     if not quarter_plan.approved:
+        # AA-448 Gate B Option A: a tenant's own quarter plan auto-approves the instant they
+        # finalize it (services/acp_planning/quarter.py::save_quarter_plan_version() ->
+        # approve_quarter_plan_version(), called back-to-back by v1_planning.py's finalize
+        # endpoint) — no human ever clicks approve for a tenant plan. This check/exception TYPE
+        # still means exactly what it always meant: "no plan has been created+finalized yet for
+        # this tenant/year/quarter" — it just never blocks on a pending-awaiting-a-human state
+        # anymore. See docs/implementation-notes/AA-448-t7-content-planning.md "STOP point" for
+        # the full reasoning (admin_atoms.py's preview-slotgrid demo path and
+        # admin_produce.py's real N7 trigger both still depend on this exact check/type; do not
+        # remove it, only its old wording changed).
         raise QuarterPlanNotApprovedError(
-            "Gate B: quarter plan must be approved by a human (Ms. Thu) before allocation — never auto.")
+            "Gate B: no quarter plan has been finalized yet for this tenant/quarter — allocation refused.")
     if quarter_plan.tenant_id != tenant_id:
         raise ValueError("quarter_plan.tenant_id does not match tenant_id — refusing cross-tenant allocation.")
 
@@ -292,9 +302,10 @@ async def allocate_month_from_db(
     quarter = (month - 1) // 3 + 1
     quarter_plan = await fetch_approved_quarter_plan(tenant_id, year, quarter, pool)
     if quarter_plan is None:
+        # AA-448 Gate B Option A — see compute_slot_grid()'s own comment above, same reasoning.
         raise QuarterPlanNotApprovedError(
-            f"No approved quarter plan for tenant={tenant_id} year={year} quarter={quarter} — "
-            "Gate B: quarter plan must be approved by a human (Ms. Thu) before allocation — never auto.")
+            f"No finalized quarter plan for tenant={tenant_id} year={year} quarter={quarter} — "
+            "Gate B: no quarter plan has been finalized yet — allocation refused.")
     return await allocate_month(
         tenant_id, year, month, channels, capacity_posts_per_week,
         quarter_plan, runway, primary_market, pool,
