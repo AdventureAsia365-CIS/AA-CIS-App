@@ -94,7 +94,11 @@ async def confirm_trip_reallocation(
         return {"accepted": False, "suggestion": suggestion}
 
     plan = QuarterPlan(**suggestion["plan"])
-    version_id = await save_quarter_plan_version(plan, pool, source="feedback_reallocation")
+    # AA-448 live-verify finding: acp_shared.quarter_plan_version.source has a CHECK constraint
+    # allowing only 'standard'/'override' (migration 092) — "override" is the correct existing
+    # value here (a tenant overriding their previous plan based on a feedback suggestion),
+    # not a new value this task should invent a migration for.
+    version_id = await save_quarter_plan_version(plan, pool, source="override")
     await approve_quarter_plan_version(version_id, f"tenant:{tenant_id}", pool)
     return {"accepted": True, "version_id": str(version_id), "suggestion": suggestion}
 

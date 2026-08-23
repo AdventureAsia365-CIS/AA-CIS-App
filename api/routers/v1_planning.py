@@ -135,7 +135,11 @@ async def finalize_quarter_plan(
     plan, _config, _trip_pool_size = await _compute_plan(
         tenant_id, body.year, body.quarter, body.specials, set(body.excluded_trip_ids), pool,
     )
-    version_id = await save_quarter_plan_version(plan, pool, source="tenant_self_service")
+    # AA-448 live-verify finding: acp_shared.quarter_plan_version.source has a CHECK constraint
+    # allowing only 'standard'/'override' (migration 092) — a tenant's own finalize IS the
+    # standard path now (Gate B Option A retired the old admin-creates/staff-approves meaning
+    # this column used to distinguish), so "standard" is correct here, not a new value.
+    version_id = await save_quarter_plan_version(plan, pool, source="standard")
     await approve_quarter_plan_version(version_id, approved_by=f"tenant:{tenant_id}", pool=pool)
 
     return {
