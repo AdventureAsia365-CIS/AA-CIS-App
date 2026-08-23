@@ -1,12 +1,31 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 08/08/2026 (AA-384) | main f521972 + AA-384 branch | latest migration: 099
-# NOTE: ECS task def / Deploy Prod # / Vercel Prod hash below are UNVERIFIED as of this update
-# (AWS was stopped, not re-checked live this session) — reconfirm at next live session, don't
-# trust the stale numbers below without a fresh `aws ecs describe-services` / gh run check.
+# Updated: 23/08/2026 (AA-445-02) | main df19ec9 | latest migration: 111
+# NOTE: ECS task def below is LIVE-VERIFIED as of 23/08/2026 (`aws ecs describe-services`,
+# post-merge Deploy Dev run 32632513361). Deploy Prod # / Vercel Prod hash were NOT re-checked
+# this session — still treat those two specifically as unverified until a fresh check.
 
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway 4ylo382khg — corrected 22/08/2026,
   AA-432; `owq9as3wjl` was stale/no longer exists, confirmed via `aws apigateway get-rest-apis`)
+- AA-445-02 (23/08/2026) — B4 `CompetitorIndex`/`score_distinctiveness()`, DFS→T2, competitor UI.
+  PR #199 merged (df19ec9), Deploy Dev run 32632513361 green, migration 111 applied live. Full
+  live E2E verified: real tenant JWT (test-n1-flow) → real `POST /v1/competitors` add → real T2
+  rewrite (real Bedrock call, `quality_score=10.00`) → T5 atomize produced 7 real atoms, **all
+  `distinctiveness=HIGH`** (live-fetched competitor corpus, 120 phrases, not the old flat
+  LOW/MED default) — confirms the actual new mechanism works end-to-end. Test data cleaned up
+  after (0 leftover rows).
+  **Real pre-existing gap found, NOT part of AA-445-02, NOT yet fixed**: `services/acp_planning/
+  quarter.py::fetch_atoms_by_trip()` (the one real atom-loader both N5 `compute_quarter_plan`
+  AND N6 `allocate_month`/`allocate_and_persist_week` call) joins `WHERE rt.tenant_id = $1` —
+  i.e. it scopes by the TOUR's original owning tenant (`raw_tours.tenant_id`), not by
+  `tour_atoms.owner_scope` (where T5 correctly stores the REWRITING tenant's id per
+  ADR-2026-038 Hướng B). Since `/v1/tours/pool` only ever offers tours where
+  `raw_tours.tenant_id = aa_internal`, **every T5 atom from a tenant rewriting a shared-pool
+  tour is invisible to N5/N6 today** — live-confirmed twice this session (0 trips/0 atoms
+  returned for test-n1-flow, both before and after the fresh 7-atom test run, across 15 real
+  T5 atoms total). `score_distinctiveness()` itself is correct and live-proven; this is a
+  separate, real blocker on the "N5/N6 actually use the new value" outcome — needs its own
+  decision/ticket, not silently patched here.
 - AA-432 (this session, part 2 — auth architecture) — **LIVE as of 22/08/2026, verified**:
   `/v1/*`'s API Gateway resource (`/v1/{v1_proxy+}`) changed from `authorizationType: CUSTOM`
   (`tenant-key-authorizer`, required `X-API-Key`) to `NONE`. Root cause (STEP0,
@@ -53,7 +72,9 @@
   restored to its original state). `/docs`, `/openapi.json` (unaffected NONE-auth routes)
   still 200.
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel — AA-103 production)
-- ECS task def: api:340 (unverified, see header note) | main 38caa5f pre-AA-384 | Vercel Prod hash unverified
+- ECS task def: **aa-cis-dev-api:127** (live-verified 23/08/2026 via `aws ecs describe-services`
+  — the previous "api:340" here was stale/wrong, not just unverified; corrected this session,
+  AA-445-02) | main df19ec9 (PR #199 merged) | Vercel Prod hash unverified
 - AA-384 (this session): product-direction correction on AA-309/AA-330's posts_per_week/Mirror
   (posts_per_week is now a free tenant choice, migration 099 — see DB SCHEMA below; Mirror is
   purely informational, no upsell language — see api/routers/admin.py get_tenant_mirror()). Real
