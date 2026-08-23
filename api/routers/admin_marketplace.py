@@ -17,6 +17,22 @@ docstring for the commercial-decision reasoning behind both), plus a new
 finalize endpoint. See docs/implementation-notes/AA-330.md for the STEP 0
 survey + the 4 commercial decisions (Nghiep) this implements verbatim.
 
+AA-444 (23/08/2026) — SCOPE NARROWED, READ THIS BEFORE TOUCHING marketplace_portfolios
+AGAIN: per ADR-2026-038 §0.3, "the tenant's Marketplace" is no longer this table — it
+is now a live view over gold_aa_internal.tenant_tour_versions JOIN
+acp_contract.tour_atoms (owner_scope), served at GET /v1/marketplace
+(api/routers/v1_marketplace.py). Do NOT read this table anywhere as if it reflected a
+tenant's CURRENT tour/atom selection — it never updates after finalize, and (per
+admin.py's get_tenant_mirror() comment, unchanged since AA-330) was already known to
+go stale. This router's endpoints are KEPT, unchanged, ONLY because
+acp_shared.tenant_onboarding.portfolio_id is a real NOT NULL FK into this table
+(migration 098) — the pre-tenant N1 onboarding flow (staff curates a draft tour list
+for a tenant that doesn't exist yet, POST /admin/tenants/{id}/seed-atoms reads the
+finalized portfolio afterward) still needs it and has no schema-change path available
+in this task (AA-444 explicitly forbids a migration here). See
+docs/implementation-notes/AA-444-marketplace-view.md for the full disposition of
+every marketplace_portfolios read/write site found in the repo.
+
 GET   /admin/marketplace/catalog                     — list/filter tours (atoms + price)
 POST  /admin/marketplace/portfolios                   — save a draft portfolio
 PATCH /admin/marketplace/portfolios/{portfolio_id}/finalize — draft -> finalized
