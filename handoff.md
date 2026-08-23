@@ -1,3 +1,67 @@
+# AA-CIS-App Handoff — Session (unnumbered, AA-441)
+Updated: 2026-08-23
+
+## Status
+- Branch: `feature/aa-441-fix-priority-bugs` → PR #194 → main (`17305fc`, squash-merged) →
+  docs follow-up (`6fb52bc`, pushed direct to main, docs-only)
+- ECS: aa-cis-dev-api task def **api:122** — digest == ECR :latest (sha256:cd4f6e77…f9a69a) —
+  **RUNNING (was already running at session start, not started by me) — STOP after session**
+- RDS: aa-cis-dev-db **RUNNING (same — STOP after session)**
+- CI on PR #194: all green ✅ | Deploy Dev: SUCCESS ✅ (Vercel + ECR build + Lambda + ECS Dev all
+  succeeded) | migration 110 applied live, re-confirmed present post-deploy
+
+## ⚠️ Found at session start — NOT resolved, needs your attention
+`feature/aa-439-tenant-tier-audit` had uncommitted WIP sitting in the working tree that wasn't
+mine (not created this session): an AA-427 follow-up fix to `frontend/app/(tenant)/portal/
+layout.tsx` (reading `cis_tenant_name`/`cis_tenant_plan` via `/api/tenant/me` instead of
+`document.cookie`, since AA-427 made those cookies httpOnly) + an AA-341 `grounding.py`
+numeric-ordinal patch + 2 deleted files (`AA45_S3_SPEC.md`, `docs/CIS_Runbook_v1.md:Zone.
+Identifier`). This is also why the **previous top entry of this file (Session, AA-427,
+updated 22/08/2026) is now MISSING below** — it was itself uncommitted WIP on that same branch,
+never actually committed to `main`. Stashed rather than discarded:
+`git stash list` on `feature/aa-439-tenant-tier-audit` → `git stash pop` to recover both the
+code changes AND that missing handoff.md entry. Flagged to Nghiep in-session; not acted on
+further (not this session's task).
+
+## Completed This Session — AA-441 (6 priority bugs from AA-438/439 audit)
+Full task prompt: `docs/claude_tasks/AA-441-01-fix-priority-bugs.md` (gitignored, per repo
+convention). Full verify evidence (pre- AND post-deploy, live HTTP against the real API):
+`docs/implementation-notes/AA-441-fix-priority-bugs.md`.
+
+1. **Pipeline Health** — `rate_limit_middleware` was skipping every non-`/v1/*` path, so
+   `shared.tenant_api_usage` never recorded admin activity. Migration 110 (`actor_type`/
+   `admin_user_id`, `tenant_id` nullable — schema design confirmed with Nghiep via
+   AskUserQuestion, not guessed) + new `/admin/*` tracking branch. Live-verified: real
+   `GET /admin/acp/run-health` call wrote a real admin-actor row.
+2. **Run Health** — was reading dead `acp_shared.acp_runs` (0 rows, legacy ACP v1) instead of
+   `acp_v2_runs` (real, 12 live rows). Per-run stages now sourced from `acp_v2_slots`. Live
+   HTTP-verified: 12 real runs returned.
+3. **`published_tours` UPSERT** — `ON CONFLICT DO UPDATE` now covers all 18 non-key columns (was
+   4). Verified via synthetic test tour, double-republish, all fields correctly overwritten.
+4. **T0 Upload Brand Guide 401** — deeper than the audit line said: full request-shape mismatch
+   (multipart FE vs JSON+presigned-URL backend nothing ever completed). Nghiep confirmed
+   mid-session: fix all 3 layers (tenant proxy multipart pass-through, `BrandTab.tsx` route,
+   backend direct-multipart-to-S3 + JWT-based tenant_id), skip "AI extracts rules" (no spec,
+   tracked as a future item, no Linear issue yet). Live HTTP-verified end-to-end: real tenant
+   JWT, no admin secret, 200, file landed in S3 under the tenant's own prefix.
+5. **Reject doesn't reset status** — `generated_content.status` stuck at `'hitl'` forever after
+   reject; now mirrors `approve_review()`'s own pattern. Fixed the 2 real affected rows
+   (Nghiep-confirmed before touching data: Seoul-Busan tour, Ulaanbaatar tour). Live
+   HTTP-verified.
+6. **`/v1/tours/pool` missing filter** — added `master_status='active' AND deleted_at IS NULL`,
+   matching `acp_contract.v_trip_registry`'s existing pattern. Live HTTP-verified: tour visible
+   while active, hidden after trashing.
+
+- `pytest tests/unit/`: 1359 passed, 0 failed (2 pre-existing tests' mocks updated for bug #5's
+  new `RETURNING` column, not weakened). `tests/integration/` not run locally (no Docker in this
+  environment) — CI's own Integration Tests run passed on both PR commits.
+- All synthetic test data created for verification (multiple tours, review rows) was fully
+  deleted after each check — nothing left behind in the DB or S3.
+- Linear AA-441: left as-is per ADR-2026-037 (merge doesn't auto-Done) — not touched this
+  session, per task instructions.
+
+---
+
 # AA-CIS-App Handoff — Session 58
 Updated: 2026-06-16
 
