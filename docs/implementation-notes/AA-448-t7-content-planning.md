@@ -150,6 +150,100 @@ later (Option B's terminology cleanup can still happen as a separate, dedicated 
 live). Not implemented yet — waiting for Nghiep/Claude Chat's decision before writing any of
 this.
 
+### Update (post-STOP round 2) — Year Plan / Quarter Plan relationship, NEW requirement
+
+Nghiep confirmed the principle behind Gate B's replacement ("plan do tenant nào tạo thì tenant đó
+tự duyệt") applies to BOTH options above — the choice between A/B is about code shape, not
+product intent, and that part is settled. But a new requirement surfaced that the schema
+question above didn't account for: **"1 kế hoạch/năm, chia sẵn 4 quý bên trong — sửa 1 quý = sửa
+1 phần của CÙNG 1 plan năm đó"** — not 4 independent `QuarterPlanVersion` rows that happen to
+share a `year` value, which is what today's schema actually is.
+
+**Confirmed by re-reading the live schema (`api/migrations/092_acp_quarter_plan.sql`,
+`quarter.py:310-352`)**: `acp_shared.quarter_plan` is `UNIQUE(tenant_id, year, quarter)` — one
+row per QUARTER, not per year. There is no table today that represents "a tenant's 2027 content
+plan" as a single addressable thing; a year is currently just 4 unrelated rows that happen to
+share a `year` integer. This is a real gap against the new requirement, not a
+misunderstanding on my part to correct — confirmed by direct schema read, not assumed.
+
+**#1 — Is the current model compatible, or is a new concept needed?** Not compatible as-is.
+`compute_quarter_plan()` itself (the pure scoring function) is FINE unchanged — it inherently
+operates on one quarter at a time because its core formula (`runway_fit`) is computed from
+`runway.stage(dest, market, month)`, which is fundamentally quarter/month-shaped (BOFU/MOFU
+windows differ by month) — there is no version of "compute all 4 quarters' trip selection in one
+call" that would even make sense mathematically; the scores themselves are legitimately
+different per quarter. What's missing is a **grouping/persistence concept above** the existing
+per-quarter rows, not a change to how quarters are scored. Two schema shapes to choose between
+(NOT implemented, no migration written — this needs your confirmation first, per your
+instruction):
+
+- **Shape 1 (recommended) — additive `year_plan` wrapper.** New table
+  `acp_shared.year_plan(year_plan_id, tenant_id, year, status, created_at, UNIQUE(tenant_id,
+  year))` + one new nullable FK column `acp_shared.quarter_plan.year_plan_id`. Every existing
+  table/column keeps its current meaning exactly as today — this is purely additive, zero risk
+  to `quarter_plan_version`'s existing per-quarter version history (the History tab, AA-323
+  round 4, already lets a tenant see v1-v5 PER QUARTER — that granularity survives unchanged).
+  A tenant's first finalize of ANY quarter in a given year auto-creates (or reuses) that year's
+  `year_plan` row and links to it.
+- **Shape 2 (heavier, not recommended without a stronger reason) — full annual restructure.**
+  Collapse `quarter_plan`+`quarter_plan_version` into one row/version PER YEAR, with all 4
+  quarters' data inside one JSON payload. Bigger diff, and it would need to either throw away or
+  redesign the existing per-quarter version-history UI concept (AA-323 round 4) — a real
+  regression risk to something already shipped, for no requirement this task actually names.
+
+**#2 — Does editing Q2 after Q1 is finalized affect Q1?** This is the actual product decision
+still open (not schema shape — behavior). Two options, both buildable on TOP of Shape 1 without
+changing which one you pick:
+
+- **(b) Quarters stay independent — recommended.** Each quarter keeps its own
+  finalize/edit lifecycle exactly as today (`quarter_plan_version.approval_status` per quarter,
+  unchanged); `year_plan` is a grouping/display label only (e.g., a rollup like "3/4 quý đã
+  chốt" computed on read, not a gate). Editing/finalizing Q2 never touches Q1's version or
+  status at all. This matches how the scoring mechanically works (quarters are genuinely
+  different computations, see #1) and needs the LEAST new logic — `year_plan` never gates
+  anything, it only groups.
+- **(a) Whole-year atomic approval.** `year_plan.status` itself is the thing "chốt" flips;
+  finalizing any single quarter after the year was already marked chốt reverts the YEAR's status
+  back to draft (or requires a separate explicit "re-finalize year" action) — even though Q1's
+  own `quarter_plan_version` payload/approval is technically untouched, the year-level state
+  visibly changes because of a Q2 edit. More moving parts (a status-recompute rule to design and
+  test), and doesn't obviously match "tenant tự duyệt kế hoạch của mình" any better than (b) does
+  — flagging as the alternative, not recommending it.
+
+**#3 — Gate B options re-proposed with this model in mind.** Good news found while working
+through this: **Option A from the original STOP survives unchanged under Shape 1 + (b),
+regardless of which of (a)/(b) you pick** — `admin_atoms.py`/`admin_produce.py` only ever call
+`fetch_approved_quarter_plan(tenant_id, year, quarter, pool)`, i.e. they check the QUARTER's
+`approval_status`, and never look at `year_plan` at all (it does not exist in their code path
+either way). So:
+- Under (b): T7's per-quarter finalize endpoint still just calls `save_quarter_plan_version()` →
+  `approve_quarter_plan_version()` immediately, exactly as Option A originally proposed — the
+  only addition is auto-creating/linking the `year_plan` row alongside it (a few extra lines,
+  not a behavior change to the approval mechanism itself).
+- Under (a): the "finalize" action would instead be a year-level endpoint that loops
+  `approve_quarter_plan_version()` across that year's 4 quarters at once — still zero changes
+  needed to `admin_atoms.py`/`admin_produce.py`, since the thing they read
+  (`quarter_plan_version.approval_status='approved'`) ends up set the same way either way; only
+  WHAT TRIGGERS the flip differs.
+
+Net: **the Gate B choice (Option A vs B) and the year/quarter shape choice are independent of
+each other** — Option A remains the recommendation regardless of which year/quarter answer you
+give, since neither combination requires touching the 2 out-of-scope admin files.
+
+**#4 — Schema impact, and effect on already-built/tested work.** Yes, Shape 1 requires a real
+migration (new `acp_shared.year_plan` table + 1 new column on `acp_shared.quarter_plan`) — not
+written yet, waiting for confirmation per your instruction not to pick column/table specifics
+unilaterally. **Zero impact on the 25 tests already passing** — `dfs_relevance.py`,
+`tenant_pool.py`, `compute_quarter_plan()`'s new weight, and `POST
+/v1/planning/quarter-plan/preview` never read or write `quarter_plan`/`quarter_plan_version`/any
+future `year_plan` table at all (preview computes and returns, never persists) — all of that
+work is agnostic to how the persistence layer later groups quarters into years, and needs no
+rework under either shape or either (a)/(b) behavior.
+
+**Still waiting on**: confirm Shape 1 vs Shape 2 (recommend Shape 1), confirm (a) vs (b) for
+cross-quarter independence (recommend (b)), then Option A can be implemented against whichever
+combination is chosen — no further unknowns block starting once these 2 are answered.
+
 ## Changed
 
 - New: `services/acp_shared/dfs_relevance.py`, `services/acp_planning/tenant_pool.py`,
