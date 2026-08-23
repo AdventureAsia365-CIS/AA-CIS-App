@@ -101,6 +101,7 @@ class TripScore(BaseModel):
     runway_fit: float
     richness: float
     distinctiveness_score: float
+    dfs_relevance_score: float = 0.5  # AA-448 — new 4th scoring term; 0.5 = SIGNAL_SCORE_MAP["MED"]
     forced: bool
     selected: bool
     reason: str

@@ -38,3 +38,27 @@ ATOM_COOLDOWN_WEEKS = 6
 # tự tính của 1 destination bình thường, không phải ngưỡng cap chủ định
 # cho tour thin) — trùng số ngẫu nhiên, đừng nhầm lẫn khi đọc lại.
 THIN_TRIP_MAX_SHARE = 0.15
+
+# AA-448 — shared HIGH/MED/LOW -> numeric mapping. Was inline in quarter.py's
+# compute_quarter_plan() (one dict literal, only used for `distinctiveness`); pulled out here
+# so the SAME 3-bucket numeric ladder is reused for the new `dfs_relevance` term (AA-448,
+# services/acp_shared/dfs_relevance.py) instead of that formula inventing its own scale — a
+# "MED" atom and a "MED" tour-demand signal now contribute the same fractional weight.
+SIGNAL_SCORE_MAP = {"HIGH": 1.0, "MED": 0.5, "LOW": 0.1}
+
+# AA-448 — N5 quarter-plan scoring weights, now 4 terms (was 3: runway_fit/richness/
+# distinctiveness, ADR-2026-038 §0.4's "thay HOẶC bổ sung runway_fit" — this repo's choice is
+# ADD, not replace, see docs/implementation-notes/AA-448-t7-content-planning.md Decision 3 for
+# the full reasoning: runway_fit measures buyer-journey TIMING (BOFU/MOFU window), dfs_relevance
+# measures real search DEMAND — two different questions, not overlapping ones, so replacing one
+# with the other would delete a still-useful signal rather than deduplicate a redundant one.
+# The original 3 weights (0.4/0.3/0.3) are scaled down proportionally by 0.8 to free exactly
+# 0.2 for the new term, preserving their relative importance to each other unchanged. Kept
+# named/importable (not inline) so `_score_reason()` and `compute_quarter_plan()` share one
+# source of truth and can't drift out of sync with each other.
+QUARTER_SCORE_WEIGHTS = {
+    "runway_fit": 0.32,
+    "richness": 0.24,
+    "distinctiveness": 0.24,
+    "dfs_relevance": 0.20,
+}

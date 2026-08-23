@@ -32,7 +32,7 @@ from uuid import UUID
 
 from services.acp_shared.atom_constants import THIN_TRIP_ATOM_MIN
 
-from .constants import THIN_TRIP_MAX_SHARE
+from .constants import QUARTER_SCORE_WEIGHTS, SIGNAL_SCORE_MAP, THIN_TRIP_MAX_SHARE
 from .models import AtomRecord, BigRock, QuarterPlan, RunwayMap, Trip, TripScore, compute_trips_hash
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -106,11 +106,14 @@ def _cap_thin_trip_shares(
     return capped, notes
 
 
-def _score_reason(runway_fit: float, richness: float, dist: float, forced: bool) -> str:
+def _score_reason(runway_fit: float, richness: float, dist: float, dfs_score: float, forced: bool) -> str:
     """AA-323 Gap 1 — short English label naming the dominant scoring factor.
-    Weights (0.4/0.3/0.3) mirror compute_quarter_plan()'s own score formula so
-    the label reflects what actually drove the ranking, not raw component
+    Weights mirror compute_quarter_plan()'s own score formula (QUARTER_SCORE_WEIGHTS,
+    constants.py) so the label reflects what actually drove the ranking, not raw component
     values a reviewer would have to interpret themselves.
+
+    AA-448 — added `dfs_score` (dfs_relevance's HIGH/MED/LOW -> numeric contribution) as a 4th
+    labelable factor alongside the original 3, same tie-break logic below unchanged.
 
     AA-323 round 6, Phần C — fixed a tie-break bug found in round 5's live
     audit: plain `max(contributions, key=...)` always resolves a tie to the
@@ -125,9 +128,10 @@ def _score_reason(runway_fit: float, richness: float, dist: float, forced: bool)
     if forced:
         return "Manually added"
     contributions = {
-        "High runway fit (BOFU/MOFU window this quarter)": runway_fit * 0.4,
-        "Rich atom pool": richness * 0.3,
-        "High-distinctiveness atoms": dist * 0.3,
+        "High runway fit (BOFU/MOFU window this quarter)": runway_fit * QUARTER_SCORE_WEIGHTS["runway_fit"],
+        "Rich atom pool": richness * QUARTER_SCORE_WEIGHTS["richness"],
+        "High-distinctiveness atoms": dist * QUARTER_SCORE_WEIGHTS["distinctiveness"],
+        "Strong search demand (DFS)": dfs_score * QUARTER_SCORE_WEIGHTS["dfs_relevance"],
     }
     top_value = max(contributions.values())
     if top_value <= 0.0:
@@ -143,6 +147,7 @@ def compute_quarter_plan(
     capacity_posts_per_week: int, specials: list[str], runway: RunwayMap,
     atoms_by_trip: dict[UUID, list[AtomRecord]],
     excludes: Optional[set[UUID]] = None,
+    dfs_relevance_by_trip: Optional[dict[UUID, str]] = None,
 ) -> QuarterPlan:
     """Pure computation — no DB, no LLM, 100% unit-testable.
 
@@ -152,11 +157,20 @@ def compute_quarter_plan(
     unchecked candidate a reviewer could re-add), but never enter `ranked`
     for selection — same effect as if capacity were computed without them.
     Does NOT change the scoring weights themselves, only which trips are
-    eligible to be chosen."""
+    eligible to be chosen.
+
+    `dfs_relevance_by_trip` (AA-448) — already-scored HIGH/MED/LOW per trip_id (see
+    services/acp_shared/dfs_relevance.py's fetch_dfs_relevance_by_tour(), which does the actual
+    seo_context DB read + thresholding; this pure function only consumes the result, same
+    division of labor as `atoms_by_trip`). A missing/None dict, or a trip_id absent from it,
+    scores as "MED" — a flat, equal contribution that does not change any existing caller's
+    RELATIVE trip ranking when they don't pass real data (see
+    docs/implementation-notes/AA-448-t7-content-planning.md Decision 2)."""
     q_months = [(quarter - 1) * 3 + i for i in (1, 2, 3)]
     excludes = excludes or set()
+    dfs_relevance_by_trip = dfs_relevance_by_trip or {}
 
-    scored: list[tuple[float, Trip, bool, float, float, float, bool]] = []
+    scored: list[tuple[float, Trip, bool, float, float, float, float, bool]] = []
     for t in trips:
         if t.lifecycle_stage == "retired":
             continue
@@ -166,18 +180,25 @@ def compute_quarter_plan(
             1 for m in q_months for mk in markets if runway.stage(dest, mk, m) in ("BOFU", "MOFU")
         ) / (len(q_months) * len(markets) or 1)
         richness = min(len(atoms) / 10, 1.0)
-        dist = sum({"HIGH": 1.0, "MED": 0.5, "LOW": 0.1}[a.distinctiveness] for a in atoms) / (len(atoms) or 1)
+        dist = sum(SIGNAL_SCORE_MAP[a.distinctiveness] for a in atoms) / (len(atoms) or 1)
+        dfs_score = SIGNAL_SCORE_MAP[dfs_relevance_by_trip.get(t.id, "MED")]
         forced = any(_fuzzy_match(s, t.name, t.destination) for s in specials)
-        score = runway_fit * 0.4 + richness * 0.3 + dist * 0.3 + (1.0 if forced else 0.0)
+        score = (
+            runway_fit * QUARTER_SCORE_WEIGHTS["runway_fit"]
+            + richness * QUARTER_SCORE_WEIGHTS["richness"]
+            + dist * QUARTER_SCORE_WEIGHTS["distinctiveness"]
+            + dfs_score * QUARTER_SCORE_WEIGHTS["dfs_relevance"]
+            + (1.0 if forced else 0.0)
+        )
         is_excluded = t.id in excludes
-        scored.append((score, t, forced, runway_fit, richness, dist, is_excluded))
+        scored.append((score, t, forced, runway_fit, richness, dist, dfs_score, is_excluded))
 
-    eligible = [x for x in scored if not x[6]]
+    eligible = [x for x in scored if not x[7]]
     eligible.sort(key=lambda x: -x[0])
 
     max_trips = max(2, min(len(eligible), capacity_posts_per_week + 1))
     chosen = eligible[:max_trips]
-    chosen_ids = {t.id for _, t, _, _, _, _, _ in chosen}
+    chosen_ids = {t.id for _, t, _, _, _, _, _, _ in chosen}
     capacity_note = None
     if len(eligible) > max_trips:
         capacity_note = (
@@ -189,26 +210,27 @@ def compute_quarter_plan(
             trip_id=t.id, name=t.name, destination=t.destination,
             score=round(score, 3), runway_fit=round(runway_fit, 3),
             richness=round(richness, 3), distinctiveness_score=round(dist, 3),
+            dfs_relevance_score=round(dfs_score, 3),
             forced=forced, selected=(t.id in chosen_ids and not is_excluded),
-            reason=_score_reason(runway_fit, richness, dist, forced),
+            reason=_score_reason(runway_fit, richness, dist, dfs_score, forced),
         )
-        for score, t, forced, runway_fit, richness, dist, is_excluded in
+        for score, t, forced, runway_fit, richness, dist, dfs_score, is_excluded in
         sorted(scored, key=lambda x: -x[0])
     ]
 
     plan = QuarterPlan(
         tenant_id=tenant_id, year=year, quarter=quarter,
-        trip_ids=[t.id for _, t, _, _, _, _, _ in chosen],
-        forced_specials=[t.id for _, t, forced, _, _, _, _ in chosen if forced],
+        trip_ids=[t.id for _, t, _, _, _, _, _, _ in chosen],
+        forced_specials=[t.id for _, t, forced, _, _, _, _, _ in chosen if forced],
         capacity_note=capacity_note,
         trips_hash=compute_trips_hash(trips),
         trip_scores=trip_scores,
     )
 
-    total_score = sum(s for s, _, _, _, _, _, _ in chosen) or 1
+    total_score = sum(s for s, _, _, _, _, _, _, _ in chosen) or 1
     raw_shares: dict[str, float] = {}
     dest_atom_counts: dict[str, int] = {}
-    for s, t, _, _, _, _, _ in chosen:
+    for s, t, _, _, _, _, _, _ in chosen:
         dest = t.destination or t.name
         raw_shares[dest] = raw_shares.get(dest, 0.0) + s / total_score
         dest_atom_counts[dest] = dest_atom_counts.get(dest, 0) + len(atoms_by_trip.get(t.id, []))
@@ -217,7 +239,7 @@ def compute_quarter_plan(
     plan.destination_shares = {k: round(v, 2) for k, v in capped_shares.items()}
     plan.thin_trip_notes = thin_notes
 
-    for _, t, _, _, _, _, _ in chosen[:3]:
+    for _, t, _, _, _, _, _, _ in chosen[:3]:
         highs = [a for a in atoms_by_trip.get(t.id, []) if a.distinctiveness == "HIGH" and not a.usage_log]
         if len(highs) >= 2:
             plan.big_rocks.append(BigRock(
