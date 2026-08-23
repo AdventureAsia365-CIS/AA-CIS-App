@@ -1,5 +1,11 @@
 # AA-437-02 — Build A4 Cross-Tenant Oversight v1
 
+**Post-merge update (23/08/2026):** PR #196 merged to `main` (`6652a66`) after CI green
+(Nghiep's go-ahead). `Deploy Dev` green (Vercel + ECR build + Lambda + ECS Dev all `success`) —
+image digest confirmed matching ECR `:latest` exactly, ECS steady state 1/1. Both endpoints
+re-verified as real HTTPS calls against the live deployed backend (not local/tunneled calls) —
+see "Post-deploy live verification" at the bottom.
+
 Branch: `feature/aa-437-02-a4-oversight-build` (off `main`, post AA-443 merge).
 Follows STEP0 (`docs/claude_audit/AA-437-01-a4-step0-audit.md`) — no re-investigation done, per
 task instructions.
@@ -94,3 +100,25 @@ task instructions.
   it.com`) was **not done** — this branch isn't merged/deployed yet, so the live backend still
   runs the old code without `admin_a4.py`. Same pattern as AA-441/AA-443: full HTTP-level
   verification happens post-merge, once deployed — reported separately when that happens.
+
+---
+
+## Post-deploy live verification (23/08/2026, after merge)
+
+All calls below hit `https://api-cis.lumiguides.it.com` / `https://aa-cis.lumiguides.it.com`
+directly — real HTTPS, real deployed code (ECS image digest confirmed == ECR `:latest`), no
+local/tunneled calls, no mocks.
+
+- **`GET /admin/a4/review-log?limit=200`** with real `X-Admin-Secret` → **200**, `total: 12`,
+  seeded row (`tenant_tour_version_id=0a839110-...`) present with full `escalate_detail`.
+- **`GET /admin/a4/review-log?tenant_id=6fbaf284-...`** (the seeded tenant) → **200**,
+  `total: 1` — tenant filter works live.
+- **`GET /admin/a4/trust-ramp`** → **200**, the real 4 packets, all `tenant_id=00000000-...-0001`
+  (aa_internal), correctly joined to `tenant_name`.
+- **`GET /admin/a4-oversight`** (no admin session) → **307 → `/login`** — same auth-gated
+  behavior every other `/admin/*` page has when unauthenticated (not a 404), confirming the
+  route is live and correctly wired into the existing `middleware.ts` guard. A full logged-in
+  browser render was not done — no headless browser available in this environment; confidence
+  instead comes from the clean `next build` (pre-merge) + this redirect behavior + the two
+  endpoints it calls both verified working live above.
+- ECS `aa-cis-dev-api`: steady state, 1/1 running, single `PRIMARY` deployment.
