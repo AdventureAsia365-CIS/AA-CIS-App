@@ -749,6 +749,81 @@ frontend.
   formula are self-chosen, uncalibrated against real data — same class of caveat as
   `dfs_relevance`'s own thresholds, flagged the same way (named constant, not hardcoded inline).
 
+## Live Verify (post-round-6, real AWS access)
+
+Nghiep re-authenticated `aa365-admin` MFA mid-session so this could run for real — same
+S3-mediated ECS exec pattern every prior live-verify in this repo uses (AA-431/AA-444/AA-445-02).
+Pre-merge, so no real deployed HTTP endpoint exists yet for these new routes — followed the same
+established pre-merge precedent AA-431 set: overwrite the changed `.py` files directly onto the
+running `aa-cis-dev-api` container's disk (`/app`, via `tar` upload — does NOT restart uvicorn,
+does NOT affect real traffic already being served by the old in-memory code), then run a fresh
+`python3` process that imports the just-written modules and calls the real router functions
+directly (real asyncpg pool, real Postgres, no mocks) — functionally equivalent to a real HTTP
+call through this router's own dependency-free calling convention (`fn(body, request, tenant)`),
+just skipping the actual TCP/ASGI layer since that requires a real deploy. True end-to-end HTTP-
+through-API-Gateway verification is a post-merge, post-deploy step for whoever merges this — same
+caveat AA-431's own notes already state for this exact situation.
+
+### 1. Migration 112 applied + schema confirmed
+
+ECS (`aa-cis-dev-cluster`/`aa-cis-dev-api`, task def `:127`) and RDS (`aa-cis-dev-db`) both
+confirmed running (`desired=1/running=1`/`available`) before starting — not started by this
+session. Ran migration 112's SQL via `asyncpg.execute()` (checked `shared.schema_versions` for
+`'112'` first, idempotent). Result: `{"status": "applied"}`.
+
+Schema confirmed live via `information_schema.columns`/`pg_constraint` (not assumed from the
+file):
+
+| Table | Confirmed live |
+|---|---|
+| `acp_shared.year_plan` | `year_plan_id` (uuid, PK), `tenant_id` (uuid, NOT NULL, FK → `shared.tenants`), `year` (integer, NOT NULL), `created_at` (timestamptz) — `UNIQUE (tenant_id, year)` |
+| `acp_shared.quarter_plan.year_plan_id` | uuid, nullable — FK column present |
+| `acp_shared.content_metric_snapshot` | all 9 columns present with correct types; FKs confirmed to `shared.tenants(tenant_id)` and `acp_deliver.pieces(piece_id)` |
+| `shared.schema_versions` | `version='112'` row present, `applied_at=2026-08-23T14:30:32Z` |
+
+### 2-3. Live function-level verify — real tenant, real data, all 7 checks pass
+
+Tenant: `test-n1-flow` (`6fbaf284-e3cd-4b4b-b53b-c9a04e8fae8e`), real pre-existing data — 1
+`tenant_tour_versions` row, 8 real `owner_scope`-scoped atoms (tour `4bf83a2c-...`), all
+`weight=1.0` before this run. A comprehensive Python script ran all of the following in one real
+DB session, with full cleanup + an independent re-check confirming the tenant was left exactly
+as found (see "Cleanup" below) — chosen over piecemeal manual curl-equivalents because the week-
+preservation and feedback-loop checks genuinely need multi-step real state (seeded slots/pieces/
+metrics), same shape as AA-431's own "one comprehensive verify script" choice.
+
+**A real bug was found and fixed during this pass** (not a pre-existing issue — introduced by
+this task's own new code, caught exactly because this was a REAL DB call, not a mock): both
+`finalize_quarter_plan()` and `confirm_trip_reallocation()`'s accept path passed a `source` value
+(`'tenant_self_service'`/`'feedback_reallocation'`) that `quarter_plan_version.source`'s CHECK
+constraint (migration 092, `IN ('standard','override')`) rejects —
+`CheckViolationError: ... quarter_plan_version_source_check`. Fixed using the existing allowed
+vocabulary (`'standard'` for tenant finalize, `'override'` for a feedback-reallocation accept) —
+see the "fix:" commit. Re-verified clean after the fix; all 7 checks below are from the
+POST-FIX run.
+
+| # | Check | Live result |
+|---|---|---|
+| 1 | Preview reads from tenant's own data, not the platform catalog | `trip_pool_size=1`, returned trip_id = the tenant's real tour `4bf83a2c-...` (not any of the 763 platform-catalog trips) |
+| 2 | Finalize auto-approves (Gate B Option A), no human step | `approval_status='approved'`, `approved_by='tenant:6fbaf284-...'` set immediately by the finalize call itself; `year_plan_id` correctly linked |
+| 3 | Lock refusal on a fully-locked quarter, clear error (not a generic 500) | `finalize` on Q1 2020 (fully past) → `HTTPException(409)`, detail: `"Q1 2020 is fully locked (every week already produced or in the past) — nothing left to plan."` |
+| 4 | Editing a partially-locked quarter is allowed; already-produced weeks are untouched | Seeded a real `acp_v2_runs`+`acp_v2_slots` row for (2031, month 1, week 1) with `status='produced'` and a distinctive `topic_hint`. Confirmed the quarter (11 other weeks still open) is NOT fully locked → re-`finalize()` on it succeeded. Re-read the seeded slot row afterward: **payload byte-for-byte identical** to before — T7's finalize never touches `acp_v2_slots` at all, confirming the design boundary documented above holds in practice, not just by code inspection |
+| 5 | Feedback rollup: low engagement → real `tour_atoms.weight` decrease | Seeded 3 real pieces (via real `acp_v2_runs`/`acp_v2_slots`/`acp_deliver.pieces` rows, atom `atom_6d25e9c335`), recorded 3 low-engagement snapshots (`reach=1000, engagement=1` → rate 0.001, well under the 0.05 baseline) via `record_metric_snapshot()`, ran `rollup_atom_weights()`: **`weight` 1.0 → 0.951**, atom present in the returned `moved` dict — confidence gate (exactly 3 posts) correctly cleared it |
+| 6 | Adjusted weight reflected in NEXT quarter's `compute_quarter_plan()` scoring | Re-ran `preview_quarter_plan()` for Q2 2031: `engagement_adjustment_score=0.497` for the affected trip — matches the math exactly (1 of the tour's 8 atoms adjusted: `(0.951 + 7×1.0)/8 = 0.9939`, `/2.0 = 0.497`), confirming the averaging-across-all-of-a-trip's-atoms behavior, not just a single-atom shortcut |
+| 7 | `suggest`/`confirm` reallocation — suggest never writes, reject still logs, accept applies via Gate B Option A | `suggest_trip_reallocation()`: 0 `quarter_plan` rows existed for the target quarter before OR after calling it. `confirm_trip_reallocation(accept=False)`: `accepted=False` returned, `acp_shared.audit_log` still gained 1 row (never-silently framing confirmed). `confirm_trip_reallocation(accept=True)`: `accepted=True`, real `version_id` returned, a real `quarter_plan` row now exists (via the SAME `save_quarter_plan_version()`→`approve_quarter_plan_version()` path finalize uses) |
+
+### Cleanup — tenant left exactly as found
+
+All seeded rows deleted in the same script's `finally` block (3 metric snapshots, 3 pieces, 4
+`acp_v2_slots`, 4 `acp_v2_runs`, 1 legacy `acp_runs` row, `tour_atoms.weight` restored to `1.0`,
+2 `quarter_plan_version` rows + 2 `quarter_plan` rows + 1 `year_plan` row + 2 `audit_log` rows
+from THIS session's own test finalizes). **Independent re-check afterward** (separate script,
+not reusing any state from the verify script): `metric_snapshots=0`, `verify_pieces=0`,
+`verify_slots=0`, `audit_log_reallocation=0`, `all_atom_weights_are_1.0=True` (all 8 real atoms).
+One exception, correctly left alone: `quarter_plans=1` — inspected it directly, found a REAL
+pre-existing row (`year=2026, quarter=3, created_at=2026-08-13`, 10 days before this session,
+not created by this task) — not deleted, since this session didn't create it (per the standing
+rule: don't delete what you didn't create and can't fully explain).
+
 ## Should know
 
 - `services/acp_planning/tenant_pool.py` reuses `runway.py`'s `_row_to_trip()` and `quarter.py`'s
@@ -764,19 +839,13 @@ frontend.
   call-sequence mock) — fixed by extending the fake to understand the 2 new queries. If that
   function's persist SQL changes again, that fake needs the same treatment; it does not fail
   loudly in an obviously-related way (raises a generic `AssertionError: Unhandled ... query`).
-- **Verification limits, stated plainly (matching this repo's own established pattern for
-  sandboxed-session build tasks, e.g. AA-445-02's notes)**: this session has no AWS/RDS/ECS
-  access. Verified: `pytest tests/unit/ -q` → 1446 passed, 1 skipped (same pre-existing unrelated
-  skip prior sessions already documented), 0 failed; `flake8 --max-line-length=120` clean on
-  every changed/new Python file; `npx tsc --noEmit` clean (0 errors) on the whole frontend;
-  `npx eslint` clean on every changed/new frontend file (the 1 remaining `no-explicit-any` in
-  `layout.tsx` is pre-existing, confirmed by running the same lint against unmodified `main`).
-  **NOT verified**: migration 112 has not been applied to any real database; no live HTTP call
-  has been made against any new endpoint; the full Next.js production build could not be run in
-  this worktree (Turbopack rejects a symlinked `node_modules`, used here only to run `tsc`/
-  `eslint` without a full `npm install` — not a real code defect, but also not a substitute for
-  a real `npm run build`/`npm install` verification pass). The task's own "Nhắc" section's
-  minimum test case (enter a low metric for one trip's atom, confirm that trip scores lower/
-  isn't re-suggested next quarter) is covered at the UNIT level (`test_aa448_content_metrics.py`,
-  `test_aa448_trip_reallocation.py`) but not against a real live database — flagged as the
-  concrete next step for a live session with AWS access, not silently skipped.
+- **Static verification** (sandboxed, no AWS access): `pytest tests/unit/ -q` → 1446 passed, 1
+  skipped (same pre-existing unrelated skip prior sessions already documented), 0 failed;
+  `flake8 --max-line-length=120` clean on every changed/new Python file; `npx tsc --noEmit`
+  clean (0 errors) on the whole frontend; `npx eslint` clean on every changed/new frontend file
+  (the 1 remaining `no-explicit-any` in `layout.tsx` is pre-existing, confirmed by running the
+  same lint against unmodified `main`).
+- **Live verification (real AWS access, same session, after Nghiep re-authenticated MFA) —
+  full evidence in the new "Live Verify" section below**, including one real bug this task's own
+  code introduced, found and fixed during that pass (`quarter_plan_version.source` CHECK
+  violation).
