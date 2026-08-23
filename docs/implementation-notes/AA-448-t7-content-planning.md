@@ -425,6 +425,163 @@ implementation work (#2 and #3 in particular are entirely new logic under either
 consequence of the shape choice) — genuinely waiting on your read of this before doing anything
 further, not proposing a default.
 
+### Update (post-STOP round 4 → round 5) — decided: Shape 1 + 2 lock conditions + month-vs-quarter
+### question + feedback loop, checked against `aa-marketing-v2` BEFORE proposing anything
+
+**Confirmed settled by Nghiep (round 4, not re-litigated here): Shape 1 (`year_plan` additive
+wrapper). Locking = BOTH (a) real content already produced (N6/N7 ran) AND (b) calendar has
+passed that period, applied together. Editing a period only ever affects LATER periods, never
+earlier ones.**
+
+Before proposing month-vs-quarter or feedback-loop design, read `aa-marketing-v2` in full (not
+re-guessed from memory) — Nghiep's own reminder: *"chúng ta đang bỏ qua nghiên cứu của chị Thư"*.
+Files read this round: `README.md` (193 lines, full), `aamc/planning.py` (343 lines, full —
+module D, all of D1-D5), `aamc/learning.py` (119 lines, full — module H + D6), `aamc/models.py`
+(`YearPlan`/`MetricSnapshot`/`UnknownEntry`/`Lesson` classes), `aamc/config.py`
+(`CONFIDENCE_ATOM_MIN_POSTS`). Also re-grepped the CURRENT AA-CIS-App repo fresh this round for
+any real engagement/metrics table (`engagement`, `MetricSnapshot`, `score_post`, `rollup_atoms`,
+`ingest_metrics`, `search_console`, `meta_api`) — zero real hits (the handful of filename matches
+returned are `destination_shares`/similar unrelated substrings, confirmed by reading each).
+
+#### Q1 answer — cadence: the research already answers this, and it matches what's already built
+
+`aamc/planning.py`'s own module map (its docstring, line 4): **"D1 runway_map (DET) · D2
+derive_yearly · D3 plan_quarter · D4 parse_brief_sentence (Mode B) · D5 allocate_month (DET
+allocator) · D7 campaign_overlay."** D3 (`plan_quarter`) selects TRIPS/big-rocks per QUARTER —
+this is exactly what `services/acp_planning/quarter.py::compute_quarter_plan()` already is (a
+direct port, confirmed by its own docstring: "Ported from aamc/planning.py's plan_quarter()/D3").
+D5 (`allocate_month`) allocates ATOMS-TO-SLOTS per MONTH, reading eligibility/cooldown/weight per
+atom — exactly what `services/acp_planning/allocator.py::compute_slot_grid()` already is (same
+docstring lineage, D5). **There is no month-grained trip-selection tier and no quarter-grained
+slot-allocation tier anywhere in the reference design** — the two-tier split (quarter = resource
+allocation frame, month = the actual calendar/atom-lock granularity) is not a new idea to invent
+for AA-448, it is exactly the architecture already ported into this repo since AA-301. This
+directly confirms Nghiep's own round-4 hunch ("quý vẫn là khung phân bổ tài nguyên lớn... trong
+khi tháng là nơi thực sự khoá/mở/điều chỉnh") as the reference design's own answer, not a guess.
+
+**Practical consequence**: the 2 lock conditions Nghiep confirmed (real content produced + past
+calendar) attach naturally to the MONTH artifact (`SlotGrid`/`acp_shared.acp_v2_runs`/
+`acp_v2_slots` — these already exist at month grain, `acp_v2_runs` already has real
+`tenant_id, year, month, week, status` columns per migration 096/103) — `compute_quarter_plan()`
+itself does not need lock logic added to IT; only the month-level artifact/endpoints do. Whether
+that means a NEW column on the existing `acp_v2_runs` table, or a separate new lock-state
+mechanism, is still open — not decided here, flagged in the open questions below since it is
+itself a real schema question (same class as the Shape 1 discussion, needs its own confirmation
+before writing a migration).
+
+#### Q2 answer — feedback loop: real, in the reference design, NOT a new invention — but narrower
+#### than "xem phản ứng thật → điều chỉnh kế hoạch quý" might suggest
+
+**Yes, it exists — Module H (`aamc/learning.py`), full docstring: "H2 score · H3 lesson_update ·
+H4 adjust (confidence-gated) · H5 report_render. D6 log_unknown."** This directly validates
+Nghiep's instinct — this is a real, designed part of the original system, not something invented
+this round. But reading the actual code (not just the concept) shows the mechanism is narrower
+than "phản hồi → sửa lại kế hoạch quý":
+
+- **H2 `score_post(ws, piece_id, day, values)`** — records one raw metric snapshot PER PUBLISHED
+  PIECE (`scope="post"`, keyed by `piece_id`). Requires a real published piece to exist.
+- **H4's actual mechanism is `rollup_atoms()`** — NOT a quarter/trip re-selection. It recomputes
+  ONLY `atom.weight` (magnitude-capped 0.25-2.0), and ONLY once an atom has been used in
+  `CONFIDENCE_ATOM_MIN_POSTS = 3` or more posts (`aamc/config.py:102`) — "below threshold: log
+  the observation, don't act." That adjusted weight then feeds into the NEXT month's
+  `allocate_month()` (D5) atom-eligibility scoring (`w = a.weight * (1.5 if starred...) *
+  distinctiveness_multiplier` — the exact same formula shape
+  `services/acp_planning/allocator.py::_eligible_atoms()` already has today, `a.weight` is
+  already a live input to it). **The reference design's feedback loop never touches
+  `QuarterPlan`/`plan_quarter()`/`compute_quarter_plan()` at all — it only adjusts which ATOMS
+  win future MONTHLY slots**, via a field (`atom.weight`) that already exists on `AtomRecord` and
+  is already read by the allocator today, just never written to by anything yet.
+- **H3 (`lesson_update`/`lesson_summary`) is qualitative**, not numeric — free-text notes
+  re-injected into future LLM prompt context, not a scoring mechanism.
+- **H5 (`report_render`) is a report only** — "what shipped" + "what we couldn't say," no
+  automatic action.
+- **The reference design's PRIMARY real feedback mechanism is actually the PRE-publish veto loop
+  (Module G2, `aamc/delivery.py`)** — the agency reviews the weekly packet within a 48-hour veto
+  window BEFORE anything ships; those vetoes become "Decisions"/"lessons," and 3 same-pattern
+  vetoes trigger a generalization prompt ("4 vetoed posts mention homestays — retire those
+  atoms?"). This is human review of DRAFT content, not real post-publish engagement data — a
+  materially different, and much cheaper-to-build, kind of "feedback" than what H2/H4 need.
+  Confirmed this already has a real analog in the current codebase's `trust_ramp.py` (AA-365,
+  already ported — a 3-state `propose_only → approve_to_publish → veto_window_auto` ramp,
+  AA-440 already documented it as closer to A4 Cross-Tenant Oversight than a hard gate) — but
+  that module is about PUBLISH GATING (Gate C / A4 territory), a different concern from T7's
+  quarter/month planning, not something this task should fold in.
+- **Even the reference build's own H1 (`ingest_metrics`) was never a real live connector.** Its
+  full docstring: *"H1 ingest_metrics is a connector surface: Search Console / Meta APIs land
+  here; metric snapshots can also be entered manually for now."* No actual Search
+  Console/Meta API integration exists anywhere in `aa-marketing-v2`'s code — manual entry was
+  always the accepted starting point, by the original design's own admission, not a shortcut
+  AA-448 would be inventing.
+
+#### Q3 answer — current data availability, checked fresh this round
+
+Confirmed by direct grep (not memory): **zero tables/columns in the current AA-CIS-App schema
+store real post-publish engagement of any kind** (likes/shares/clicks/Search Console/Meta data —
+none exist). T11 (Publish/Distribute) is confirmed still not built (per AA-447-01's audit,
+re-cited not re-verified this round — `deliver_packet()` only flips `packets.status='delivered'`,
+no social API integration, grepped 0 hits repo-wide). **One nuance worth surfacing, not assumed**:
+T9 (Final Content Write) DOES already produce real content rows —
+`acp_deliver.pieces` has 135 real rows (10 `status='passed'`), per this repo's own CLAUDE.md — so
+a real `piece_id` to attach a manually-entered metric to already exists for SOME content, even
+though nothing auto-publishes it anywhere yet. Whether that means "a human could manually
+copy-paste T9's content somewhere themselves today and then manually report back engagement
+numbers against that real `piece_id`" is a workflow question outside what the code can answer —
+flagged as a real option, not assumed to be the intended use.
+
+#### Naming collision worth flagging (not a Shape 1 re-litigation — Shape 1 stays chosen)
+
+The reference design already has something LITERALLY called `YearPlan` (`aamc/models.py:208`) —
+but it means something completely different from Shape 1's `acp_shared.year_plan` (a grouping/FK
+wrapper around 4 `quarter_plan` rows, per round 3's design). The reference `YearPlan` is a
+once-per-year, LLM-assisted STRATEGY document — `personas`, `excluded_archetypes`, `pillars`
+(content-pillar shares derived from atom-type distribution), `channel_roles`, `posture_options` —
+and `allocate_month()` (D5) reads it ONLY to label each slot with a rotating pillar tag
+(`pillars[slot_n % len(pillars)]`), not for any approval/gating/grouping purpose. **There is no
+parent-child or approval coupling between the reference's `YearPlan` and `QuarterPlan` at all** —
+they are two unrelated artifacts that happen to both exist "once per year." This means Shape 1's
+`year_plan` table (already decided, staying as-is) and the reference's `YearPlan` concept are
+NOT the same thing despite the name collision — flagging this now so a future session porting D2
+(`derive_yearly` — personas/pillars/posture) doesn't reuse the `year_plan` table name for a
+second, unrelated purpose. Not proposing to port D2 in this task (out of scope, not asked for) —
+just naming the collision before it causes confusion later.
+
+#### Scope-size flag (per Nghiep's own explicit ask to raise this if seen)
+
+The task started as "rewrite T7" (one tenant-facing quarter/month planning screen). With Shape 1
++ month-level locking + a feedback loop, the real scope now touches: (1) the new `year_plan`
+table (round 3, confirmed), (2) a new month-level lock-state mechanism (this round, not yet
+designed — see open question below), (3) a new metrics-snapshot-equivalent table +
+`atom.weight`-adjustment logic (Module H's `rollup_atoms()` port) if the feedback loop is meant
+to be real code and not just a stubbed data model. That is now closer to "T7 + a meaningful slice
+of the reference's Module H" in one branch/PR, not a single self-contained page. Raising this
+because Nghiep asked me to if I saw real risk — not un-deciding "gộp luôn" myself, and will
+proceed with whatever Nghiep confirms either way.
+
+#### Open questions — trying to bundle everything remaining into this one round
+
+1. **Month-lock mechanism**: extend the existing `acp_shared.acp_v2_runs` table (already
+   tenant/year/month/week-grained, migration 096/103) with a lock-state column, or a new
+   separate table? (Same class of "real schema change, confirm before writing" as Shape 1/2 was —
+   not picking unilaterally.)
+2. **Feedback loop scope for THIS task, given Q2's answer above**: given zero real engagement
+   data exists and even the reference build never had a live connector either — build (a) the
+   data model shell only (a metrics-snapshot-equivalent table + a manual-entry endpoint, atom-
+   weight adjustment logic wired but inert until real snapshots exist — matches the reference's
+   own "H1 stub, manual entry accepted" precedent), or (b) full atom-weight rollup logic
+   (`rollup_atoms()`-equivalent) built and tested against manually-entered data now, or (c)
+   something narrower/different than both? And: is "a human manually posts T9 content somewhere
+   themselves, then manually reports engagement back against that real `piece_id`" the intended
+   workflow, or is real automatic ingestion (Search Console/Meta) actually expected before this
+   is useful at all?
+3. **Given the scope-size flag above**: still one PR/branch, or split (e.g., year_plan + month
+   lock in this branch, feedback loop as its own follow-up ticket)? Nghiep already said "gộp
+   luôn" once — asking again only because the concrete shape (2 new tables + adjustment logic,
+   not just a UI) is now clearer than it was when that call was first made; happy to proceed
+   either way once confirmed.
+
+Nothing implemented this round — analysis only, per instruction not to pick schema specifics
+without presenting first.
+
 ## Changed
 
 - New: `services/acp_shared/dfs_relevance.py`, `services/acp_planning/tenant_pool.py`,
