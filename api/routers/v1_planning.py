@@ -140,7 +140,16 @@ async def finalize_quarter_plan(
     # standard path now (Gate B Option A retired the old admin-creates/staff-approves meaning
     # this column used to distinguish), so "standard" is correct here, not a new value.
     version_id = await save_quarter_plan_version(plan, pool, source="standard")
-    await approve_quarter_plan_version(version_id, approved_by=f"tenant:{tenant_id}", pool=pool)
+    approved_by = f"tenant:{tenant_id}"
+    await approve_quarter_plan_version(version_id, approved_by=approved_by, pool=pool)
+    # Live-verify finding: approve_quarter_plan_version() only updates the DB row — the
+    # in-memory `plan` object built above was never mutated, so returning it as-is here would
+    # show approved=false in THIS response even though the very next GET already returns
+    # approved=true (confirmed live: DB is correct, only this response's immediate payload was
+    # stale). Mirror what the in-memory approve_quarter_plan() helper already does for exactly
+    # this reason.
+    plan.approved = True
+    plan.approved_by = approved_by
 
     return {
         "version_id": str(version_id),
