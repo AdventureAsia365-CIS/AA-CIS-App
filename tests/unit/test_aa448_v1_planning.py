@@ -176,6 +176,11 @@ class TestFinalizeQuarterPlan:
         mock_approve.assert_awaited_once()
         assert mock_approve.await_args.kwargs["approved_by"] == f"tenant:{TENANT_ID}"
         assert "version_id" in result
+        # Live-verify finding (post-deploy real HTTP): the response's own `plan.approved` must
+        # already read true — a client polling the finalize response itself, not just a
+        # follow-up GET, should never see a stale approved=false.
+        assert result["plan"]["approved"] is True
+        assert result["plan"]["approved_by"] == f"tenant:{TENANT_ID}"
 
 
 class TestGetQuarterPlan:
