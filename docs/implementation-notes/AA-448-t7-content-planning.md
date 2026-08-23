@@ -582,28 +582,172 @@ proceed with whatever Nghiep confirms either way.
 Nothing implemented this round — analysis only, per instruction not to pick schema specifics
 without presenting first.
 
+### Update (round 6) — FINAL decisions, implementation starts now
+
+All open architecture questions are closed as of this round. This is the source of truth for
+what gets built — later sections below record what was actually implemented against it.
+
+**1. Schema — Shape 1, unchanged from round 4/5.**
+
+**2. Cadence — unchanged from round 5's research-grounded answer.** Quarter = trip/big-rock
+selection (D3/`quarter.py`), month = atom-to-slot allocation (D5/`allocator.py`). No new tier.
+
+**3. Locking — corrected from round 4's wording (round 4 said "only affects later periods,"
+which under-specified what happens to the period BEING edited):**
+- A week is **hard-locked** (immutable) if EITHER real content was already produced for it
+  (N6/N7 ran) OR it is chronologically in the past. Locked weeks never change regardless of
+  what happens to later weeks/quarters.
+- The **currently-being-edited period** — editing takes effect immediately, but only from the
+  real point in time the edit happens forward; already-past/already-produced weeks within that
+  same quarter are NOT retroactively recomputed.
+- **Later (future, not-yet-started) quarters** may naturally shift as a consequence (they were
+  never locked to begin with) — no special handling needed beyond "recompute uses whatever the
+  current inputs are when it runs."
+- **Implementation shape chosen** (my own engineering call, per "dùng cách bạn thấy hợp lý
+  nhất"): **no new schema for lock state.** Lock status is entirely a READ-time computation
+  against data that already exists — "produced" = a row exists in `acp_shared.acp_v2_runs` for
+  that `(tenant_id, year, month, week)` (already real-time-populated by N7's existing trigger,
+  untouched by this task); "past" = `date.today()` has moved past that MONTH (month-grain
+  calendar cutoff, not synthetic week-to-real-date mapping — see "Should know" below for why
+  week-grain calendar cutoff was NOT attempted). This directly answers round 5's open question 1
+  ("mở rộng `acp_v2_runs` hay bảng riêng") — neither: it's a pure read, no write needed at all.
+- **Scope boundary, stated plainly**: T7 itself (this task) only ever writes to `quarter_plan`/
+  `quarter_plan_version` — it does not persist `acp_v2_slots` rows itself (that stays N7's job,
+  `allocate_and_persist_week()`/`admin_produce.py`'s `/run` trigger, both untouched). T7's lock
+  check therefore does two things and no more: (a) exposes lock status for display, (b) refuses
+  to finalize/re-approve a quarter plan only when the ENTIRE quarter is locked (every week of
+  all 3 months already produced-or-past) — it does NOT, and structurally cannot from inside this
+  task's scope, guarantee that a LATER re-trigger of N7 for a partially-locked quarter won't
+  attempt to reconcile an old vs. new trip selection for the same already-produced week — that
+  reconciliation logic lives inside `allocate_and_persist_week()`/`persist_slot_grid()`
+  (`_deterministic_slot_id()` hashes in `trip_id`, so a changed trip selection for an
+  already-produced week would generate a NEW, non-colliding `slot_id` rather than being blocked
+  by the existing `ON CONFLICT (slot_id) DO NOTHING` idempotency guard) — a real, PRE-EXISTING
+  gap in N7's own persist layer that predates this task and is not something T7 can close without
+  touching that layer, which every round of this task has been told to leave alone. Flagged
+  honestly rather than silently assumed solved — the quarter-level lock check materially reduces
+  how often this could ever be hit (blocks the fully-locked case outright) but does not
+  eliminate it for a still-open, partially-produced quarter. Worth its own follow-up ticket
+  against N7, not this one.
+
+**4. Feedback loop — explicitly a NEW extension beyond `aamc`'s Module H, not a restoration.**
+Documented as such everywhere it's implemented (matching the T8 §0.5 "formula fit" precedent
+Nghiep cited) — `rollup_atoms()`'s CONFIDENCE_ATOM_MIN_POSTS=3 confidence-gate mechanism is kept
+verbatim (that part IS the original design), everything downstream of it (the per-post scoring
+formula, since travel content has no `capture_rate`/`engaged_time` field anywhere in this app;
+the trip-level reallocation suggestion, which `aamc` never had at all — H4 only ever touched
+`atom.weight`, never `QuarterPlan`) is new, built and labeled as new.
+
+- **Manual metric entry** (new table, migration — see below): `POST /v1/planning/metrics`,
+  `{piece_id, reach, engagement, clicks}` — matches `aamc`'s own H1 precedent ("manual entry
+  accepted, no live connector") rather than waiting on a Search Console/Meta integration that
+  doesn't exist in either the reference or this repo.
+- **Atom weight rollup** (new, `rollup_atom_weights()`): confidence-gated exactly like `aamc`
+  (>=3 posts using that atom carry a metric snapshot before its weight moves at all).
+  Per-post score formula is NEW (not in `aamc`, which used a travel-content-inapplicable
+  `capture_rate`/`engaged_time`): `engagement / max(reach, 1)` (a plain engagement RATE),
+  averaged per atom, magnitude-capped into `[0.25, 2.0]` exactly like `aamc`'s own bound.
+- **`compute_quarter_plan()` gains a 5th weighted term**, done ONCE now (per Nghiep's explicit
+  instruction not to add dfs_relevance then redo the formula a second time for this) —
+  `QUARTER_SCORE_WEIGHTS` becomes `{runway_fit: 0.30, richness: 0.20, distinctiveness: 0.20,
+  dfs_relevance: 0.15, engagement_adjustment: 0.15}` (sums to 1.0). **No new function parameter
+  needed** — `engagement_adjustment` is derived directly from the SAME `atoms_by_trip` dict the
+  function already receives (`atom.weight`, already fetched by `tenant_pool.py`, already read by
+  N6's allocator — this is the first time N5/`compute_quarter_plan()` reads it too):
+  `engagement_component(trip) = min(1.0, avg(atom.weight for atom in this trip's atoms) / 2.0)`
+  — this normalizes `aamc`'s own `[0.25, 2.0]` weight range so "weight=1.0" (no feedback data
+  yet, or genuinely neutral) maps to exactly `0.5`, matching the SAME "MED"/no-signal midpoint
+  convention `distinctiveness`/`dfs_relevance` already use (`SIGNAL_SCORE_MAP["MED"] = 0.5`) — a
+  trip with zero adjusted atoms scores neither better nor worse than before this feature existed.
+- **`suggest_trip_reallocation()` / `confirm_trip_reallocation()`** — mirrors
+  `trust_ramp.py::suggest_ramp_transition()`/`confirm_ramp_transition()`'s exact shape/naming,
+  per Nghiep's own suggestion, kept as named (no better name found): `suggest_...()` is pure-ish
+  (computes a fresh `compute_quarter_plan()` for the target quarter using current, feedback-
+  adjusted atom weights, diffs it against the tenant's last saved plan for that quarter if any,
+  returns the diff — never writes); `confirm_...()` always writes an `acp_shared.audit_log` entry
+  (reusing the SAME table `trust_ramp.py` already uses, per that module's own "no new logging
+  shape" precedent) recording the suggestion + the tenant's accept/reject, and on accept calls
+  the SAME `save_quarter_plan_version()`+`approve_quarter_plan_version()` path T7's own finalize
+  endpoint uses (Gate B Option A) — a reallocation suggestion, once accepted, becomes a normal
+  new quarter plan version, not a special different kind of object.
+
+**5. One PR — confirmed, staying that way unless a new risk surfaces (none has, beyond what's
+already flagged above).**
+
+**Build order** (Nghiep's own suggestion, followed as-is): migration (Shape 1 + metrics table) →
+Gate B Option A (exception wording + finalize/read endpoints, year_plan auto-link) → month/week
+lock (read-only, no schema) → feedback loop (metric entry → atom-weight rollup →
+suggest/confirm reallocation, including the 5-weight `compute_quarter_plan()` change) →
+frontend.
+
 ## Changed
 
+### Round 1 (dfs_relevance + tenant-scoped fetch + preview endpoint)
+
 - New: `services/acp_shared/dfs_relevance.py`, `services/acp_planning/tenant_pool.py`,
-  `api/routers/v1_planning.py`.
+  `api/routers/v1_planning.py` (preview endpoint only at this point).
 - Edited: `services/acp_planning/quarter.py` (`compute_quarter_plan()`'s new 4th weight +
-  `_score_reason()`'s new 4th arg — both backward-compatible, defaults preserve old behavior for
-  every caller that doesn't pass the new data), `services/acp_planning/models.py` (`TripScore.
-  dfs_relevance_score`, defaulted for old-payload JSON compat), `services/acp_planning/
-  constants.py` (`SIGNAL_SCORE_MAP`, `QUARTER_SCORE_WEIGHTS`), `api/main.py` (router
-  registration), `tests/unit/test_aa301_quarter.py` (6 `_score_reason()` calls updated for the
-  new signature/weights, 1 new test added for the dfs_relevance dominance case).
-- New tests: `tests/unit/test_aa448_dfs_relevance.py` (13), `tests/unit/
-  test_aa448_tenant_pool.py` (7), `tests/unit/test_aa448_v1_planning.py` (5).
-- **Not yet changed** (blocked on STOP point): `allocator.py`, `admin.py`'s `/admin/
-  quarter-plan/*` routes, any frontend file.
+  `_score_reason()`'s new 4th arg), `services/acp_planning/models.py` (`TripScore.
+  dfs_relevance_score`), `services/acp_planning/constants.py` (`SIGNAL_SCORE_MAP`,
+  `QUARTER_SCORE_WEIGHTS`), `api/main.py` (router registration), `tests/unit/
+  test_aa301_quarter.py` (`_score_reason()` signature).
+- New tests: `test_aa448_dfs_relevance.py` (13), `test_aa448_tenant_pool.py` (7),
+  `test_aa448_v1_planning.py` (5, preview only).
+
+### Round 6 (Shape 1, Gate B Option A, month/week locking, feedback loop)
+
+- **New migration**: `api/migrations/112_acp_shared_year_plan_and_metrics.sql` —
+  `acp_shared.year_plan` (Shape 1) + `acp_shared.quarter_plan.year_plan_id` FK +
+  `acp_shared.content_metric_snapshot` (feedback loop manual entry). **NOT applied to any real
+  database this session** — no AWS/RDS access from this sandboxed environment (same class of
+  limitation AA-445-02's own notes flagged: "requires cis-start, a live-session action"). The
+  migration file itself was written, reviewed against this repo's own migration conventions
+  (numbered, self-registers into `shared.schema_versions`, `IF NOT EXISTS` guards), but never
+  run — applying it is a real next step for a live session with AWS access.
+- **New**: `services/acp_planning/lock_status.py` (week/month lock check, pure read, no new
+  schema), `services/acp_shared/content_metrics.py` (manual metric entry + confidence-gated
+  atom-weight rollup), `services/acp_planning/trip_reallocation.py` (suggest/confirm, mirrors
+  `trust_ramp.py`'s exact shape).
+- **Edited**: `services/acp_planning/quarter.py` (`save_quarter_plan_version()` now also
+  ensures/links a `year_plan` row; `compute_quarter_plan()`/`_score_reason()` gained the 5th
+  `engagement_adjustment` term), `services/acp_planning/models.py`
+  (`TripScore.engagement_adjustment_score`, `QuarterPlanNotApprovedError`'s docstring),
+  `services/acp_planning/constants.py` (`QUARTER_SCORE_WEIGHTS` re-derived to 5 terms,
+  `CONFIDENCE_ATOM_MIN_POSTS`/`ATOM_WEIGHT_MIN`/`ATOM_WEIGHT_MAX`/`ENGAGEMENT_RATE_BASELINE`
+  added), `services/acp_planning/allocator.py` (2 exception message wording changes only — the
+  check/type/trigger condition are unchanged), `api/routers/v1_planning.py` (finalize/read/
+  slot-grid/metrics/rollup/suggest/confirm endpoints added), `api/routers/admin.py` (`/admin/
+  quarter-plan/pending` and `/admin/quarter-plan/{version_id}/approve` retired; 3 now-unused
+  imports removed).
+- **Frontend**: `frontend/app/(tenant)/portal/t7-planning/page.tsx` (new route),
+  `frontend/app/(tenant)/portal/_components/PlanningTab.tsx` (new — preview/finalize table,
+  feedback metric-entry form + rollup trigger, reallocation suggestion panel), `Sidebar.tsx`
+  (new nav entry after Atom Curation, before Marketplace, per the STEP0 investigation's
+  proposal), `layout.tsx` (`BREADCRUMBS` entry).
+- **New tests**: `test_aa448_lock_status.py` (8), `test_aa448_content_metrics.py` (13),
+  `test_aa448_trip_reallocation.py` (6), `test_aa448_v1_planning.py` extended to 12 (finalize/
+  get/metrics/reallocation wiring added, preview tests fixed for the new lock-status DB call).
+  `test_aa320_quarter_plan_persist.py`'s `FakeDB`/`FakeConn` extended to understand the new
+  `year_plan` insert/select (existing tests were failing after `save_quarter_plan_version()`'s
+  edit until this fix — see "Should know").
 
 ## Tradeoffs
 
-- See Decision 3 (additive vs. replace) and Decision 5 (owner_scope-only vs. IN ('platform',
-  tenant_id)) above — both chosen with reasoning documented rather than silently picked, per
-  this task's own "không tự quyết âm thầm nếu ảnh hưởng đáng kể" instruction, but neither
-  required stopping to ask (only the Gate B point did).
+- See Decision 3 (additive vs. replace, dfs_relevance) and Decision 5 (owner_scope-only vs. IN
+  ('platform', tenant_id)) in round 1 — both chosen with reasoning documented rather than
+  silently picked, neither required stopping to ask.
+- Round 6: `confirm_trip_reallocation()` re-runs `suggest_trip_reallocation()` internally instead
+  of accepting a cached suggestion payload from the client — an extra DB round-trip, deliberately
+  accepted for a low-frequency (quarterly) action in exchange for never applying a stale
+  suggestion (see `trip_reallocation.py`'s own docstring).
+- Round 6: month/week lock status uses MONTH-grain calendar cutoff (not week-grain) specifically
+  because no code anywhere in this repo maps `compute_slot_grid()`'s `week` (1-4, a round-robin
+  label, not tied to real calendar days) to an actual date range — inventing that mapping was
+  explicitly out of scope ("không phát minh cách tính tuần mới"). The "produced" check (real
+  `acp_v2_runs` rows) still gives real week-level precision for whichever weeks N7 actually ran.
+- Round 6: `ENGAGEMENT_RATE_BASELINE` (0.05) and the plain `engagement / reach` per-post scoring
+  formula are self-chosen, uncalibrated against real data — same class of caveat as
+  `dfs_relevance`'s own thresholds, flagged the same way (named constant, not hardcoded inline).
 
 ## Should know
 
@@ -615,3 +759,24 @@ without presenting first.
   `allocate_month()` are UNTOUCHED and still used by `admin_atoms.py`'s preview-slotgrid +
   `admin_produce.py`'s real N7 trigger — do not "clean these up" as apparently-dead code in a
   future session without re-checking those two call sites first.
+- **`save_quarter_plan_version()`'s edit (year_plan linking) broke `test_aa320_quarter_plan_
+  persist.py`'s hand-rolled `FakeDB`/`FakeConn`** (a query-substring-matching fake, not a strict
+  call-sequence mock) — fixed by extending the fake to understand the 2 new queries. If that
+  function's persist SQL changes again, that fake needs the same treatment; it does not fail
+  loudly in an obviously-related way (raises a generic `AssertionError: Unhandled ... query`).
+- **Verification limits, stated plainly (matching this repo's own established pattern for
+  sandboxed-session build tasks, e.g. AA-445-02's notes)**: this session has no AWS/RDS/ECS
+  access. Verified: `pytest tests/unit/ -q` → 1446 passed, 1 skipped (same pre-existing unrelated
+  skip prior sessions already documented), 0 failed; `flake8 --max-line-length=120` clean on
+  every changed/new Python file; `npx tsc --noEmit` clean (0 errors) on the whole frontend;
+  `npx eslint` clean on every changed/new frontend file (the 1 remaining `no-explicit-any` in
+  `layout.tsx` is pre-existing, confirmed by running the same lint against unmodified `main`).
+  **NOT verified**: migration 112 has not been applied to any real database; no live HTTP call
+  has been made against any new endpoint; the full Next.js production build could not be run in
+  this worktree (Turbopack rejects a symlinked `node_modules`, used here only to run `tsc`/
+  `eslint` without a full `npm install` — not a real code defect, but also not a substitute for
+  a real `npm run build`/`npm install` verification pass). The task's own "Nhắc" section's
+  minimum test case (enter a low metric for one trip's atom, confirm that trip scores lower/
+  isn't re-suggested next quarter) is covered at the UNIT level (`test_aa448_content_metrics.py`,
+  `test_aa448_trip_reallocation.py`) but not against a real live database — flagged as the
+  concrete next step for a live session with AWS access, not silently skipped.

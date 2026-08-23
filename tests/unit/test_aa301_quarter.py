@@ -156,51 +156,62 @@ class TestScoreReasonTieBreak:
     case, "Balanced" for a genuine nonzero tie, and the correct single
     dominant factor otherwise."""
 
-    # AA-448 — _score_reason() gained a 4th positional arg (dfs_score) and the weights it
-    # multiplies by moved from the old inline 0.4/0.3/0.3 to QUARTER_SCORE_WEIGHTS
-    # (constants.py: runway_fit=0.32, richness=0.24, distinctiveness=0.24, dfs_relevance=0.20).
-    # Every call below is updated for the new signature/weights; dfs_score=0.0 in the original
-    # 3-factor tests keeps them isolating exactly the same comparison they always did (the new
-    # term simply contributes nothing when 0.0). A new test at the bottom of this class covers
-    # dfs_relevance's own dominance case, the one genuinely new behavior this task adds.
+    # AA-448 round 1 — _score_reason() gained a 4th positional arg (dfs_score). Round 6 — a 5th
+    # (engagement_score). Weights now come from QUARTER_SCORE_WEIGHTS (constants.py:
+    # runway_fit=0.30, richness=0.20, distinctiveness=0.20, dfs_relevance=0.15,
+    # engagement_adjustment=0.15 — was 0.4/0.3/0.3 pre-AA-448, then 0.32/0.24/0.24/0.20 after
+    # round 1, now this). Every call below carries both new args; 0.0 in the original 3-factor
+    # tests keeps them isolating exactly the same comparison they always did (a 0.0 term
+    # contributes nothing). 2 new tests at the bottom cover dfs_relevance's and
+    # engagement_adjustment's own dominance cases — the two genuinely new behaviors AA-448 adds.
 
     def test_forced_short_circuits_before_any_contribution_check(self):
-        assert _score_reason(0.9, 0.9, 0.9, 0.9, forced=True) == "Manually added"
+        assert _score_reason(0.9, 0.9, 0.9, 0.9, 0.9, forced=True) == "Manually added"
 
     def test_all_zero_no_longer_defaults_to_first_key(self):
         """The exact real-world case round 5 found: runway_fit=richness=dist=0.0
         (no BOFU/MOFU window yet, no curated atoms) must NOT read as
         'High runway fit' — the literal opposite of what 0.0 means."""
-        reason = _score_reason(0.0, 0.0, 0.0, 0.0, forced=False)
+        reason = _score_reason(0.0, 0.0, 0.0, 0.0, 0.0, forced=False)
         assert reason != "High runway fit (BOFU/MOFU window this quarter)"
         assert reason == "No runway or atom signal yet this quarter"
 
     def test_genuine_runway_fit_dominance_still_labeled_correctly(self):
-        # runway_fit*0.32=0.32, richness*0.24=0.12, dist*0.24=0.048, dfs*0.20=0.0 -> runway_fit wins
-        reason = _score_reason(1.0, 0.5, 0.2, 0.0, forced=False)
+        # runway_fit*0.30=0.30, richness*0.20=0.10, dist*0.20=0.04, dfs*0.15=0.0,
+        # engagement*0.15=0.0 -> runway_fit wins
+        reason = _score_reason(1.0, 0.5, 0.2, 0.0, 0.0, forced=False)
         assert reason == "High runway fit (BOFU/MOFU window this quarter)"
 
     def test_genuine_richness_dominance_labeled_correctly(self):
-        # richness*0.24=0.24 beats runway_fit*0.32=0.064, dist*0.24=0.024, dfs*0.20=0.0
-        reason = _score_reason(0.2, 1.0, 0.1, 0.0, forced=False)
+        # richness*0.20=0.20 beats runway_fit*0.30=0.06, dist*0.20=0.02, dfs*0.15=0.0,
+        # engagement*0.15=0.0
+        reason = _score_reason(0.2, 1.0, 0.1, 0.0, 0.0, forced=False)
         assert reason == "Rich atom pool"
 
     def test_genuine_distinctiveness_dominance_labeled_correctly(self):
-        # dist*0.24=0.24 beats runway_fit*0.32=0.064, richness*0.24=0.024, dfs*0.20=0.0
-        reason = _score_reason(0.2, 0.1, 1.0, 0.0, forced=False)
+        # dist*0.20=0.20 beats runway_fit*0.30=0.06, richness*0.20=0.02, dfs*0.15=0.0,
+        # engagement*0.15=0.0
+        reason = _score_reason(0.2, 0.1, 1.0, 0.0, 0.0, forced=False)
         assert reason == "High-distinctiveness atoms"
 
     def test_genuine_dfs_relevance_dominance_labeled_correctly(self):
-        # AA-448 new axis. dfs*0.20=0.20 beats runway_fit*0.32=0.064, richness*0.24=0.024,
-        # dist*0.24=0.024.
-        reason = _score_reason(0.2, 0.1, 0.1, 1.0, forced=False)
+        # AA-448 round 1 axis. dfs*0.15=0.15 beats runway_fit*0.30=0.06, richness*0.20=0.02,
+        # dist*0.20=0.02, engagement*0.15=0.0.
+        reason = _score_reason(0.2, 0.1, 0.1, 1.0, 0.0, forced=False)
         assert reason == "Strong search demand (DFS)"
 
+    def test_genuine_engagement_adjustment_dominance_labeled_correctly(self):
+        # AA-448 round 6 axis. engagement*0.15=0.15 beats runway_fit*0.30=0.06,
+        # richness*0.20=0.02, dist*0.20=0.02, dfs*0.15=0.0.
+        reason = _score_reason(0.2, 0.1, 0.1, 0.0, 1.0, forced=False)
+        assert reason == "Strong real engagement (feedback)"
+
     def test_nonzero_tie_reads_as_balanced_not_first_key(self):
-        # richness*0.24 == dist*0.24 == 0.24 (same multiplier applied to the same
+        # richness*0.20 == dist*0.20 == 0.20 (same multiplier applied to the same
         # value 1.0, so this is an EXACT float tie, not just close) -> both
-        # beat runway_fit*0.32=0.0 and dfs*0.20=0.0 -> a real tie between two nonzero factors.
-        reason = _score_reason(0.0, 1.0, 1.0, 0.0, forced=False)
+        # beat runway_fit*0.30=0.0, dfs*0.15=0.0, engagement*0.15=0.0 -> a real tie between two
+        # nonzero factors.
+        reason = _score_reason(0.0, 1.0, 1.0, 0.0, 0.0, forced=False)
         assert reason == "Balanced score (multiple factors tied)"
 
 

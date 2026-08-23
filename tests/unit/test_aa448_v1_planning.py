@@ -1,13 +1,11 @@
-"""AA-448 — T7 Content Planning router (api/routers/v1_planning.py), preview endpoint only
-(the finalize/read/slot-grid endpoints are added once the Gate B replacement decision is made —
-see docs/implementation-notes/AA-448-t7-content-planning.md).
+"""AA-448 — T7 Content Planning router (api/routers/v1_planning.py).
 
 Same conventions as test_aa444_marketplace_view.py: mocked asyncpg pool, `tenant=` dependency
 bypassed (called directly, not through FastAPI's Depends() machinery).
 """
 import json
 import uuid
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -52,6 +50,12 @@ def _atom_row(**over):
     return base
 
 
+def _plan_side_effect(dfs_rows=None):
+    """The 4 conn.fetch() calls _compute_plan()+lock-status make, in order: trips, atoms, dfs
+    relevance, then acp_v2_runs (lock status)."""
+    return [[_trip_row()], [_atom_row()], dfs_rows or [], []]
+
+
 class TestPreviewQuarterPlan:
     @pytest.mark.asyncio
     async def test_uses_tenant_scoped_pool_not_platform_catalog(self):
@@ -60,14 +64,10 @@ class TestPreviewQuarterPlan:
         763-trip v_trip_registry."""
         conn = AsyncMock()
         conn.fetchrow.return_value = {"posts_per_week": 2, "markets": None, "channels": None}
-        conn.fetch.side_effect = [
-            [_trip_row()],       # fetch_tenant_trips
-            [_atom_row()],       # fetch_tenant_atoms_by_trip
-            [],                  # fetch_dfs_relevance_by_tour
-        ]
+        conn.fetch.side_effect = _plan_side_effect()
         pool = _make_pool(conn)
         request = _make_request(pool)
-        body = v1_planning.QuarterPlanPreviewRequest(year=2026, quarter=4)
+        body = v1_planning.QuarterPlanRequest(year=2026, quarter=4)
 
         result = await v1_planning.preview_quarter_plan(body, request, tenant={"sub": TENANT_ID})
 
@@ -83,14 +83,15 @@ class TestPreviewQuarterPlan:
         assert result["trip_pool_size"] == 1
         assert len(result["plan"]["trip_scores"]) == 1
         assert result["plan"]["trip_scores"][0]["trip_id"] == str(TRIP_ID)
+        assert result["fully_locked"] is False  # no acp_v2_runs rows, quarter is in the future
 
     @pytest.mark.asyncio
     async def test_config_never_client_supplied_always_read_fresh(self):
         """Self-service means the tenant's OWN configured markets/channels/capacity —
-        QuarterPlanPreviewRequest has no field for any of these."""
-        assert "markets" not in v1_planning.QuarterPlanPreviewRequest.model_fields
-        assert "capacity_posts_per_week" not in v1_planning.QuarterPlanPreviewRequest.model_fields
-        assert "channels" not in v1_planning.QuarterPlanPreviewRequest.model_fields
+        QuarterPlanRequest has no field for any of these."""
+        assert "markets" not in v1_planning.QuarterPlanRequest.model_fields
+        assert "capacity_posts_per_week" not in v1_planning.QuarterPlanRequest.model_fields
+        assert "channels" not in v1_planning.QuarterPlanRequest.model_fields
 
     @pytest.mark.asyncio
     async def test_dfs_relevance_feeds_into_plan_scoring(self):
@@ -98,15 +99,13 @@ class TestPreviewQuarterPlan:
         dfs_relevance_score in the returned trip_scores (not the flat MED default)."""
         conn = AsyncMock()
         conn.fetchrow.return_value = {"posts_per_week": 2, "markets": None, "channels": None}
-        conn.fetch.side_effect = [
-            [_trip_row()],
-            [_atom_row()],
-            [{"tour_id": TRIP_ID, "keyword_ideas": json.dumps(
-                [{"keyword": "sapa trekking", "search_volume": 900}])}],
-        ]
+        conn.fetch.side_effect = _plan_side_effect(dfs_rows=[{
+            "tour_id": TRIP_ID,
+            "keyword_ideas": json.dumps([{"keyword": "sapa trekking", "search_volume": 900}]),
+        }])
         pool = _make_pool(conn)
         request = _make_request(pool)
-        body = v1_planning.QuarterPlanPreviewRequest(year=2026, quarter=4)
+        body = v1_planning.QuarterPlanRequest(year=2026, quarter=4)
 
         result = await v1_planning.preview_quarter_plan(body, request, tenant={"sub": TENANT_ID})
 
@@ -119,10 +118,77 @@ class TestPreviewQuarterPlan:
         conn.fetchrow.return_value = None  # fetch_tenant_planning_config raises TenantNotFoundError
         pool = _make_pool(conn)
         request = _make_request(pool)
-        body = v1_planning.QuarterPlanPreviewRequest(year=2026, quarter=4)
+        body = v1_planning.QuarterPlanRequest(year=2026, quarter=4)
 
         with pytest.raises(Exception) as exc_info:
             await v1_planning.preview_quarter_plan(body, request, tenant={"sub": TENANT_ID})
+        assert getattr(exc_info.value, "status_code", None) == 404
+
+
+class TestFinalizeQuarterPlan:
+    @pytest.mark.asyncio
+    async def test_refuses_when_quarter_fully_locked(self):
+        """Round 6: only a FULLY locked quarter blocks finalize — simulate every one of the 12
+        (month, week) slots as already 'produced' (acp_v2_runs has a row for each)."""
+        conn = AsyncMock()
+        produced_rows = [
+            {"month": m, "week": w}
+            for m in (1, 2, 3) for w in (1, 2, 3, 4)
+        ]
+        conn.fetch.side_effect = [produced_rows]  # only fetch_quarter_lock_status runs
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+        body = v1_planning.QuarterPlanRequest(year=2020, quarter=1)  # safely in the past too
+
+        with pytest.raises(Exception) as exc_info:
+            await v1_planning.finalize_quarter_plan(body, request, tenant={"sub": TENANT_ID})
+        assert getattr(exc_info.value, "status_code", None) == 409
+
+    @pytest.mark.asyncio
+    async def test_finalize_saves_and_auto_approves(self):
+        """Gate B Option A: finalize calls save_quarter_plan_version() then
+        approve_quarter_plan_version() immediately — no pending/human step exposed."""
+        conn = AsyncMock()
+        conn.fetch.side_effect = [
+            [],                    # lock status (acp_v2_runs) — nothing locked
+            [_trip_row()],         # fetch_tenant_trips
+            [_atom_row()],         # fetch_tenant_atoms_by_trip
+            [],                    # fetch_dfs_relevance_by_tour
+        ]
+        conn.fetchrow.return_value = {"posts_per_week": 2, "markets": None, "channels": None}
+        conn.fetchval.side_effect = [
+            None, uuid.uuid4(),                 # year_plan insert-select
+            uuid.uuid4(),                        # quarter_plan plan_id
+            1,                                    # next_version_no
+            uuid.uuid4(),                          # quarter_plan_version insert -> version_id
+        ]
+        txn_ctx = AsyncMock()
+        txn_ctx.__aenter__ = AsyncMock(return_value=None)
+        txn_ctx.__aexit__ = AsyncMock(return_value=False)
+        conn.transaction = MagicMock(return_value=txn_ctx)
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+        body = v1_planning.QuarterPlanRequest(year=2026, quarter=4)
+
+        with patch("api.routers.v1_planning.approve_quarter_plan_version", new=AsyncMock()) as mock_approve:
+            result = await v1_planning.finalize_quarter_plan(body, request, tenant={"sub": TENANT_ID})
+
+        mock_approve.assert_awaited_once()
+        assert mock_approve.await_args.kwargs["approved_by"] == f"tenant:{TENANT_ID}"
+        assert "version_id" in result
+
+
+class TestGetQuarterPlan:
+    @pytest.mark.asyncio
+    async def test_404_when_no_finalized_plan(self):
+        conn = AsyncMock()
+        conn.fetchrow.return_value = None  # fetch_approved_quarter_plan -> None
+        conn.fetch.return_value = []
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        with pytest.raises(Exception) as exc_info:
+            await v1_planning.get_quarter_plan(request, tenant={"sub": TENANT_ID}, year=2026, quarter=4)
         assert getattr(exc_info.value, "status_code", None) == 404
 
 
@@ -131,3 +197,56 @@ class TestAuthReusesV1ToursDependency:
         from api.routers.v1_tours import get_tenant
 
         assert v1_planning.get_tenant is get_tenant
+
+
+class TestMetricsEndpoints:
+    @pytest.mark.asyncio
+    async def test_post_metric_unowned_piece_404s(self):
+        with patch(
+            "api.routers.v1_planning.record_metric_snapshot",
+            new=AsyncMock(side_effect=v1_planning.PieceNotOwnedError("nope")),
+        ):
+            body = v1_planning.MetricSnapshotRequest(piece_id="piece_x", reach=100, engagement=10)
+            request = _make_request(MagicMock())
+            with pytest.raises(Exception) as exc_info:
+                await v1_planning.post_metric_snapshot(body, request, tenant={"sub": TENANT_ID})
+            assert getattr(exc_info.value, "status_code", None) == 404
+
+    @pytest.mark.asyncio
+    async def test_rollup_wires_through_to_service(self):
+        with patch(
+            "api.routers.v1_planning.rollup_atom_weights",
+            new=AsyncMock(return_value={"atom_1": 1.4}),
+        ):
+            request = _make_request(MagicMock())
+            result = await v1_planning.post_metrics_rollup(request, tenant={"sub": TENANT_ID})
+            assert result == {"atoms_adjusted": 1, "weights": {"atom_1": 1.4}}
+
+
+class TestTripReallocationEndpoints:
+    @pytest.mark.asyncio
+    async def test_suggest_wires_through_to_service(self):
+        with patch(
+            "api.routers.v1_planning.suggest_trip_reallocation",
+            new=AsyncMock(return_value={"added": [], "removed": []}),
+        ) as mock_suggest:
+            request = _make_request(MagicMock())
+            result = await v1_planning.get_trip_reallocation_suggestion(
+                request, tenant={"sub": TENANT_ID}, year=2026, quarter=1,
+            )
+            mock_suggest.assert_awaited_once()
+            assert result == {"added": [], "removed": []}
+
+    @pytest.mark.asyncio
+    async def test_confirm_wires_through_to_service(self):
+        with patch(
+            "api.routers.v1_planning.confirm_trip_reallocation",
+            new=AsyncMock(return_value={"accepted": True}),
+        ) as mock_confirm:
+            body = v1_planning.TripReallocationConfirmRequest(year=2026, quarter=1, accept=True)
+            request = _make_request(MagicMock())
+            result = await v1_planning.post_trip_reallocation_confirm(
+                body, request, tenant={"sub": TENANT_ID},
+            )
+            mock_confirm.assert_awaited_once()
+            assert result == {"accepted": True}

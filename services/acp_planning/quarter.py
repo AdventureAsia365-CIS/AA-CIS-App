@@ -106,14 +106,16 @@ def _cap_thin_trip_shares(
     return capped, notes
 
 
-def _score_reason(runway_fit: float, richness: float, dist: float, dfs_score: float, forced: bool) -> str:
+def _score_reason(runway_fit: float, richness: float, dist: float, dfs_score: float,
+                   engagement_score: float, forced: bool) -> str:
     """AA-323 Gap 1 — short English label naming the dominant scoring factor.
     Weights mirror compute_quarter_plan()'s own score formula (QUARTER_SCORE_WEIGHTS,
     constants.py) so the label reflects what actually drove the ranking, not raw component
     values a reviewer would have to interpret themselves.
 
-    AA-448 — added `dfs_score` (dfs_relevance's HIGH/MED/LOW -> numeric contribution) as a 4th
-    labelable factor alongside the original 3, same tie-break logic below unchanged.
+    AA-448 round 1 — added `dfs_score` as a 4th labelable factor. Round 6 — added
+    `engagement_score` (real post-publish feedback, rolled up from tour_atoms.weight) as a 5th,
+    same tie-break logic below unchanged either time.
 
     AA-323 round 6, Phần C — fixed a tie-break bug found in round 5's live
     audit: plain `max(contributions, key=...)` always resolves a tie to the
@@ -132,6 +134,7 @@ def _score_reason(runway_fit: float, richness: float, dist: float, dfs_score: fl
         "Rich atom pool": richness * QUARTER_SCORE_WEIGHTS["richness"],
         "High-distinctiveness atoms": dist * QUARTER_SCORE_WEIGHTS["distinctiveness"],
         "Strong search demand (DFS)": dfs_score * QUARTER_SCORE_WEIGHTS["dfs_relevance"],
+        "Strong real engagement (feedback)": engagement_score * QUARTER_SCORE_WEIGHTS["engagement_adjustment"],
     }
     top_value = max(contributions.values())
     if top_value <= 0.0:
@@ -159,18 +162,28 @@ def compute_quarter_plan(
     Does NOT change the scoring weights themselves, only which trips are
     eligible to be chosen.
 
-    `dfs_relevance_by_trip` (AA-448) — already-scored HIGH/MED/LOW per trip_id (see
+    `dfs_relevance_by_trip` (AA-448 round 1) — already-scored HIGH/MED/LOW per trip_id (see
     services/acp_shared/dfs_relevance.py's fetch_dfs_relevance_by_tour(), which does the actual
     seo_context DB read + thresholding; this pure function only consumes the result, same
     division of labor as `atoms_by_trip`). A missing/None dict, or a trip_id absent from it,
     scores as "MED" — a flat, equal contribution that does not change any existing caller's
     RELATIVE trip ranking when they don't pass real data (see
-    docs/implementation-notes/AA-448-t7-content-planning.md Decision 2)."""
+    docs/implementation-notes/AA-448-t7-content-planning.md Decision 2).
+
+    `engagement_adjustment` (AA-448 round 6, the 5th term) is NOT a separate parameter — it is
+    derived directly from `atoms_by_trip`'s own `AtomRecord.weight` field (already fetched,
+    already read by N6's allocator; this is the first time N5 reads it too). No new plumbing
+    needed: `rollup_atom_weights()` (services/acp_shared/content_metrics.py) writes
+    `tour_atoms.weight` from real feedback ahead of time; this function just averages a trip's
+    atoms' current weight and normalizes it. A trip with no feedback-adjusted atoms yet (the
+    common case early on) scores the neutral 0.5 midpoint, same convention as dfs_relevance's
+    own "MED" default — this feature changes nothing about existing rankings until real feedback
+    data exists."""
     q_months = [(quarter - 1) * 3 + i for i in (1, 2, 3)]
     excludes = excludes or set()
     dfs_relevance_by_trip = dfs_relevance_by_trip or {}
 
-    scored: list[tuple[float, Trip, bool, float, float, float, float, bool]] = []
+    scored: list[tuple[float, Trip, bool, float, float, float, float, float, bool]] = []
     for t in trips:
         if t.lifecycle_stage == "retired":
             continue
@@ -182,23 +195,29 @@ def compute_quarter_plan(
         richness = min(len(atoms) / 10, 1.0)
         dist = sum(SIGNAL_SCORE_MAP[a.distinctiveness] for a in atoms) / (len(atoms) or 1)
         dfs_score = SIGNAL_SCORE_MAP[dfs_relevance_by_trip.get(t.id, "MED")]
+        # AA-448 round 6 — engagement_adjustment: avg atom.weight (aamc-style [0.25, 2.0] range,
+        # 1.0 = neutral/no feedback yet) normalized so weight=1.0 -> exactly 0.5, matching the
+        # SIGNAL_SCORE_MAP "MED" midpoint every other term already uses.
+        avg_weight = sum(a.weight for a in atoms) / len(atoms) if atoms else 1.0
+        engagement_score = min(1.0, avg_weight / 2.0)
         forced = any(_fuzzy_match(s, t.name, t.destination) for s in specials)
         score = (
             runway_fit * QUARTER_SCORE_WEIGHTS["runway_fit"]
             + richness * QUARTER_SCORE_WEIGHTS["richness"]
             + dist * QUARTER_SCORE_WEIGHTS["distinctiveness"]
             + dfs_score * QUARTER_SCORE_WEIGHTS["dfs_relevance"]
+            + engagement_score * QUARTER_SCORE_WEIGHTS["engagement_adjustment"]
             + (1.0 if forced else 0.0)
         )
         is_excluded = t.id in excludes
-        scored.append((score, t, forced, runway_fit, richness, dist, dfs_score, is_excluded))
+        scored.append((score, t, forced, runway_fit, richness, dist, dfs_score, engagement_score, is_excluded))
 
-    eligible = [x for x in scored if not x[7]]
+    eligible = [x for x in scored if not x[8]]
     eligible.sort(key=lambda x: -x[0])
 
     max_trips = max(2, min(len(eligible), capacity_posts_per_week + 1))
     chosen = eligible[:max_trips]
-    chosen_ids = {t.id for _, t, _, _, _, _, _, _ in chosen}
+    chosen_ids = {t.id for _, t, _, _, _, _, _, _, _ in chosen}
     capacity_note = None
     if len(eligible) > max_trips:
         capacity_note = (
@@ -211,26 +230,27 @@ def compute_quarter_plan(
             score=round(score, 3), runway_fit=round(runway_fit, 3),
             richness=round(richness, 3), distinctiveness_score=round(dist, 3),
             dfs_relevance_score=round(dfs_score, 3),
+            engagement_adjustment_score=round(engagement_score, 3),
             forced=forced, selected=(t.id in chosen_ids and not is_excluded),
-            reason=_score_reason(runway_fit, richness, dist, dfs_score, forced),
+            reason=_score_reason(runway_fit, richness, dist, dfs_score, engagement_score, forced),
         )
-        for score, t, forced, runway_fit, richness, dist, dfs_score, is_excluded in
+        for score, t, forced, runway_fit, richness, dist, dfs_score, engagement_score, is_excluded in
         sorted(scored, key=lambda x: -x[0])
     ]
 
     plan = QuarterPlan(
         tenant_id=tenant_id, year=year, quarter=quarter,
-        trip_ids=[t.id for _, t, _, _, _, _, _, _ in chosen],
-        forced_specials=[t.id for _, t, forced, _, _, _, _, _ in chosen if forced],
+        trip_ids=[t.id for _, t, _, _, _, _, _, _, _ in chosen],
+        forced_specials=[t.id for _, t, forced, _, _, _, _, _, _ in chosen if forced],
         capacity_note=capacity_note,
         trips_hash=compute_trips_hash(trips),
         trip_scores=trip_scores,
     )
 
-    total_score = sum(s for s, _, _, _, _, _, _, _ in chosen) or 1
+    total_score = sum(s for s, _, _, _, _, _, _, _, _ in chosen) or 1
     raw_shares: dict[str, float] = {}
     dest_atom_counts: dict[str, int] = {}
-    for s, t, _, _, _, _, _, _ in chosen:
+    for s, t, _, _, _, _, _, _, _ in chosen:
         dest = t.destination or t.name
         raw_shares[dest] = raw_shares.get(dest, 0.0) + s / total_score
         dest_atom_counts[dest] = dest_atom_counts.get(dest, 0) + len(atoms_by_trip.get(t.id, []))
@@ -239,7 +259,7 @@ def compute_quarter_plan(
     plan.destination_shares = {k: round(v, 2) for k, v in capped_shares.items()}
     plan.thin_trip_notes = thin_notes
 
-    for _, t, _, _, _, _, _, _ in chosen[:3]:
+    for _, t, _, _, _, _, _, _, _ in chosen[:3]:
         highs = [a for a in atoms_by_trip.get(t.id, []) if a.distinctiveness == "HIGH" and not a.usage_log]
         if len(highs) >= 2:
             plan.big_rocks.append(BigRock(
@@ -335,17 +355,38 @@ async def save_quarter_plan_version(plan: QuarterPlan, pool, source: str = "stan
     reuses it on every later call. Always appends a new quarter_plan_version
     (never overwrites — re-planning a quarter keeps every prior version
     queryable) with approval_status='pending'. Does not touch
-    current_version_id — that only moves on approve_quarter_plan_version()."""
+    current_version_id — that only moves on approve_quarter_plan_version().
+
+    AA-448 round 6 (Shape 1) — also ensures a parent acp_shared.year_plan row exists for
+    (tenant_id, year) and links this quarter_plan row to it (year_plan_id), get-or-create,
+    idempotent. This is the ONLY place that needs to do this: this function is the sole choke
+    point every quarter_plan row is created through (confirmed — the only OTHER production
+    caller, admin.py's create_quarter_plan, is retired by this same task; admin_atoms.py's
+    preview-slotgrid never calls this function, it only reads). Purely additive — every other
+    column/row this function already writes keeps its exact prior behavior."""
     payload = json.dumps(plan.model_dump(mode="json"))
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
                 """
-                INSERT INTO acp_shared.quarter_plan (tenant_id, year, quarter)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (tenant_id, year, quarter) DO NOTHING
+                INSERT INTO acp_shared.year_plan (tenant_id, year)
+                VALUES ($1, $2)
+                ON CONFLICT (tenant_id, year) DO NOTHING
                 """,
-                plan.tenant_id, plan.year, plan.quarter,
+                plan.tenant_id, plan.year,
+            )
+            year_plan_id = await conn.fetchval(
+                "SELECT year_plan_id FROM acp_shared.year_plan WHERE tenant_id = $1 AND year = $2",
+                plan.tenant_id, plan.year,
+            )
+            await conn.execute(
+                """
+                INSERT INTO acp_shared.quarter_plan (tenant_id, year, quarter, year_plan_id)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (tenant_id, year, quarter) DO UPDATE
+                    SET year_plan_id = COALESCE(acp_shared.quarter_plan.year_plan_id, EXCLUDED.year_plan_id)
+                """,
+                plan.tenant_id, plan.year, plan.quarter, year_plan_id,
             )
             plan_id = await conn.fetchval(
                 """
