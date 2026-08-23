@@ -37,6 +37,7 @@ from api.routers.admin_settings import router as admin_settings_router
 from api.routers.admin_atoms import router as admin_atoms_router
 from api.routers.admin_marketplace import router as admin_marketplace_router
 from api.routers.admin_produce import router as admin_produce_router
+from api.routers.admin_a4 import router as admin_a4_router
 from api.routers.acp_health import router as acp_health_router
 from api.middleware.rate_limit import rate_limit_middleware
 from api.middleware.sentry_context import sentry_context_middleware
@@ -194,6 +195,7 @@ app.include_router(admin_settings_router)
 app.include_router(admin_atoms_router)
 app.include_router(admin_marketplace_router)
 app.include_router(admin_produce_router)
+app.include_router(admin_a4_router)
 app.include_router(acp_health_router)
 
 app.middleware("http")(rate_limit_middleware)

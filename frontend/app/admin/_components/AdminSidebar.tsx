@@ -3,7 +3,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Sparkles, ShoppingBag, CalendarCheck, Boxes, PlayCircle } from "lucide-react";
+import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Sparkles, ShoppingBag, CalendarCheck, Boxes, PlayCircle, Eye } from "lucide-react";
 import { A, serif, sans, SIDEBAR_WIDTH } from "./adminUi";
 
 interface Notif {
@@ -216,6 +216,12 @@ export default function AdminSidebar() {
             <NavItem active={active("/admin/run-health")} accent={A.red}
               icon={<Activity size={15} />} label="Run Health"
               onClick={() => router.push("/admin/run-health")} />
+            {/* AA-437 [A4]: read-only cross-tenant oversight — T3 escalation log + trust ramp
+                state. No action here (flag/suspend/force-unpublish is future Command Center
+                scope), so it sits alongside Run Health rather than under a new group. */}
+            <NavItem active={active("/admin/a4-oversight")} accent={A.red}
+              icon={<Eye size={15} />} label="Cross-Tenant Oversight"
+              onClick={() => router.push("/admin/a4-oversight")} />
           </NavGroup>
         )}
 
