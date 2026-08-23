@@ -824,6 +824,59 @@ pre-existing row (`year=2026, quarter=3, created_at=2026-08-13`, 10 days before 
 not created by this task) — not deleted, since this session didn't create it (per the standing
 rule: don't delete what you didn't create and can't fully explain).
 
+## Post-merge / post-deploy record
+
+Per Nghiep's explicit instruction ("ci green thì merge luôn, theo dõi deploy, verify, check def
+task, báo cáo") — merged rather than left as a PR for separate review, deviating from this
+task's own earlier-stated "PR only, Claude Chat merges after review" default. Noted here for
+the record, not glossed over.
+
+- **PR #200** (`feature/aa-448-build-t7-planning` → `main`): all 5 required CI checks green
+  (Lint, Security Audit, Unit Tests, Integration Tests, Docker Build Check, each run twice) +
+  Vercel preview — squash-merged. Contains migration 112; per this repo's own stated convention
+  a migration-carrying PR should get a manual look regardless of CI — merged anyway per Nghiep's
+  explicit instruction this round, flagged here rather than silently following the general
+  policy over the specific instruction actually given.
+- **Deploy Dev run 32654612013** (triggered by the #200 merge): all 4 jobs green (Build/Push
+  ECR, Deploy Frontend to Vercel, Deploy Lambda Functions, Deploy to ECS Dev incl. the
+  workflow's own smoke test). New task def **`aa-cis-dev-api:128`**, service `1/1` running,
+  single `PRIMARY` deployment (clean rollout, no stuck old deployment).
+- **Real end-to-end HTTP verify, post-deploy** (first time this task's endpoints were reachable
+  via the actual domain, not just direct function calls) — minted a real tenant JWT for
+  `test-n1-flow` in-container (`api.routers.auth._create_jwt`, same shortcut AA-432's own notes
+  used, no API-key login needed) and called `https://api-cis.lumiguides.it.com` directly:
+  - `POST /v1/planning/quarter-plan/preview` → **200**, real tenant data (tour "Southern Laos:
+    Plateau, Temples & the Four Thousand Islands — 5 Days"), all 5 score components present.
+  - `POST /v1/planning/quarter-plan` (finalize) → **200**, `version_id` returned.
+  - `GET /v1/planning/quarter-plan?year=&quarter=` → **200**, `approved: true,
+    approved_by: "tenant:6fbaf284-..."` — Gate B Option A confirmed via real HTTP, not just the
+    pre-merge function-level pass.
+  - No `Authorization` header → **401** `{"detail":"Not authenticated"}` — auth boundary intact.
+  - **New finding from this real-HTTP pass, NOT caught by the pre-merge function-level verify**:
+    the `finalize` response's OWN payload showed `plan.approved: false` even though the DB was
+    already `approved: true` (confirmed by the immediately-following `GET`) — a real, if minor,
+    inconsistency the pre-merge test harness's own request/response shape didn't happen to
+    surface. Root cause: `approve_quarter_plan_version()` only writes the DB row, never mutates
+    the in-memory `QuarterPlan` object the handler had already built. Fixed in **PR #201**
+    (`fix/aa-448-finalize-approved-response`) — mirrors the existing in-memory
+    `approve_quarter_plan()` helper's own pattern (`plan.approved = True` before returning).
+    Regression test added.
+- **PR #201**: all CI green — squash-merged. **Deploy Dev run 32655384683**: all jobs green,
+  smoke test passed. New task def **`aa-cis-dev-api:129`**, `1/1` running.
+- **Re-verified live against `:129`** — same finalize call, now returns `plan.approved: true`
+  immediately in its own response (`approved_by: "tenant:6fbaf284-..."`), no follow-up GET
+  needed to see the correct state.
+- **Cleanup**: every quarter/year created by real HTTP calls this round (2032 Q1, 2033 Q1) —
+  `quarter_plan_version` unlinked+deleted, `quarter_plan` deleted, `year_plan` deleted.
+  Independently re-confirmed `0` remaining rows for tenant `test-n1-flow` across every test year
+  touched this entire task (2020, 2031, 2032, 2033) — the tenant is back to exactly its
+  pre-session state, real pre-existing data (8 atoms, 1 tenant_tour_version, the 1 unrelated
+  13/08/2026 quarter_plan row) untouched throughout.
+
+**Final state**: `main` at `bbb2871` (PR #201's squash commit). ECS `aa-cis-dev-api:129` live.
+Both PRs' branches (`feature/aa-448-build-t7-planning`, `fix/aa-448-finalize-approved-response`)
+kept (not deleted) per this session's own merge commands (`--delete-branch=false`).
+
 ## Should know
 
 - `services/acp_planning/tenant_pool.py` reuses `runway.py`'s `_row_to_trip()` and `quarter.py`'s
