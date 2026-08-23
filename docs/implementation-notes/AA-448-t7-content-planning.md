@@ -244,6 +244,187 @@ rework under either shape or either (a)/(b) behavior.
 cross-quarter independence (recommend (b)), then Option A can be implemented against whichever
 combination is chosen — no further unknowns block starting once these 2 are answered.
 
+### Update (post-STOP round 3) — full symmetric detail on both shapes, no recommendation pushed
+
+Nghiep asked for round 2's two open questions laid out WITHOUT nudging toward the recommended
+option — Shape 2 in particular was under-specified last round (I described Shape 1 in schema
+detail and Shape 2 only in one sentence). Full write-up below, both shapes to the same level of
+detail, plus a correction: round 2's "good news, Option A survives either shape unchanged" claim
+was **only actually true for Shape 1** — Shape 2 changes that conclusion (see "Consequence for
+Gate B" under Shape 2 below). Also: the "Q1 vs Q2" question itself was under-specified — it
+actually bundles 3 separable questions, laid out at the end of this section instead of the
+single (a)/(b) binary I asked before.
+
+#### Shape 1 — additive `year_plan` wrapper (full detail, same as round 2)
+
+```sql
+CREATE TABLE acp_shared.year_plan (
+    year_plan_id  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id     UUID NOT NULL REFERENCES shared.tenants(tenant_id),
+    year          INT NOT NULL,
+    status        TEXT,  -- exact meaning depends on the (a)/(b) answer below
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (tenant_id, year)
+);
+
+ALTER TABLE acp_shared.quarter_plan
+    ADD COLUMN year_plan_id UUID REFERENCES acp_shared.year_plan(year_plan_id);
+```
+
+`acp_shared.quarter_plan`/`acp_shared.quarter_plan_version` keep every existing column/row/
+meaning unchanged — this is purely additive. Each of the 4 quarters stays its own
+`quarter_plan` row (as today), now with an extra pointer to a shared parent `year_plan` row.
+"1 plan năm" is realized as: **one `year_plan_id` value, addressable as a real row, with 4
+linked `quarter_plan` children** — not a single flat record containing all 4 quarters' data.
+
+**What Shape 1 can/can't do:**
+- Supports EITHER (a) or (b) below (see "Q1 vs Q2" section) — `year_plan.status` can be either a
+  real gate (option a) or a pure computed-on-read rollup (option b); the table shape itself does
+  not force either behavior.
+- Editing Q2 is: create a new `quarter_plan_version` row under Q2's own `quarter_plan` row —
+  completely independent write, Q1's row is never touched, regardless of (a)/(b) (the (a)/(b)
+  question only decides whether `year_plan.status` ALSO gets recomputed as a side effect of that
+  write, not whether Q1's own data changes — it never does, under either Shape).
+- Per-quarter version history (`GET .../{tenant_id}/{year}/{quarter}/history`, AA-323 round 4)
+  is completely unaffected — each quarter's own version_no sequence keeps working exactly as
+  today.
+- **Migration/data impact**: zero data loss, zero ambiguity. The 9 real existing rows (per
+  AA-447-01's audit: `acp_shared.quarter_plan`/`quarter_plan_version`, tenant_id populated)
+  simply get `year_plan_id = NULL` until first touched by new code, OR a one-time backfill
+  (`INSERT INTO year_plan (tenant_id, year) SELECT DISTINCT tenant_id, year FROM quarter_plan`)
+  creates the missing parent rows retroactively — no row needs to be merged, split, or
+  reinterpreted.
+- **Consequence for Gate B**: `admin_atoms.py`/`admin_produce.py` never read `year_plan` at all
+  (confirmed — neither file's code references anything beyond `quarter_plan`/
+  `quarter_plan_version`/`fetch_approved_quarter_plan(tenant_id, year, quarter, pool)`/
+  `fetch_quarter_plan_version(version_id, pool)`, all of which keep their EXACT current
+  behavior/contract under Shape 1) — genuinely zero changes needed to either file, confirmed
+  holds true.
+
+#### Shape 2 — full annual restructure (full detail, this round's addition)
+
+```sql
+CREATE TABLE acp_shared.annual_plan (
+    plan_id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id           UUID NOT NULL REFERENCES shared.tenants(tenant_id),
+    year                INT NOT NULL,
+    current_version_id  UUID,  -- FK added once annual_plan_version exists
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (tenant_id, year)
+);
+
+CREATE TABLE acp_shared.annual_plan_version (
+    version_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    plan_id           UUID NOT NULL REFERENCES acp_shared.annual_plan(plan_id),
+    version_no        INT NOT NULL,
+    -- ONE JSON blob holding all 4 quarters, keyed by quarter number:
+    -- {"quarters": {"1": <QuarterPlan dict>, "2": {...}, "3": {...}, "4": {...}}}
+    payload           JSONB NOT NULL,
+    source            TEXT,
+    approval_status   TEXT NOT NULL DEFAULT 'pending',  -- ONE status for all 4 quarters together
+    approved_by       TEXT,
+    approved_at       TIMESTAMPTZ,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+`acp_shared.quarter_plan`/`acp_shared.quarter_plan_version` are REPLACED, not kept alongside —
+there is now exactly one row (well, one row per version) representing the whole year; "4 quý"
+exist only as sub-keys inside one JSON payload, not as 4 separate addressable DB rows. This is
+arguably the MORE literal reading of "1 kế hoạch/năm" — there is truly one record — but it comes
+with structural consequences the wording alone doesn't make obvious:
+
+- **Approval is structurally forced to be atomic-whole-year — Shape 2 cannot build option (b)
+  below.** There is exactly one `approval_status` column per version, covering all 4 quarters'
+  sub-payloads at once. "Q1 approved, Q2 still draft" cannot be represented in this schema at
+  all — not a policy choice, a structural limitation of "one status column per row." If
+  independent-per-quarter approval is ever wanted (now or later), Shape 2 would need to be
+  abandoned/migrated away from to get it.
+- **Editing Q2 requires a read-merge-write, and creates a "new version of the whole year" even
+  though 3/4 of its content is unchanged.** `save_quarter_plan_version()`'s current shape (a
+  simple append-only INSERT) would need to become: fetch the current version's payload → copy
+  Q1/Q3/Q4's sub-objects forward unchanged → replace the "2" key with the freshly-recomputed
+  Q2 → INSERT one new `annual_plan_version` row. This is a materially different function, not a
+  small edit.
+- **`fetch_quarter_plan_version(version_id, pool)` — admin_atoms.py's own call site breaks.**
+  This function currently returns ONE quarter's full plan, addressed by `version_id` alone
+  (the row's own `quarter` column, via the JOIN to `quarter_plan`, tells the caller which
+  quarter it is). Under Shape 2, a `version_id` addresses a WHOLE YEAR's payload containing 4
+  quarters — the function would need an additional `quarter` parameter to know which embedded
+  sub-object to extract and return, which `admin_atoms.py`'s existing call
+  (`fetch_quarter_plan_version(version_uuid, pool)`, no quarter param, reads
+  `version_row["quarter"]` from the result) does not supply and cannot supply without editing
+  that file. **This is a real correction to round 2's framing**: I said Option A "survives
+  unchanged under either shape" — that is only true for Shape 1. Shape 2 forces a change to
+  `admin_atoms.py` regardless of which Gate B option (A or B) is chosen, because the change is
+  about what a "version" addresses (one quarter vs. one year), not about approval semantics at
+  all.
+- **Per-quarter version history becomes hard to read.** AA-323 round 4's history view currently
+  shows each quarter's OWN independent version sequence (Q1 could be on v5 while Q2 is still on
+  v1). Under Shape 2, `version_no` is shared across the whole year — editing Q1 five times while
+  Q2 is touched once means the year's version counter is at least 6, and Q2's one edit doesn't
+  have its own clean "v1" identity anymore; it is just "whatever the shared year-version number
+  happened to be when Q2 was last touched," interleaved with Q1's edits. A tenant reviewing
+  "Q2's history" would see a list of year-versions mostly describing edits to a DIFFERENT
+  quarter. This is a real loss of a currently-shipped capability, not just an implementation
+  detail.
+- **Migration/data impact — real ambiguity, not just extra work.** The 9 existing
+  `quarter_plan_version` rows (per-quarter today) would need to be collapsed into equivalent
+  annual-level rows. If a tenant has Q1 v1/v2 and Q3 v1 but Q2/Q4 were never created at all,
+  there is no non-arbitrary way to backfill what Q2/Q4's "sub-object" should contain in the
+  merged payload (an empty/placeholder `QuarterPlan`? synthesized from `compute_quarter_plan()`
+  retroactively, which may compute differently today than whenever Q1/Q3 were originally
+  planned?) — a real design decision with no clean default, unlike Shape 1's trivial backfill.
+- **"1 kế hoạch/năm, chia 4 quý" under Shape 2**: realized as literally as possible — ONE row,
+  ONE version, 4 quarters as sub-keys. But because approval is forced atomic (see above), "sửa
+  Q2 sau khi Q1 đã chốt" cannot mean "Q1 stays approved, Q2 goes back to draft" — the two live
+  options under Shape 2 specifically are: (i) refuse the edit outright once the year is
+  approved, tenant must explicitly "re-open" the whole year first, or (ii) allow it, but the
+  ENTIRE year (all 4 quarters, including Q1's byte-for-byte-unchanged sub-payload) reverts to
+  `'pending'` as a new version — Q1's CONTENT doesn't change, but its EFFECTIVE approval status
+  does, purely as a side effect of Q2 being edited. This is a real, structural way Q1 "gets
+  affected" that Shape 1 simply does not have (under Shape 1, Q1's row/version/approval_status
+  is never touched by a Q2 edit, full stop — the only thing that can move is `year_plan.status`,
+  which under Shape 1's option (b) doesn't gate anything at all).
+
+#### "Q1 vs Q2" — the question was underspecified last round; 3 separable questions, not 1
+
+Round 2 asked this as a single (a)/(b) binary ("editing Q2 after Q1 is finalized — does Q1's
+approval status change, yes/no"). That conflates three genuinely different questions that don't
+have to share one answer — laid out separately here, none decided:
+
+1. **Approval-status coupling** (what round 2's (a)/(b) actually meant): if Q1's
+   `quarter_plan_version.approval_status = 'approved'` and Q2 is later edited/re-approved, does
+   Q1's own approval_status value change as a mechanical side effect? Under Shape 1 the answer is
+   structurally "no, never" (separate rows) regardless of policy; under Shape 2 the answer is
+   structurally "yes, always, if edits after approval are allowed at all" (one shared status
+   column) — this question is actually answered BY the shape choice, not independently of it,
+   which round 2 didn't make clear.
+2. **Content-freeze after real-world use** (a NEW question, not covered at all last round): once
+   Q1's content has actually been consumed downstream (N6 slot-allocated, N7 produced/published
+   content for Q1's window) — is Q1 still editable at all, or does real usage lock it regardless
+   of approval status? This is a genuinely different mechanism from "approval" — a plan can be
+   `approved` yet still purely hypothetical (nothing produced from it yet) or `approved` AND
+   already acted on (content shipped). Neither Shape 1 nor Shape 2 as described addresses this on
+   their own — it would need its own check (e.g., "does `acp_v2_slots`/`acp_deliver.pieces` have
+   any row referencing this quarter's plan already") independent of whichever schema shape is
+   picked.
+3. **Calendar/temporal lock** (also NEW, not covered last round): if the real current date has
+   already moved past Q1 (e.g., today is in Q2 or later), should the UI/API still allow editing
+   Q1 at all — purely because it's in the past — regardless of its approval_status or whether
+   anything was produced from it? This is a THIRD, independent mechanism (a date comparison, not
+   a DB relationship) that could be layered on top of either shape/either approval answer.
+
+These three are not mutually exclusive — a real system could have all three simultaneously (Q1
+mechanically independent from Q2's approval_status under Shape 1, AND Q1 additionally locked
+once N7 has produced from it, AND additionally locked once the calendar has passed it). Round 2's
+question only addressed #1. **Asking directly rather than presenting forced options this time**:
+which of #1/#2/#3 does "sửa Q2 sau khi Q1 đã chốt, Q1 có bị ảnh hưởng không" actually mean to
+you — one of them, more than one, or something not listed here? This determines real
+implementation work (#2 and #3 in particular are entirely new logic under either shape, not a
+consequence of the shape choice) — genuinely waiting on your read of this before doing anything
+further, not proposing a default.
+
 ## Changed
 
 - New: `services/acp_shared/dfs_relevance.py`, `services/acp_planning/tenant_pool.py`,
