@@ -116,12 +116,19 @@ async def run_t3_qa_gate(
     initial_result: dict,
     brand_rules: dict,
     max_repairs: int = TENANT_QA_MAX_REPAIRS,
+    seo_data: dict = None,
 ) -> dict:
     """Self-repair loop, max `max_repairs` regenerate attempts (default 2). Attempt 0
     checks `initial_result` (T2's already-computed output — no extra LLM call for the
     first check). Each failing attempt regenerates via _rewrite_tour() (imported
     locally to avoid a v1_pipeline <-> tenant_pipeline import cycle at module load)
     and re-checks both gates on the fresh output.
+
+    AA-445-02 — seo_data: the same dict the T2 entry point (v1_tours.py::trigger_rewrite())
+    now builds and passes to its own _rewrite_tour() call (see that file for the
+    fetch-or-reuse-seo_context logic). Threaded through here so a T3 repair-round
+    regenerate doesn't silently drop back to seo={} after the entry-point fix — without
+    this, only ATTEMPT 0's content would ever carry real SEO context.
 
     Returns {"passed": bool, "result": <latest rewrite result dict>, "attempts": int,
     "structural_issues": [...], "grounding_issues": [...]}."""
@@ -151,6 +158,7 @@ async def run_t3_qa_gate(
                     structural_count=len(structural), grounding_count=len(grounding))
         result = await _rewrite_tour(
             tour_dict, idx=0, total=1, brand_rules=brand_rules, is_tenant_rewrite=True,
+            seo=seo_data,
         )
 
 
@@ -192,7 +200,7 @@ async def escalate_t3_failure(
                 structural_count=len(structural_issues), grounding_count=len(grounding_issues))
 
 
-async def run_t5_atomize(tenant_id: str, tour_id: str, rewritten: dict, pool) -> dict:
+async def run_t5_atomize(tenant_id: str, tour_id: str, rewritten: dict, pool, country: str = "") -> dict:
     """T5 — decompose atoms from T4 output (tenant-rewritten), owner_scope=tenant_id.
     Reuses AA-299's proven prompt/parse pipeline from api/routers/v1_atoms.py
     (_build_user_prompt, _SYSTEM_PROMPT, _strip_json_fence, invoke_claude) — the
@@ -210,6 +218,14 @@ async def run_t5_atomize(tenant_id: str, tour_id: str, rewritten: dict, pool) ->
     tour_atoms.tour_id's FK target) — the caller passes published_tours.tour_id
     (same value, already selected alongside published_tours.id in
     trigger_rewrite()), not tenant_tour_versions.id or published_tours.id.
+
+    AA-445-02 — country: the tour's raw_tours.country (caller already has tour_dict["country"]
+    in scope), used to look up this tenant's declared competitor domains for score_distinctiveness()
+    (acp_silver_s2.competitor_inputs is (tenant_id, country)-scoped). Only wired here (T5,
+    owner_scope=tenant_id) — NOT at N2's platform-scope decompose — see AA-445-02 implementation
+    notes Decision 1 for why (CompetitorIndex is tenant-relative; platform atoms have no single
+    owning tenant). An empty/unresolvable country just yields an empty CompetitorIndex
+    (score_distinctiveness() already handles that — returns MED), not an error.
     """
     row = {
         "id": tour_id,
@@ -249,22 +265,30 @@ async def run_t5_atomize(tenant_id: str, tour_id: str, rewritten: dict, pool) ->
         logger.error("t5_atomize_parse_failed", tour_id=tour_id, tenant_id=tenant_id, error=str(e))
         return {"status": "failed", "error": f"invalid atom JSON from model: {e}"}
 
+    # AA-445-02 (B4/score_distinctiveness()) — build the CompetitorIndex once per call
+    # (not once per atom) and reuse it across every atom this tour produces; the corpus
+    # itself is cache-backed (acp_shared.competitor_index_cache, 24h TTL) so this is a DB
+    # read on a cache hit, not a re-fetch of every competitor homepage per tour.
+    from services.acp_shared.competitor_index import build_competitor_index, score_distinctiveness
+    competitor_idx = await build_competitor_index(tenant_id, country, pool) if atoms else None
+
     inserted = 0
     async with pool.acquire() as conn:
         if atoms:
             for atom in atoms:
                 atom_id = f"atom_{uuid.uuid4().hex[:10]}"
+                distinctiveness = score_distinctiveness(atom.get("text") or "", competitor_idx)
                 await conn.execute("""
                     INSERT INTO acp_contract.tour_atoms
                         (atom_id, tour_id, owner_scope, text, activity_type, emotional_hook,
                          visual_potential, persona_fit, season_note, starred, deleted, weight,
-                         source_hash, itinerary_day, created_at, updated_at)
+                         source_hash, itinerary_day, distinctiveness, created_at, updated_at)
                     VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13,
-                            $14, now(), now())
+                            $14, $15, now(), now())
                 """, atom_id, tour_id, tenant_id, atom.get("text"), atom.get("activity_type"),
                     atom.get("emotional_hook"), atom.get("visual_potential", 1),
                     json.dumps(atom.get("persona_fit") or []), atom.get("season_note"),
-                    False, False, 1.0, source_hash, atom.get("itinerary_day"))
+                    False, False, 1.0, source_hash, atom.get("itinerary_day"), distinctiveness)
                 inserted += 1
         else:
             marker_id = f"atom_marker_{uuid.uuid4().hex[:10]}"

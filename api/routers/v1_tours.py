@@ -318,10 +318,54 @@ async def trigger_rewrite(
 
     # Run LLM rewrite in background (don't block response)
     async def _do_rewrite_and_save():
+        # AA-445-02 — DFS mở rộng T2 (docs/claude_audit/AA-445-01-dfs-distinctiveness-step0-audit
+        # .md Q2a): T1/T2 never called process_seo(), so `seo` reached the shared
+        # _rewrite_tour()/validate_node graph as {} — structurally, not by a tier flag. Mirrors
+        # admin_pipeline.py's A1 pattern (lines ~458-488): reuse an existing seo_context row for
+        # this tour_id if one exists (free — AA-439-05 confirmed most tenant-rewritten tours were
+        # originally A1-generated and already have one), else call process_seo() on a miss
+        # (~$0.18/tour, AA-439-05 §7). Best-effort — a SEO fetch failure must not block the
+        # rewrite itself, same as A1's own try/except around this block.
+        seo_data: dict = {}
+        try:
+            async with pool.acquire() as _conn_seo:
+                _existing = await _conn_seo.fetchrow("""
+                    SELECT top_keywords, keyword_ideas, people_also_ask
+                    FROM silver_aa_internal.seo_context
+                    WHERE tour_id = $1::uuid
+                    ORDER BY fetched_at DESC LIMIT 1
+                """, pt["tour_id"])
+            if _existing:
+                import json as _json_seo
+                _tk = _existing["top_keywords"]
+                seo_data = {
+                    "top_keywords": (_json_seo.loads(_tk) if isinstance(_tk, str) else _tk) or [],
+                }
+                seo_data["keywords"] = {"top_keywords": seo_data["top_keywords"]}
+            else:
+                from services.seo_intelligence.handler import process_seo
+                from services.seo_intelligence.seed_builder import build_seed
+                seed = build_seed(tour_dict.get("country"), None, tour_dict.get("name")) or tour_dict.get("name", "")
+                if seed:
+                    _seo_result = await process_seo(
+                        tour_id=pt["tour_id"], destination=seed, seed=seed,
+                        tenant_id=tenant_id, seo_mode="dataforseo",
+                    )
+                    seo_data = _seo_result.get("data", {})
+                    if "keywords" in seo_data and "top_keywords" not in seo_data:
+                        seo_data["top_keywords"] = seo_data["keywords"].get("top_keywords", [])
+                    elif "top_keywords" in seo_data and "keywords" not in seo_data:
+                        seo_data["keywords"] = {"top_keywords": seo_data["top_keywords"]}
+                    seo_data.setdefault("top_keywords", [])
+        except Exception as _seo_err:
+            import structlog as _sl_seo
+            _sl_seo.get_logger().warning("t2_seo_step_failed", tour_id=pt["tour_id"], error=str(_seo_err))
+
         try:
             result = await _do_rewrite(
                 tour_dict, idx=0, total=1,
                 brand_rules=brand_rules,
+                seo=seo_data,
                 is_tenant_rewrite=True,  # skips name-match check in validate_node
             )
             if result.get("status") == "success" and result.get("generated"):
@@ -333,6 +377,7 @@ async def trigger_rewrite(
                 source_texts = [str(v) for v in tour_dict.values() if v]
                 qa = await run_t3_qa_gate(
                     tour_dict, source_texts, result, brand_rules,
+                    seo_data=seo_data,  # AA-445-02 — repair-round rewrites also carry seo_data
                 )
                 result = qa["result"]  # possibly a later repair round's output
 
@@ -414,7 +459,10 @@ async def trigger_rewrite(
                 # reason to undo an already-valid rewrite. AA-436 removed the old `else`
                 # here — T5 now always runs, real pass or auto-pass alike.
                 from services.acp_produce.tenant_pipeline import run_t5_atomize
-                t5 = await run_t5_atomize(tenant_id, pt["tour_id"], rewritten, pool)
+                t5 = await run_t5_atomize(
+                    tenant_id, pt["tour_id"], rewritten, pool,
+                    country=tour_dict.get("country") or "",  # AA-445-02 — competitor lookup grain
+                )
                 _sl2.get_logger().info("tenant_atomize_done",
                     version_id=str(version_id), tour_id=pt["tour_id"],
                     t5_status=t5.get("status"), atom_count=t5.get("atom_count", 0),
