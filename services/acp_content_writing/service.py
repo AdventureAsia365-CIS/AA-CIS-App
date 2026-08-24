@@ -29,7 +29,8 @@ from services.acp_angle_gate.brand_audience import fetch_brand_audience
 from services.acp_angle_gate.channel_style import get_channel_style
 from services.acp_angle_gate.goals import get_goal
 from services.acp_content_writing.generate import rewrite_with_feedback, write_content
-from services.acp_content_writing.quality_gates import run_quality_gates
+from services.acp_content_writing.quality_gates import (deep_strip_citation_tags, run_quality_gates,
+                                                          strip_citation_tags)
 from services.acp_planning.tenant_pool import fetch_tenant_trips
 from services.acp_produce.brand import fetch_brand_rubric_text
 
@@ -133,20 +134,20 @@ async def write_and_check(
             content_text, cost = await asyncio.to_thread(
                 write_content, content_seed=atom_text, goal=goal, channel_style=channel_style,
                 brand_audience=brand_audience, angle=chosen, cta=cta,
-                destination=destination, trip_name=trip_name,
+                destination=destination, trip_name=trip_name, atom_id=req["atom_id"],
             )
         else:
             content_text, cost = await asyncio.to_thread(
                 rewrite_with_feedback, content_seed=atom_text, goal=goal, channel_style=channel_style,
                 brand_audience=brand_audience, angle=chosen, cta=cta,
                 revision_feedback=repair_log[-1]["violations"],
-                destination=destination, trip_name=trip_name,
+                destination=destination, trip_name=trip_name, atom_id=req["atom_id"],
             )
         total_cost += cost
 
         outcome = await asyncio.to_thread(
             run_quality_gates, content_text=content_text, atom_text=atom_text, cta=cta,
-            goal_key=goal["key"], brand_rubric_text=brand_rubric_text,
+            goal_key=goal["key"], brand_rubric_text=brand_rubric_text, channel=req["channel"],
         )
         gate_ledger = outcome["gate_ledger"]
 
@@ -167,6 +168,21 @@ async def write_and_check(
         if not first_failure["repairable"] or attempt >= MAX_ATTEMPTS:
             status, held_reason = "held", _held_reason_from(first_failure)
             break
+
+    # AA-452 — mandatory, tenant-facing-leak-prevention step: strip every [R:atom_id]/[F:id]
+    # citation tag (channel='blog' only ever produces one, prompts.py's _BLOG_FORMAT_INSTRUCTIONS)
+    # from content_text AND from every gate_ledger/repair_log violation string (a gate's own
+    # violation message can itself quote a tagged excerpt — see quality_gates.gate_grounding()'s
+    # own comment) BEFORE this piece is persisted or returned, regardless of status ('approved'
+    # or 'held' both go through this — a held piece is still fully visible to the tenant per
+    # _hold()'s own "hold VISIBLE, never silent" precedent, so a held piece leaking a raw tag
+    # would be exactly as real a leak as an approved one). Runs unconditionally for every
+    # channel — a no-op for the 7 that never produce a tag, real for blog.
+    content_text = strip_citation_tags(content_text)
+    gate_ledger = deep_strip_citation_tags(gate_ledger)
+    repair_log = deep_strip_citation_tags(repair_log)
+    if held_reason:
+        held_reason = strip_citation_tags(held_reason)
 
     piece = await _persist_piece(
         pool, tenant_id=tenant_id, request_id=request_id, attempt_number=attempt,

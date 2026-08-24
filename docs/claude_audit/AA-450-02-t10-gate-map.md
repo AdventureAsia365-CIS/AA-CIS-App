@@ -16,10 +16,18 @@ either N7's own code/docstrings or `SKILL_v2.md`/T8's real schema, cited per row
 | F8 framework judge | **Adjusted, ported** | Same mechanism (Nova Pro judge, binary 1/0 per criterion + mandatory evidence quote, isolated from the writer's own prompt — `services.acp_produce.judge_client.invoke_judge`/`parse_judge_json` reused directly, not rewritten). N7's `FRAMEWORK_RUBRICS` only covers `{hub, PAS, AIDA, hook_story_cta, hook_beats_payoff, reader_as_hero}` — T8's 8 goals (`goals.py`) use `marketing_term` values including SLAP/FAB/BAB/5W1H that have no existing rubric. New rubric items for the missing frameworks are derived directly and mechanically from each goal's own already-written `logic` field in `goals.py` (e.g. Product/Service Explanation's `logic` is literally `"Feature-Advantage-Benefit"` — one criterion per beat) — not invented from scratch. |
 | F9 brand/SEO audit | **Adjusted, ported** | Same judge mechanism + failure-code-vocabulary + `GENERIC_AI_WORDING_ANCHOR` pattern, `services.acp_produce.brand.fetch_brand_rubric_text()` reused directly (already real, tenant-scoped, no T9-specific rewrite needed). Rubric fields: N7's own real `facebook` rubric (`_SOCIAL_RUBRIC_FIELDS["facebook"] = [brand_fit, cta_clear, human_read]`) reused verbatim as T9's baseline across ALL channels — not a new invention, and deliberately not a bespoke per-channel field set, matching N7's own documented discipline (ADR-2026-009, "extend from real failures, don't guess the full rubric ahead of data") given T9 has zero real production pieces yet for any channel. `cta_clear` absorbs F6's dropped literal-CTA check (see F6 row) and is checked against the REQUEST's own free-text `cta` value, not a hardcoded phrase (N7's `_CTA_PHRASE_RE`/`Design This Journey` false-positive carve-out doesn't port as-is for this reason — flagged, not silently copied). |
 
-**Net T9/T10 gate stack: F1-adjusted (grounding, DET) → F2-adjusted (banned patterns, DET) →
-F6-DET-half (CTA present, DET, non-repairable) → F8-adjusted (framework judge, LLM) →
-F9-adjusted (brand/CTA-clarity/human-read judge, LLM)** — 5 gates, 3 deterministic + 2 LLM-judge,
-down from N7's 9 (4 removed as genuinely inapplicable to short single-channel content, 1 split).
-Every removal is grounded in either N7's own existing code behavior for short-form content, or
-this task's own explicit "don't invent unfounded numeric limits" instruction — not a new
-judgment call invented for this task.
+**Net T9/T10 gate stack: F6-DET-half (CTA present, DET, non-repairable) → F1-adjusted (grounding,
+DET) → F2-adjusted (banned patterns, DET) → F4-adjusted (extreme length only, DET) →
+F8-adjusted (framework judge, LLM) → F9-adjusted (brand/CTA-clarity/human-read judge, LLM)** —
+6 gates, 4 deterministic + 2 LLM-judge, down from N7's 9 (3 removed as genuinely inapplicable to
+short single-channel content, 1 split, F4 kept in a lightened form). Every removal/adjustment is
+grounded in either N7's own existing code behavior for short-form content, or this task's own
+explicit "don't invent unfounded numeric limits" instruction — not a new judgment call invented
+for this task.
+
+**Correction (AA-452, 24/08/2026)**: this summary line originally read "5 gates" — an undercount
+that never matched the code even at merge time (F4 was always implemented, see the F4 row above
+and `quality_gates.py::gate_extreme_length()`/`F4_extreme_length`). AA-452 later added F3/F5/F7
+back, scoped to `channel == 'blog'` only, after finding `channel_style.py`'s own `blog` entry
+describes exactly the H2/FAQ structure this doc's F3/F7 rows assumed T9 never produces — see
+`docs/claude_audit/AA-452-t10-nine-gates.md` for the full re-investigation and decision.
