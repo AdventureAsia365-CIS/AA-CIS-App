@@ -13,7 +13,12 @@ import structlog
 from services.acp_angle_gate.brand_audience import fetch_brand_audience
 from services.acp_angle_gate.generate import generate_angles
 from services.acp_angle_gate.goals import get_goal
-from services.acp_planning.tenant_pool import fetch_tenant_trips
+from services.acp_planning.allocator import compute_slot_grid, create_weekly_produce_run, persist_slot_grid
+from services.acp_planning.models import QuarterPlanNotApprovedError
+from services.acp_planning.quarter import fetch_approved_quarter_plan
+from services.acp_planning.runway import compute_runway_map
+from services.acp_planning.tenant_config import TenantNotFoundError, fetch_tenant_planning_config
+from services.acp_planning.tenant_pool import fetch_tenant_atoms_by_trip, fetch_tenant_trips
 
 logger = structlog.get_logger()
 
@@ -87,11 +92,86 @@ async def _fetch_slot_cta(tenant_id: UUID, atom_id: str, channel: str, pool) -> 
     return cta or None  # empty string from a slot with no cta_target is treated as "none"
 
 
-async def create_request(tenant_id: UUID, atom_id: str, channel: str, pool) -> dict:
+async def _compute_and_persist_slot_cta(
+    tenant_id: UUID, atom_id: str, channel: str, year: int, month: int, pool,
+) -> Optional[str]:
+    """AA-451 — closes the gap migration 114's header documented: T7's own tenant-facing
+    endpoint (api/routers/v1_planning.py::get_slot_grid()) never persists its computed
+    SlotGrid, so `_fetch_slot_cta()` above realistically finds nothing for a real self-service
+    tenant. Called ONLY when that lookup already came back empty AND the caller supplied
+    `year`/`month` (Option B, Nghiep-confirmed — see docs/implementation-notes/AA-451.md).
+
+    Recomputes the tenant's month slot-grid using the EXACT SAME tenant-scoped fetchers
+    `get_slot_grid()` uses (`fetch_tenant_planning_config`/`fetch_approved_quarter_plan`/
+    `fetch_tenant_trips`/`fetch_tenant_atoms_by_trip`/`compute_runway_map`/`compute_slot_grid`)
+    — deliberately NOT `allocate_month()`/`allocate_and_persist_week()` (services.acp_planning.
+    allocator), which call the platform-wide `runway.fetch_trips()`/`quarter.fetch_atoms_by_trip
+    ()` AA-445-02 found scope by the tour's OWNING tenant, not `owner_scope` — reusing those here
+    would silently persist a different (wrong-tenant) slot set than what this same tenant's own
+    T7 preview shows them.
+
+    Returns None (never raises) on any "can't compute yet" state — unknown tenant, no finalized
+    quarter plan, or the atom simply isn't in any slot this month (cooldown / trip not in this
+    quarter's share) — exactly the same "best-effort, fall through to T9's own CTA-ask fallback"
+    contract `_fetch_slot_cta()` already has."""
+    try:
+        config = await fetch_tenant_planning_config(tenant_id, pool)
+    except TenantNotFoundError:
+        return None
+
+    quarter = (month - 1) // 3 + 1
+    quarter_plan = await fetch_approved_quarter_plan(tenant_id, year, quarter, pool)
+    if quarter_plan is None:
+        # No finalized T7 quarter plan yet — same 404 condition get_slot_grid() itself would
+        # give a tenant calling it directly. Not an error here: T8 must still work even for a
+        # tenant who never touched T7.
+        return None
+
+    trips = await fetch_tenant_trips(tenant_id, pool)
+    trips_by_id = {t.id: t for t in trips}
+    atoms_by_trip = await fetch_tenant_atoms_by_trip(tenant_id, pool)
+    runway = compute_runway_map(tenant_id, year, trips, config.markets)
+
+    try:
+        grid = compute_slot_grid(
+            tenant_id, year, month, config.channels, config.capacity_posts_per_week,
+            quarter_plan, runway, trips_by_id, atoms_by_trip, config.markets[0],
+        )
+    except QuarterPlanNotApprovedError:
+        # Defensive/unreachable — fetch_approved_quarter_plan() always forces .approved=True.
+        return None
+
+    target = next((s for s in grid.slots if s.channel == channel and atom_id in s.atom_ids), None)
+    if target is None:
+        # Atom didn't land in a slot this month (atom floor / cooldown / trip not selected for
+        # this quarter's destination share) — nothing to persist, cta stays None.
+        return None
+
+    run_id = await create_weekly_produce_run(pool, str(tenant_id), year, month, target.week)
+    await persist_slot_grid(pool, run_id, str(tenant_id), target.week, grid)
+
+    # Re-read from the DB rather than trusting `target.cta_target` in-memory — same "don't
+    # hand-carry pre-write state" lesson AA-448's own finalize-response bug taught, and doubles
+    # as a correctness check that the persist actually landed.
+    return await _fetch_slot_cta(tenant_id, atom_id, channel, pool)
+
+
+async def create_request(
+    tenant_id: UUID, atom_id: str, channel: str, pool,
+    year: Optional[int] = None, month: Optional[int] = None,
+) -> dict:
     """Workflow step 1. Validates the atom belongs to this tenant (owner_scope check) up front —
-    refuses a cross-tenant atom_id here rather than only failing later at generate time."""
+    refuses a cross-tenant atom_id here rather than only failing later at generate time.
+
+    AA-451: `year`/`month` are optional and backward-compatible — omitted, behavior is
+    unchanged from before this change (`cta` may come back None, T9's existing ask-the-tenant
+    fallback still covers it). Supplied, and no slot is already persisted for this
+    (tenant, channel, atom), this computes-and-persists one on the spot (see
+    `_compute_and_persist_slot_cta()`)."""
     atom = await _fetch_atom_for_tenant(tenant_id, atom_id, pool)
     cta = await _fetch_slot_cta(tenant_id, atom_id, channel, pool)
+    if cta is None and year is not None and month is not None:
+        cta = await _compute_and_persist_slot_cta(tenant_id, atom_id, channel, year, month, pool)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
