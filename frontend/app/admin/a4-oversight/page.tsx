@@ -1,9 +1,7 @@
 "use client";
-// app/admin/a4-oversight/page.tsx — AA-437 [A4] Cross-Tenant Oversight v1
+// app/admin/a4-oversight/page.tsx — AA-437 [A4] Cross-Tenant Oversight v1 + AA-455 bước 1
 //
-// Read-only, per Nghiep's decisions (Linear AA-437, 23/08/2026): no flag/suspend/
-// force-unpublish action here — that's explicitly deferred to the Command Center backlog
-// (AA-255->259) if/when it gets built. Two sections:
+// Three sections. First two are read-only, per Nghiep's decisions (Linear AA-437, 23/08/2026):
 //   1. Review Log — silver_aa_internal.review_queue T3 (QA-gate escalate) rows, the log AA-436
 //      redirected here once T3 stopped blocking tenants. Raw rows from the backend; grouped by
 //      check_id client-side (BE deliberately does no aggregation — STEP0's own recommendation,
@@ -11,6 +9,13 @@
 //   2. Trust Ramp — every acp_deliver.packets row with its own publish_mode. No per-tenant
 //      rollup: ramp state lives per-PACKET (STEP0 finding), so a tenant with multiple packets
 //      shows one row per packet, grouped visually by tenant, never collapsed to one number.
+//   3. Publish Log — AA-455 bước 1's one mutating addition: acp_shared.publish_log rows +
+//      a "Force unpublish" action on status='published' rows. Per STEP0
+//      (docs/claude_audit/AA-455-01-step0-a4-force-unpublish.md §4/§7), this stays a section on
+//      THIS SAME page rather than a new route — /admin/a4-oversight is already allowlisted in
+//      middleware.ts (since AA-437), and a new route would repeat the exact 307-redirect bug
+//      AA-384/388/405/437 each independently hit (a page with no PROTECTED_ROUTES entry
+//      silently redirects to /login even with a valid admin session).
 //
 // Style/component pattern follows /admin/run-health (AA-259's own confirmed reference UI for
 // this kind of admin monitoring page) — Card/SLabel/Badge/TH/TD from adminUi.tsx, no new
@@ -40,6 +45,23 @@ interface ReviewLogRow {
   failure_summary: string | null;
   escalate_detail: EscalateDetailItem[];
   review_status: string;
+  created_at: string | null;
+}
+
+interface PublishLogRow {
+  publish_id: string;
+  piece_id: string;
+  tenant_id: string;
+  tenant_name: string | null;
+  tenant_slug: string | null;
+  channel: string;
+  status: string;
+  external_id: string | null;
+  external_url: string | null;
+  published_at: string | null;
+  unpublished_at: string | null;
+  unpublished_by: string | null;
+  last_error: string | null;
   created_at: string | null;
 }
 
@@ -73,6 +95,12 @@ function rampBadgeColor(mode: string): "gray" | "amber" | "green" {
   if (mode === "veto_window_auto") return "green";
   if (mode === "approve_to_publish") return "amber";
   return "gray";
+}
+
+function publishStatusColor(status: string): "gray" | "amber" | "green" | "red" {
+  if (status === "published") return "green";
+  if (status === "failed") return "red";
+  return "gray"; // unpublished
 }
 
 // ── Review Log section ───────────────────────────────────────────────────────
@@ -222,6 +250,141 @@ function RowLine({ row, expanded, onToggle }: {
   );
 }
 
+// ── Publish Log section (AA-455 bước 1) ──────────────────────────────────────
+
+function PublishLogSection() {
+  const [rows, setRows] = useState<PublishLogRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [tenantFilter, setTenantFilter] = useState("");
+  const [actioningId, setActioningId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const fetchData = useCallback(() => {
+    setLoading(true);
+    const params = new URLSearchParams({ limit: "200" });
+    if (tenantFilter.trim()) params.set("tenant_id", tenantFilter.trim());
+    fetch(`/api/admin/a4/publish-log?${params}`)
+      .then(r => (r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`)))
+      .then(d => { setRows(d.data || []); setError(null); })
+      .catch(e => setError(String(e)))
+      .finally(() => setLoading(false));
+  }, [tenantFilter]);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  const handleForceUnpublish = useCallback(async (publishId: string) => {
+    if (!window.confirm("Force-unpublish this piece? This cannot be undone from here.")) return;
+    setActioningId(publishId);
+    setActionError(null);
+    try {
+      const res = await fetch(`/api/admin/a4/publish-log/${publishId}/unpublish`, { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await fetchData();
+    } catch (e) {
+      setActionError(String(e));
+    } finally {
+      setActioningId(null);
+    }
+  }, [fetchData]);
+
+  return (
+    <Card style={{ marginBottom: 24 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+        <div>
+          <h2 style={{ fontFamily: serif, fontSize: 18, fontWeight: 500, color: A.ink, margin: "0 0 4px" }}>
+            Publish Log — T11 Delivery State
+          </h2>
+          <div style={{ fontSize: 12, color: A.muted }}>
+            acp_shared.publish_log — force-unpublish a live piece if something's wrong (grounding
+            miss, brand-rule violation T10 didn't catch). Tenants can also unpublish their own
+            content; this table doesn&apos;t distinguish who acted beyond unpublished_by.
+          </div>
+        </div>
+        <input
+          value={tenantFilter}
+          onChange={e => setTenantFilter(e.target.value)}
+          placeholder="Filter by tenant_id…"
+          style={{
+            padding: "6px 10px", borderRadius: 6, border: `1px solid ${A.line}`,
+            fontSize: 12, fontFamily: mono, width: 280, outline: "none",
+          }}
+        />
+      </div>
+
+      {actionError && (
+        <div style={{ padding: "8px 12px", marginBottom: 12, borderRadius: 6, background: "#fef2f2", color: A.red, fontSize: 12 }}>
+          {actionError}
+        </div>
+      )}
+
+      {loading ? (
+        <div style={{ padding: 24, textAlign: "center", color: A.muted }}>Loading…</div>
+      ) : error ? (
+        <div style={{ padding: 24, textAlign: "center", color: A.red }}>{error}</div>
+      ) : rows.length === 0 ? (
+        <div style={{ padding: 24, textAlign: "center", color: A.muted2 }}>
+          No publish_log rows yet — T11&apos;s own write path isn&apos;t built yet (bước 2).
+        </div>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ background: A.bg }}>
+                {["Tenant", "Channel", "Status", "External", "Unpublished By", "Created", ""].map(h => (
+                  <th key={h} style={{
+                    padding: "8px 12px", textAlign: "left", fontSize: 10.5, fontWeight: 600,
+                    letterSpacing: "0.08em", textTransform: "uppercase", color: A.muted,
+                    borderBottom: `1px solid ${A.line}`,
+                  }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(row => {
+                const td: React.CSSProperties = { padding: "10px 12px", borderBottom: `1px solid ${A.line}`, fontSize: 12.5, color: A.body, verticalAlign: "top" };
+                return (
+                  <tr key={row.publish_id}>
+                    <td style={td}>
+                      <div style={{ fontWeight: 600 }}>{row.tenant_name || "—"}</div>
+                      <div style={{ fontFamily: mono, fontSize: 10.5, color: A.muted2 }}>{row.tenant_slug || row.tenant_id.slice(0, 8)}</div>
+                    </td>
+                    <td style={td}>{row.channel}</td>
+                    <td style={td}><Badge color={publishStatusColor(row.status)}>{row.status}</Badge></td>
+                    <td style={{ ...td, fontFamily: mono, fontSize: 11 }}>
+                      {row.external_url ? (
+                        <a href={row.external_url} target="_blank" rel="noreferrer" style={{ color: A.ink }}>{row.external_id || row.external_url}</a>
+                      ) : (row.external_id || "—")}
+                      {row.last_error && <div style={{ color: A.red, marginTop: 2 }}>{row.last_error}</div>}
+                    </td>
+                    <td style={{ ...td, fontFamily: mono, fontSize: 11, color: A.muted }}>{row.unpublished_by || "—"}</td>
+                    <td style={{ ...td, fontFamily: mono, fontSize: 11, color: A.muted }}>{fmtDate(row.created_at)}</td>
+                    <td style={td}>
+                      {row.status === "published" && (
+                        <button
+                          onClick={() => handleForceUnpublish(row.publish_id)}
+                          disabled={actioningId === row.publish_id}
+                          style={{
+                            padding: "5px 10px", borderRadius: 6, border: `1px solid ${A.red}`,
+                            background: "transparent", color: A.red, fontSize: 11.5, cursor: "pointer",
+                            opacity: actioningId === row.publish_id ? 0.5 : 1,
+                          }}
+                        >
+                          {actioningId === row.publish_id ? "Unpublishing…" : "Force unpublish"}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 // ── Trust Ramp section ───────────────────────────────────────────────────────
 
 function TrustRampSection() {
@@ -332,12 +495,13 @@ export default function A4OversightPage() {
             Cross-Tenant Oversight
           </h1>
           <div style={{ fontSize: 12, color: A.muted, marginTop: 4 }}>
-            Read-only monitoring — AA does not gate tenant content at any T0-T11 step; this is
-            post-hoc visibility only. No action on this page (flag/suspend/force-unpublish is a
-            separate, future scope).
+            Post-hoc monitoring — AA does not gate tenant content at any T0-T11 step. Review Log
+            and Trust Ramp are read-only; Publish Log below is the one exception, per AA-455 —
+            force-unpublish is a safety-net intervention, not a content-approval gate.
           </div>
         </div>
         <ReviewLogSection />
+        <PublishLogSection />
         <TrustRampSection />
       </div>
     </div>

@@ -24,6 +24,7 @@ from api.routers.v1_exports import router as v1_exports_router
 from api.routers.v1_pipeline import router as v1_pipeline_router
 from api.routers.v1_acp import router as v1_acp_router
 from api.routers.v1_competitors import router as v1_competitors_router
+from api.routers.v1_publish import router as v1_publish_router
 from api.routers.v1_atoms import router as v1_atoms_router
 from api.routers.v1_s0 import router as v1_s0_router
 from api.routers.v1_s1 import router as v1_s1_router
@@ -185,6 +186,7 @@ app.include_router(v1_exports_router)
 app.include_router(v1_pipeline_router)
 app.include_router(v1_acp_router)
 app.include_router(v1_competitors_router)
+app.include_router(v1_publish_router)  # AA-455 bước 1 — tenant self-unpublish (publish_log)
 app.include_router(v1_s0_router)
 app.include_router(v1_atoms_router)
 app.include_router(v1_s1_router, prefix="/acp/s1")
