@@ -3,12 +3,15 @@ convention test_aa448_v1_planning.py already uses. generate_angles() is patched 
 tests the DB lifecycle/state-machine, not LLM behavior (see test_aa449_angle_gate_generate.py
 for that)."""
 import uuid
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from services.acp_angle_gate import service
+from services.acp_planning.models import QuarterPlan, RunwayMap, Slot, SlotGrid
+from services.acp_planning.tenant_config import TenantNotFoundError, TenantPlanningConfig
 
 TENANT_ID = uuid.uuid4()
 OTHER_TENANT_ID = uuid.uuid4()
@@ -185,3 +188,152 @@ class TestFetchRequest:
         pool = _make_pool(conn)
         with pytest.raises(service.RequestNotFoundError):
             await service.fetch_request(TENANT_ID, REQUEST_ID, pool)
+
+
+# AA-451 — create_request()'s optional year/month compute-and-persist path
+# (_compute_and_persist_slot_cta). All the tenant-scoped fetchers/allocator functions are
+# patched at the module level (services.acp_angle_gate.service's own imported names) rather than
+# hitting real DB logic here — that logic (compute_slot_grid, persist_slot_grid, etc.) already
+# has its own dedicated test coverage (test_aa301_allocator.py, test_aa377_aa378_run_slot_persist
+# .py). These tests only verify create_request() wires year/month through correctly and degrades
+# to cta=None (never raises) on every "can't compute yet" state.
+_CONFIG = TenantPlanningConfig(markets=["US"], channels=["facebook"], capacity_posts_per_week=2)
+_PLAN = QuarterPlan(tenant_id=TENANT_ID, year=2026, quarter=3, trip_ids=[TRIP_ID],
+                    approved=True, approved_by="tenant:x")
+_RUNWAY = RunwayMap(tenant_id=TENANT_ID, year=2026, cells=[])
+_SLOT = Slot(slot_id="slot_abc", week=1, channel="facebook", kind="evergreen",
+            trip_id=TRIP_ID, atom_ids=["atom_abc123"], cta_target="https://real-cta.example/book")
+_GRID = SlotGrid(tenant_id=TENANT_ID, year=2026, month=8, slots=[_SLOT])
+
+
+def _patch_compute_chain(stack, **overrides):
+    """Common patch set for the compute-and-persist branch — individual tests override just the
+    pieces they need to exercise a particular early-return. `stack` is a contextlib.ExitStack
+    the caller owns, so patches stay active for the whole `with stack:` block (assertions on the
+    mocks must run before they're torn down)."""
+    defaults = dict(
+        fetch_tenant_planning_config=AsyncMock(return_value=_CONFIG),
+        fetch_approved_quarter_plan=AsyncMock(return_value=_PLAN),
+        fetch_tenant_trips=AsyncMock(return_value=[]),
+        fetch_tenant_atoms_by_trip=AsyncMock(return_value={}),
+        compute_runway_map=MagicMock(return_value=_RUNWAY),
+        compute_slot_grid=MagicMock(return_value=_GRID),
+        create_weekly_produce_run=AsyncMock(return_value="run_1"),
+        persist_slot_grid=AsyncMock(return_value=[_SLOT]),
+    )
+    defaults.update(overrides)
+    for name, mock in defaults.items():
+        stack.enter_context(patch.object(service, name, new=mock))
+
+
+@pytest.mark.asyncio
+class TestCreateRequestPersistsSlotCta:
+    async def test_year_month_given_computes_persists_and_refetches_cta(self):
+        conn = AsyncMock()
+        # 1st fetchrow: owner_scope atom check. 2nd: _fetch_slot_cta (nothing yet). 3rd (after
+        # persist): _fetch_slot_cta re-read, now finds the just-persisted row. 4th: the INSERT.
+        conn.fetchrow.side_effect = [
+            _atom_row(), None, {"cta_target": "https://real-cta.example/book"}, _request_row(),
+        ]
+        pool = _make_pool(conn)
+
+        with ExitStack() as stack:
+            _patch_compute_chain(stack)
+            result = await service.create_request(
+                TENANT_ID, "atom_abc123", "facebook", pool, year=2026, month=8,
+            )
+            service.create_weekly_produce_run.assert_awaited_once()
+            service.persist_slot_grid.assert_awaited_once()
+
+        assert result["status"] == "pending_goal"
+        insert_query, *params = conn.fetchrow.call_args_list[-1][0]
+        assert "INSERT INTO acp_shared.angle_gate_request" in insert_query
+        assert params[-1] == "https://real-cta.example/book"  # cta is the last INSERT param
+
+    async def test_no_finalized_quarter_plan_leaves_cta_none(self):
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [_atom_row(), None, _request_row(cta=None)]
+        pool = _make_pool(conn)
+
+        with ExitStack() as stack:
+            _patch_compute_chain(stack, fetch_approved_quarter_plan=AsyncMock(return_value=None))
+            result = await service.create_request(
+                TENANT_ID, "atom_abc123", "facebook", pool, year=2026, month=8,
+            )
+            service.create_weekly_produce_run.assert_not_called()
+            service.persist_slot_grid.assert_not_called()
+
+        assert result["status"] == "pending_goal"
+        insert_query, *params = conn.fetchrow.call_args_list[-1][0]
+        assert params[-1] is None  # cta stayed None — no exception, T9's fallback still covers it
+
+    async def test_unknown_tenant_leaves_cta_none(self):
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [_atom_row(), None, _request_row(cta=None)]
+        pool = _make_pool(conn)
+
+        with ExitStack() as stack:
+            _patch_compute_chain(
+                stack,
+                fetch_tenant_planning_config=AsyncMock(side_effect=TenantNotFoundError("nope")),
+            )
+            result = await service.create_request(
+                TENANT_ID, "atom_abc123", "facebook", pool, year=2026, month=8,
+            )
+
+        assert result["status"] == "pending_goal"
+
+    async def test_atom_not_in_any_slot_leaves_cta_none_and_does_not_persist(self):
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [_atom_row(), None, _request_row(cta=None)]
+        pool = _make_pool(conn)
+        # Grid computed, but no slot matches this atom_id/channel.
+        empty_grid = SlotGrid(tenant_id=TENANT_ID, year=2026, month=8, slots=[])
+
+        with ExitStack() as stack:
+            _patch_compute_chain(stack, compute_slot_grid=MagicMock(return_value=empty_grid))
+            result = await service.create_request(
+                TENANT_ID, "atom_abc123", "facebook", pool, year=2026, month=8,
+            )
+            service.create_weekly_produce_run.assert_not_called()
+            service.persist_slot_grid.assert_not_called()
+
+        assert result["status"] == "pending_goal"
+
+    async def test_year_month_omitted_skips_compute_entirely(self):
+        """Backward compatibility — the exact pre-AA-451 call shape must not touch any of the
+        new compute-and-persist machinery at all."""
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [_atom_row(), None, _request_row()]
+        pool = _make_pool(conn)
+
+        with ExitStack() as stack:
+            _patch_compute_chain(stack)
+            result = await service.create_request(TENANT_ID, "atom_abc123", "facebook", pool)
+            service.fetch_approved_quarter_plan.assert_not_called()
+            service.compute_slot_grid.assert_not_called()
+            service.persist_slot_grid.assert_not_called()
+
+        assert result["status"] == "pending_goal"
+
+    async def test_already_persisted_slot_skips_compute_entirely(self):
+        """If _fetch_slot_cta already finds a real row (e.g. an admin-triggered N7 run already
+        persisted it), the compute-and-persist branch must not run at all — no redundant work,
+        no risk of a second (possibly different) grid computation overwriting anything."""
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [
+            _atom_row(), {"cta_target": "https://already-there.example"}, _request_row(),
+        ]
+        pool = _make_pool(conn)
+
+        with ExitStack() as stack:
+            _patch_compute_chain(stack)
+            result = await service.create_request(
+                TENANT_ID, "atom_abc123", "facebook", pool, year=2026, month=8,
+            )
+            service.fetch_approved_quarter_plan.assert_not_called()
+            service.compute_slot_grid.assert_not_called()
+
+        assert result["status"] == "pending_goal"
+        insert_query, *params = conn.fetchrow.call_args_list[-1][0]
+        assert params[-1] == "https://already-there.example"

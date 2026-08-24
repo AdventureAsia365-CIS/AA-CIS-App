@@ -10,7 +10,11 @@ Written fresh per ADR §0.5 — no import from services.acp_s4_social anywhere i
 the services.acp_angle_gate package it calls into.
 
 Endpoint shape (per docs/claude_tasks/AA-449-01-build-t8-angle-gate.md):
-  POST /v1/angle-gate/requests               — create from (atom_id, channel)     [step 1]
+  POST /v1/angle-gate/requests               — create from (atom_id, channel[, year, month])
+                                                 [step 1; AA-451: optional year/month let this
+                                                 compute+persist a T7 slot on the spot to fill
+                                                 `cta`, see services/acp_angle_gate/service.py
+                                                 ::_compute_and_persist_slot_cta()]
   GET  /v1/angle-gate/goals                   — static 8-goal list                 [step 2 data]
   POST /v1/angle-gate/requests/{id}/goal       — choose goal, generate 3 angles     [steps 2-6]
   GET  /v1/angle-gate/requests/{id}            — read request + angles             [any time]
@@ -18,6 +22,7 @@ Endpoint shape (per docs/claude_tasks/AA-449-01-build-t8-angle-gate.md):
 """
 from __future__ import annotations
 
+from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -34,6 +39,11 @@ router = APIRouter(prefix="/v1/angle-gate", tags=["tenant-angle-gate"])
 class CreateRequestBody(BaseModel):
     atom_id: str
     channel: str
+    # AA-451: optional, backward-compatible — when given (and no T7 slot is already persisted
+    # for this atom+channel), create_request() computes+persists this tenant's month slot-grid
+    # on the spot to fill angle_gate_request.cta. Omitted -> unchanged pre-AA-451 behavior.
+    year: Optional[int] = None
+    month: Optional[int] = None
 
 
 class SetGoalBody(BaseModel):
@@ -54,7 +64,9 @@ async def create_request(body: CreateRequestBody, request: Request, tenant=Depen
     tenant_id = UUID(tenant["sub"])
     pool = request.app.state.pool
     try:
-        req = await service.create_request(tenant_id, body.atom_id, body.channel, pool)
+        req = await service.create_request(
+            tenant_id, body.atom_id, body.channel, pool, year=body.year, month=body.month,
+        )
     except service.AtomNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return {
