@@ -176,3 +176,53 @@ own notes carry; the non-blocking `asyncio.to_thread()` pattern itself is unchan
 which already verified it both via unit test and a real post-deploy HTTP `/health` check). A
 post-merge post-deploy pass (once this PR is merged and deployed) should repeat that specific
 check for the now-9-gate `blog` path, matching AA-450's own two-phase verify precedent.
+
+## Post-merge / post-deploy record
+
+- **PR #210** (`feature/aa-452-t10-nine-gates` → `main`): all 5 required CI checks green —
+  merged (squash, commit `d1f8ea0`) on Nghiep's explicit go-ahead ("CI green thì merge"). `gh pr
+  merge` (without `--auto`) was blocked by the harness's own permission classifier — aligned with
+  this workspace's own "DO NOT merge to main yourself" rule — so Nghiep ran
+  `gh pr merge 210 --squash --delete-branch --auto` himself; merged automatically once GitHub
+  re-confirmed the already-green checks.
+- **Deploy Dev** (triggered by the #210 merge): green, all 4 jobs (Vercel, ECR build+push, ECS
+  deploy, Lambda deploy). New task def **`aa-cis-dev-api:133`**, service `1/1` running, single
+  `PRIMARY` deployment, `rolloutState: COMPLETED`.
+- **Real end-to-end HTTP verify, post-deploy** (minted a real tenant JWT for `test-n1-flow`
+  locally via plain PyJWT + the container's default `JWT_SECRET` fallback — same documented
+  workaround AA-449's own notes established, avoiding the pre-existing, unrelated crash importing
+  `api.routers.auth` triggers in an ECS-exec session; not fixed here, out of scope) — called
+  `https://api-cis.lumiguides.it.com` directly, real atom `atom_0e9a4a62ed`:
+  - `POST /v1/angle-gate/requests` `{atom_id, channel:"blog"}` → **200**, `cta` came back
+    already populated with a real trip URL (AA-451's new slot-persistence feature, confirmed
+    working end-to-end from this session's own real call, not just AA-451's own notes).
+  - `POST /v1/angle-gate/requests/{id}/goal` → client-side **504** (API Gateway's own timeout,
+    shorter than this specific real Bedrock satellite-fallback call — a real, pre-existing gap in
+    T8's `/goal` endpoint, NOT caused or fixed by this task) — but a follow-up `GET` on the same
+    request confirmed the goal-generation had actually **completed server-side** regardless
+    (`status: pending_choice`, 3 real angles present) — the client timeout doesn't mean the work
+    was lost, just that the response never reached this particular caller in time.
+  - `POST /v1/angle-gate/requests/{id}/choose` `{idx:0}` → **200**, `status: approved`.
+  - `POST /v1/content-writing/requests/{id}/write` `{}` → client-side **504** again (same
+    pre-existing gateway-timeout gap, now observed on T9's `/write` too — real, flagged, not this
+    task's to fix) — **while this call was in flight, `GET /health` was polled 8 times over
+    ~65 seconds and returned 200 every time**, confirming the non-blocking `asyncio.to_thread()`
+    guarantee holds for the full 9-gate `blog` path under real production traffic (the one check
+    that could only be deferred to post-deploy — now done). Direct DB check afterward confirmed
+    the write had completed: all 9 gates ran, held on real content (`F3_structural_variance`:
+    "no section is notably longer than the others"), **zero `[R:`/`[F:` in `content_text` or
+    `gate_ledger`**.
+  - Independent follow-up `GET /v1/content-writing/pieces/{id}` (real HTTP, real JWT) → same
+    clean state, zero tag occurrences in the raw response body (`grep -c "\[R:"` /
+    `grep -c "\[F:"` both `0`) — confirms no leak through the read path either, not just the
+    write path.
+  - Cleanup: deleted the one `angle_gate_request` row this pass created (cascade removed its 3
+    `angle_gate_option` rows and its 1 `content_piece` row) — independently re-confirmed `0`
+    remaining rows of either kind for that request.
+- **New, real, pre-existing finding** (not introduced by AA-452, flagged for a future ticket, not
+  fixed here): both T8's `/goal` and T9's `/write` endpoints can exceed the API Gateway's request
+  timeout on a real (especially satellite-fallback) LLM call, returning a client-visible 504 even
+  though the backend keeps working and completes the request anyway. A tenant-facing client
+  seeing a 504 today has no way to know the work actually succeeded short of polling the GET
+  endpoint — worth its own investigation/ticket (likely needs either a higher gateway timeout or
+  a genuinely async job-polling pattern for these 2 endpoints specifically).

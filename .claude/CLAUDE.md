@@ -1,16 +1,50 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 24/08/2026 (AA-451, PR #208 merged + deployed + real HTTP-verified) | main cc5fcf5
-# latest migration: 115 (AA-451 needed none — reused 096/103/114 as-is)
+# Updated: 24/08/2026 (AA-452, PR #210 merged + deployed + real HTTP-verified) | main d1f8ea0
+# latest migration: 115 (AA-452 needed none — no new DB column for the tagged intermediate text,
+# see its LIVE STATE entry below for why)
 # NOTE: ECS task def below is LIVE-VERIFIED as of 24/08/2026 (`aws ecs describe-services`, now
-# :132, post-AA-451 deploy). Deploy Prod # / Vercel Prod hash were NOT re-checked this session —
-# still treat those two specifically as unverified until a fresh check. AA-451's own change
-# (services/acp_angle_gate/service.py::_compute_and_persist_slot_cta()) IS now deployed and real-
-# HTTP-verified through the actual domain (via ECS-internal localhost:8000) — see its LIVE STATE
-# entry below, full trace in docs/implementation-notes/AA-451.md "Post-merge / post-deploy record".
+# :133, post-AA-452 deploy). Deploy Prod # / Vercel Prod hash were NOT re-checked this session —
+# still treat those two specifically as unverified until a fresh check. AA-452's own new gates
+# (F3/F5/F7, channel='blog' only) + the tag-strip mechanism ARE now deployed and real-HTTP-
+# verified through the actual domain — see its LIVE STATE entry below, full trace in
+# docs/implementation-notes/AA-452-t10-nine-gates.md "Live Verify".
 
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway 4ylo382khg — corrected 22/08/2026,
   AA-432; `owq9as3wjl` was stale/no longer exists, confirmed via `aws apigateway get-rest-apis`)
+- AA-452 (24/08/2026) — T10 extended from 6 gates to the full F1-F9 set (F3 structural variance/
+  F5 atom density/F7 FAQ dedup added), scoped to `channel == 'blog'` only — the other 7 channels
+  keep the exact 6-gate stack AA-450 shipped, unchanged. STEP0 correction (this task's own
+  premise was off by one): AA-450 already had 6 gates, not 5 (`F4_extreme_length` already
+  existed) — real gap was 3 missing gates, not 4. `services/acp_content_writing/prompts.py`
+  now instructs the `blog`-channel writer to produce real markdown `## ` H2 sections, a
+  `## FAQ` section (`**Q: .../A: ...` pairs) when the piece has one, and `[R:{atom_id}]`
+  citation tags after fact-bearing sentences — verified reliable via 3 real Bedrock runs before
+  any gate code was written. Citation tags are internal-only, never tenant-visible, for any
+  channel or outcome: `quality_gates.strip_citation_tags()`/`deep_strip_citation_tags()` run
+  once at the end of `service.write_and_check()`, on `content_text` + every `gate_ledger`/
+  `repair_log` violation string + `held_reason`, for both `approved` and `held` pieces — real
+  live-verify (real Bedrock, real RDS, real HTTP through the actual domain) confirmed zero
+  `[R:`/`[F:` leakage on a real held blog piece whose gate violations DID internally quote
+  tagged text before the scrub. No new DB column for the tagged intermediate — no real consumer
+  yet (T10 admin review-queue UI still out of scope), avoided speculative schema. 79 new/updated
+  tests, full suite 1585 passed (post-rebase onto AA-451/#208, which merged mid-session and
+  redeployed the task from under this session's own live-verify — rebased cleanly, no conflicts,
+  re-verified). Real post-deploy HTTP verify (real tenant `test-n1-flow`, actual domain): full
+  create→goal→choose→write lifecycle for `channel='blog'` ran all 9 gates (held on real content
+  after 2 attempts — gates evaluating critically, not rubber-stamping), zero tag leak in the
+  `/write` response, the persisted DB row, AND the independent `GET /pieces/{id}` re-fetch;
+  `channel='facebook'` regression-checked at exactly the pre-existing 6 gates, approved, no leak
+  (confirmed no-op). **`GET /health` stayed 200 across 8 checks over ~65s while `/write` ran the
+  full 9-gate blog path** — the one check AA-450 could only defer to post-deploy, now confirmed:
+  the non-blocking `asyncio.to_thread()` guarantee holds under real traffic with the larger gate
+  stack, not just synthetic unit-test timing. **PR #210 merged** (`d1f8ea0`, squash), deployed
+  live (task def `:133`). Real, pre-existing, NOT-AA-452 finding noted in passing: T8's own
+  `/goal` and T9's `/write` endpoints both hit a ~29s API-Gateway 504 on real long LLM calls
+  while the backend keeps working and completes anyway (confirmed via DB re-check both times) —
+  a real gap worth its own ticket, not something this task's scope covered or fixed. Full detail:
+  `docs/implementation-notes/AA-452-t10-nine-gates.md`, gate-map/decisions in
+  `docs/claude_audit/AA-452-t10-nine-gates.md`.
 - AA-451 (24/08/2026) — T8's `create_request()` (`services/acp_angle_gate/service.py`) gains
   optional `year`/`month`: when given and no slot is already persisted for
   `(tenant, channel, atom)`, computes that tenant's month slot-grid with the SAME tenant-scoped
@@ -147,8 +181,8 @@
   restored to its original state). `/docs`, `/openapi.json` (unaffected NONE-auth routes)
   still 200.
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel — AA-103 production)
-- ECS task def: **aa-cis-dev-api:132** (live-verified 24/08/2026 via `aws ecs describe-services`,
-  post-AA-451 Deploy Dev, rolloutState COMPLETED) | main cc5fcf5 (PR #208 merged) | Vercel Prod
+- ECS task def: **aa-cis-dev-api:133** (live-verified 24/08/2026 via `aws ecs describe-services`,
+  post-AA-452 Deploy Dev, rolloutState COMPLETED) | main d1f8ea0 (PR #210 merged) | Vercel Prod
   hash unverified
 - AA-384 (this session): product-direction correction on AA-309/AA-330's posts_per_week/Mirror
   (posts_per_week is now a free tenant choice, migration 099 — see DB SCHEMA below; Mirror is
