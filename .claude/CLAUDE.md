@@ -1,13 +1,11 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 24/08/2026 (AA-450, PR pending — migrations 114+115 already applied live) | main 8661849
-# (AA-449 fully merged/deployed; AA-450's own build PR is NOT merged yet, carries migrations
-# 114+115, needs Nghiep's manual look per this repo's own migration-PR convention) | latest
-# migration: 115
-# NOTE: ECS task def below is LIVE-VERIFIED as of 24/08/2026 (`aws ecs describe-services`,
-# still :130, before AA-450's own deploy). Deploy Prod # / Vercel Prod hash were NOT re-checked
-# this session — still treat those two specifically as unverified until a fresh check. AA-450's
-# own new code (services/acp_content_writing/*, api/routers/v1_content_writing.py) is NOT yet
-# deployed — pre-merge live-verified only (function-level, direct container file overwrite),
+# Updated: 24/08/2026 (AA-450, PR #207 merged + deployed + real HTTP-verified) | main 9512d8a
+# latest migration: 115
+# NOTE: ECS task def below is LIVE-VERIFIED as of 24/08/2026 (`aws ecs describe-services`, now
+# :131, post-AA-450 deploy). Deploy Prod # / Vercel Prod hash were NOT re-checked this session —
+# still treat those two specifically as unverified until a fresh check. AA-450's own new code
+# (services/acp_content_writing/*, api/routers/v1_content_writing.py) IS now deployed and real-
+# HTTP-verified through the actual domain — see its LIVE STATE entry below, full trace in
 # see docs/implementation-notes/AA-450-t9-content-writing.md "Live Verify".
 
 ## LIVE STATE
@@ -56,11 +54,14 @@
   passed. Live-verified pre-merge (function-level, real Bedrock + real RDS, real tenant
   `test-n1-flow`, real atom `atom_0e9a4a62ed`): full create→goal→choose→write→check lifecycle,
   all 6 T10 gates passed on attempt 1, response verified to match an independent DB re-fetch (the
-  AA-448-class stale-response bug, confirmed NOT repeated). Full detail:
-  `docs/implementation-notes/AA-450-t9-content-writing.md`. **PR NOT merged yet** — carries
-  migrations 114+115 (already applied live separately), needs Nghiep's manual look. T10's
-  standalone admin review-queue UI (for `held` pieces) and T11 (publish) remain out of scope, no
-  issue created yet.
+  AA-448-class stale-response bug, confirmed NOT repeated). **PR #207 merged (`9512d8a`), Deploy
+  Dev green, task def `:131`.** Real post-deploy HTTP verify (24/08/2026, real tenant JWT, actual
+  domain): full create→goal→choose→422-no-cta→write-with-cta→get lifecycle, ~15.8s for the real
+  write+T10-inline call, all 6 gates passed, `/health` stayed 200 throughout (non-blocking
+  guarantee held under real traffic, not just the unit test's synthetic timing). Full detail:
+  `docs/implementation-notes/AA-450-t9-content-writing.md` ("Post-merge / post-deploy record").
+  T10's standalone admin review-queue UI (for `held` pieces) and T11 (publish) remain out of
+  scope, no issue created yet.
 - AA-445-02 (23/08/2026) — B4 `CompetitorIndex`/`score_distinctiveness()`, DFS→T2, competitor UI.
   PR #199 merged (df19ec9), Deploy Dev run 32632513361 green, migration 111 applied live. Full
   live E2E verified: real tenant JWT (test-n1-flow) → real `POST /v1/competitors` add → real T2
@@ -126,9 +127,9 @@
   restored to its original state). `/docs`, `/openapi.json` (unaffected NONE-auth routes)
   still 200.
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel — AA-103 production)
-- ECS task def: **aa-cis-dev-api:127** (live-verified 23/08/2026 via `aws ecs describe-services`
-  — the previous "api:340" here was stale/wrong, not just unverified; corrected this session,
-  AA-445-02) | main df19ec9 (PR #199 merged) | Vercel Prod hash unverified
+- ECS task def: **aa-cis-dev-api:131** (live-verified 24/08/2026 via `aws ecs describe-services`,
+  post-AA-450 Deploy Dev, rolloutState COMPLETED) | main 9512d8a (PR #207 merged) | Vercel Prod
+  hash unverified
 - AA-384 (this session): product-direction correction on AA-309/AA-330's posts_per_week/Mirror
   (posts_per_week is now a free tenant choice, migration 099 — see DB SCHEMA below; Mirror is
   purely informational, no upsell language — see api/routers/admin.py get_tenant_mirror()). Real

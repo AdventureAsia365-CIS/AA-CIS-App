@@ -179,3 +179,41 @@ same as they did). ECS (`aa-cis-dev-cluster`/`aa-cis-dev-api`, task def `:130`) 
    (Decision 2) was verified in the unit test suite (`test_aa450_event_loop_not_blocked.py`)
    against the real call path, not live this session — live confirms the calls succeed, the unit
    test confirms they don't block the shared event loop while doing so.
+
+## Post-merge / post-deploy record
+
+- **PR #207** (`feature/aa-450-build-t9-content-writing` → `main`): all 5 required CI checks
+  green — merged (squash, commit `9512d8a`) on Nghiep's explicit go-ahead ("cu green thì merge").
+- **Deploy Dev** (triggered by the #207 merge): green, all 4 jobs (ECR build+push, ECS deploy,
+  Lambda deploy, Vercel deploy hook). New task def **`aa-cis-dev-api:131`**, service `1/1`
+  running, single `PRIMARY` deployment, `rolloutState: COMPLETED`.
+- **Real end-to-end HTTP verify, post-deploy** (first time these endpoints were reachable via the
+  actual domain, not just the pre-merge function-level pass) — minted a real tenant JWT for
+  `test-n1-flow` and called `https://api-cis.lumiguides.it.com` directly:
+  - No `Authorization` header on `POST /v1/content-writing/requests/{id}/write` → **401** — auth
+    boundary intact.
+  - `POST /v1/angle-gate/requests` `{atom_id: atom_0e9a4a62ed, channel: linkedin}` → **200**,
+    response now carries the new `cta` field (`null`) — confirms the migration-114 wiring
+    deployed correctly, not just present in code.
+  - `POST /v1/angle-gate/requests/{id}/goal` `{goal: trust_building}` → **200**, real Bedrock
+    call, 3 real grounded angles (correctly citing only the atom's own facts — Tad E-Tu, Tad
+    Fane as Champasak Province's highest waterfall, Tad Yuang).
+  - `POST /v1/angle-gate/requests/{id}/choose` `{idx: 0}` → **200**, `status: approved`,
+    `cta: null` — **confirms live, through the real deployed HTTP path, the exact gap Decision 4
+    predicted**: a real tenant's real angle-gate request has no CTA by the time it reaches T9.
+  - `POST /v1/content-writing/requests/{id}/write` `{}` (no override) → **422**, the exact
+    `MissingCTAError` diagnostic message — the CTA-ask fallback (Decision 5) confirmed working
+    through real HTTP, not just the pre-merge function-level pass.
+  - `POST /v1/content-writing/requests/{id}/write` `{cta: "Message our route designers..."}`
+    → **200** in ~15.8s (real Sonnet write + all 5 T10 gates, 2 of them real LLM-judge calls) →
+    `status: approved`, all 6 gate-ledger entries `passed: true`, real content grounded in the
+    atom's facts with the given CTA worked naturally into the closing paragraph — not pasted on.
+  - Independent follow-up `GET /v1/content-writing/pieces/{id}` → same `status`/`content_text` —
+    confirms no AA-448-class stale-response bug in real HTTP traffic, not just the mocked/
+    function-level test.
+  - `GET /health` immediately after the ~15.8s write call → **200**, `{"status":"ok",...}` —
+    confirms the non-blocking-event-loop guarantee (Decision 2) held under a real request, not
+    just the unit test's synthetic timing.
+  - Cleanup: deleted the one `angle_gate_request` row this pass created (cascade removed its 3
+    `angle_gate_option` rows and its 1 `content_piece` row) — independently re-confirmed `0`
+    remaining rows of either kind for that request.
