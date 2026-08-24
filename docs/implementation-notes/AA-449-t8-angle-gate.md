@@ -179,9 +179,45 @@ confirmed already running before starting (not started by this session).
    documented limitation AA-448's own notes state for this exact pre-merge situation; a post-merge
    post-deploy step for whoever merges this.
 
-## Post-merge / post-deploy — NOT done yet
+## Post-merge / post-deploy record
 
-This PR is **not auto-merged** — it carries migration 113, and per this repo's own stated
-convention ("A PR carrying a migration should NOT be auto-merged regardless of CI outcome") it
-needs Nghiep's manual look before merge, even though CI is expected to pass. Migration 113 is
-already applied live (see above) so merging does not additionally touch the DB.
+- **PR #204** (`feature/aa-449-build-t8-angle-gate` → `main`): all 5 required CI checks green —
+  squash-merged manually by Nghiep after review (not auto-merged, per this repo's own
+  migration-PR convention — carries migration 113, already applied live pre-merge so the merge
+  itself touched no schema). Merge commit `8093645`.
+- **Deploy Dev** (triggered by the #204 merge): green. New task def **`aa-cis-dev-api:130`**,
+  service `1/1` running, single `PRIMARY` deployment, `rolloutState: COMPLETED`.
+- **Real end-to-end HTTP verify, post-deploy** (first time these endpoints were reachable via
+  the actual domain, not just the pre-merge function-level pass) — minted a real tenant JWT for
+  `test-n1-flow` and called `https://api-cis.lumiguides.it.com` directly:
+  - No `Authorization` header on `POST /v1/angle-gate/requests` → **401** — auth boundary
+    intact. (`GET /v1/angle-gate/goals` returns 200 with no auth — intentional, it's a static
+    list with no tenant-specific data, not an oversight.)
+  - `POST /v1/angle-gate/requests` `{atom_id, channel:"linkedin"}` → **200**, real atom
+    (`atom_0e9a4a62ed`), `status: pending_goal` — exercises the newly-added `linkedin` channel
+    end-to-end, not just in tests.
+  - `POST /v1/angle-gate/requests/{id}/goal` `{goal:"promotion"}` → **200**, real Bedrock
+    Sonnet 4.5 call, 3 angles returned, all 4 fields populated on each, exactly 1
+    `recommended: true`, `status: pending_choice`.
+  - `POST /v1/angle-gate/requests/{id}/choose` `{idx:0}` → **200**, `status: approved` in the
+    response itself. Independent follow-up `GET` → also `approved`, same chosen idx — confirms
+    `choose_angle()`'s re-fetch-before-return design actually avoids AA-448's stale-response bug
+    class in real HTTP traffic, not just in the mocked/function-level test.
+  - Cleanup: deleted the one `angle_gate_request` row this pass created (cascade removed its 3
+    `angle_gate_option` rows) — independently re-confirmed `0` remaining rows for the tenant.
+
+### New finding this round — pre-existing, not caused by this PR
+
+Minting the tenant JWT via the documented shortcut (`api.routers.auth._create_jwt`, in-container)
+**crashed the ECS-exec SSM session outright** (`Cannot perform start session: EOF`, zero stdout,
+the spawned `python3` process left as a zombie) — reproduced consistently across 6+ attempts.
+Isolated the cause: importing `api.routers.auth` (or anything that pulls in the `api` package)
+triggers a Sentry-DSN-from-Secrets-Manager fetch that fails (`ResourceNotFoundException` — the
+secret doesn't exist in this account) and logs a warning, and something after that kills the
+whole process rather than degrading gracefully. Worked around by minting the JWT with plain
+PyJWT directly, using the same fallback secret `api/routers/auth.py` itself falls back to when
+`JWT_SECRET` is unset (confirmed unset in this container — a real, separate finding: the dev
+container is running on its hardcoded default JWT secret, not a real per-env secret). Not fixed
+here — out of scope for T8, pre-existing in code this task didn't touch, and needs someone to
+actually trace the Sentry init path to know if it's Sentry-specific or a coincidental red
+herring. Flagging for a future ticket, not silently dropping it.
