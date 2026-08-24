@@ -19,15 +19,20 @@ v1 scope, per Nghiep's 5 decisions (Linear AA-437, 23/08/2026):
      with its own level, never collapsed.
   4/5. Route `/admin/a4-oversight` (FE), endpoints `/admin/a4/review-log` + `/admin/a4/trust-ramp`.
 
-No flag/suspend/force-unpublish here — explicitly out of scope (AA-437's own Linear text),
-deferred to the Command Center backlog (AA-255->259) if/when that gets built.
+AA-455 bước 1 (24/08/2026) added a 3rd use case: `publish_log` list + force-unpublish. Per
+STEP0 (docs/claude_audit/AA-455-01-step0-a4-force-unpublish.md §4/§7), this stays on the SAME
+`/admin/a4-oversight` FE page (already allowlisted in middleware.ts since AA-437) and the SAME
+`/admin/a4` router prefix here — no new route, so no middleware change needed. Still no
+flag/suspend — that stays deferred to the Command Center backlog (AA-255->259); force-unpublish
+is the one action this issue scoped in.
 """
 from __future__ import annotations
 
 from typing import Optional
+from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Header, Query, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 
 from api.routers.admin import verify_admin_secret
 
@@ -147,3 +152,108 @@ async def get_trust_ramp(request: Request, x_admin_secret: str = Header(None)):
     ]
     logger.info("a4_trust_ramp_queried", count=len(data))
     return {"data": data, "total": len(data)}
+
+
+@router.get("/publish-log")
+async def get_publish_log(
+    request: Request,
+    tenant_id: Optional[str] = Query(None),
+    limit: int = Query(200, ge=1, le=500),
+    x_admin_secret: str = Header(None),
+):
+    """AA-455 bước 1 — T11 delivery-state rows (acp_shared.publish_log). Deploys against an
+    empty table until T11's own write path (bước 2, not built here) starts producing rows.
+    Same flat-list-first shape as review-log/trust-ramp above — no server-side aggregation."""
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+
+    conditions = ["1=1"]
+    params: list = []
+    if tenant_id:
+        params.append(tenant_id)
+        conditions.append(f"pl.tenant_id = ${len(params)}::uuid")
+    where = " AND ".join(conditions)
+    params.append(limit)
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(f"""
+            SELECT
+                pl.publish_id::text, pl.piece_id::text, pl.tenant_id::text,
+                t.name AS tenant_name, t.slug AS tenant_slug,
+                pl.channel, pl.status, pl.external_id, pl.external_url,
+                pl.published_at, pl.unpublished_at, pl.unpublished_by,
+                pl.last_error, pl.created_at
+            FROM acp_shared.publish_log pl
+            LEFT JOIN shared.tenants t ON t.tenant_id = pl.tenant_id
+            WHERE {where}
+            ORDER BY pl.created_at DESC
+            LIMIT ${len(params)}
+        """, *params)
+
+    data = [
+        {
+            "publish_id": r["publish_id"],
+            "piece_id": r["piece_id"],
+            "tenant_id": r["tenant_id"],
+            "tenant_name": r["tenant_name"],
+            "tenant_slug": r["tenant_slug"],
+            "channel": r["channel"],
+            "status": r["status"],
+            "external_id": r["external_id"],
+            "external_url": r["external_url"],
+            "published_at": r["published_at"].isoformat() if r["published_at"] else None,
+            "unpublished_at": r["unpublished_at"].isoformat() if r["unpublished_at"] else None,
+            "unpublished_by": r["unpublished_by"],
+            "last_error": r["last_error"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        for r in rows
+    ]
+    logger.info("a4_publish_log_queried", count=len(data), tenant_filter=tenant_id)
+    return {"data": data, "total": len(data), "tenant_filter": tenant_id}
+
+
+@router.post("/publish-log/{publish_id}/unpublish")
+async def force_unpublish(
+    publish_id: UUID,
+    request: Request,
+    x_admin_secret: str = Header(None),
+    x_admin_user_id: Optional[str] = Header(None),
+):
+    """AA-455 bước 1 — A4's one mutating action. Only flips a `status='published'` row to
+    'unpublished'; a row already unpublished/failed 404s rather than double-acting (verified
+    live, see AA-455-01 implementation notes). `unpublished_by` records "admin:<id>" using the
+    same `x-admin-user-id` header AA-232 already established (BFF forwards the verified JWT's
+    `sub` claim) — tolerant of a missing/malformed header, same fallback shape
+    admin_pipeline.py's reviewed_by handling already uses, so a legacy ADMIN_SECRET-only session
+    doesn't 500, it just records "admin:unknown"."""
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+
+    admin_actor = "unknown"
+    if x_admin_user_id:
+        try:
+            admin_actor = str(UUID(x_admin_user_id))
+        except (ValueError, AttributeError):
+            admin_actor = "unknown"
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE acp_shared.publish_log
+            SET status = 'unpublished', unpublished_at = now(), unpublished_by = $2
+            WHERE publish_id = $1 AND status = 'published'
+            RETURNING publish_id::text, tenant_id::text, channel, status, unpublished_at
+        """, publish_id, f"admin:{admin_actor}")
+
+    if not row:
+        raise HTTPException(status_code=404, detail="publish_log row not found or already unpublished")
+
+    logger.info("a4_force_unpublish", publish_id=str(publish_id), admin_actor=admin_actor)
+    return {
+        "publish_id": row["publish_id"],
+        "tenant_id": row["tenant_id"],
+        "channel": row["channel"],
+        "status": row["status"],
+        "unpublished_at": row["unpublished_at"].isoformat() if row["unpublished_at"] else None,
+        "unpublished_by": f"admin:{admin_actor}",
+    }
