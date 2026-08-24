@@ -15,7 +15,11 @@ AA_INTERNAL_TENANT_ID = "00000000-0000-0000-0000-000000000001"
 PIPELINE_GATES = {
     "brand_audit_threshold": 7.0,
     "dedup_key": "lower(trim(src_name)) + lower(trim(provider))",
-    "pipeline_flow": ["generate", "validate", "brand_audit", "flag_fix"],
+    # AA-454: was missing "llm_judge" (validate->llm_judge->brand_audit) and "revalidate"
+    # (flag_fix->revalidate->END) — real edge order per services/content_generation/graph.py
+    # ::build_graph(). increment_retry/hitl aren't included: they're retry-loop control nodes,
+    # not part of the linear happy-path sequence this chip displays.
+    "pipeline_flow": ["generate", "validate", "llm_judge", "brand_audit", "flag_fix", "revalidate"],
 }
 
 
