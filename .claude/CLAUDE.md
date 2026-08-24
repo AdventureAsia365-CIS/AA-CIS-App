@@ -1,13 +1,14 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 23/08/2026 (AA-449, PR pending — migration 113 already applied live) | main 471fd3c
-# (AA-449-00 docs merged; AA-449's own build PR is NOT merged yet, carries migration 113, needs
-# Nghiep's manual look per this repo's own migration-PR convention) | latest migration: 113
-# NOTE: ECS task def below is LIVE-VERIFIED as of 23/08/2026 (`aws ecs describe-services`,
-# post-merge Deploy Dev run 32632513361, before AA-449). Deploy Prod # / Vercel Prod hash were
-# NOT re-checked this session — still treat those two specifically as unverified until a fresh
-# check. AA-449's own new code (services/acp_angle_gate/*, api/routers/v1_angle_gate.py) is
-# NOT yet deployed — pre-merge live-verified only (function-level, direct container file
-# overwrite), see docs/implementation-notes/AA-449-t8-angle-gate.md "Live Verify".
+# Updated: 24/08/2026 (AA-450, PR pending — migrations 114+115 already applied live) | main 8661849
+# (AA-449 fully merged/deployed; AA-450's own build PR is NOT merged yet, carries migrations
+# 114+115, needs Nghiep's manual look per this repo's own migration-PR convention) | latest
+# migration: 115
+# NOTE: ECS task def below is LIVE-VERIFIED as of 24/08/2026 (`aws ecs describe-services`,
+# still :130, before AA-450's own deploy). Deploy Prod # / Vercel Prod hash were NOT re-checked
+# this session — still treat those two specifically as unverified until a fresh check. AA-450's
+# own new code (services/acp_content_writing/*, api/routers/v1_content_writing.py) is NOT yet
+# deployed — pre-merge live-verified only (function-level, direct container file overwrite),
+# see docs/implementation-notes/AA-450-t9-content-writing.md "Live Verify".
 
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway 4ylo382khg — corrected 22/08/2026,
@@ -29,9 +30,37 @@
   live finding, not this task's bug: native acc2 Bedrock Sonnet 4.5 currently rejects with
   `...not available for channel program accounts...` — `LLMClient` correctly fell through to the
   acc3 satellite, exactly as designed. Full detail: `docs/implementation-notes/
-  AA-449-t8-angle-gate.md`. **PR NOT merged yet** — carries migration 113 (already applied live
-  separately), needs Nghiep's manual look per this repo's own migration-PR convention. T9 (writing
-  the actual content from the chosen angle) is explicitly out of scope, no issue created yet.
+  AA-449-t8-angle-gate.md`. **PR merged** (`8093645`), deployed live (task def `:130`). T9 now
+  built — see AA-450 below.
+- AA-450 (24/08/2026) — T9 Content Writing + T10-inline quality gates, written fresh (ADR §0.5).
+  New `services/acp_content_writing/` package (`prompts.py`/`generate.py`/`framework_rubrics.py`/
+  `quality_gates.py`/`service.py`) + `api/routers/v1_content_writing.py` (`/v1/content-writing/*`,
+  tenant-JWT-only) + `acp_shared.content_piece` (migration 115, **applied live**). CTA gap fix
+  bundled in (STEP0-flagged, build task §3): `angle_gate_request.cta` column (migration 114,
+  **applied live**) + `services/acp_angle_gate/service.py::_fetch_slot_cta()` wired into
+  `create_request()`. **Real finding confirmed live, not just predicted**: this CTA lookup will
+  realistically stay NULL for essentially every real tenant self-service request — T7's own
+  tenant-facing endpoint (`v1_planning.py::get_slot_grid()`) never calls `persist_slot_grid()`,
+  only admin-triggered paths do — the live-verify run's `angle_gate_request.cta` was `None` both
+  right after creation and after `choose_angle()`, exactly as this finding predicts. T9's write
+  endpoint asks for a CTA (optional body field) rather than fabricating one, per SKILL_v2.md's
+  own step 4. Architecture (Nghiep, post-Phase-1): ONE endpoint, write→check→up to 1 retry with
+  specific feedback→persist, all inline in one request — not N7's separate async retry loop
+  (Phase 1 traced N7's real production ALB-timeout incidents + low judge-gate convergence rate to
+  that architecture, `docs/claude_audit/AA-450-01-t9-t10-retry-loop-investigation.md`); every
+  blocking LLM call wrapped in `asyncio.to_thread()` from the start, not patched in after an
+  incident. T10 = 5 gates (not N7's 9) — full gate-by-gate mapping:
+  `docs/claude_audit/AA-450-02-t10-gate-map.md`. Frontend: NO separate `/portal/t9-write` route —
+  mid-build decision, `AngleGateTab.tsx` (`/portal/t8-angle-gate`) extended into one continuous
+  wizard, T9 fires automatically the instant an angle is chosen. 53 new tests, full suite 1552
+  passed. Live-verified pre-merge (function-level, real Bedrock + real RDS, real tenant
+  `test-n1-flow`, real atom `atom_0e9a4a62ed`): full create→goal→choose→write→check lifecycle,
+  all 6 T10 gates passed on attempt 1, response verified to match an independent DB re-fetch (the
+  AA-448-class stale-response bug, confirmed NOT repeated). Full detail:
+  `docs/implementation-notes/AA-450-t9-content-writing.md`. **PR NOT merged yet** — carries
+  migrations 114+115 (already applied live separately), needs Nghiep's manual look. T10's
+  standalone admin review-queue UI (for `held` pieces) and T11 (publish) remain out of scope, no
+  issue created yet.
 - AA-445-02 (23/08/2026) — B4 `CompetitorIndex`/`score_distinctiveness()`, DFS→T2, competitor UI.
   PR #199 merged (df19ec9), Deploy Dev run 32632513361 green, migration 111 applied live. Full
   live E2E verified: real tenant JWT (test-n1-flow) → real `POST /v1/competitors` add → real T2
@@ -178,8 +207,10 @@ Content-team-facing (frontend/app/(internal)/*): /catalog, /upload, /brand, /rev
   route-group split from /admin/*, still live, not part of AA-384's scope.
 Tenant portal (frontend/app/(tenant)/portal/*): tenant-facing pipeline view, separate auth
   (/tenant-login). T-series routes: /portal/t0-brand, /portal/t1-rewrite, /portal/t4-pool,
-  /portal/t6-atoms (AA-431), /portal/t7-planning (AA-448), /portal/t8-angle-gate (AA-449). No
-  dedicated /portal/t3-* route — T3 is a badge on t4-pool, not its own page (ADR-2026-038 §0.1).
+  /portal/t6-atoms (AA-431), /portal/t7-planning (AA-448), /portal/t8-angle-gate (AA-449/AA-450 —
+  ONE continuous wizard covering both T8 goal/angle-choice AND T9 write/T10-inline check, no
+  separate T9 route — see AA-450's LIVE STATE entry). No dedicated /portal/t3-* route — T3 is a
+  badge on t4-pool, not its own page (ADR-2026-038 §0.1).
 API proxy convention: every /admin/* page calls same-origin /api/admin/[...path] (never the ECS
   API URL directly from the client) — that route attaches X-Admin-Secret + x-admin-user-id server-
   side after requireAdmin() verification. New admin pages MUST follow this, not fetch API_URL
@@ -197,7 +228,8 @@ acp_shared.*          → marketplace_portfolios (097, DEPRECATED as of AA-444/2
                         docs/implementation-notes/AA-444-marketplace-view.md), tenant_atom_state
                         + tenant_onboarding (098, N1 Gate A), acp_quota_ledger, audit_log,
                         year_plan + quarter_plan/quarter_plan_version (092/112, T7),
-                        angle_gate_request/angle_gate_option (113, T8, AA-449)
+                        angle_gate_request/angle_gate_option (113+114 cta col, T8, AA-449/450),
+                        content_piece (115, T9+T10-inline, AA-450)
 acp_contract.*        → tour_atoms (079; owner_scope was platform-only at 079, ADR-2026-038
                         Hướng B (21/08/2026) changed this to per-tenant — owner_scope=tenant_id
                         for tenant-rewritten-tour atoms (T5), owner_scope='platform' remains for
@@ -225,7 +257,7 @@ pipeline_runs:      id, tenant_id, batch_id, status, cost_usd, llm_model,
                     tours_total, tours_passed, started_at, completed_at
 
 ## MIGRATIONS + APPROVAL GATES (stable conventions)
-- Migrations are plain numbered .sql files in api/migrations/ (099 latest as of AA-384), applied
+- Migrations are plain numbered .sql files in api/migrations/ (115 latest as of AA-450), applied
   against RDS via the global S3-mediated ECS exec pattern (see ~/.claude/CLAUDE.md) — no ORM
   auto-migrate, no psql direct connect (ECS container has neither). Each file self-registers into
   shared.schema_versions (version, applied_at, description) with ON CONFLICT DO NOTHING, so re-runs

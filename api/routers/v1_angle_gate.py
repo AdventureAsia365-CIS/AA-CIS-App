@@ -62,6 +62,7 @@ async def create_request(body: CreateRequestBody, request: Request, tenant=Depen
         "atom_id": req["atom_id"],
         "trip_id": str(req["trip_id"]) if req["trip_id"] else None,
         "channel": req["channel"],
+        "cta": req["cta"],  # AA-450: usually None today — see migration 114's header comment
         "status": req["status"],
     }
 

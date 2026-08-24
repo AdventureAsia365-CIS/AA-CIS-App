@@ -45,7 +45,8 @@ def _atom_row():
 def _request_row(**over):
     base = {
         "request_id": REQUEST_ID, "tenant_id": TENANT_ID, "atom_id": "atom_abc123",
-        "trip_id": TRIP_ID, "channel": "facebook", "goal": None, "status": "pending_goal",
+        "trip_id": TRIP_ID, "channel": "facebook", "goal": None, "cta": None,
+        "status": "pending_goal",
         "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
     }
     base.update(over)
@@ -63,13 +64,16 @@ def _option_row(idx, recommended=False, chosen=False):
 class TestCreateRequest:
     async def test_creates_request_for_owned_atom(self):
         conn = AsyncMock()
-        conn.fetchrow.side_effect = [_atom_row(), _request_row()]
+        # AA-450: create_request() now also looks up a persisted T7 slot's cta_target
+        # (services/acp_angle_gate/service.py::_fetch_slot_cta) before the INSERT — None here
+        # (no matching slot), the realistic case migration 114's own header comment documents.
+        conn.fetchrow.side_effect = [_atom_row(), None, _request_row()]
         pool = _make_pool(conn)
 
         result = await service.create_request(TENANT_ID, "atom_abc123", "facebook", pool)
 
         assert result["status"] == "pending_goal"
-        insert_query, *params = conn.fetchrow.call_args_list[1][0]
+        insert_query, *params = conn.fetchrow.call_args_list[2][0]
         assert "INSERT INTO acp_shared.angle_gate_request" in insert_query
         assert params[0] == TENANT_ID
 

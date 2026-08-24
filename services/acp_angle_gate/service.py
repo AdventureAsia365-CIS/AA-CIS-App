@@ -5,6 +5,7 @@ DB tables: acp_shared.angle_gate_request / angle_gate_option (migration 113).
 """
 from __future__ import annotations
 
+from typing import Optional
 from uuid import UUID
 
 import structlog
@@ -46,6 +47,21 @@ _ATOM_QUERY = """
     WHERE atom_id = $1 AND owner_scope = $2 AND NOT deleted AND NOT is_empty_marker
 """
 
+# AA-450: migration 114's own header comment documents why this realistically returns NULL for
+# most real tenant self-service requests today — T7's tenant-facing endpoint
+# (api/routers/v1_planning.py::get_slot_grid()) never calls persist_slot_grid(), so
+# acp_v2_slots is populated only by admin-triggered N7 paths. Wired anyway (correct
+# infrastructure for whenever a persisted slot DOES exist, e.g. an admin-run tenant, or a
+# future change that persists the tenant preview) — services/acp_content_writing/ has its own
+# fallback for the NULL case, not this module's job to fabricate one.
+_SLOT_CTA_QUERY = """
+    SELECT payload ->> 'cta_target' AS cta_target
+    FROM acp_shared.acp_v2_slots
+    WHERE tenant_id = $1 AND channel = $2 AND payload -> 'atom_ids' ? $3
+    ORDER BY created_at DESC
+    LIMIT 1
+"""
+
 
 async def _fetch_atom_for_tenant(tenant_id: UUID, atom_id: str, pool) -> dict:
     """Tenant-scoped single-atom fetch, same owner_scope=tenant_id convention
@@ -60,19 +76,31 @@ async def _fetch_atom_for_tenant(tenant_id: UUID, atom_id: str, pool) -> dict:
     return {"atom_id": row["atom_id"], "trip_id": row["tour_id"], "text": row["text"]}
 
 
+async def _fetch_slot_cta(tenant_id: UUID, atom_id: str, channel: str, pool) -> Optional[str]:
+    """AA-450: best-effort CTA lookup from a persisted T7 slot (services.acp_planning.models
+    .Slot.cta_target) matching this (tenant, channel, atom). Returns None (not an error) when no
+    matching slot row exists — see this module's own comment above `_SLOT_CTA_QUERY` and
+    migration 114's header for why that's the common case today, not an edge case."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(_SLOT_CTA_QUERY, str(tenant_id), channel, atom_id)
+    cta = row["cta_target"] if row else None
+    return cta or None  # empty string from a slot with no cta_target is treated as "none"
+
+
 async def create_request(tenant_id: UUID, atom_id: str, channel: str, pool) -> dict:
     """Workflow step 1. Validates the atom belongs to this tenant (owner_scope check) up front —
     refuses a cross-tenant atom_id here rather than only failing later at generate time."""
     atom = await _fetch_atom_for_tenant(tenant_id, atom_id, pool)
+    cta = await _fetch_slot_cta(tenant_id, atom_id, channel, pool)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO acp_shared.angle_gate_request (tenant_id, atom_id, trip_id, channel)
-            VALUES ($1, $2, $3, $4)
-            RETURNING request_id, tenant_id, atom_id, trip_id, channel, goal, status,
+            INSERT INTO acp_shared.angle_gate_request (tenant_id, atom_id, trip_id, channel, cta)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING request_id, tenant_id, atom_id, trip_id, channel, goal, cta, status,
                       created_at, updated_at
             """,
-            tenant_id, atom["atom_id"], atom["trip_id"], channel,
+            tenant_id, atom["atom_id"], atom["trip_id"], channel, cta,
         )
     return dict(row)
 
@@ -81,7 +109,7 @@ async def _fetch_request_row(tenant_id: UUID, request_id: UUID, pool):
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT request_id, tenant_id, atom_id, trip_id, channel, goal, status,
+            SELECT request_id, tenant_id, atom_id, trip_id, channel, goal, cta, status,
                    created_at, updated_at
             FROM acp_shared.angle_gate_request
             WHERE request_id = $1 AND tenant_id = $2
@@ -203,6 +231,7 @@ async def fetch_request(tenant_id: UUID, request_id: UUID, pool) -> dict:
         "trip_id": str(req["trip_id"]) if req["trip_id"] else None,
         "channel": req["channel"],
         "goal": req["goal"],
+        "cta": req["cta"],
         "status": req["status"],
         "created_at": req["created_at"].isoformat(),
         "updated_at": req["updated_at"].isoformat(),
