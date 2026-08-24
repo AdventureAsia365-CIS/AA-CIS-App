@@ -1,12 +1,37 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 23/08/2026 (AA-445-02) | main df19ec9 | latest migration: 111
+# Updated: 23/08/2026 (AA-449, PR pending — migration 113 already applied live) | main 471fd3c
+# (AA-449-00 docs merged; AA-449's own build PR is NOT merged yet, carries migration 113, needs
+# Nghiep's manual look per this repo's own migration-PR convention) | latest migration: 113
 # NOTE: ECS task def below is LIVE-VERIFIED as of 23/08/2026 (`aws ecs describe-services`,
-# post-merge Deploy Dev run 32632513361). Deploy Prod # / Vercel Prod hash were NOT re-checked
-# this session — still treat those two specifically as unverified until a fresh check.
+# post-merge Deploy Dev run 32632513361, before AA-449). Deploy Prod # / Vercel Prod hash were
+# NOT re-checked this session — still treat those two specifically as unverified until a fresh
+# check. AA-449's own new code (services/acp_angle_gate/*, api/routers/v1_angle_gate.py) is
+# NOT yet deployed — pre-merge live-verified only (function-level, direct container file
+# overwrite), see docs/implementation-notes/AA-449-t8-angle-gate.md "Live Verify".
 
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway 4ylo382khg — corrected 22/08/2026,
   AA-432; `owq9as3wjl` was stale/no longer exists, confirmed via `aws apigateway get-rest-apis`)
+- AA-449 (23/08/2026) — T8 Angle Gate, written fresh per ADR-2026-038 §0.5 (NO reuse of
+  `acp_s4_social`). New `services/acp_angle_gate/` package + `api/routers/v1_angle_gate.py`
+  (`/v1/angle-gate/*`, tenant-JWT-only) + `acp_shared.angle_gate_request`/`angle_gate_option`
+  (migration 113, **applied live**). Terminology fixed vs. the round-1 STEP0 confusion: "Goal" =
+  the 8-value Bang-1 list, "Angle" = the 3 LLM-generated options per (atom, channel) request
+  (name/why_it_works/formula_fit/best_final_style). Bonus fix bundled in (build task's own §2,
+  a real pre-existing gap STEP0 found): T7's `Slot.channel`/`compute_slot_grid()` extended from
+  4 to 8 channel values (was silently unable to support 4 of Bang 2's 7 real channels — a tenant
+  configuring e.g. `linkedin` would have hit a real Pydantic `ValidationError`) — also updated
+  `admin.py::_VALID_CHANNELS` + `frontend/app/admin/tenants/page.tsx::ALL_CHANNELS`, the 2 other
+  call sites of the same 4-value list. 53 new tests (channel-extension regression suite +
+  generate/service/router units), full suite 1499 passed. Live-verified pre-merge (function-level,
+  real Bedrock + real RDS, real tenant `test-n1-flow`): full create→goal→3-angles→choose lifecycle,
+  including confirming the AA-448-class "stale response after write" bug does NOT recur here. Real
+  live finding, not this task's bug: native acc2 Bedrock Sonnet 4.5 currently rejects with
+  `...not available for channel program accounts...` — `LLMClient` correctly fell through to the
+  acc3 satellite, exactly as designed. Full detail: `docs/implementation-notes/
+  AA-449-t8-angle-gate.md`. **PR NOT merged yet** — carries migration 113 (already applied live
+  separately), needs Nghiep's manual look per this repo's own migration-PR convention. T9 (writing
+  the actual content from the chosen angle) is explicitly out of scope, no issue created yet.
 - AA-445-02 (23/08/2026) — B4 `CompetitorIndex`/`score_distinctiveness()`, DFS→T2, competitor UI.
   PR #199 merged (df19ec9), Deploy Dev run 32632513361 green, migration 111 applied live. Full
   live E2E verified: real tenant JWT (test-n1-flow) → real `POST /v1/competitors` add → real T2
@@ -152,7 +177,9 @@ Admin (frontend/app/admin/*, gated by requireAdmin() in frontend/app/api/admin/[
 Content-team-facing (frontend/app/(internal)/*): /catalog, /upload, /brand, /review — older
   route-group split from /admin/*, still live, not part of AA-384's scope.
 Tenant portal (frontend/app/(tenant)/portal/*): tenant-facing pipeline view, separate auth
-  (/tenant-login).
+  (/tenant-login). T-series routes: /portal/t0-brand, /portal/t1-rewrite, /portal/t4-pool,
+  /portal/t6-atoms (AA-431), /portal/t7-planning (AA-448), /portal/t8-angle-gate (AA-449). No
+  dedicated /portal/t3-* route — T3 is a badge on t4-pool, not its own page (ADR-2026-038 §0.1).
 API proxy convention: every /admin/* page calls same-origin /api/admin/[...path] (never the ECS
   API URL directly from the client) — that route attaches X-Admin-Secret + x-admin-user-id server-
   side after requireAdmin() verification. New admin pages MUST follow this, not fetch API_URL
@@ -168,7 +195,9 @@ acp_shared.*          → marketplace_portfolios (097, DEPRECATED as of AA-444/2
                         is a real FK into it; the tenant's live Marketplace view is now
                         GET /v1/marketplace, api/routers/v1_marketplace.py, see
                         docs/implementation-notes/AA-444-marketplace-view.md), tenant_atom_state
-                        + tenant_onboarding (098, N1 Gate A), acp_quota_ledger, audit_log
+                        + tenant_onboarding (098, N1 Gate A), acp_quota_ledger, audit_log,
+                        year_plan + quarter_plan/quarter_plan_version (092/112, T7),
+                        angle_gate_request/angle_gate_option (113, T8, AA-449)
 acp_contract.*        → tour_atoms (079; owner_scope was platform-only at 079, ADR-2026-038
                         Hướng B (21/08/2026) changed this to per-tenant — owner_scope=tenant_id
                         for tenant-rewritten-tour atoms (T5), owner_scope='platform' remains for
