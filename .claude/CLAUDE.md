@@ -1,16 +1,36 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 24/08/2026 (AA-450, PR #207 merged + deployed + real HTTP-verified) | main 9512d8a
-# latest migration: 115
+# Updated: 24/08/2026 (AA-451, PR #208 merged + deployed + real HTTP-verified) | main cc5fcf5
+# latest migration: 115 (AA-451 needed none — reused 096/103/114 as-is)
 # NOTE: ECS task def below is LIVE-VERIFIED as of 24/08/2026 (`aws ecs describe-services`, now
-# :131, post-AA-450 deploy). Deploy Prod # / Vercel Prod hash were NOT re-checked this session —
-# still treat those two specifically as unverified until a fresh check. AA-450's own new code
-# (services/acp_content_writing/*, api/routers/v1_content_writing.py) IS now deployed and real-
-# HTTP-verified through the actual domain — see its LIVE STATE entry below, full trace in
-# see docs/implementation-notes/AA-450-t9-content-writing.md "Live Verify".
+# :132, post-AA-451 deploy). Deploy Prod # / Vercel Prod hash were NOT re-checked this session —
+# still treat those two specifically as unverified until a fresh check. AA-451's own change
+# (services/acp_angle_gate/service.py::_compute_and_persist_slot_cta()) IS now deployed and real-
+# HTTP-verified through the actual domain (via ECS-internal localhost:8000) — see its LIVE STATE
+# entry below, full trace in docs/implementation-notes/AA-451.md "Post-merge / post-deploy record".
 
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway 4ylo382khg — corrected 22/08/2026,
   AA-432; `owq9as3wjl` was stale/no longer exists, confirmed via `aws apigateway get-rest-apis`)
+- AA-451 (24/08/2026) — T8's `create_request()` (`services/acp_angle_gate/service.py`) gains
+  optional `year`/`month`: when given and no slot is already persisted for
+  `(tenant, channel, atom)`, computes that tenant's month slot-grid with the SAME tenant-scoped
+  fetchers T7's `GET /v1/planning/slot-grid` uses (never `allocate_month()`'s platform-wide,
+  `owner_scope`-buggy fetchers — AA-445-02), persists it, and re-reads the real `cta_target` —
+  closes the gap AA-450/migration 114 documented (`angle_gate_request.cta` realistically always
+  NULL for real tenant self-service). T7's `GET /v1/planning/slot-grid` itself is UNCHANGED
+  (still pure read-only, deliberately — STEP0 confirmed this was AA-448's intentional design,
+  not an oversight); persistence is triggered only by real T8 usage, never by browsing. Nghiep
+  confirmed this design (Option B of 3 presented) before build. Backward compatible — `year`/
+  `month` omitted keeps prior behavior, T9's ask-the-tenant CTA fallback (422) untouched.
+  6 new tests, full suite 1910 collected/1844 passed, 0 new failures (28 pre-existing
+  live-DB-dependent failures confirmed identical on `main` before this change). Real post-deploy
+  HTTP-verified (24/08/2026, real tenant `test-n1-flow`, via ECS-internal localhost:8000): full
+  T7-finalize→T7-preview→T8-create(with year/month) lifecycle, `cta` came back as the tenant's
+  real trip URL (not NULL); DB-confirmed the `acp_v2_slots`/`acp_v2_runs` rows were actually
+  written; idempotency confirmed (repeat call, slot row count stayed 1); cross-tenant isolation
+  confirmed (`test-agency` cannot see `test-n1-flow`'s persisted slot). **PR #208 merged**
+  (`cc5fcf5`, squash), deployed live (task def `:132`). Full detail:
+  `docs/implementation-notes/AA-451.md`.
 - AA-449 (23/08/2026) — T8 Angle Gate, written fresh per ADR-2026-038 §0.5 (NO reuse of
   `acp_s4_social`). New `services/acp_angle_gate/` package + `api/routers/v1_angle_gate.py`
   (`/v1/angle-gate/*`, tenant-JWT-only) + `acp_shared.angle_gate_request`/`angle_gate_option`
@@ -127,8 +147,8 @@
   restored to its original state). `/docs`, `/openapi.json` (unaffected NONE-auth routes)
   still 200.
 - Frontend: https://aa-cis.lumiguides.it.com ✅ (Vercel — AA-103 production)
-- ECS task def: **aa-cis-dev-api:131** (live-verified 24/08/2026 via `aws ecs describe-services`,
-  post-AA-450 Deploy Dev, rolloutState COMPLETED) | main 9512d8a (PR #207 merged) | Vercel Prod
+- ECS task def: **aa-cis-dev-api:132** (live-verified 24/08/2026 via `aws ecs describe-services`,
+  post-AA-451 Deploy Dev, rolloutState COMPLETED) | main cc5fcf5 (PR #208 merged) | Vercel Prod
   hash unverified
 - AA-384 (this session): product-direction correction on AA-309/AA-330's posts_per_week/Mirror
   (posts_per_week is now a free tenant choice, migration 099 — see DB SCHEMA below; Mirror is
