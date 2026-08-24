@@ -145,7 +145,7 @@ class TestRunQualityGates:
         with patch.object(qg, "invoke_judge") as mock_judge:
             outcome = qg.run_quality_gates(
                 content_text="piece", atom_text="atom", cta=None, goal_key="promotion",
-                brand_rubric_text="rubric",
+                brand_rubric_text="rubric", channel="facebook",
             )
         assert outcome["passed"] is False
         assert outcome["first_failure"]["gate"] == "F6_cta_present"
@@ -160,7 +160,7 @@ class TestRunQualityGates:
         with patch.object(qg, "invoke_judge", side_effect=[_judge_raw(**f8_data), _judge_raw(**f9_data)]):
             outcome = qg.run_quality_gates(
                 content_text="A clean, specific piece about the trail.", atom_text="the trail",
-                cta="Book now", goal_key="promotion", brand_rubric_text="rubric",
+                cta="Book now", goal_key="promotion", brand_rubric_text="rubric", channel="facebook",
             )
         assert outcome["passed"] is True
         assert len(outcome["gate_ledger"]) == 6  # cta + grounding + banned + length + f8 + f9
@@ -173,7 +173,7 @@ class TestRunQualityGates:
         with patch.object(qg, "invoke_judge", side_effect=[_judge_raw(**f8_data), _judge_raw(**f9_data)]):
             outcome = qg.run_quality_gates(
                 content_text="This breathtaking view awaits you.", atom_text="a view",
-                cta="Book now", goal_key="promotion", brand_rubric_text="rubric",
+                cta="Book now", goal_key="promotion", brand_rubric_text="rubric", channel="facebook",
             )
         assert outcome["passed"] is False
         assert outcome["first_failure"]["gate"] == "F2_banned_patterns"

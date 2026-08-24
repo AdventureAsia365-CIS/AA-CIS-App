@@ -22,17 +22,24 @@ per the build task's own explicit 2-phase gate.
    (write ~9-31s, judge calls) all ran successfully without needing a restart or exhibiting the
    blocking behavior N7 hit.
 
-3. **T10 = 5 gates, not N7's full 9** (full mapping/reasoning:
-   `docs/claude_audit/AA-450-02-t10-gate-map.md`). F5/F3/F4/F7 removed as genuinely inapplicable
-   to T9's short single-channel content (same "no target to apply to" reasoning N7's own code
-   already documents for short-form channels); F6 split (CTA-missing → immediate non-repairable
-   hold, "CTA reflected in body" folded into the F9-equivalent judge's `cta_clear` field); F1/F2
-   adjusted to a single-atom, no-citation-tag shape; F8's rubric table extended to cover T8's 4
-   goals (SLAP/FAB/BAB/5W1H) N7's own `FRAMEWORK_RUBRICS` never covered, derived mechanically from
-   `goals.py`'s own `logic` field, not guessed; F9's rubric fields reuse N7's own real facebook
-   rubric (`brand_fit`/`cta_clear`/`human_read`) verbatim as the baseline across all 8 channels —
-   flagged, not oversold as final, per the same "extend from real failures" discipline N7's own
-   F9-social docstring documents.
+3. **T10 = 6 gates, not N7's full 9** (full mapping/reasoning:
+   `docs/claude_audit/AA-450-02-t10-gate-map.md`; **correction, AA-452**: this decision text
+   originally said "5 gates" — an undercount of the code even at the time, F4 was always
+   implemented as `F4_extreme_length` below; see `docs/claude_audit/AA-452-t10-nine-gates.md`).
+   F5/F3/F7 removed as genuinely inapplicable to T9's short single-channel content (same
+   "no target to apply to" reasoning N7's own code already documents for short-form channels —
+   **AA-452 later added these 3 back, scoped to `channel == 'blog'` only**, after finding
+   `channel_style.py`'s own `blog` entry describes exactly the H2/FAQ structure this reasoning
+   assumed didn't apply); F6 split (CTA-missing → immediate non-repairable hold, "CTA reflected
+   in body" folded into the F9-equivalent judge's `cta_clear` field); F1/F2 adjusted to a
+   single-atom, no-citation-tag shape (**AA-452**: `channel == 'blog'` is the one exception —
+   see that task's own notes for why); F4 lightened to an extreme-length-only sanity check (no
+   word-count band — no source document has per-channel numbers); F8's rubric table extended to
+   cover T8's 4 goals (SLAP/FAB/BAB/5W1H) N7's own `FRAMEWORK_RUBRICS` never covered, derived
+   mechanically from `goals.py`'s own `logic` field, not guessed; F9's rubric fields reuse N7's
+   own real facebook rubric (`brand_fit`/`cta_clear`/`human_read`) verbatim as the baseline
+   across all 8 channels — flagged, not oversold as final, per the same "extend from real
+   failures" discipline N7's own F9-social docstring documents.
 
 4. **A REAL, previously-undocumented gap found while wiring the CTA fix (build task §3)**:
    `services/acp_planning/tenant_pool.py`... no — the real finding is in `v1_planning.py`:
@@ -107,10 +114,12 @@ per the build task's own explicit 2-phase gate.
 
 ## Tradeoffs
 
-- T10's 5-gate stack (vs. N7's 9) is a real, documented reduction — flagged in the gate map, not
+- T10's 6-gate stack (vs. N7's 9) is a real, documented reduction — flagged in the gate map, not
   silently narrower. If real held-piece data later shows a pattern the removed gates would have
   caught (e.g. structural-variance-style AI-uniformity in a longer channel like `landing_page` or
   `blog`), that's a real follow-up, not something this task's own reasoning ruled out for good.
+  (**AA-452**: this follow-up materialized for `blog` sooner than expected — see
+  `docs/implementation-notes/AA-452-t10-nine-gates.md`.)
 - F9's rubric fields (`brand_fit`/`cta_clear`/`human_read`) are the SAME 3 fields for all 8
   channels, not channel-bespoke — explicitly flagged in the gate map as "may need updating with
   real data," the same caveat N7's own 2-channel version of this choice carries.
