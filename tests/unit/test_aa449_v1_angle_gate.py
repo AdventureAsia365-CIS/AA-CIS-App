@@ -38,7 +38,7 @@ class TestCreateRequest:
             v1_angle_gate.service, "create_request",
             new=AsyncMock(return_value={
                 "request_id": REQUEST_ID, "atom_id": "atom_1", "trip_id": None,
-                "channel": "facebook", "status": "pending_goal",
+                "channel": "facebook", "cta": None, "status": "pending_goal",
             }),
         ):
             result = await v1_angle_gate.create_request(body, _make_request(), tenant={"sub": TENANT_ID})
