@@ -118,6 +118,61 @@ this task — read before this file for the full reasoning behind every decision
   `asyncio.to_thread()` pattern — all unchanged, per the build task's explicit instruction not to
   touch them.
 
-## Live Verify
+## Live Verify (real AWS access, `aa365-admin`, real Bedrock + real RDS)
 
-(To be filled in after AWS access is available this session — MFA-gated, pending.)
+Same S3-mediated ECS exec + "overwrite the changed .py files directly onto the running
+`aa-cis-dev-api` container's disk" precedent AA-431/AA-448/AA-449/AA-450 established — does not
+restart uvicorn, so the new gate logic is NOT reachable via real HTTP this way (same documented
+limitation those tasks' own notes carry; verified function-level instead). Mid-session, an
+unrelated PR (AA-451, `#208`) merged to `main` and triggered a real "Deploy Dev" run, replacing
+the running task (`aa-cis-dev-api:131` → `:132`) — killed an in-progress verify attempt; rebased
+this branch onto the new `main` (clean, no conflicts — AA-451 only touches
+`services/acp_angle_gate/service.py`, which this task never touches) and re-verified against the
+new task. Full suite re-run post-rebase: 1585 passed (1579 + AA-451's own 6 new tests).
+
+**Step 1 — prompt compliance, 3 independent real Bedrock runs (`channel='blog'`, real atom
+`atom_0e9a4a62ed`, Southern Laos waterfalls)**: `has_h2=True has_faq=True tag_count>0` on all 3
+runs (tag_count 11/9/6) — the writer reliably produces real markdown `## ` H2 sections, a
+`## FAQ` section in the real `**Q: .../A: ...` format, and `[R:atom_id]` citation tags, without
+prompting drift across repeated generations. Confirmed reliable before writing any gate code
+against this markup, per the build task's own explicit ordering requirement.
+
+**Full lifecycle, real tenant (`test-n1-flow`), same real atom, split into 4 short exec calls
+(create→goal→choose→write) chained via the real `request_id`** — the ECS Exec/SSM session in
+this environment proved too flaky to hold open for a full multi-LLM-call lifecycle in one shot
+(the client-side connection would drop mid-call with `Cannot perform start session: EOF`, but
+the server-side work kept running and completing regardless — confirmed by DB state after each
+apparent drop); splitting into one exec call per workflow step, each redirecting to a file then
+`cat`-ing it back, sidestepped this reliably.
+
+- **`channel='blog'`**: `write_and_check()` → **all 9 gates ran**
+  (`["F6_cta_present","F1_grounding","F2_banned_patterns","F4_extreme_length","F5_atom_density",
+  "F3_structural_variance","F7_faq_dedup","F8_framework","F9_brand_voice"]`). Attempt 1 failed
+  `F4_extreme_length` (real content ran long); attempt 2 (after rewrite) still failed
+  `F1_grounding`/`F3_structural_variance`/`F7_faq_dedup` simultaneously → **held** after
+  exhausting `MAX_ATTEMPTS=2`, exactly as designed (a held piece here is a GOOD sign for this
+  verify — it proves the gates are evaluating real content critically, not rubber-stamping).
+  **`LEAK_CONTENT=False`, `LEAK_LEDGER=False`, `HELD_REASON` clean, independent `fetch_piece()`
+  re-check also `REFETCH_LEAK=False`** — zero `[R:`/`[F:` survived into the tenant-facing
+  `content_text`, the full `gate_ledger` (including `F1_grounding`'s own violation message,
+  which DOES quote a tagged excerpt internally before the scrub — confirmed this specific path
+  is covered, not just the common case), or `held_reason`, on REAL Bedrock output through the
+  REAL persist path — not just the unit tests' synthetic fixtures. `REFETCH_MATCHES=True`
+  (no AA-448-class stale-response bug).
+- **`channel='facebook'` (regression check)**: `write_and_check()` → **exactly the pre-existing
+  6 gates** (`["F6_cta_present","F1_grounding","F2_banned_patterns","F4_extreme_length",
+  "F8_framework","F9_brand_voice"]`, no F5/F3/F7) → attempt 1 failed a repairable gate, attempt 2
+  passed → **approved**. `LEAK_CONTENT=False`/`LEAK_LEDGER=False` (expected — no tag ever
+  produced for this channel, confirms `strip_citation_tags()` is a verified no-op here, not
+  untested dead code), `REFETCH_MATCHES=True`. Confirms AA-452 changed nothing observable for
+  the 7 non-blog channels.
+- **Cleanup**: both `angle_gate_request` rows deleted (cascades `angle_gate_option` +
+  `content_piece`); independently re-queried afterward — `0` remaining rows of either kind for
+  both request ids.
+
+**Not done this session**: real HTTP `/health`-during-`/write` concurrency check (needs the
+patched router live behind a real deploy — same documented pre-merge limitation AA-449/AA-450's
+own notes carry; the non-blocking `asyncio.to_thread()` pattern itself is unchanged from AA-450,
+which already verified it both via unit test and a real post-deploy HTTP `/health` check). A
+post-merge post-deploy pass (once this PR is merged and deployed) should repeat that specific
+check for the now-9-gate `blog` path, matching AA-450's own two-phase verify precedent.
