@@ -220,14 +220,8 @@ def _apply_schema(conn):
             ALTER COLUMN tenant_id SET DEFAULT '00000000-0000-0000-0000-000000000001';
     """)
 
-    # Add columns missing from webhook_deliveries schema
-    cur.execute("""
-        ALTER TABLE gold_aa_internal.webhook_deliveries
-            ADD COLUMN IF NOT EXISTS hmac_signature TEXT,
-            ADD COLUMN IF NOT EXISTS max_attempts INT DEFAULT 3;
-    """)
-
-    # Add columns missing from schema that ExportService + tests expect
+    # Add columns missing from schema — used by test_export_integration.py/test_pipeline_e2e.py
+    # (raw SQL, not the AA-454-removed ExportService, which was dead code with no real caller)
     cur.execute("""
         ALTER TABLE gold_aa_internal.published_tours
             ADD COLUMN IF NOT EXISTS slug TEXT,

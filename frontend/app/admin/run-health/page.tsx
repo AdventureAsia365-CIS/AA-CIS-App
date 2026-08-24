@@ -38,7 +38,6 @@ interface RunHealth {
   gate_statuses: Record<string, GateStatus>;
   evaluator_score: number | null;
   evaluator_warning: boolean;
-  retry_count: number;
   stuck: boolean;
 }
 

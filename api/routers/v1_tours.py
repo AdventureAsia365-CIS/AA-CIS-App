@@ -536,7 +536,7 @@ async def list_my_versions(
             SELECT ttv.id, ttv.version_number, ttv.status, ttv.quality_score,
                    ttv.edit_source, ttv.rewrite_language, ttv.created_at,
                    ttv.rewritten_content, ttv.qa_auto_passed,
-                   pt.id AS published_tour_id, pt.aa_name, pt.quality_score AS aa_quality,
+                   pt.id AS published_tour_id, pt.tour_id, pt.aa_name, pt.quality_score AS aa_quality,
                    rt.country, rt.duration
             FROM gold_aa_internal.tenant_tour_versions ttv
             JOIN gold_aa_internal.published_tours pt ON pt.id = ttv.published_tour_id

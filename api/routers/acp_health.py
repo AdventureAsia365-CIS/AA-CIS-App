@@ -288,7 +288,6 @@ async def get_run_health(
             "evaluator_warning": (
                 evaluator_score is not None and evaluator_score < EVALUATOR_SCORE_FLOOR
             ),
-            "retry_count":      0,  # UNIQUE(run_id, stage) — upserted in-place
             "stuck":            run_stuck,
         })
 
