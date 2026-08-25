@@ -1,17 +1,50 @@
 # AA-CIS-App — Claude Code Context
-# Updated: 24/08/2026 (AA-452, PR #210 merged + deployed + real HTTP-verified) | main d1f8ea0
-# latest migration: 115 (AA-452 needed none — no new DB column for the tagged intermediate text,
-# see its LIVE STATE entry below for why)
-# NOTE: ECS task def below is LIVE-VERIFIED as of 24/08/2026 (`aws ecs describe-services`, now
-# :133, post-AA-452 deploy). Deploy Prod # / Vercel Prod hash were NOT re-checked this session —
-# still treat those two specifically as unverified until a fresh check. AA-452's own new gates
-# (F3/F5/F7, channel='blog' only) + the tag-strip mechanism ARE now deployed and real-HTTP-
-# verified through the actual domain — see its LIVE STATE entry below, full trace in
-# docs/implementation-notes/AA-452-t10-nine-gates.md "Live Verify".
+# Updated: 25/08/2026 (AA-458, PR #219+#220 merged + deployed + real HTTP-verified) | main d45d130
+# latest migration: 117 (shared.tenant_integrations, AA-457 — per-tenant WordPress credential
+# pointer; AA-458 itself needed none, only read/wrote the existing publish_log/content_piece
+# tables from migrations 116/115)
+# NOTE: ECS task def below is LIVE-VERIFIED as of 25/08/2026 (`aws ecs describe-services`, now
+# :139, post-AA-458 deploy). Deploy Prod # / Vercel Prod hash were NOT re-checked this session —
+# still treat those two specifically as unverified until a fresh check. The full T7→T8→T9→T10→T11
+# tenant content pipeline is now built, deployed, and live-verified end-to-end — see AA-458's LIVE
+# STATE entry below, full trace in docs/implementation-notes/AA-458.md "Live Verify".
 
 ## LIVE STATE
 - API: https://api-cis.lumiguides.it.com ✅ (via API Gateway 4ylo382khg — corrected 22/08/2026,
   AA-432; `owq9as3wjl` was stale/no longer exists, confirmed via `aws apigateway get-rest-apis`)
+- **T7→T8→T9→T10→T11 tenant content pipeline: COMPLETE (25/08/2026)** — AA-456/457/459/460/458
+  closed the full chain. T11 = real, tenant-facing WordPress publish, blog-channel only (7 other
+  channels deferred, no code). `shared.tenant_integrations` (migration 117, AA-457) holds a
+  per-tenant WordPress site pointer; real credentials (URL + Application Password) live in
+  Secrets Manager (`acp/cms/{tenant_id}`), never plaintext in Postgres — `POST /v1/integrations/
+  wordpress` (save) + `/test` (test-connection, `GET {wp_url}/wp-json/wp/v2/users/me`). AA-460
+  fixed a real false-positive found live during AA-457's own verify: `test_wordpress()` used to
+  accept ANY `200` as success, including anti-bot/WAF HTML challenge pages — now requires
+  `content-type: application/json` AND a real WordPress-shaped body (`id` field) before reporting
+  success. AA-458 applied the identical lesson to the actual publish call itself
+  (`WordPressAdapter.create_post()`, `services/acp_s4_blog/cms/wordpress.py`) — requires `id` AND
+  `link` in a real JSON response before writing `publish_log status='published'`; anything else
+  (including a 200 HTML page) writes `status='failed'` with a clear `last_error`, never a
+  fabricated success. `GET /v1/publish-log/pending` + `POST /v1/publish-log/{piece_id}/publish`
+  (api/routers/v1_publish.py) are the tenant-facing list/publish endpoints — ownership + `status=
+  'approved'` + `channel='blog'` all checked, 422 "Connect WordPress to publish" when no
+  integration exists. `/portal/t11-publish` (frontend) is the standalone route (Sidebar NAV1,
+  "Publish") — connect form when not connected, pending-content list + per-piece Publish button
+  otherwise. A4's force-unpublish (`admin_a4.py`, from AA-455) is the safety net — no admin
+  pre-approval gates T11's own auto-publish (ADR-2026-038 §0.2), by design.
+  **Known, real, non-blocking gap**: neither AA-460's nor AA-458's live-verify could get a
+  genuine successful publish against the real test site `aa-wordpress.rf.gd` specifically — that
+  free host's (InfinityFree) anti-bot layer challenges every non-browser HTTP client
+  unconditionally regardless of credentials, confirmed structural and persistent across both
+  sessions (a real Playwright browser sails through it fine — used successfully for Application
+  Password creation/revocation both times). The negative-path guarantee (never report success on
+  a page that isn't really WordPress) is thoroughly live-proven either way; the positive path
+  (real WordPress JSON → real published row) is proven by deterministic unit test only
+  (`test_create_post_success_real_wp_response`) — needs either a non-anti-bot-gated test site or
+  time for this one's escalation to lapse to close live. Full detail (this task's own trace):
+  `docs/implementation-notes/AA-458.md`. AA-456/457/459/460's own session notes live only in
+  `docs/claude_audit/` (gitignored, not committed) — not re-derivable from this repo checkout,
+  see their respective Linear issues for the full record instead.
 - AA-452 (24/08/2026) — T10 extended from 6 gates to the full F1-F9 set (F3 structural variance/
   F5 atom density/F7 FAQ dedup added), scoped to `channel == 'blog'` only — the other 7 channels
   keep the exact 6-gate stack AA-450 shipped, unchanged. STEP0 correction (this task's own
