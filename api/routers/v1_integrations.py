@@ -216,7 +216,12 @@ async def test_wordpress(request: Request, tenant=Depends(get_tenant)):
 
     try:
         creds = _get_secret(row["secret_key"])
-    except ClientError:
+    except ClientError as exc:
+        # AA-457 live-verify (24/08/2026) hit this path via a real, unrelated IAM gap
+        # (ECS task role missing secretsmanager:CreateSecret) and this branch logged nothing,
+        # making the 502 hard to diagnose from CloudWatch alone — logging added after that.
+        logger.error("integration_secret_read_failed", tenant_id=tenant_id,
+                     secret_key=row["secret_key"], error=str(exc))
         raise HTTPException(status_code=502, detail="Could not read saved credentials — try reconnecting")
 
     try:

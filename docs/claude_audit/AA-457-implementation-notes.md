@@ -110,6 +110,40 @@ build.
   live in this session; worth a quick real re-save check whenever Nghiep does the real-WordPress
   verify pass, since it's cheap to add to that same session.
 
+## ⚠️ REAL BLOCKING FINDING — ECS task role cannot write to Secrets Manager
+
+**`POST /v1/integrations/wordpress` (the save endpoint) is currently broken for every real
+tenant, deployed and confirmed live.** Root cause, confirmed via CloudWatch
+(`/ecs/aa-cis-dev`):
+
+```
+AccessDeniedException: User: arn:aws:sts::005097885195:assumed-role/aa-cis-dev-ecs-task-role/...
+is not authorized to perform: secretsmanager:CreateSecret on resource: acp/cms/{tenant_id}
+```
+
+The task's own IAM policy (`aa-cis-dev-ecs-task-policy`, checked live via `aws iam
+get-role-policy`) grants `secretsmanager:GetSecretValue` (Resource: `*`) only — every existing
+Secrets Manager use in this codebase (RDS creds, DataForSEO, Anthropic key, image-sourcer API
+keys) is **read-only against secrets an admin/Terraform already created ahead of time**. This is
+the first code path in this app that ever needs to **write a new secret at runtime**, and the
+task role was never granted that. Not a code bug — `_put_secret()` and the create-or-update
+fallback logic are correct (unit-tested, and the fallback path itself — `put_secret_value` after
+a `ResourceExistsException` — was exercised for real once the secret existed, see below).
+
+**Fix needed (out of scope for this PR — this repo, `AA-CIS-App`, doesn't own IAM policy;
+that's Terraform in `AA-CIS-Infra`)**: add `secretsmanager:CreateSecret`,
+`secretsmanager:PutSecretValue`, and likely `secretsmanager:TagResource` to
+`aa-cis-dev-ecs-task-policy`, ideally scoped to `arn:aws:secretsmanager:us-west-1:005097885195:
+secret:acp/cms/*` (tighter than the existing `Resource: "*"` on the read permission — a fresh
+addition is a reasonable place to start least-privilege rather than copying the looser existing
+pattern). **This must be applied and re-verified before AA-458 (T11 PR2) can do anything useful**
+— PR2's whole premise is publishing against a tenant's saved credentials, and no tenant can save
+credentials right now.
+
+Did not attempt to grant this permission myself (mutating a live IAM role is exactly the kind of
+hard-to-reverse, shared-system action this session's own operating principles say to surface and
+confirm rather than do unilaterally) — flagging for Nghiep instead.
+
 ## Live Verify
 
 ### Group 1 — verified live this session (no real WordPress site needed)
@@ -117,14 +151,46 @@ build.
 - **Migration**: applied cleanly to dev RDS via the S3-mediated ECS exec pattern.
   `shared.schema_versions` row confirmed (`version='117'`), all 9 real columns confirmed via
   `information_schema.columns`.
-- *(Filled in after merge + deploy — see the post-merge/post-deploy record for the full
-  real-HTTP trace: save with a fake-but-syntactically-valid domain, Secrets Manager verified via
-  `aws secretsmanager get-secret-value` showing the real JSON with no plaintext leak elsewhere,
-  DB row confirmed holding only `site_url` + the secret's key name; test-connection against a
-  non-existent domain confirmed a real DNS failure classified correctly; SSRF validation confirmed
-  rejecting `localhost`/`127.0.0.1`/a private-range IP before any outbound call; cross-tenant
-  isolation confirmed on both `GET` and `POST`; FE connect flow confirmed working end-to-end
-  through a real tenant session with the fake domain, Secrets Manager re-checked after.)*
+- **SSRF validation**: real HTTP `POST /v1/integrations/wordpress` against
+  `https://api-cis.lumiguides.it.com` with `localhost`, `127.0.0.1`, `192.168.1.5`, and
+  `169.254.169.254` (the cloud-metadata SSRF classic) — all rejected `422` before any outbound
+  call; `http://` (non-https) also rejected `422`.
+- **Save endpoint**: confirmed **broken** by the IAM gap above (`502`), live, for a real tenant —
+  see the blocking finding. Could not complete this specific check as originally planned (verify
+  Secrets Manager via the app's own save path) because of it.
+- **Secrets Manager + DB isolation, verified via a workaround**: since the app's own save() is
+  blocked, manually created the secret (via this session's own elevated `aa365-admin` CLI
+  credentials, NOT the ECS task role) and the matching `tenant_integrations` DB row directly, to
+  still real-verify everything downstream of save(). Confirmed: `SELECT *` on the seeded row
+  contains no trace of the app_password or username string anywhere (`'test app pw' in row` →
+  `False`); `config` holds only `{"site_url": ...}`; `secret_key` holds only the key name
+  `acp/cms/{tenant_id}`.
+- **Test-connection against a real non-existent domain**: `POST
+  /v1/integrations/wordpress/test` → real DNS failure, correctly classified
+  (`"Could not connect to this WordPress site — check the URL"`), `last_verified_at` stayed
+  `null`, `last_verify_error` set, `success: false`. This exercised the endpoint's actual network
+  code path for real, exactly as the task's own instruction called for.
+- **Cross-tenant isolation**: `GET`/`POST` as tenant B (`wanderlux-travel`, a real *active*
+  tenant — deliberately not the same stale/deactivated test tenant AA-455's session initially
+  mis-picked) never saw tenant A's connected status; `POST .../test` as tenant B 404'd
+  ("WordPress is not connected yet") since B has no row of its own — no cross-tenant leak on
+  either read or write path.
+- **Frontend, real browser session (Playwright/Chromium against the real
+  `https://aa-cis.lumiguides.it.com`)**: tenant auth in this app needs two cookies together
+  (`cis_tenant_token` + `cis_role=tenant`) — middleware.ts checks `cis_role` against
+  `PROTECTED_ROUTES` *before* it even looks at the JWT; a first attempt with only the token
+  cookie 307'd to `/tenant-login`, fixed once both cookies were set. Confirmed real end-to-end:
+  connected tenant sees the status card + real content_piece-placeholder skeleton, clicking "Test
+  connection" surfaces the real DNS-failure message in the UI; an unconnected tenant sees the
+  inline connect form, submitting it correctly surfaces the real backend `502` from the IAM gap
+  (confirms the FE's own error-handling path is correct, independent of the backend issue); the
+  standalone `/portal/t11-publish/connection` page loads, its "Change credentials" toggle reveals
+  the same shared form.
+- **Cleanup**: all seeded test data removed after — `tenant_integrations` row deleted (0 rows
+  remaining), the manually-created secret force-deleted without a recovery window. A small
+  logging gap found live (the `_get_secret()` failure branch in `test_wordpress` logged nothing,
+  making the very 502 above hard to diagnose from CloudWatch alone) was fixed in this same PR —
+  see `v1_integrations.py`'s `integration_secret_read_failed` log line.
 
 ### Group 2 — NOT verified, requires a real WordPress site (Nghiep to provide)
 
