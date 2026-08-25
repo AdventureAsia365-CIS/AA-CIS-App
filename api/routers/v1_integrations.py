@@ -186,11 +186,18 @@ async def save_wordpress(body: SaveWordPressRequest, request: Request, tenant=De
     return _row_to_status(row)
 
 
-def _classify_test_failure(status: Optional[int], exc: Optional[Exception]) -> str:
+def _classify_test_failure(status: Optional[int], exc: Optional[Exception], invalid_200_body: bool = False) -> str:
     if status == 401:
         return "Wrong username or application password"
     if status == 404:
         return "WordPress REST API is not enabled on this site"
+    if status == 200 and invalid_200_body:
+        # AA-460: a 200 with the wrong shape/content-type is real and common — WAF/anti-bot
+        # challenge pages, maintenance pages, and misconfigured catch-all routes all return
+        # 200 at arbitrary paths. Live-verify (AA-457-02) confirmed this exact case: InfinityFree's
+        # anti-bot layer returns 200/text-html for every request, previously misread as success
+        # for correct AND wrong AND garbage credentials alike.
+        return "Unexpected response from this URL — verify it's a WordPress site with REST API enabled"
     if status is not None:
         return f"WordPress returned an unexpected response (HTTP {status})"
     return "Could not connect to this WordPress site — check the URL"
@@ -231,16 +238,34 @@ async def test_wordpress(request: Request, tenant=Depends(get_tenant)):
 
     status_code: Optional[int] = None
     error: Optional[Exception] = None
+    invalid_200_body = False
     try:
         auth = aiohttp.BasicAuth(creds["username"], creds["app_password"])
         async with aiohttp.ClientSession(timeout=_TEST_TIMEOUT) as session:
             async with session.get(f"{wp_url}/wp-json/wp/v2/users/me", auth=auth) as resp:
                 status_code = resp.status
+                if status_code == 200:
+                    # AA-460: status 200 alone doesn't mean this is real WordPress — a WAF/
+                    # anti-bot challenge page, a maintenance page, or a misconfigured catch-all
+                    # route can all return 200 at this exact path (confirmed live, AA-457-02:
+                    # InfinityFree's anti-bot layer did exactly this for every credential tried,
+                    # correct and wrong alike). Require content-type + real WordPress user-object
+                    # shape (an "id" field) before trusting it.
+                    content_type = resp.headers.get("content-type", "")
+                    body_text = await resp.text()
+                    parsed_body = None
+                    if content_type.startswith("application/json"):
+                        try:
+                            parsed_body = json.loads(body_text)
+                        except (json.JSONDecodeError, ValueError):
+                            parsed_body = None
+                    if not (isinstance(parsed_body, dict) and "id" in parsed_body):
+                        invalid_200_body = True
     except Exception as exc:  # noqa: BLE001 — classified below, any network failure lands here
         error = exc
 
-    success = status_code == 200
-    message = None if success else _classify_test_failure(status_code, error)
+    success = status_code == 200 and not invalid_200_body
+    message = None if success else _classify_test_failure(status_code, error, invalid_200_body)
 
     async with pool.acquire() as conn:
         if success:
