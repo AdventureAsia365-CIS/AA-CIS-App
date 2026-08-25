@@ -1,11 +1,17 @@
 """
 WordPress REST API v2 adapter — PRD v1.0 Q7.
 Auth: Application Password (WP 5.6+, base64 Basic auth).
-Posts always created as 'draft' — human publishes manually (PRD v1.0 Q6, Q10).
+
+AA-458: `content.status` (BlogContent's own field, previously declared but never read — this
+adapter used to hardcode the literal string "draft" regardless) now controls the real WordPress
+post status. Existing callers (services/acp_s4_blog/cms/publisher.py) never set `status`
+explicitly, so they keep getting BlogContent's own default ("draft") — zero behavior change for
+that pipeline. api/routers/v1_publish.py (AA-458's real publish endpoint) is the first caller to
+pass `status="publish"`.
 """
 import base64
+import json
 import logging
-from typing import Optional
 
 import aiohttp
 
@@ -30,7 +36,7 @@ class WordPressAdapter(CMSAdapter):
             "title": content.seo_title or content.title,
             "content": content.content_html,
             "slug": content.slug,
-            "status": "draft",
+            "status": content.status,
             "meta": {
                 "_yoast_wpseo_title": content.seo_title,
                 "_yoast_wpseo_metadesc": content.seo_meta,
@@ -43,14 +49,34 @@ class WordPressAdapter(CMSAdapter):
                 json=payload,
                 headers=self._headers(),
             ) as resp:
-                if resp.status not in (200, 201):
-                    body = await resp.text()
-                    raise RuntimeError(f"WP API {resp.status}: {body[:300]}")
-                data = await resp.json()
+                status_code = resp.status
+                content_type = resp.headers.get("content-type", "")
+                body_text = await resp.text()
+
+        if status_code not in (200, 201):
+            raise RuntimeError(f"WP API {status_code}: {body_text[:300]}")
+
+        # AA-460 lesson, applied here for the same reason: a 200/201 status alone doesn't mean
+        # this is a real WordPress post response — a WAF/anti-bot challenge page, a maintenance
+        # page, or a misconfigured catch-all route can all return a 2xx at this exact path.
+        # Require content-type + real WordPress post shape (both "id" and "link") before trusting
+        # it — anything else raises, so the caller (v1_publish.py) records a real 'failed'
+        # publish_log row instead of a false 'published' one with fabricated external_id/url.
+        parsed_body = None
+        if content_type.startswith("application/json"):
+            try:
+                parsed_body = json.loads(body_text)
+            except (json.JSONDecodeError, ValueError):
+                parsed_body = None
+
+        if not (isinstance(parsed_body, dict) and "id" in parsed_body and "link" in parsed_body):
+            raise RuntimeError(
+                f"WP API returned an unexpected response (not a real WordPress post): {body_text[:300]}"
+            )
 
         return CMSPostResult(
-            post_id=data["id"],
-            post_url=data["link"],
-            status=data["status"],
+            post_id=parsed_body["id"],
+            post_url=parsed_body["link"],
+            status=parsed_body.get("status", content.status),
             cms_type="wordpress",
         )
