@@ -175,14 +175,20 @@ def _wp_row():
             "secret_key": f"acp/cms/{TENANT['sub']}"}
 
 
-def _mock_aiohttp_session(status: int | None, raise_exc: Exception | None = None):
-    """Build a mock replacing aiohttp.ClientSession() so session.get(...).status is controllable."""
+def _mock_aiohttp_session(status: int | None, raise_exc: Exception | None = None,
+                           content_type: str = "application/json", body_text: str = ""):
+    """Build a mock replacing aiohttp.ClientSession() so session.get(...).status/headers/text()
+    are all controllable — AA-460 needs headers+body, not just status, to test the real
+    content-validation fix (a bare status mock can no longer stand in for "a real WordPress
+    response", exactly the gap that let the false-positive bug through in the first place)."""
     resp_ctx = AsyncMock()
     if raise_exc:
         resp_ctx.__aenter__ = AsyncMock(side_effect=raise_exc)
     else:
         mock_resp = MagicMock()
         mock_resp.status = status
+        mock_resp.headers = {"content-type": content_type}
+        mock_resp.text = AsyncMock(return_value=body_text)
         resp_ctx.__aenter__ = AsyncMock(return_value=mock_resp)
     resp_ctx.__aexit__ = AsyncMock(return_value=False)
 
@@ -212,9 +218,10 @@ async def test_test_wordpress_success_sets_last_verified_at():
     pool.acquire = MagicMock(return_value=ctx)
     req = _make_request(pool)
 
+    wp_user_json = json.dumps({"id": 1, "name": "admin", "slug": "admin"})
     with patch.object(mod, "_get_secret", return_value={
             "wp_url": "https://example-tenant-blog.com", "username": "admin", "app_password": "pw"}), \
-         patch("aiohttp.ClientSession", _mock_aiohttp_session(200)):
+         patch("aiohttp.ClientSession", _mock_aiohttp_session(200, body_text=wp_user_json)):
         result = await mod.test_wordpress(req, TENANT)
 
     assert result["success"] is True
@@ -277,3 +284,101 @@ async def test_test_wordpress_connection_error_classified_as_unreachable():
 
     assert result["success"] is False
     assert "Could not connect" in result["last_verify_error"]
+
+
+# ── AA-460 — false-positive regression: a 200 that isn't real WordPress JSON ────
+
+@pytest.mark.asyncio
+async def test_test_wordpress_200_html_anti_bot_page_is_not_success():
+    """The exact bug found live in AA-457-02: InfinityFree's anti-bot challenge page returns
+    200/text-html for every request, previously misread as a successful connection."""
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(side_effect=[_wp_row(), {
+        "config": json.dumps({"site_url": "https://aa-wordpress.rf.gd"}),
+        "connected_at": None, "last_verified_at": None,
+        "last_verify_error": "Unexpected response from this URL — verify it's a WordPress site with REST API enabled",
+    }])
+    ctx = AsyncMock()
+    ctx.__aenter__ = AsyncMock(return_value=conn)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    pool = MagicMock()
+    pool.acquire = MagicMock(return_value=ctx)
+    req = _make_request(pool)
+
+    anti_bot_html = '<html><body><script src="/aes.js"></script></body></html>'
+    with patch.object(mod, "_get_secret", return_value={
+            "wp_url": "https://aa-wordpress.rf.gd", "username": "admin", "app_password": "correct"}), \
+         patch("aiohttp.ClientSession", _mock_aiohttp_session(200, content_type="text/html", body_text=anti_bot_html)):
+        result = await mod.test_wordpress(req, TENANT)
+
+    assert result["success"] is False
+    assert "Unexpected response" in result["last_verify_error"]
+    # last_verified_at must NOT be assigned — same anti-false-success-on-failure guarantee
+    update_sql = conn.fetchrow.call_args_list[1][0][0]
+    set_clause = update_sql.split("WHERE")[0]
+    assert "last_verified_at =" not in set_clause
+
+
+@pytest.mark.asyncio
+async def test_test_wordpress_200_json_but_missing_id_field_is_not_success():
+    """content-type is real JSON but the body doesn't have WordPress's user-object shape —
+    still must not be treated as success (e.g. a JSON API that isn't WordPress at all)."""
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(side_effect=[_wp_row(), {
+        "config": json.dumps({"site_url": "https://example-tenant-blog.com"}),
+        "connected_at": None, "last_verified_at": None, "last_verify_error": "Unexpected response...",
+    }])
+    ctx = AsyncMock()
+    ctx.__aenter__ = AsyncMock(return_value=conn)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    pool = MagicMock()
+    pool.acquire = MagicMock(return_value=ctx)
+    req = _make_request(pool)
+
+    with patch.object(mod, "_get_secret", return_value={
+            "wp_url": "https://example-tenant-blog.com", "username": "admin", "app_password": "pw"}), \
+         patch("aiohttp.ClientSession", _mock_aiohttp_session(
+             200, content_type="application/json", body_text=json.dumps({"status": "ok"}))):
+        result = await mod.test_wordpress(req, TENANT)
+
+    assert result["success"] is False
+
+
+@pytest.mark.asyncio
+async def test_test_wordpress_200_malformed_json_is_not_success():
+    """content-type claims JSON but the body doesn't actually parse — must not crash, must not
+    report success."""
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(side_effect=[_wp_row(), {
+        "config": json.dumps({"site_url": "https://example-tenant-blog.com"}),
+        "connected_at": None, "last_verified_at": None, "last_verify_error": "Unexpected response...",
+    }])
+    ctx = AsyncMock()
+    ctx.__aenter__ = AsyncMock(return_value=conn)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    pool = MagicMock()
+    pool.acquire = MagicMock(return_value=ctx)
+    req = _make_request(pool)
+
+    with patch.object(mod, "_get_secret", return_value={
+            "wp_url": "https://example-tenant-blog.com", "username": "admin", "app_password": "pw"}), \
+         patch("aiohttp.ClientSession", _mock_aiohttp_session(
+             200, content_type="application/json", body_text="{not valid json")):
+        result = await mod.test_wordpress(req, TENANT)
+
+    assert result["success"] is False
+
+
+def test_classify_test_failure_200_invalid_body_has_dedicated_message():
+    msg = mod._classify_test_failure(200, None, invalid_200_body=True)
+    assert "Unexpected response" in msg
+    assert "REST API" in msg
+
+
+def test_classify_test_failure_200_valid_body_flag_never_reached():
+    """Sanity: a genuinely successful 200 never reaches _classify_test_failure at all (the
+    caller only calls it when success is False) — this just confirms the function itself
+    doesn't misclassify a default invalid_200_body=False + status=200 combination, which
+    would only happen if a caller misused it."""
+    msg = mod._classify_test_failure(200, None, invalid_200_body=False)
+    assert msg == "WordPress returned an unexpected response (HTTP 200)"
