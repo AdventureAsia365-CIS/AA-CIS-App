@@ -1,14 +1,21 @@
 """
-services.acp_content_writing.service — T9 + T10-inline orchestration, single endpoint
-(Nghiep's confirmed architecture after Phase 1 — docs/claude_audit/
-AA-450-01-t9-t10-retry-loop-investigation.md).
+services.acp_content_writing.service — T9 + T10-inline orchestration.
 
-`write_and_check()` is the ONE function the router calls: write (T9) -> check (T10, 5 gates) ->
-on a repairable failure, rewrite once with specific feedback and check again -> persist the
-final `content_piece` row (status='approved' or 'held') -> return. Max 2 total write attempts,
-confirmed cap (Phase 1 §2c's real N7 convergence data: judge-class checks converge on repair
-only 2.5%-14.6% of the time — a low cap is better supported by that data than N7's own 3-8
-round range, which was calibrated for a background job with no tenant waiting on it).
+AA-466: /write is now 202 Accepted + poll (real API Gateway 504s on long LLM+T10 runs,
+AA-453/465 — up to 2 attempts x (1 write/rewrite LLM call + 1 T10 gate check) could run ~89s).
+`start_write()` does everything that was always fast/no-LLM (fetch+validate the request,
+resolve goal/channel/brand/atom/trip context, insert a `content_piece` placeholder row with
+status='processing') and is awaited synchronously by the router — same 404/409/422 error
+contract as before. `run_write_background()` is the part that was always slow (the write/rewrite
++ T10-check loop) — launched via `asyncio.create_task()` by the router (strong-ref pattern, see
+that file) and updates the SAME placeholder row in place when done. The write/check loop body
+itself is UNCHANGED from the pre-AA-466 single-function version — only the HTTP/persistence
+layer around it moved.
+
+Max 2 total write attempts, confirmed cap (Phase 1 §2c's real N7 convergence data: judge-class
+checks converge on repair only 2.5%-14.6% of the time — a low cap is better supported by that
+data than N7's own 3-8 round range, which was calibrated for a background job with no tenant
+waiting on it).
 
 Every blocking LLM call (write, rewrite, and quality_gates.py's 2 judge gates) runs inside
 `asyncio.to_thread()` from the very first version of this module — not patched in after an
@@ -77,11 +84,15 @@ def _held_reason_from(first_failure: dict) -> str:
     return f"{first_failure['gate']}: {'; '.join(first_failure['violations'][:3])}"
 
 
-async def write_and_check(
+async def start_write(
     tenant_id: UUID, request_id: UUID, pool, cta_override: Optional[str] = None,
 ) -> dict:
-    """The single endpoint's whole logic. Raises RequestNotReadyError / MissingCTAError /
-    angle_gate_service.RequestNotFoundError — the router maps each to an HTTP status."""
+    """Fast pre-flight (no LLM call) — everything write_and_check() used to do before its
+    write/check loop. Raises RequestNotReadyError / MissingCTAError /
+    angle_gate_service.RequestNotFoundError — the router maps each to an HTTP status, UNCHANGED
+    from the pre-AA-466 synchronous contract for these specific conditions. On success, inserts
+    the `content_piece` placeholder row (status='processing') and returns it — the router
+    returns this as the 202 body, then launches run_write_background() with the piece_id."""
     req = await angle_gate_service.fetch_request(tenant_id, request_id, pool)
     if req["status"] != "approved":
         raise RequestNotReadyError(
@@ -122,95 +133,155 @@ async def write_and_check(
     async with pool.acquire() as conn:
         brand_rubric_text = await fetch_brand_rubric_text(conn, str(tenant_id))
 
-    total_cost = 0.0
-    content_text: str = ""
-    gate_ledger: list[dict] = []
-    repair_log: list[dict] = []
-    status = "held"
-    held_reason = "unreachable"  # overwritten every branch below; kept non-None for mypy/clarity
+    piece = await _insert_placeholder_piece(pool, tenant_id=tenant_id, request_id=request_id)
 
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-        if attempt == 1:
-            content_text, cost = await asyncio.to_thread(
-                write_content, content_seed=atom_text, goal=goal, channel_style=channel_style,
-                brand_audience=brand_audience, angle=chosen, cta=cta,
-                destination=destination, trip_name=trip_name, atom_id=req["atom_id"],
-            )
-        else:
-            content_text, cost = await asyncio.to_thread(
-                rewrite_with_feedback, content_seed=atom_text, goal=goal, channel_style=channel_style,
-                brand_audience=brand_audience, angle=chosen, cta=cta,
-                revision_feedback=repair_log[-1]["violations"],
-                destination=destination, trip_name=trip_name, atom_id=req["atom_id"],
-            )
-        total_cost += cost
+    context = {
+        "atom_text": atom_text, "goal": goal, "channel_style": channel_style,
+        "brand_audience": brand_audience, "chosen": chosen, "cta": cta,
+        "destination": destination, "trip_name": trip_name,
+        "brand_rubric_text": brand_rubric_text, "channel": req["channel"],
+        "atom_id": req["atom_id"],
+    }
+    return {"piece": piece, "context": context}
 
-        outcome = await asyncio.to_thread(
-            run_quality_gates, content_text=content_text, atom_text=atom_text, cta=cta,
-            goal_key=goal["key"], brand_rubric_text=brand_rubric_text, channel=req["channel"],
+
+async def _insert_placeholder_piece(pool, *, tenant_id: UUID, request_id: UUID) -> dict:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO acp_shared.content_piece
+                (tenant_id, angle_gate_request_id, attempt_number, content_text, status)
+            VALUES ($1, $2, 1, '', 'processing')
+            RETURNING piece_id, tenant_id, angle_gate_request_id, attempt_number, content_text,
+                      status, held_reason, gate_ledger, repair_log, created_at
+            """,
+            tenant_id, request_id,
         )
-        gate_ledger = outcome["gate_ledger"]
+    return _row_to_dict(row)
 
-        if outcome["passed"]:
-            status, held_reason = "approved", None
-            break
 
-        first_failure = outcome["first_failure"]
-        repair_log.append({
-            "attempt": attempt, "gate_targeted": first_failure["gate"],
-            "violations": first_failure["violations"], "repairable": first_failure["repairable"],
-        })
+async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, pool) -> None:
+    """The write/rewrite + T10-check loop — UNCHANGED body from the pre-AA-466 single-function
+    write_and_check(), just reading its inputs from `context` (built by start_write()) instead
+    of local variables, and calling `_finalize_piece()` (an UPDATE by piece_id) instead of
+    `_persist_piece()` (an INSERT). Launched via `asyncio.create_task()` + strong-ref (see
+    api/routers/v1_content_writing.py) — same GC-safety pattern api/routers/v1_tours.py's
+    `trigger_rewrite()` already established (AA-425), not the bare `asyncio.create_task()`
+    v1_s4_blog.py uses. Any uncaught exception here means the background task itself failed
+    (Bedrock throttle, network error, anything) BEFORE producing real content — written back as
+    status='failed', distinct from status='held' (a real, complete, gate-blocked outcome with
+    real content_text) — see migration 118's header for why these must not be conflated."""
+    atom_text, goal, channel_style = context["atom_text"], context["goal"], context["channel_style"]
+    brand_audience, chosen, cta = context["brand_audience"], context["chosen"], context["cta"]
+    destination, trip_name = context["destination"], context["trip_name"]
+    brand_rubric_text, channel, atom_id = context["brand_rubric_text"], context["channel"], context["atom_id"]
+
+    attempt = 1  # bound before the try block so the except handler always has a real value
+    try:
+        total_cost = 0.0
+        content_text: str = ""
+        gate_ledger: list[dict] = []
+        repair_log: list[dict] = []
+        status = "held"
+        held_reason = "unreachable"  # overwritten every branch below; kept non-None for mypy/clarity
+
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            if attempt == 1:
+                content_text, cost = await asyncio.to_thread(
+                    write_content, content_seed=atom_text, goal=goal, channel_style=channel_style,
+                    brand_audience=brand_audience, angle=chosen, cta=cta,
+                    destination=destination, trip_name=trip_name, atom_id=atom_id,
+                )
+            else:
+                content_text, cost = await asyncio.to_thread(
+                    rewrite_with_feedback, content_seed=atom_text, goal=goal, channel_style=channel_style,
+                    brand_audience=brand_audience, angle=chosen, cta=cta,
+                    revision_feedback=repair_log[-1]["violations"],
+                    destination=destination, trip_name=trip_name, atom_id=atom_id,
+                )
+            total_cost += cost
+
+            outcome = await asyncio.to_thread(
+                run_quality_gates, content_text=content_text, atom_text=atom_text, cta=cta,
+                goal_key=goal["key"], brand_rubric_text=brand_rubric_text, channel=channel,
+            )
+            gate_ledger = outcome["gate_ledger"]
+
+            if outcome["passed"]:
+                status, held_reason = "approved", None
+                break
+
+            first_failure = outcome["first_failure"]
+            repair_log.append({
+                "attempt": attempt, "gate_targeted": first_failure["gate"],
+                "violations": first_failure["violations"], "repairable": first_failure["repairable"],
+            })
+            logger.info(
+                "t9_attempt_failed_quality_check", request_id=str(request_id), attempt=attempt,
+                gate=first_failure["gate"], repairable=first_failure["repairable"],
+            )
+
+            if not first_failure["repairable"] or attempt >= MAX_ATTEMPTS:
+                status, held_reason = "held", _held_reason_from(first_failure)
+                break
+
+        # AA-452 — mandatory, tenant-facing-leak-prevention step: strip every [R:atom_id]/[F:id]
+        # citation tag (channel='blog' only ever produces one, prompts.py's _BLOG_FORMAT_INSTRUCTIONS)
+        # from content_text AND from every gate_ledger/repair_log violation string (a gate's own
+        # violation message can itself quote a tagged excerpt — see quality_gates.gate_grounding()'s
+        # own comment) BEFORE this piece is persisted or returned, regardless of status ('approved'
+        # or 'held' both go through this — a held piece is still fully visible to the tenant per
+        # _hold()'s own "hold VISIBLE, never silent" precedent, so a held piece leaking a raw tag
+        # would be exactly as real a leak as an approved one). Runs unconditionally for every
+        # channel — a no-op for the 7 that never produce a tag, real for blog.
+        content_text = strip_citation_tags(content_text)
+        gate_ledger = deep_strip_citation_tags(gate_ledger)
+        repair_log = deep_strip_citation_tags(repair_log)
+        if held_reason:
+            held_reason = strip_citation_tags(held_reason)
+
+        await _finalize_piece(
+            pool, piece_id=piece_id, attempt_number=attempt,
+            content_text=content_text, status=status, held_reason=held_reason,
+            gate_ledger=gate_ledger, repair_log=repair_log,
+        )
         logger.info(
-            "t9_attempt_failed_quality_check", request_id=str(request_id), attempt=attempt,
-            gate=first_failure["gate"], repairable=first_failure["repairable"],
+            "t9_write_and_check_done", request_id=str(request_id), status=status,
+            attempts=attempt, cost_usd=total_cost,
         )
-
-        if not first_failure["repairable"] or attempt >= MAX_ATTEMPTS:
-            status, held_reason = "held", _held_reason_from(first_failure)
-            break
-
-    # AA-452 — mandatory, tenant-facing-leak-prevention step: strip every [R:atom_id]/[F:id]
-    # citation tag (channel='blog' only ever produces one, prompts.py's _BLOG_FORMAT_INSTRUCTIONS)
-    # from content_text AND from every gate_ledger/repair_log violation string (a gate's own
-    # violation message can itself quote a tagged excerpt — see quality_gates.gate_grounding()'s
-    # own comment) BEFORE this piece is persisted or returned, regardless of status ('approved'
-    # or 'held' both go through this — a held piece is still fully visible to the tenant per
-    # _hold()'s own "hold VISIBLE, never silent" precedent, so a held piece leaking a raw tag
-    # would be exactly as real a leak as an approved one). Runs unconditionally for every
-    # channel — a no-op for the 7 that never produce a tag, real for blog.
-    content_text = strip_citation_tags(content_text)
-    gate_ledger = deep_strip_citation_tags(gate_ledger)
-    repair_log = deep_strip_citation_tags(repair_log)
-    if held_reason:
-        held_reason = strip_citation_tags(held_reason)
-
-    piece = await _persist_piece(
-        pool, tenant_id=tenant_id, request_id=request_id, attempt_number=attempt,
-        content_text=content_text, status=status, held_reason=held_reason,
-        gate_ledger=gate_ledger, repair_log=repair_log,
-    )
-    logger.info(
-        "t9_write_and_check_done", request_id=str(request_id), status=status,
-        attempts=attempt, cost_usd=total_cost,
-    )
-    return piece
+    except Exception as exc:
+        logger.error(
+            "t9_write_background_failed", request_id=str(request_id), piece_id=str(piece_id),
+            attempt=attempt, error_type=type(exc).__name__, error=str(exc),
+        )
+        try:
+            await _finalize_piece(
+                pool, piece_id=piece_id, attempt_number=attempt, content_text="",
+                status="failed", held_reason=f"{type(exc).__name__}: {exc}",
+                gate_ledger=[], repair_log=[],
+            )
+        except Exception:
+            logger.error(
+                "t9_write_background_failed_status_write_also_failed",
+                request_id=str(request_id), piece_id=str(piece_id),
+            )
 
 
-async def _persist_piece(
-    pool, *, tenant_id: UUID, request_id: UUID, attempt_number: int, content_text: str,
+async def _finalize_piece(
+    pool, *, piece_id: UUID, attempt_number: int, content_text: str,
     status: str, held_reason: Optional[str], gate_ledger: list[dict], repair_log: list[dict],
 ) -> dict:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO acp_shared.content_piece
-                (tenant_id, angle_gate_request_id, attempt_number, content_text, status,
-                 held_reason, gate_ledger, repair_log)
-            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)
+            UPDATE acp_shared.content_piece
+            SET attempt_number = $2, content_text = $3, status = $4, held_reason = $5,
+                gate_ledger = $6::jsonb, repair_log = $7::jsonb
+            WHERE piece_id = $1
             RETURNING piece_id, tenant_id, angle_gate_request_id, attempt_number, content_text,
                       status, held_reason, gate_ledger, repair_log, created_at
             """,
-            tenant_id, request_id, attempt_number, content_text, status, held_reason,
+            piece_id, attempt_number, content_text, status, held_reason,
             json.dumps(gate_ledger), json.dumps(repair_log),
         )
     return _row_to_dict(row)
@@ -251,5 +322,5 @@ async def fetch_piece(tenant_id: UUID, piece_id: UUID, pool) -> dict:
 
 __all__ = [
     "ContentWritingError", "RequestNotReadyError", "MissingCTAError", "MAX_ATTEMPTS",
-    "write_and_check", "fetch_piece",
+    "start_write", "run_write_background", "fetch_piece",
 ]

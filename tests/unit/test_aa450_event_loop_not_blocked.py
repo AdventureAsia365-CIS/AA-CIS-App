@@ -1,28 +1,31 @@
 """
-tests/unit/test_aa450_event_loop_not_blocked.py — AA-450: the T9+T10-inline single endpoint must
+tests/unit/test_aa450_event_loop_not_blocked.py — AA-450: the T9+T10-inline write/check loop must
 NOT block the shared ECS-task event loop, built in from the start (not patched in after an
 incident the way N7's AA-416 fix was — see docs/claude_audit/
 AA-450-01-t9-t10-retry-loop-investigation.md).
 
-Every blocking LLM call inside services/acp_content_writing/service.py::write_and_check() (the
-write call, and quality_gates.py's 2 judge calls) is wrapped in `asyncio.to_thread()` from this
-module's first version. This test reproduces AA-416's own test shape exactly (a slow synchronous
-call standing in for a real invoke_claude()/invoke_judge() call, run concurrently with a cheap
-health-check coroutine on the same event loop) against the REAL `write_and_check()` call path,
-not just a synthetic stand-in for run_gates() the way AA-416's test used.
+Every blocking LLM call inside services/acp_content_writing/service.py::run_write_background()
+(the write call, and quality_gates.py's 2 judge calls) is wrapped in `asyncio.to_thread()` from
+this module's first version. AA-466 split the old single write_and_check() into a fast
+pre-flight (start_write()) and this background loop (run_write_background()) — this test now
+targets the background loop directly (that's the only part with any real blocking-risk LLM
+call; start_write() is DB-only, never at risk of blocking the loop for any meaningful time).
+Reproduces AA-416's own test shape exactly (a slow synchronous call standing in for a real
+invoke_claude()/invoke_judge() call, run concurrently with a cheap health-check coroutine on the
+same event loop) against the REAL run_write_background() call path, not just a synthetic
+stand-in for run_gates() the way AA-416's test used.
 """
 import asyncio
 import time
 import uuid
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from services.acp_content_writing import service
 
-TENANT_ID = uuid.uuid4()
 REQUEST_ID = uuid.uuid4()
+PIECE_ID = uuid.uuid4()
 
 GOAL = {"key": "promotion", "name": "Promotion", "description": "d", "logic": "AIDA", "marketing_term": "AIDA"}
 ANGLE = {"idx": 0, "name": "A", "why_it_works": "wa", "formula_fit": "AIDA",
@@ -34,31 +37,13 @@ _SIMULATED_BEDROCK_LATENCY_SECONDS = 0.5
 _HEALTH_CHECK_MAX_LATENCY_SECONDS = 0.05
 
 
-def _request():
+def _context():
     return {
-        "request_id": str(REQUEST_ID), "tenant_id": str(TENANT_ID), "atom_id": "atom_abc123",
-        "trip_id": None, "channel": "facebook", "goal": "promotion", "cta": "Book a consultation",
-        "status": "approved", "created_at": "2026-08-24T00:00:00", "updated_at": "2026-08-24T00:00:00",
-        "angles": [ANGLE],
+        "atom_text": "atom text", "goal": GOAL, "channel_style": {"key": "facebook"},
+        "brand_audience": {}, "chosen": ANGLE, "cta": "Book a consultation",
+        "destination": None, "trip_name": None, "brand_rubric_text": "rubric",
+        "channel": "facebook", "atom_id": "atom_abc123",
     }
-
-
-def _piece_row():
-    return {
-        "piece_id": uuid.uuid4(), "tenant_id": TENANT_ID, "angle_gate_request_id": REQUEST_ID,
-        "attempt_number": 1, "content_text": "final piece text", "status": "approved",
-        "held_reason": None, "gate_ledger": [], "repair_log": [],
-        "created_at": datetime.now(timezone.utc),
-    }
-
-
-def _make_pool(conn):
-    ctx = AsyncMock()
-    ctx.__aenter__ = AsyncMock(return_value=conn)
-    ctx.__aexit__ = AsyncMock(return_value=False)
-    pool = MagicMock()
-    pool.acquire = MagicMock(return_value=ctx)
-    return pool
 
 
 def _slow_sync_write(*args, **kwargs) -> tuple[str, float]:
@@ -77,11 +62,7 @@ async def _fake_health_check() -> dict:
 
 
 @pytest.mark.asyncio
-async def test_write_and_check_does_not_block_concurrent_health_check():
-    conn = AsyncMock()
-    conn.fetchrow.side_effect = [{"text": "atom text"}, _piece_row()]
-    pool = _make_pool(conn)
-
+async def test_run_write_background_does_not_block_concurrent_health_check():
     health_latencies: list[float] = []
     stop = asyncio.Event()
 
@@ -94,24 +75,27 @@ async def test_write_and_check_does_not_block_concurrent_health_check():
 
     poller = asyncio.create_task(_poll_health())
 
-    with patch.object(service.angle_gate_service, "fetch_request", new=AsyncMock(return_value=_request())), \
-         patch.object(service, "fetch_brand_audience", new=AsyncMock(return_value={})), \
-         patch.object(service, "fetch_brand_rubric_text", new=AsyncMock(return_value="rubric")), \
-         patch.object(service, "get_goal", return_value=GOAL), \
-         patch.object(service, "write_content", side_effect=_slow_sync_write), \
-         patch.object(service, "run_quality_gates", side_effect=_fast_passing_gates):
+    finalized: dict = {}
+
+    async def _capture_finalize(pool, **kwargs):
+        finalized.update(kwargs)
+        return None
+
+    with patch.object(service, "write_content", side_effect=_slow_sync_write), \
+         patch.object(service, "run_quality_gates", side_effect=_fast_passing_gates), \
+         patch.object(service, "_finalize_piece", new=AsyncMock(side_effect=_capture_finalize)):
         t_start = time.monotonic()
-        result = await service.write_and_check(TENANT_ID, REQUEST_ID, pool)
+        await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())
         elapsed = time.monotonic() - t_start
 
     stop.set()
     await poller
 
-    assert result["status"] == "approved"
+    assert finalized["status"] == "approved"
     assert elapsed >= _SIMULATED_BEDROCK_LATENCY_SECONDS  # the slow write really did run
     assert health_latencies, "health poller never got a chance to run concurrently"
     assert max(health_latencies) < _HEALTH_CHECK_MAX_LATENCY_SECONDS, (
-        f"health check latency spiked to {max(health_latencies):.3f}s while write_and_check() "
+        f"health check latency spiked to {max(health_latencies):.3f}s while run_write_background() "
         f"was writing — the event loop was blocked, the built-in-from-the-start asyncio.to_thread "
         f"wrapping is missing or broken"
     )

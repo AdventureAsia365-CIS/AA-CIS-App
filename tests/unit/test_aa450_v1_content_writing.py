@@ -1,6 +1,9 @@
-"""AA-450 — api/routers/v1_content_writing.py. Same convention test_aa449_v1_angle_gate.py uses:
-endpoint functions called directly, service.py patched (already unit-tested separately in
-test_aa450_content_writing_service.py) — this file checks HTTP status-code mapping."""
+"""AA-450 (endpoint shape) + AA-466 (202 Accepted + poll) — api/routers/v1_content_writing.py.
+Same convention test_aa449_v1_angle_gate.py uses: endpoint functions called directly,
+service.py patched (already unit-tested separately in test_aa450_content_writing_service.py) —
+this file checks HTTP status-code mapping + that the background task is actually launched with
+a strong ref (AA-466 — the GC-safety pattern api/routers/v1_tours.py's trigger_rewrite() uses)."""
+import asyncio
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -22,22 +25,53 @@ def _make_request():
     return request
 
 
+def _started(status="processing"):
+    return {
+        "piece": {"piece_id": str(PIECE_ID), "status": status, "content_text": "",
+                   "angle_gate_request_id": str(REQUEST_ID)},
+        "context": {"atom_text": "x"},
+    }
+
+
 class TestWrite:
     @pytest.mark.asyncio
-    async def test_success(self):
+    async def test_success_returns_202_processing_placeholder(self):
         body = v1_content_writing.WriteBody(cta=None)
-        with patch.object(
-            v1_content_writing.service, "write_and_check",
-            new=AsyncMock(return_value={"status": "approved", "piece_id": str(PIECE_ID)}),
-        ):
+        with patch.object(v1_content_writing.service, "start_write",
+                           new=AsyncMock(return_value=_started())), \
+             patch.object(v1_content_writing.service, "run_write_background",
+                           new=AsyncMock(return_value=None)) as mock_bg:
             result = await v1_content_writing.write(REQUEST_ID, body, _make_request(), tenant={"sub": TENANT_ID})
-        assert result["status"] == "approved"
+            await asyncio.sleep(0)  # let the scheduled background task actually run
+
+        assert result["status"] == "processing"
+        assert result["piece_id"] == str(PIECE_ID)
+        mock_bg.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_background_task_launched_with_strong_ref(self):
+        """AA-466 — the task must be added to the module-level _background_tasks set (and
+        removed again on completion via add_done_callback), the same GC-safety guard
+        api/routers/v1_tours.py::trigger_rewrite() already uses. A bare create_task() with no
+        ref can be garbage-collected mid-flight."""
+        body = v1_content_writing.WriteBody(cta=None)
+        assert len(v1_content_writing._background_tasks) == 0
+        with patch.object(v1_content_writing.service, "start_write",
+                           new=AsyncMock(return_value=_started())), \
+             patch.object(v1_content_writing.service, "run_write_background",
+                           new=AsyncMock(return_value=None)):
+            await v1_content_writing.write(REQUEST_ID, body, _make_request(), tenant={"sub": TENANT_ID})
+            assert len(v1_content_writing._background_tasks) == 1  # added before the task ran
+            # task completion -> add_done_callback fires via call_soon, needs 2 ticks to observe
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+        assert len(v1_content_writing._background_tasks) == 0
 
     @pytest.mark.asyncio
     async def test_request_not_found_404(self):
         body = v1_content_writing.WriteBody(cta=None)
         with patch.object(
-            v1_content_writing.service, "write_and_check",
+            v1_content_writing.service, "start_write",
             new=AsyncMock(side_effect=RequestNotFoundError("nope")),
         ):
             with pytest.raises(HTTPException) as exc:
@@ -48,7 +82,7 @@ class TestWrite:
     async def test_not_ready_409(self):
         body = v1_content_writing.WriteBody(cta=None)
         with patch.object(
-            v1_content_writing.service, "write_and_check",
+            v1_content_writing.service, "start_write",
             new=AsyncMock(side_effect=service.RequestNotReadyError("angle not chosen yet")),
         ):
             with pytest.raises(HTTPException) as exc:
@@ -59,7 +93,7 @@ class TestWrite:
     async def test_missing_cta_422(self):
         body = v1_content_writing.WriteBody(cta=None)
         with patch.object(
-            v1_content_writing.service, "write_and_check",
+            v1_content_writing.service, "start_write",
             new=AsyncMock(side_effect=service.MissingCTAError("no cta")),
         ):
             with pytest.raises(HTTPException) as exc:
@@ -70,7 +104,7 @@ class TestWrite:
     async def test_generic_error_500(self):
         body = v1_content_writing.WriteBody(cta=None)
         with patch.object(
-            v1_content_writing.service, "write_and_check",
+            v1_content_writing.service, "start_write",
             new=AsyncMock(side_effect=service.ContentWritingError("unexpected")),
         ):
             with pytest.raises(HTTPException) as exc:
@@ -80,15 +114,19 @@ class TestWrite:
     @pytest.mark.asyncio
     async def test_cta_override_forwarded(self):
         body = v1_content_writing.WriteBody(cta="Read the guide")
-        with patch.object(
-            v1_content_writing.service, "write_and_check",
-            new=AsyncMock(return_value={"status": "approved"}),
-        ) as mock_write:
+        with patch.object(v1_content_writing.service, "start_write",
+                           new=AsyncMock(return_value=_started())) as mock_start, \
+             patch.object(v1_content_writing.service, "run_write_background",
+                           new=AsyncMock(return_value=None)):
             await v1_content_writing.write(REQUEST_ID, body, _make_request(), tenant={"sub": TENANT_ID})
-        assert mock_write.call_args.kwargs["cta_override"] == "Read the guide"
+            await asyncio.sleep(0)
+        assert mock_start.call_args.kwargs["cta_override"] == "Read the guide"
 
 
 class TestGetPiece:
+    """UNCHANGED by AA-466 — fetch_piece() and this endpoint didn't need to change; kept here to
+    confirm poll callers still get the right shape/status mapping at any of the 4 status values."""
+
     @pytest.mark.asyncio
     async def test_success(self):
         with patch.object(
@@ -97,6 +135,24 @@ class TestGetPiece:
         ):
             result = await v1_content_writing.get_piece(PIECE_ID, _make_request(), tenant={"sub": TENANT_ID})
         assert result["status"] == "approved"
+
+    @pytest.mark.asyncio
+    async def test_processing_status_returned_while_polling(self):
+        with patch.object(
+            v1_content_writing.service, "fetch_piece",
+            new=AsyncMock(return_value={"status": "processing", "content_text": ""}),
+        ):
+            result = await v1_content_writing.get_piece(PIECE_ID, _make_request(), tenant={"sub": TENANT_ID})
+        assert result["status"] == "processing"
+
+    @pytest.mark.asyncio
+    async def test_failed_status_returned_after_background_error(self):
+        with patch.object(
+            v1_content_writing.service, "fetch_piece",
+            new=AsyncMock(return_value={"status": "failed", "held_reason": "RuntimeError: boom"}),
+        ):
+            result = await v1_content_writing.get_piece(PIECE_ID, _make_request(), tenant={"sub": TENANT_ID})
+        assert result["status"] == "failed"
 
     @pytest.mark.asyncio
     async def test_not_found_404(self):

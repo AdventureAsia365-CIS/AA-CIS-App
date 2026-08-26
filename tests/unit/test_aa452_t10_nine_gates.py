@@ -183,12 +183,18 @@ class TestRunQualityGatesChannelDispatch:
         assert qg.gate_extreme_length(stripped)["passed"] is True
 
 
-# ---------------------------------------------------------------- service.write_and_check() leak test
+# ---------------------------------------------------------------- service.run_write_background() leak test
 # The single most important test in this file (Nghiep's own framing) — confirms NO [R:/[F: tag
 # ever survives into the persisted/returned piece, for a real blog-channel run through the whole
-# write_and_check() orchestration, not just the gate functions in isolation.
+# write/check loop, not just the gate functions in isolation.
+#
+# AA-466 split the old single write_and_check() into start_write() (fast pre-flight) +
+# run_write_background() (the write/check loop, unchanged body) — these tests now target
+# run_write_background() directly with a hand-built context dict, and capture what's actually
+# passed to _finalize_piece() (an UPDATE by piece_id) instead of _persist_piece() (the old
+# INSERT). Same "echo back what was really sent, don't assert against a hardcoded mock return
+# value" principle the original _echo_insert_as_returning_row() was written to enforce.
 
-TENANT_ID = uuid.uuid4()
 REQUEST_ID = uuid.uuid4()
 
 GOAL = {"key": "promotion", "name": "Promotion", "description": "d", "logic": "AIDA", "marketing_term": "AIDA"}
@@ -207,67 +213,30 @@ TAGGED_BLOG_CONTENT = (
 )
 
 
-def _make_pool(conn):
-    ctx = AsyncMock()
-    ctx.__aenter__ = AsyncMock(return_value=conn)
-    ctx.__aexit__ = AsyncMock(return_value=False)
-    pool = MagicMock()
-    pool.acquire = MagicMock(return_value=ctx)
-    return pool
-
-
-def _request(channel="blog"):
+def _context(channel="blog"):
     return {
-        "request_id": str(REQUEST_ID), "tenant_id": str(TENANT_ID), "atom_id": "atom_abc123",
-        "trip_id": None, "channel": channel, "goal": "promotion", "cta": "Book a consultation",
-        "status": "approved", "created_at": "2026-08-24T00:00:00", "updated_at": "2026-08-24T00:00:00",
-        "angles": [ANGLE],
+        "atom_text": "atom text", "goal": GOAL, "channel_style": {"key": channel},
+        "brand_audience": {}, "chosen": ANGLE, "cta": "Book a consultation",
+        "destination": None, "trip_name": None, "brand_rubric_text": "rubric",
+        "channel": channel, "atom_id": "atom_abc123",
     }
 
 
-def _echo_insert_as_returning_row(*args):
-    """Simulates Postgres's own RETURNING clause: echoes back whatever was actually passed to
-    the INSERT, rather than a hand-typed static fixture — a static fixture can't catch a bug
-    where write_and_check() computes the right value but forgets to actually pass it into
-    _persist_piece() (exactly the class of gap the first version of these 2 tests missed:
-    asserting only against a hardcoded mock return value tests nothing about the real code
-    path). `args` is (sql, tenant_id, request_id, attempt_number, content_text, status,
-    held_reason, gate_ledger_json, repair_log_json) — the exact positional shape
-    service.py::_persist_piece()'s one real INSERT call uses."""
-    (_sql, tenant_id, request_id, attempt_number, content_text, status, held_reason,
-     gate_ledger_json, repair_log_json) = args
-    return {
-        "piece_id": uuid.uuid4(), "tenant_id": tenant_id, "angle_gate_request_id": request_id,
-        "attempt_number": attempt_number, "content_text": content_text, "status": status,
-        "held_reason": held_reason, "gate_ledger": json.loads(gate_ledger_json),
-        "repair_log": json.loads(repair_log_json), "created_at": datetime.now(timezone.utc),
-    }
-
-
-def _piece_row(**over):
-    base = {
-        "piece_id": uuid.uuid4(), "tenant_id": TENANT_ID, "angle_gate_request_id": REQUEST_ID,
-        "attempt_number": 1, "content_text": "final piece text", "status": "approved",
-        "held_reason": None, "gate_ledger": [], "repair_log": [],
-        "created_at": datetime.now(timezone.utc),
-    }
-    base.update(over)
-    return base
+def _capturing_finalize(sink: dict):
+    """Echoes what run_write_background() actually passed to _finalize_piece() into `sink` —
+    a static mock return value can't catch a bug where the loop computes the right value but
+    forgets to pass it through (the class of gap the original version of these tests was
+    written to catch, adapted from INSERT-args-echo to this kwargs-capture shape for AA-466)."""
+    async def _finalize(pool, **kwargs):
+        sink.update(kwargs)
+        return None
+    return _finalize
 
 
 @pytest.mark.asyncio
 class TestWriteAndCheckStripsTagsBeforeOutput:
     async def test_approved_blog_piece_has_no_tag_in_returned_content_or_ledger(self):
-        conn = AsyncMock()
-        calls = {"n": 0}
-
-        def _fetchrow(*args):
-            calls["n"] += 1
-            return {"text": "atom text"} if calls["n"] == 1 else _echo_insert_as_returning_row(*args)
-
-        conn.fetchrow.side_effect = _fetchrow
-        pool = _make_pool(conn)
-
+        finalized: dict = {}
         tagged_violation_ledger = [
             {"gate": "F6_cta_present", "passed": True, "violations": [], "repairable": True},
             {"gate": "F1_grounding", "passed": True,
@@ -275,42 +244,23 @@ class TestWriteAndCheckStripsTagsBeforeOutput:
         ]
         passing_outcome = {"passed": True, "gate_ledger": tagged_violation_ledger, "first_failure": None}
 
-        with patch.object(service.angle_gate_service, "fetch_request",
-                           new=AsyncMock(return_value=_request())), \
-             patch.object(service, "fetch_brand_audience", new=AsyncMock(return_value={})), \
-             patch.object(service, "fetch_brand_rubric_text", new=AsyncMock(return_value="rubric")), \
-             patch.object(service, "get_goal", return_value=GOAL), \
-             patch.object(service, "write_content", return_value=(TAGGED_BLOG_CONTENT, 0.02)), \
-             patch.object(service, "run_quality_gates", return_value=passing_outcome):
-            result = await service.write_and_check(TENANT_ID, REQUEST_ID, pool)
+        with patch.object(service, "write_content", return_value=(TAGGED_BLOG_CONTENT, 0.02)), \
+             patch.object(service, "run_quality_gates", return_value=passing_outcome), \
+             patch.object(service, "_finalize_piece", new=AsyncMock(side_effect=_capturing_finalize(finalized))):
+            await service.run_write_background(REQUEST_ID, uuid.uuid4(), _context(), pool=MagicMock())
 
-        assert "[R:" not in result["content_text"]
-        assert "[F:" not in result["content_text"]
+        assert "[R:" not in finalized["content_text"]
+        assert "[F:" not in finalized["content_text"]
         # confirm the tag-free markdown/prose survived (strip removed only the tag, not content)
-        assert "## Why Southern Laos" in result["content_text"]
-        assert "Cross the bamboo bridge at dawn" in result["content_text"]
+        assert "## Why Southern Laos" in finalized["content_text"]
+        assert "Cross the bamboo bridge at dawn" in finalized["content_text"]
         # gate_ledger's own violation string must be scrubbed too (F1's own quoted-excerpt path)
-        ledger_str = str(result["gate_ledger"])
-        assert "[R:" not in ledger_str
-
-        # also confirm what was actually sent to the INSERT (not just the mocked RETURNING row)
-        insert_args = conn.fetchrow.call_args_list[1][0]
-        persisted_content_text = insert_args[4]  # positional order in _persist_piece's SQL
-        assert "[R:" not in persisted_content_text
+        assert "[R:" not in str(finalized["gate_ledger"])
 
     async def test_held_blog_piece_also_has_no_tag_leak(self):
         # L6 precedent: a held piece is fully visible to the tenant (content + reason + ledger),
         # so it must be scrubbed exactly as thoroughly as an approved one.
-        conn = AsyncMock()
-        calls = {"n": 0}
-
-        def _fetchrow(*args):
-            calls["n"] += 1
-            return {"text": "atom text"} if calls["n"] == 1 else _echo_insert_as_returning_row(*args)
-
-        conn.fetchrow.side_effect = _fetchrow
-        pool = _make_pool(conn)
-
+        finalized: dict = {}
         failing_ledger = [
             {"gate": "F6_cta_present", "passed": True, "violations": [], "repairable": True},
             {"gate": "F5_atom_density", "passed": False,
@@ -320,42 +270,32 @@ class TestWriteAndCheckStripsTagsBeforeOutput:
         held_first_failure = failing_ledger[1]
         failing_outcome = {"passed": False, "gate_ledger": failing_ledger, "first_failure": held_first_failure}
 
-        with patch.object(service.angle_gate_service, "fetch_request",
-                           new=AsyncMock(return_value=_request())), \
-             patch.object(service, "fetch_brand_audience", new=AsyncMock(return_value={})), \
-             patch.object(service, "fetch_brand_rubric_text", new=AsyncMock(return_value="rubric")), \
-             patch.object(service, "get_goal", return_value=GOAL), \
-             patch.object(service, "write_content", return_value=(TAGGED_BLOG_CONTENT, 0.02)), \
+        with patch.object(service, "write_content", return_value=(TAGGED_BLOG_CONTENT, 0.02)), \
              patch.object(service, "rewrite_with_feedback", return_value=(TAGGED_BLOG_CONTENT, 0.02)), \
-             patch.object(service, "run_quality_gates", return_value=failing_outcome):
-            result = await service.write_and_check(TENANT_ID, REQUEST_ID, pool)
+             patch.object(service, "run_quality_gates", return_value=failing_outcome), \
+             patch.object(service, "_finalize_piece", new=AsyncMock(side_effect=_capturing_finalize(finalized))):
+            await service.run_write_background(REQUEST_ID, uuid.uuid4(), _context(), pool=MagicMock())
 
-        assert result["status"] == "held"
-        assert "[R:" not in (result["held_reason"] or "")
-        assert "[R:" not in str(result["gate_ledger"])
-        assert "[R:" not in result["content_text"]
+        assert finalized["status"] == "held"
+        assert "[R:" not in (finalized["held_reason"] or "")
+        assert "[R:" not in str(finalized["gate_ledger"])
+        assert "[R:" not in finalized["content_text"]
 
     async def test_non_blog_channel_write_unaffected_by_strip_step(self):
         # No tags ever produced for non-blog — confirms the unconditional strip call is a true
         # no-op for the other 7 channels, not a behavior change.
-        conn = AsyncMock()
-        conn.fetchrow.side_effect = [{"text": "atom text"}, _piece_row(content_text="Plain facebook post.")]
-        pool = _make_pool(conn)
+        finalized: dict = {}
         passing_outcome = {
             "passed": True,
             "gate_ledger": [{"gate": "F6_cta_present", "passed": True, "violations": [], "repairable": True}],
             "first_failure": None,
         }
 
-        with patch.object(service.angle_gate_service, "fetch_request",
-                           new=AsyncMock(return_value=_request(channel="facebook"))), \
-             patch.object(service, "fetch_brand_audience", new=AsyncMock(return_value={})), \
-             patch.object(service, "fetch_brand_rubric_text", new=AsyncMock(return_value="rubric")), \
-             patch.object(service, "get_goal", return_value=GOAL), \
-             patch.object(service, "write_content", return_value=("Plain facebook post.", 0.02)) as mock_write, \
-             patch.object(service, "run_quality_gates", return_value=passing_outcome) as mock_gates:
-            result = await service.write_and_check(TENANT_ID, REQUEST_ID, pool)
+        with patch.object(service, "write_content", return_value=("Plain facebook post.", 0.02)) as mock_write, \
+             patch.object(service, "run_quality_gates", return_value=passing_outcome) as mock_gates, \
+             patch.object(service, "_finalize_piece", new=AsyncMock(side_effect=_capturing_finalize(finalized))):
+            await service.run_write_background(REQUEST_ID, uuid.uuid4(), _context(channel="facebook"), pool=MagicMock())
 
-        assert result["content_text"] == "Plain facebook post."
+        assert finalized["content_text"] == "Plain facebook post."
         assert mock_write.call_args.kwargs["atom_id"] == "atom_abc123"
         assert mock_gates.call_args.kwargs["channel"] == "facebook"
