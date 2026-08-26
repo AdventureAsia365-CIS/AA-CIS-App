@@ -61,15 +61,6 @@ const PROTECTED_ROUTES: { prefix: string; roles: string[] }[] = [
   // — Marketplace builds the portfolio that directly feeds tenant onboarding (seed-atoms), same
   // commercial sensitivity, not a general staff/reviewer page.
   { prefix: "/admin/marketplace", roles: ["admin"] },
-  // AA-388: Gate B (Ms. Thu's quarter-plan approval) — admin-only, same shape as
-  // Gate A (/admin/tenants). Learned from AA-384's own gap in this file's header:
-  // a page without an entry here 404s-to-login even with a valid admin session.
-  { prefix: "/admin/quarter-plan", roles: ["admin"] },
-  // AA-405: N7 Produce trigger + N8 Gate C approve — admin-only, same shape as Gate A/Gate B
-  // above (a real approval/trigger action, not a general staff/reviewer page). Learned from
-  // AA-384's own gap documented in this file's header: added here from the start, not after
-  // the page silently 404s-to-login.
-  { prefix: "/admin/produce", roles: ["admin"] },
   // AA-437: A4 Cross-Tenant Oversight (review-log + trust-ramp, read-only) — admin-only, same
   // shape as Gate A/Gate B/Produce above. Same gap as AA-384/AA-388/AA-405 documented in this
   // file's header, and the exact one PR #196's own "post-deploy live verification" note missed:
