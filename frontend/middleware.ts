@@ -55,12 +55,6 @@ const PUBLIC_PATHS = ["/login", "/tenant-login"];
 const PROTECTED_ROUTES: { prefix: string; roles: string[] }[] = [
   // Admin-only (was ADMIN_PATHS)
   { prefix: "/admin/tenants", roles: ["admin"] },
-  // AA-384: real page shipped but never added here — same #4/#5 fail-closed gap this file's own
-  // header documents (a listed page with no PROTECTED_ROUTES entry falls into the `!route` branch
-  // and redirects to /login even with a valid admin session). Admin-only, matching /admin/tenants
-  // — Marketplace builds the portfolio that directly feeds tenant onboarding (seed-atoms), same
-  // commercial sensitivity, not a general staff/reviewer page.
-  { prefix: "/admin/marketplace", roles: ["admin"] },
   // AA-437: A4 Cross-Tenant Oversight (review-log + trust-ramp, read-only) — admin-only, same
   // shape as Gate A/Gate B/Produce above. Same gap as AA-384/AA-388/AA-405 documented in this
   // file's header, and the exact one PR #196's own "post-deploy live verification" note missed:
