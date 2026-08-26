@@ -47,45 +47,11 @@ from api.routers.acp_health import router as acp_health_router
 from api.middleware.rate_limit import rate_limit_middleware
 from api.middleware.sentry_context import sentry_context_middleware
 from api.core.sentry import init_sentry
-from services.acp.s2.router import router as v1_s2_router, _do_resume_run
 
 logger = structlog.get_logger()
 pool: asyncpg.Pool = None
 
 init_sentry()
-
-
-async def _recover_stuck_s2_runs(pool, graph) -> None:
-    """Auto-resume S2 runs stuck at status='running' on ECS restart.
-
-    Grace period: only recovers runs not updated in the last 2 minutes —
-    prevents racing with a run that legitimately started just before restart.
-    """
-    try:
-        async with pool.acquire() as conn:
-            rows = await conn.fetch("""
-                SELECT sr.run_id::text AS run_id, r.tenant_id::text AS tenant_id
-                FROM acp_shared.acp_stage_runs sr
-                JOIN acp_shared.acp_runs r ON r.run_id = sr.run_id
-                WHERE sr.stage = 's2'
-                  AND r.status = 'running'
-                  AND sr.metadata ? 'checkpointer'
-                  AND sr.updated_at < NOW() - INTERVAL '2 minutes'
-            """)
-        if not rows:
-            logger.info("startup_recovery_none")
-            return
-        logger.warning("startup_recovery_found", count=len(rows))
-        for row in rows:
-            run_id = row["run_id"]
-            tenant_id = row["tenant_id"]
-            try:
-                await _do_resume_run(run_id, tenant_id, pool, graph)
-                logger.info("startup_recovery_resumed", run_id=run_id)
-            except Exception as exc:
-                logger.error("startup_recovery_failed", run_id=run_id, error=str(exc))
-    except Exception as exc:
-        logger.error("startup_recovery_error", error=str(exc))
 
 
 @asynccontextmanager
@@ -100,32 +66,6 @@ async def lifespan(app: FastAPI):
         os.environ["DATABASE_URL"], min_size=2, max_size=10,
     )
     app.state.pool = pool
-
-    # Build and register S2 graph (async — awaits checkpointer.setup())
-    import boto3
-    import json as _json
-
-    def _get_api_keys():
-        try:
-            client = boto3.client("secretsmanager", region_name=os.environ.get("AWS_REGION", "us-west-1"))
-            secret = client.get_secret_value(SecretId="aa-cis/dev/api-keys")
-            return _json.loads(secret["SecretString"])
-        except Exception:
-            return {}
-
-    from services.acp.s2.graph import get_compiled_s2_graph
-    s3 = boto3.client("s3", region_name=os.environ.get("AWS_REGION", "us-west-1"))
-    app.state.s2_pg_conn = None
-    try:
-        app.state.s2_graph, app.state.s2_pg_conn = await get_compiled_s2_graph(
-            pool, s3, _get_api_keys(), os.environ["DATABASE_URL"]
-        )
-    except Exception as e:
-        logger.warning("s2_graph_init_failed", error=str(e))
-        app.state.s2_graph = None
-
-    if app.state.s2_graph is not None:
-        await _recover_stuck_s2_runs(pool, app.state.s2_graph)
 
     # AA-223: recover run-tour jobs left 'running' by a prior container exit.
     # Best-effort — a transient DB error here must NOT crash boot (crash-loop risk).
@@ -152,8 +92,6 @@ async def lifespan(app: FastAPI):
             logger.error("shutdown_forced_task_abandon", count=len(_pending))
 
     await pool.close()
-    if app.state.s2_pg_conn is not None:
-        await app.state.s2_pg_conn.close()
     await redis.aclose()
 
 app = FastAPI(
@@ -170,7 +108,6 @@ app.add_middleware(
         "http://localhost:3001",
         "https://api-cis.lumiguides.it.com",
         "https://aa-cis.lumiguides.it.com",
-        "https://acp.lumiguides.it.com",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -192,7 +129,6 @@ app.include_router(v1_s0_router)
 app.include_router(v1_atoms_router)
 app.include_router(v1_s1_router, prefix="/acp/s1")
 app.include_router(v1_s1_from_atom_router)
-app.include_router(v1_s2_router, prefix="/acp/s2")
 app.include_router(v1_s3_router)
 app.include_router(v1_acp_gate_router)
 app.include_router(v1_rules_router)

@@ -13,16 +13,8 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt requirements-acpcore.txt ./
-RUN --mount=type=secret,id=acpcore_token,required=true \
-    GIT_CONFIG_COUNT=1 \
-    GIT_CONFIG_KEY_0="url.https://x-access-token:$(cat /run/secrets/acpcore_token)@github.com/.insteadOf" \
-    GIT_CONFIG_VALUE_0="https://github.com/" \
-    pip install --no-cache-dir -r requirements.txt && \
-    GIT_CONFIG_COUNT=1 \
-    GIT_CONFIG_KEY_0="url.https://x-access-token:$(cat /run/secrets/acpcore_token)@github.com/.insteadOf" \
-    GIT_CONFIG_VALUE_0="https://github.com/" \
-    pip install --no-cache-dir --no-deps -r requirements-acpcore.txt
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy source
 COPY api/ ./api/
