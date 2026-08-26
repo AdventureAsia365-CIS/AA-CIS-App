@@ -272,11 +272,10 @@ def compute_quarter_plan(
 
 
 _ATOM_ROW_QUERY = """
-    SELECT ta.atom_id, ta.tour_id, ta.text, ta.activity_type, ta.distinctiveness, ta.starred,
-           ta.deleted, ta.weight, ta.cooldown_until, ta.usage_log
-    FROM acp_contract.tour_atoms ta
-    JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = ta.tour_id
-    WHERE rt.tenant_id = $1 AND NOT ta.deleted AND NOT ta.is_empty_marker
+    SELECT atom_id, tour_id, text, activity_type, distinctiveness, starred,
+           deleted, weight, cooldown_until, usage_log
+    FROM acp_contract.tour_atoms
+    WHERE owner_scope = $1 AND NOT deleted AND NOT is_empty_marker
 """
 
 
@@ -302,8 +301,16 @@ def _row_to_atom(row) -> AtomRecord:
 
 
 async def fetch_atoms_by_trip(tenant_id: UUID, pool) -> dict[UUID, list[AtomRecord]]:
+    """`tenant_id` is passed as a plain str (matches `tour_atoms.owner_scope`'s column
+    type — free-text per ADR-2026-038 Hướng B, not a UUID FK). AA-461: filters by
+    `owner_scope`, NOT `raw_tours.tenant_id` — a tenant's T5 atoms rewritten from a
+    shared-pool tour (raw_tours.tenant_id = aa_internal) always carry
+    owner_scope = the rewriting tenant's own id, so filtering by the tour's original
+    owner made those atoms invisible to N5/N6 quarter planning. Same fix shape as
+    `tenant_pool.fetch_tenant_atoms_by_trip()` (AA-448, T7's own parallel function that
+    routed around this same bug for its slot-grid endpoint instead of fixing it here)."""
     async with pool.acquire() as conn:
-        rows = await conn.fetch(_ATOM_ROW_QUERY, tenant_id)
+        rows = await conn.fetch(_ATOM_ROW_QUERY, str(tenant_id))
     by_trip: dict[UUID, list[AtomRecord]] = {}
     for r in rows:
         atom = _row_to_atom(r)
