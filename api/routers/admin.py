@@ -19,7 +19,6 @@ from services.acp_planning.tenant_config import (
     fetch_tenant_planning_config,
     save_tenant_planning_config,
 )
-from services.acp_shared.marketplace_estimates import runway_months
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
@@ -29,30 +28,6 @@ PLAN_LIMITS = {
     "growth":   {"rpm": 300,  "tours_per_month": 500},
     "business": {"rpm": 1000, "tours_per_month": 2000},
     "internal": {"rpm": 60,   "tours_per_month": 999999},
-}
-
-# AA-309 [N1] commercial-decision (Nghiep, confirmed before build, 08/08/2026) — fixed vocabulary
-# for tenant_atom_state.assigned_angle (migration 098). 7 angles: the 3 illustrative examples from
-# AA-309's original description (culinary_people/physical_terrain/culture_craft) plus 4 more, sized
-# to give headroom above AA-332's own cited ceiling of ~3-5 tenants per (destination, source market)
-# before a new destination must open -- some destinations won't fit every angle equally well (a
-# luxury_leisure framing may not suit a budget trekking country), so slack beyond the exact tenant
-# ceiling matters. Each is a generic narrative lens applicable across destinations, not tied to one
-# country, so the same underlying atom facts can genuinely read differently depending which angle a
-# tenant is assigned. Mirrors migration 098's own CHECK constraint — keep both in sync if this list
-# ever changes.
-ASSIGNED_ANGLES = {
-    # AA-401: values translated to English, matching frontend/app/admin/tenants/page.tsx's
-    # own ASSIGNED_ANGLES display-label map verbatim (that copy was already English — see
-    # AA-389's i18n fix; this dict was the one gap left, feeding Mirror tab's
-    # assigned_angle_label straight from here, untranslated until now).
-    "culinary_people":    "Culinary & people",
-    "physical_terrain":   "Physical & terrain",
-    "culture_craft":      "Culture & craft",
-    "nature_wildlife":    "Nature & wildlife",
-    "luxury_leisure":     "Luxury & leisure",
-    "family_group":       "Family & group experiences",
-    "wellness_spiritual": "Wellness & spiritual",
 }
 
 # ── Auth guard ────────────────────────────────────────────────────────────────
@@ -110,12 +85,14 @@ async def create_tenant(
     run production for a tenant that hasn't been reviewed. This function itself never touched
     silver_aa_internal.raw_tours (no code to remove here) -- that "tenant brings its own tours"
     assumption lives only in list_tenants()/get_tenant_details() below, the old ACP v1 shape N1
-    deliberately does not extend: a new tenant's tours come from acp_shared.tenant_atom_state
-    (ONE-TIME seeded from a finalized acp_shared.marketplace_portfolios row via POST
-    .../seed-atoms — this is the pre-tenant onboarding seed step only, not a live source; the
-    tenant's ONGOING/current tour+atom selection, once they exist and start using T1-T6, is
-    GET /v1/marketplace, AA-444, api/routers/v1_marketplace.py), never from rows the tenant
-    uploads under its own tenant_id."""
+    deliberately does not extend: a tenant's tour/atom selection is GET /v1/marketplace (AA-444,
+    api/routers/v1_marketplace.py), never rows the tenant uploads under its own tenant_id.
+
+    AA-472 (Hướng B, ADR-2026-038): the pre-tenant Marketplace-portfolio seeding step
+    (POST .../seed-atoms, acp_shared.marketplace_portfolios) is removed entirely -- staff no
+    longer curate a tour list before a tenant exists. This function now inserts the
+    tenant_onboarding row itself, in the same transaction, with portfolio_id=NULL -- Gate A
+    approval no longer depends on a separate seeding call ever happening."""
     verify_admin_secret(x_admin_secret)
 
     if body.plan_tier not in PLAN_LIMITS:
@@ -180,6 +157,17 @@ async def create_tenant(
                 "name": body.name, "plan_tier": body.plan_tier, "posts_per_week": body.posts_per_week,
             }))
 
+            # AA-472: tenant_onboarding row created here directly (portfolio_id=NULL) -- the
+            # separate seed-atoms step that used to create this row is gone (Hướng B).
+            await conn.execute(
+                """
+                INSERT INTO acp_shared.tenant_onboarding (tenant_id, portfolio_id)
+                VALUES ($1, NULL)
+                ON CONFLICT (tenant_id) DO NOTHING
+                """,
+                tenant_id,
+            )
+
     return CreateTenantResponse(
         tenant_id=str(tenant_id),
         name=body.name,
@@ -205,10 +193,14 @@ async def list_tenants(
     true`), so a brand-new tenant — is_active=false by design until Gate A approves it — vanished
     from the UI the instant it was created, with no way to click back into it and finish
     onboarding. Now also returns `pending_tenants` (is_active=false) alongside the unchanged
-    `tenants` (active) list, each carrying its real onboarding progress (seeded / angle_assigned /
-    gate_a_status) read from acp_shared.tenant_atom_state + tenant_onboarding — not inferred from
-    is_active alone, since is_active stays false for the entire pending window regardless of which
-    step the tenant is actually on."""
+    `tenants` (active) list, each carrying its real `gate_a_status` read from
+    acp_shared.tenant_onboarding — not inferred from is_active alone, since is_active stays false
+    for the entire pending window regardless of approval_status.
+
+    AA-472: `seeded`/`seeded_tour_count`/`angle_assigned` are removed from this response --
+    acp_shared.tenant_atom_state is no longer part of the N1 onboarding flow (portfolio seeding
+    and per-tenant angle assignment were both removed, Hướng B). gate_a_status is now the only
+    real onboarding-progress signal left."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
     async with pool.acquire() as conn:
@@ -250,16 +242,10 @@ async def list_tenants(
         pending_rows = await conn.fetch("""
             SELECT
                 t.tenant_id, t.name, t.slug, t.plan_tier::text, t.posts_per_week,
-                t.country, t.created_at,
-                COUNT(tas.tour_id)                        AS seeded_tour_count,
-                BOOL_OR(tas.assigned_angle IS NOT NULL)    AS angle_assigned,
-                to_.approval_status
+                t.country, t.created_at, to_.approval_status
             FROM shared.tenants t
-            LEFT JOIN acp_shared.tenant_atom_state tas ON tas.tenant_id = t.tenant_id
             LEFT JOIN acp_shared.tenant_onboarding to_ ON to_.tenant_id = t.tenant_id
             WHERE t.is_active = false
-            GROUP BY t.tenant_id, t.name, t.slug, t.plan_tier, t.posts_per_week, t.country,
-                     t.created_at, to_.approval_status
             ORDER BY t.created_at
         """)
     return {
@@ -310,10 +296,7 @@ async def list_tenants(
                 "country":        r["country"],
                 "created_at":     r["created_at"].isoformat(),
                 "onboarding": {
-                    "seeded":            r["seeded_tour_count"] > 0,
-                    "seeded_tour_count": r["seeded_tour_count"],
-                    "angle_assigned":    bool(r["angle_assigned"]),
-                    "gate_a_status":     r["approval_status"] or "not_started",
+                    "gate_a_status": r["approval_status"] or "not_started",
                 },
             }
             for r in pending_rows
@@ -882,220 +865,6 @@ async def offboard_tenant(
     }
 
 
-# ── POST /admin/tenants/{id}/seed-atoms — N1 step 2 ──────────────────────────
-
-class SeedAtomsRequest(BaseModel):
-    portfolio_id: UUID
-
-
-@router.post("/tenants/{tenant_id}/seed-atoms", summary="N1 step 2 — seed tenant_atom_state from a finalized portfolio")
-async def seed_tenant_atoms(
-    tenant_id: UUID,
-    body: SeedAtomsRequest,
-    request: Request,
-    x_admin_secret: str = Header(None),
-):
-    """AA-309 [N1] — deliberately a SEPARATE step from create_tenant() (Nghiep, confirmed before
-    build): a tenant can be retried here without recreating the tenant row if seeding fails.
-    Idempotent re-run with the SAME portfolio_id is a safe no-op (ON CONFLICT DO NOTHING on both
-    inserts); a second call with a DIFFERENT portfolio_id is rejected (409) rather than silently
-    mixing two portfolios' tour lists into one tenant's atom state.
-
-    AA-444 (23/08/2026): this is the ONE deliberately-kept marketplace_portfolios read site
-    left in the app after AA-444's deprecation pass — acp_shared.tenant_onboarding.portfolio_id
-    is a real NOT NULL FK into that table (migration 098), so this call cannot be removed
-    without a migration (out of scope for AA-444). Do not treat this as evidence the table is
-    still a live "current tenant state" source elsewhere — it is not; see
-    docs/implementation-notes/AA-444-marketplace-view.md."""
-    verify_admin_secret(x_admin_secret)
-    pool = request.app.state.pool
-
-    async with pool.acquire() as conn:
-        tenant = await conn.fetchval("SELECT tenant_id FROM shared.tenants WHERE tenant_id = $1", tenant_id)
-        if not tenant:
-            raise HTTPException(status_code=404, detail=f"Tenant {tenant_id} not found")
-
-        portfolio = await conn.fetchrow(
-            "SELECT portfolio_id, tour_ids, status FROM acp_shared.marketplace_portfolios WHERE portfolio_id = $1",
-            body.portfolio_id,
-        )
-        if not portfolio:
-            raise HTTPException(status_code=404, detail=f"Portfolio {body.portfolio_id} not found")
-        if portfolio["status"] != "finalized":
-            raise HTTPException(
-                status_code=400,
-                detail=f"Portfolio {body.portfolio_id} is '{portfolio['status']}', not 'finalized'",
-            )
-
-        existing_onboarding = await conn.fetchrow(
-            "SELECT portfolio_id FROM acp_shared.tenant_onboarding WHERE tenant_id = $1", tenant_id,
-        )
-        if existing_onboarding and existing_onboarding["portfolio_id"] != body.portfolio_id:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Tenant {tenant_id} already seeded from portfolio "
-                    f"{existing_onboarding['portfolio_id']} — cannot reseed from a different portfolio"
-                ),
-            )
-
-        async with conn.transaction():
-            await conn.execute(
-                """
-                INSERT INTO acp_shared.tenant_atom_state (tenant_id, tour_id)
-                SELECT $1, unnest($2::uuid[])
-                ON CONFLICT (tenant_id, tour_id) DO NOTHING
-                """,
-                tenant_id, portfolio["tour_ids"],
-            )
-            await conn.execute(
-                """
-                INSERT INTO acp_shared.tenant_onboarding (tenant_id, portfolio_id)
-                VALUES ($1, $2)
-                ON CONFLICT (tenant_id) DO NOTHING
-                """,
-                tenant_id, body.portfolio_id,
-            )
-
-        seeded_count = await conn.fetchval(
-            "SELECT count(*) FROM acp_shared.tenant_atom_state WHERE tenant_id = $1", tenant_id,
-        )
-
-    return {
-        "tenant_id": str(tenant_id),
-        "portfolio_id": str(body.portfolio_id),
-        "seeded_tour_count": seeded_count,
-    }
-
-
-# ── PATCH /admin/tenants/{id}/angle — N1 step 3 ──────────────────────────────
-
-class AssignAngleRequest(BaseModel):
-    assigned_angle: str
-
-
-@router.patch("/tenants/{tenant_id}/angle", summary="N1 step 3 — assign the tenant's anti-cannibalization angle")
-async def assign_tenant_angle(
-    tenant_id: UUID,
-    body: AssignAngleRequest,
-    request: Request,
-    x_admin_secret: str = Header(None),
-):
-    """Applies to every tenant_atom_state row for this tenant at once (same value on every row —
-    AA-309 build task decision: angle is a per-TENANT decision, denormalized onto the per-tour
-    table rather than a separate 1-row-per-tenant table). Validated against the fixed
-    ASSIGNED_ANGLES vocabulary — never free text."""
-    verify_admin_secret(x_admin_secret)
-    if body.assigned_angle not in ASSIGNED_ANGLES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"assigned_angle must be one of {list(ASSIGNED_ANGLES.keys())}",
-        )
-
-    pool = request.app.state.pool
-    async with pool.acquire() as conn:
-        result = await conn.execute(
-            """
-            UPDATE acp_shared.tenant_atom_state
-            SET assigned_angle = $2, updated_at = now()
-            WHERE tenant_id = $1
-            """,
-            tenant_id, body.assigned_angle,
-        )
-    updated = int(result.split()[-1])
-    if updated == 0:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No tenant_atom_state rows for tenant {tenant_id} — run seed-atoms first",
-        )
-
-    return {
-        "tenant_id": str(tenant_id),
-        "assigned_angle": body.assigned_angle,
-        "assigned_angle_label": ASSIGNED_ANGLES[body.assigned_angle],
-        "tour_rows_updated": updated,
-    }
-
-
-# ── GET /admin/tenants/{id}/mirror — N1 steps 4+5 ────────────────────────────
-
-@router.get("/tenants/{tenant_id}/mirror", summary="N1 steps 4+5 — Mirror: real atom count + runway info")
-async def get_tenant_mirror(
-    tenant_id: UUID,
-    request: Request,
-    x_admin_secret: str = Header(None),
-):
-    """AA-384 product-direction change: this endpoint is now PURELY INFORMATIONAL — no upsell
-    language, no "next plan tier" suggestion. Pre-paying-customer stage, >700-tour catalog: atom
-    scarcity is not a real concern yet, so a tier-upgrade nudge here would be selling against a
-    limit that doesn't actually bind. posts_per_week now comes straight from shared.tenants
-    (tenant's own free choice at creation, migration 099) — no plan_tier lookup at all.
-
-    Still never reads acp_shared.marketplace_portfolios.atom_snapshot (that's a Marketplace-time
-    snapshot that can go stale — atoms starred/deleted/added before onboarding actually happens).
-    Always a FRESH COUNT(*) against acp_contract.tour_atoms for this tenant's seeded tour_ids, and
-    still calls runway_months() directly (services.acp_shared.marketplace_estimates, AA-330 Phần B)
-    with the UNCHANGED formula — AA-384 only changes how the result is presented, not computed.
-
-    AA-444 (23/08/2026): this ONBOARDING-time mirror is unrelated to the tenant's ongoing
-    Marketplace view — that live rollup (tenant_tour_versions x tour_atoms, both tenant-scoped)
-    is now GET /v1/marketplace (api/routers/v1_marketplace.py), per ADR-2026-038 §0.3."""
-    verify_admin_secret(x_admin_secret)
-    pool = request.app.state.pool
-
-    async with pool.acquire() as conn:
-        tenant = await conn.fetchrow(
-            "SELECT tenant_id, plan_tier::text AS plan_tier, posts_per_week "
-            "FROM shared.tenants WHERE tenant_id = $1",
-            tenant_id,
-        )
-        if not tenant:
-            raise HTTPException(status_code=404, detail=f"Tenant {tenant_id} not found")
-
-        state_rows = await conn.fetch(
-            "SELECT tour_id, assigned_angle FROM acp_shared.tenant_atom_state WHERE tenant_id = $1",
-            tenant_id,
-        )
-        if not state_rows:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No tenant_atom_state rows for tenant {tenant_id} — run seed-atoms first",
-            )
-        tour_ids = [r["tour_id"] for r in state_rows]
-        assigned_angle = state_rows[0]["assigned_angle"]
-
-        atom_count = await conn.fetchval(
-            """
-            SELECT count(*) FROM acp_contract.tour_atoms
-            WHERE tour_id = ANY($1) AND NOT deleted AND NOT is_empty_marker
-            """,
-            tour_ids,
-        )
-
-    plan_tier = tenant["plan_tier"]
-    posts_per_week = tenant["posts_per_week"]
-    months = runway_months(atom_count, posts_per_week)
-
-    message = (
-        f"At the current pace ({posts_per_week} posts/week), existing content covers about "
-        f"{months} months."
-        if months is not None
-        else "Content runway cannot be estimated at the current posting pace."
-    )
-
-    return {
-        "tenant_id": str(tenant_id),
-        "plan_tier": plan_tier,
-        "posts_per_week": posts_per_week,
-        "tour_count": len(tour_ids),
-        "atom_count": atom_count,
-        "runway_months": months,
-        "message": message,
-        "assigned_angle": assigned_angle,
-        "assigned_angle_label": ASSIGNED_ANGLES.get(assigned_angle) if assigned_angle else None,
-    }
-
-
 # ── GET/PUT /admin/tenants/{id}/config — AA-323 Gap 3: N4-N6 markets/channels/
 # capacity config. capacity_posts_per_week reads/writes shared.tenants.posts_per_week
 # (AA-384, existing single source of truth) — markets/channels read/write the new
@@ -1181,9 +950,15 @@ async def approve_gate_a(
     """Mirrors acp_shared.quarter_plan_version's real approve pattern (AA-320) exactly:
     SELECT...FOR UPDATE row lock, reject a non-'pending' status (409, never a silent no-op on a
     second approve call), UPDATE approval_status/approved_by/approved_at. Only on success does
-    shared.tenants.is_active flip to true — never earlier. Requires assigned_angle to already be
-    set (step 3 must precede step 6, per the 6-step spec) — rejects an incomplete onboarding rather
-    than approving a tenant with no angle assigned."""
+    shared.tenants.is_active flip to true — never earlier.
+
+    AA-472: the "no tenant_onboarding row" 404 is removed -- create_tenant() now inserts this row
+    itself, unconditionally, for every tenant (Hướng B), so the row existing is a real invariant,
+    not something this endpoint needs to check for. The former assigned_angle gate is also
+    removed -- angle was modeled as a per-TENANT attribute on acp_shared.tenant_atom_state, which
+    this task's own investigation found to be the wrong concept from the start (angle belongs to
+    an individual T8 piece, not the tenant as a whole); approval_status == 'pending' is now the
+    only real precondition."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
 
@@ -1193,11 +968,6 @@ async def approve_gate_a(
                 "SELECT approval_status FROM acp_shared.tenant_onboarding WHERE tenant_id = $1 FOR UPDATE",
                 tenant_id,
             )
-            if row is None:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"No tenant_onboarding row for tenant {tenant_id} — run seed-atoms first",
-                )
             if row["approval_status"] != "pending":
                 raise HTTPException(
                     status_code=409,
@@ -1205,19 +975,6 @@ async def approve_gate_a(
                         f"Tenant {tenant_id} onboarding is '{row['approval_status']}', "
                         "not 'pending' — cannot approve"
                     ),
-                )
-
-            has_angle = await conn.fetchval(
-                """
-                SELECT 1 FROM acp_shared.tenant_atom_state
-                WHERE tenant_id = $1 AND assigned_angle IS NOT NULL LIMIT 1
-                """,
-                tenant_id,
-            )
-            if not has_angle:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Tenant {tenant_id} has no assigned_angle yet — run PATCH .../angle first",
                 )
 
             await conn.execute(
@@ -1276,7 +1033,7 @@ async def get_gate_a_status(
     if not row:
         raise HTTPException(
             status_code=404,
-            detail=f"No tenant_onboarding row for tenant {tenant_id} — run seed-atoms first",
+            detail=f"No tenant_onboarding row for tenant {tenant_id}",
         )
 
     return {
