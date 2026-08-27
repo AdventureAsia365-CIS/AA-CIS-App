@@ -4,7 +4,6 @@ AA-125: Unit tests for pgvector cosine similarity calibration helpers.
 Tests:
 - test_cosine_similarity_similar_texts: near-identical texts → TF-IDF sim > 0.90
 - test_cosine_similarity_different_texts: unrelated texts → TF-IDF sim < 0.80
-- test_threshold_applied_correctly: dedup check respects _DEDUP_THRESHOLD gate
 """
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -75,67 +74,3 @@ def test_cosine_similarity_different_texts_zero_overlap():
     b = "Serengeti Tanzania wildebeest migration safari camping Africa"
     sim = _pair_sim(a, b)
     assert sim < 0.05, f"Expected sim < 0.05 for zero-overlap texts, got {sim:.3f}"
-
-
-# ── Test 3: dedup check respects threshold gate ────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_threshold_applied_correctly_blocks_duplicate():
-    """check_blog_dedup returns an existing draft_id when similarity exceeds threshold."""
-    fake_embedding = [0.1] * 1536
-
-    mock_row = {"similarity": 0.95, "draft_id": "aaaaaaaa-0000-0000-0000-000000000001"}
-    mock_conn = AsyncMock()
-    mock_conn.fetchrow = AsyncMock(return_value=mock_row)
-
-    with patch("services.acp_s4.embeddings.embed_text", return_value=fake_embedding):
-        from services.acp_s4.embeddings import check_blog_dedup
-        result = await check_blog_dedup(
-            mock_conn,
-            tenant_id="tenant-uuid",
-            title="Ha Long Bay luxury cruise",
-            primary_keyword="vietnam cruise",
-            threshold=0.92,
-        )
-
-    assert result == "aaaaaaaa-0000-0000-0000-000000000001"
-    mock_conn.fetchrow.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_threshold_applied_correctly_passes_unique():
-    """check_blog_dedup returns None when no similar draft exists above threshold."""
-    fake_embedding = [0.1] * 1536
-
-    mock_conn = AsyncMock()
-    mock_conn.fetchrow = AsyncMock(return_value=None)
-
-    with patch("services.acp_s4.embeddings.embed_text", return_value=fake_embedding):
-        from services.acp_s4.embeddings import check_blog_dedup
-        result = await check_blog_dedup(
-            mock_conn,
-            tenant_id="tenant-uuid",
-            title="Mekong Delta boat tour",
-            primary_keyword="vietnam mekong",
-            threshold=0.92,
-        )
-
-    assert result is None
-
-
-@pytest.mark.asyncio
-async def test_threshold_applied_correctly_fails_open_on_embed_error():
-    """check_blog_dedup returns None (fail-open) when embedding call raises."""
-    mock_conn = AsyncMock()
-
-    with patch("services.acp_s4.embeddings.embed_text", side_effect=RuntimeError("bedrock down")):
-        from services.acp_s4.embeddings import check_blog_dedup
-        result = await check_blog_dedup(
-            mock_conn,
-            tenant_id="tenant-uuid",
-            title="Sapa trekking tour",
-            primary_keyword="sapa vietnam",
-        )
-
-    assert result is None
-    mock_conn.fetchrow.assert_not_awaited()

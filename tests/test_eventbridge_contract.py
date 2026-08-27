@@ -47,15 +47,6 @@ class TestACPEventSourceStrings(unittest.TestCase):
             "services/acp/handler.py still contains hardcoded 'aa-cis.pipeline'"
         assert "ACPEventSource.S1" in src or "acp.s1" in src
 
-    def test_gate2_approval_uses_hitl_source(self):
-        """Gate 2 HITL approval event must use ACPEventSource.HITL, not 'acp.s3'."""
-        import inspect
-        import api.routers.v1_s3 as v1
-        src = inspect.getsource(v1)
-        # The HITL approval block must reference the HITL source constant
-        assert "ACPEventSource.HITL" in src, \
-            "v1_s3.py Gate 2 approval must emit ACPEventSource.HITL, not 'acp.s3'"
-
 
 # ── 2. Idempotency helpers unit tests ────────────────────────────────────────
 

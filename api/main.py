@@ -22,21 +22,15 @@ from api.routers.v1_angle_gate import router as v1_angle_gate_router
 from api.routers.v1_content_writing import router as v1_content_writing_router
 from api.routers.v1_exports import router as v1_exports_router
 from api.routers.v1_pipeline import router as v1_pipeline_router
-from api.routers.v1_acp import router as v1_acp_router
 from api.routers.v1_competitors import router as v1_competitors_router
 from api.routers.v1_publish import router as v1_publish_router
 from api.routers.v1_integrations import router as v1_integrations_router
 from api.routers.v1_s0 import router as v1_s0_router
-from api.routers.v1_s1 import router as v1_s1_router
 from api.routers.v1_s1_from_atom import router as v1_s1_from_atom_router
-from api.routers.v1_s3 import router as v1_s3_router
-from api.routers.v1_acp_gate import router as v1_acp_gate_router
 from api.routers.v1_rules import router as v1_rules_router
 from api.routers.v1_social import router as v1_social_router
-from api.routers.v1_s4_blog import router as v1_s4_blog_router
 from api.routers.admin import router as admin_router
 from api.routers.admin_pipeline import router as admin_pipeline_router
-from api.routers.admin_acp_proxy import router as admin_acp_proxy_router
 from api.routers.admin_settings import router as admin_settings_router
 from api.routers.admin_atoms import router as admin_atoms_router
 from api.routers.admin_a4 import router as admin_a4_router
@@ -118,21 +112,15 @@ app.include_router(v1_angle_gate_router)  # AA-449 — T8 Angle Gate
 app.include_router(v1_content_writing_router)  # AA-450 — T9 Content Writing + T10-inline
 app.include_router(v1_exports_router)
 app.include_router(v1_pipeline_router)
-app.include_router(v1_acp_router)
 app.include_router(v1_competitors_router)
 app.include_router(v1_publish_router)  # AA-455 bước 1 — tenant self-unpublish (publish_log)
 app.include_router(v1_integrations_router)  # AA-457 [T11 PR1] — tenant WordPress credentials
 app.include_router(v1_s0_router)
-app.include_router(v1_s1_router, prefix="/acp/s1")
 app.include_router(v1_s1_from_atom_router)
-app.include_router(v1_s3_router)
-app.include_router(v1_acp_gate_router)
 app.include_router(v1_rules_router)
 app.include_router(v1_social_router)
-app.include_router(v1_s4_blog_router)
 app.include_router(admin_router)
 app.include_router(admin_pipeline_router)
-app.include_router(admin_acp_proxy_router)
 app.include_router(admin_settings_router)
 app.include_router(admin_atoms_router)
 app.include_router(admin_a4_router)
