@@ -1,5 +1,14 @@
 """tests/verify_scripts/aa391_e2e_orchestrator.py — AA-391 live verify glue.
 
+AA-475: BROKEN as of the N2 atomize teardown — `api.routers.v1_atoms` (this script's STEP 3
+import, below) no longer exists; N2 platform-scope decompose was deleted along with
+/admin/atomize + /admin/curation, retired in favor of T5's tenant-scoped atomize
+(services/acp_produce/tenant_pipeline.py::run_t5_atomize). Never wired into pytest/CI (manual,
+TEST_MODE-gated script only) so this doesn't break the build — left as-is rather than rewritten,
+since patching STEP 3 to call T5 instead would misrepresent what this script's historical run
+actually verified (N2, not T5). A future re-run of this chain needs a new STEP 3 written against
+run_t5_atomize first.
+
 WHY THIS FILE EXISTS (ADR-2026-037, same standard AA-364/367/375/376/377/378's own verify
 scripts already met): proves the full S0->N8 chain (N0-N2 decompose -> N3 curate -> S1-from-atom
 -> N4 runway -> N5 quarter (Gate B) -> N6 allocate -> N7 slot production -> N8 packet assembly)

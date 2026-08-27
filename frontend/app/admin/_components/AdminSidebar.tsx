@@ -3,7 +3,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Sparkles, Boxes, Eye } from "lucide-react";
+import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Eye } from "lucide-react";
 import { A, serif, sans, SIDEBAR_WIDTH } from "./adminUi";
 
 interface Notif {
@@ -20,8 +20,7 @@ interface Notif {
 
 // AA-323 round 6, Phần D — sidebar reorganized around the real ACP v2
 // (N0-N8) business flow instead of historical grouping:
-//   1. Real ACP v2 (N0-N8): Tenants(N1)/Marketplace(N1)/Atomize(N2)/
-//      Atom Curation(N2, + deep-links to N4-N6 preview)/Quarter Plan Gate B(N5).
+//   1. Real ACP v2 (N0-N8): Tenants(N1)/Marketplace(N1)/Quarter Plan Gate B(N5).
 //   2. AA-internal's own content-authoring pipeline (Upload/S1 Rewrite/
 //      Review/Brand/Master Content) — a different, older system for AA's
 //      own tour copy, unrelated to the B2B tenant flow.
@@ -29,11 +28,10 @@ interface Notif {
 // S4 Social, admin_acp_proxy.py) was removed from this sidebar entirely
 // (nobody needs ACPv1 access anymore, per Nghiep). The routes/pages and
 // their backend are untouched and still reachable directly by URL.
-const ATOMS_NAV = [
-  { href: "/admin/atomize",  icon: <Boxes size={15} />,    label: "Atomize (N2)" },
-  { href: "/admin/curation", icon: <Sparkles size={15} />, label: "Atom Curation" },
-];
-
+// AA-475 — the "ACP v2 — Atoms" group (Atomize N2 + Atom Curation) was
+// removed along with those pages; the non-admin Dashboard fallback that
+// group used to carry moved into "AA Internal Content" below so
+// reviewer/content roles keep a Dashboard entry point.
 const CONTENT_AUTHORING_NAV = [
   { href: "/admin/upload",         icon: <Upload size={15} />,        label: "Upload (S0)" },
   { href: "/admin/s1-rewrite",      icon: <Wand2 size={15} />,         label: "S1 Rewrite" },
@@ -214,23 +212,18 @@ export default function AdminSidebar() {
           </NavGroup>
         )}
 
-        {/* ACP v2 — N2 atoms (visible to all roles, same as before) */}
-        <NavGroup label="ACP v2 — Atoms">
+        {/* AA-internal's own content-authoring pipeline — a different, older
+            system for AA's own tour copy, not part of the B2B ACP v2 flow.
+            Visible to all roles (same as before). AA-475: the non-admin
+            Dashboard fallback (reviewer/content roles don't get the
+            isAdmin-gated one above) moved here from the deleted
+            "ACP v2 — Atoms" group. */}
+        <NavGroup label="AA Internal Content">
           {!isAdmin && (
             <NavItem active={active("/admin/dashboard")} accent={A.gold}
               icon={<LayoutDashboard size={15} />} label="Dashboard"
               onClick={() => router.push("/admin/dashboard")} />
           )}
-          {ATOMS_NAV.map(n => (
-            <NavItem key={n.href} active={active(n.href)} accent={A.gold}
-              icon={n.icon} label={n.label} onClick={() => router.push(n.href)} />
-          ))}
-        </NavGroup>
-
-        {/* AA-internal's own content-authoring pipeline — a different, older
-            system for AA's own tour copy, not part of the B2B ACP v2 flow.
-            Visible to all roles (same as before). */}
-        <NavGroup label="AA Internal Content">
           {CONTENT_AUTHORING_NAV.map(n => (
             <NavItem key={n.href} active={active(n.href)} accent={A.gold}
               icon={n.icon} label={n.label} onClick={() => router.push(n.href)} />

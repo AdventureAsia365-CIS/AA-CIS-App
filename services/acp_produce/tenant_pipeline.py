@@ -45,11 +45,11 @@ import uuid
 
 import structlog
 
-from api.routers.v1_atoms import (
-    _SYSTEM_PROMPT,
-    _build_user_prompt,
-    _source_hash,
-    _strip_json_fence,
+from services.acp_shared.atom_extraction import (
+    SYSTEM_PROMPT as _SYSTEM_PROMPT,
+    build_user_prompt as _build_user_prompt,
+    source_hash as _source_hash,
+    strip_json_fence as _strip_json_fence,
 )
 from services.acp_shared.grounding import find_novel_numeric_claims
 from shared.llm_client.bedrock_satellite import invoke_claude
@@ -202,12 +202,15 @@ async def escalate_t3_failure(
 
 async def run_t5_atomize(tenant_id: str, tour_id: str, rewritten: dict, pool, country: str = "") -> dict:
     """T5 — decompose atoms from T4 output (tenant-rewritten), owner_scope=tenant_id.
-    Reuses AA-299's proven prompt/parse pipeline from api/routers/v1_atoms.py
+    Reuses AA-299's proven prompt/parse pipeline, now living in
+    services/acp_shared/atom_extraction.py (AA-475 — moved out of the deleted
+    api/routers/v1_atoms.py, the old platform-scope N2 atomize endpoint this module
+    never called directly, only imported these pure helpers from)
     (_build_user_prompt, _SYSTEM_PROMPT, _strip_json_fence, invoke_claude) — the
     two changes AA-425 asks for: (1) `row` built from T4 output, not a
     v_trip_registry SELECT (raw source); (2) owner_scope=tenant_id, not 'platform'.
 
-    Idempotency fix vs. v1_atoms.py::_decompose_inline() (invisible there because
+    Idempotency fix vs. the old N2 platform-scope decompose (invisible there because
     owner_scope was always 'platform' — never exercised with more than one owner
     per tour_id): the source_hash lookup is scoped to (tour_id, owner_scope)
     together, not tour_id alone, so two tenants rewriting the same underlying

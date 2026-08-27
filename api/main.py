@@ -26,7 +26,6 @@ from api.routers.v1_acp import router as v1_acp_router
 from api.routers.v1_competitors import router as v1_competitors_router
 from api.routers.v1_publish import router as v1_publish_router
 from api.routers.v1_integrations import router as v1_integrations_router
-from api.routers.v1_atoms import router as v1_atoms_router
 from api.routers.v1_s0 import router as v1_s0_router
 from api.routers.v1_s1 import router as v1_s1_router
 from api.routers.v1_s1_from_atom import router as v1_s1_from_atom_router
@@ -124,7 +123,6 @@ app.include_router(v1_competitors_router)
 app.include_router(v1_publish_router)  # AA-455 bước 1 — tenant self-unpublish (publish_log)
 app.include_router(v1_integrations_router)  # AA-457 [T11 PR1] — tenant WordPress credentials
 app.include_router(v1_s0_router)
-app.include_router(v1_atoms_router)
 app.include_router(v1_s1_router, prefix="/acp/s1")
 app.include_router(v1_s1_from_atom_router)
 app.include_router(v1_s3_router)
