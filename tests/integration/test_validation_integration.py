@@ -106,28 +106,10 @@ class TestQualityScoresRepository:
         assert cur.fetchone()[0] == "failed"
         cur.close()
 
-    def test_all_29_lessons_in_registry(self, db_conn):
-        """lessons_registry must have entries loadable for 29 validators."""
-        cur = db_conn.cursor()
-        # Seed a representative subset
-        validators = [
-            (1, "formatting", "no_all_caps", "V01_CAPS_CHECK"),
-            (2, "formatting", "title_case_name", "V02_TITLE_CASE"),
-            (5, "seo", "no_this_is_opener", "V05_SEO_OPENER"),
-            (25, "seo", "meta_max_160_chars", "V25_META_LENGTH"),
-            (29, "brand", "no_forbidden_words", "V29_FORBIDDEN"),
-        ]
-        for lesson_num, category, fn, failure_code in validators:
-            cur.execute("""
-                INSERT INTO shared.lessons_registry
-                    (lesson_num, category, validator_fn, failure_code, is_active)
-                VALUES (%s, %s, %s, %s, TRUE)
-                ON CONFLICT (lesson_num) DO NOTHING
-            """, (lesson_num, category, fn, failure_code))
-        cur.execute("SELECT COUNT(*) FROM shared.lessons_registry WHERE is_active = TRUE")
-        count = cur.fetchone()[0]
-        cur.close()
-        assert count >= 5  # Seeded 5 above
+    # AA-481: test_all_29_lessons_in_registry removed — tested shared.lessons_registry, dropped
+    # by migration 122 (0 production caller anywhere, confirmed via AA-479 full-schema audit;
+    # table predates ACP entirely, migration 002/003). Kept here as the direct, foreseeable
+    # consequence of that drop rather than left to break CI's real Postgres integration run.
 
 
 class TestBrandRuleValidation:

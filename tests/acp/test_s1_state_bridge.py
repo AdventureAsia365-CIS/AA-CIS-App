@@ -4,9 +4,12 @@ AA-104 — S1 State Bridge Guard tests.
 Coverage:
   1. S1 commit-before-publish: DB commit success → event published
   2. S1 no-publish on DB fail: DB raises → event NOT published
-  3. S2 guard blocks empty s1_keywords_used
-  4. S2 guard blocks null s1_keywords_used
-  5. S2 guard passes valid s1_keywords_used
+
+AA-481: TestS2Guard removed — imported services.acp.s2.router, a module whose source no
+longer exists in this repo (dead ACPv1 S2, confirmed via AA-479/481 audit: 0 real .py files,
+only stale __pycache__, git ls-files empty). TestS1CommitBeforePublish stays — it tests
+api.services.run_context_db.write_run_context_stage, which services/export/handler.py (the
+live A0-A3 admin pipeline) still uses.
 """
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -107,76 +110,3 @@ class TestS1CommitBeforePublish:
                 pass
 
         assert len(eb_calls) == 0, "EventBridge must not fire when DB write raises"
-
-
-# ── S2: guard clause ──────────────────────────────────────────────────────────
-
-class TestS2Guard:
-    """Guard: S1ContextNotReadyError raised when s1_keywords_used absent or empty."""
-
-    def test_s2_guard_blocks_empty_keywords(self):
-        """context with s1_keywords_used=[] → S1ContextNotReadyError raised."""
-        from services.acp.s2.router import _guard_s1_context
-        from services.acp_shared.errors import S1ContextNotReadyError
-
-        with pytest.raises(S1ContextNotReadyError) as exc_info:
-            _guard_s1_context({"s1_keywords_used": []}, "run-id-1")
-
-        assert "S1_CONTEXT_NOT_READY" in str(exc_info.value)
-        assert "run-id-1" in str(exc_info.value)
-
-    def test_s2_guard_blocks_null_keywords(self):
-        """context with s1_keywords_used=None → S1ContextNotReadyError raised."""
-        from services.acp.s2.router import _guard_s1_context
-        from services.acp_shared.errors import S1ContextNotReadyError
-
-        with pytest.raises(S1ContextNotReadyError):
-            _guard_s1_context({"s1_keywords_used": None}, "run-id-2")
-
-    def test_s2_guard_blocks_missing_key(self):
-        """context missing s1_keywords_used key entirely → S1ContextNotReadyError raised."""
-        from services.acp.s2.router import _guard_s1_context
-        from services.acp_shared.errors import S1ContextNotReadyError
-
-        with pytest.raises(S1ContextNotReadyError):
-            _guard_s1_context({}, "run-id-3")
-
-    def test_s2_guard_passes_valid_keywords(self):
-        """context with s1_keywords_used=['keyword1'] → no exception raised."""
-        from services.acp.s2.router import _guard_s1_context
-
-        # Should not raise
-        _guard_s1_context({"s1_keywords_used": ["keyword1"]}, "run-id-4")
-
-    def test_s2_guard_passes_multiple_keywords(self):
-        """context with multiple keywords → no exception raised."""
-        from services.acp.s2.router import _guard_s1_context
-
-        _guard_s1_context(
-            {"s1_keywords_used": ["vietnam tours", "cambodia trekking", "laos cycling"]},
-            "run-id-5",
-        )
-
-    def test_s1_context_not_ready_error_is_catchable_as_exception(self):
-        """S1ContextNotReadyError must be subclass of Exception for try/except."""
-        from services.acp_shared.errors import S1ContextNotReadyError
-
-        err = S1ContextNotReadyError("test message")
-        assert isinstance(err, Exception)
-        assert "test message" in str(err)
-
-    @pytest.mark.asyncio
-    async def test_s2_manual_trigger_requires_s1_run_id(self):
-        """POST /run without s1_run_id → HTTPException 422 before any DB/graph work."""
-        from fastapi import HTTPException
-        from services.acp.s2.router import run_s2, RunS2Request
-
-        body = RunS2Request(country="Vietnam")  # s1_run_id omitted
-        mock_request = MagicMock()
-        mock_tenant = {"sub": "00000000-0000-0000-0000-000000000001", "role": "admin"}
-
-        with pytest.raises(HTTPException) as exc_info:
-            await run_s2(body, mock_request, mock_tenant)
-
-        assert exc_info.value.status_code == 422
-        assert "s1_run_id is required" in str(exc_info.value.detail)
