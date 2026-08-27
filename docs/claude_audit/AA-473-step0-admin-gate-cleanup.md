@@ -704,3 +704,269 @@ trong PR này — cần Nghiệp quyết hướng (xây T7 write UI trước, ha
 vô thời hạn) trước khi có prompt build riêng cho nó.
 
 Dừng lại chờ Nghiệp review trước khi giao prompt build.
+
+---
+---
+
+# AA-473 BUILD — Phần 1 done (PR #234), Phần 2 dry-run bổ sung (12 tenant)
+
+Ngày: 2026-08-27. Phần 1 (xoá code Gate A) đã merge-ready ở PR #234 (chi tiết trong
+`docs/implementation-notes/AA-473.md`). Phần này ghi lại DRY RUN bổ sung cho Phần 2 sau khi
+Nghiệp thêm `test-n1-flow` vào danh sách xoá (11 → 12 tenant) và yêu cầu chứng minh cứng thêm
+2 điểm: cross-reference atom xuyên tenant, và FK constraint thật.
+
+## 0. Kiểm tra AA-471 trước khi thêm test-n1-flow
+
+Đọc trực tiếp Linear AA-471 ("[AUDIT] tenant test-n1-flow thiếu default brand_rules row"):
+status **Backlog**, priority **Low**, dòng cuối mô tả tự ghi "Không phải bug ưu tiên cao — audit
+thêm khi có thời gian, không chặn việc nào khác." Phát hiện gốc (thiếu `brand_rules` row) đã được
+ghi lại đầy đủ trong text của issue — không phụ thuộc phải giữ sống dữ liệu tenant này để điều
+tra tiếp (bước điều tra tiếp theo của AA-471 là quét TOÀN BỘ tenant khác xem có cùng thiếu không,
+không phải phải mổ xẻ riêng tenant này). Không có `blockedBy` nào trong Linear relations.
+**Kết luận: không có phụ thuộc, an toàn để thêm vào danh sách xoá.**
+
+## 1. DRY RUN đầy đủ — 12 tenant, 56 bảng (số liệu MỚI, thay thế hoàn toàn số liệu 11-tenant cũ)
+
+Query lại `shared.tenants WHERE slug = ANY(...)` cho 12 slug, resolve đủ 12 tenant_id (bao gồm
+`test-n1-flow` = `6fbaf284-e3cd-4b4b-b53b-c9a04e8fae8e`, **is_active=True** — tenant duy nhất
+trong danh sách xoá đang active, vì đây là tenant test được dùng sống nhiều session trước).
+
+Quét lại toàn bộ 56 bảng có cột `tenant_id` (fix thêm cast `::text` 2 phía để không bị lỗi
+type-mismatch như lần chạy 11-tenant trước — lần đó có 18 bảng lỗi `text = uuid` bị bỏ sót, đã
+chạy lại và xác nhận toàn bộ 18 bảng đó thực ra đều 0 row cho 11 tenant cũ):
+
+```
+"acp_shared"."acp_quota_ledger": 4 rows
+"acp_shared"."acp_v2_runs": 2 rows
+"acp_shared"."acp_v2_slots": 2 rows
+"acp_shared"."angle_gate_request": 6 rows
+"acp_shared"."audit_log": 4 rows
+"acp_shared"."competitor_index_cache": 1 rows
+"acp_shared"."content_piece": 3 rows
+"acp_shared"."quarter_plan": 1 rows
+"acp_shared"."tenant_atom_state": 19 rows
+"acp_shared"."tenant_config": 3 rows
+"acp_shared"."tenant_onboarding": 4 rows
+"acp_shared"."year_plan": 1 rows
+"gold_aa_internal"."tenant_tour_versions": 17 rows
+"shared"."tenant_api_usage": 380 rows
+"shared"."tenant_brand_rule_versions": 1 rows
+"shared"."tenant_brand_rules": 9 rows
+"shared"."tenants": 12 rows
+"shared"."v_tenant_monthly_usage": 12 rows (view, không phải bảng thật)
+"silver_aa_internal"."review_queue": 12 rows
+(42 bảng còn lại: 0 rows)
+```
+
+Tổng: **493 row** ở bảng phụ (so với 242 row của 11 tenant cũ — tăng do `test-n1-flow` là tenant
+active có nhiều dữ liệu sản phẩm thật từ các session build trước: T7 quarter_plan/year_plan, T8
+angle_gate_request, N4/N5/N6 acp_v2_runs/acp_v2_slots, T9 content_piece). Cộng **12 tenant** ở
+`shared.tenants`.
+
+**Atom owner_scope**: 44 atom (không phải 15 như số cũ) — `test-agency`: 15 atom,
+`test-n1-flow`: 29 atom.
+
+**Sanity check — 4 tenant còn lại vẫn đúng như cũ (test-n1-flow đã chuyển sang danh sách xoá)**:
+`aa_internal`, `wanderlux-travel`, `exploreasia-co` — **chỉ còn 3 tenant active thật**, không
+còn tenant nào để "test" nữa sau đợt dọn này. Đã xác nhận không có tenant nghi vấn nào khác lọt
+ra ngoài 12 tên.
+
+## 2. Cross-reference atom xuyên tenant — SẠCH, có bằng chứng
+
+**2a. Grep + quét toàn bộ 38 cột JSONB trong 4 schema `acp_shared/acp_contract/acp_deliver/
+acp_planning`** tìm chuỗi atom_id nhúng trong JSON (không chỉ cột kiểu FK rõ ràng) + quét toàn
+bộ cột tên khớp `%atom_id%`/`%atom_ids%` trong information_schema — tìm được đúng 2 cột thật sự
+lưu atom_id: `acp_contract.tour_atoms.atom_id` (chính nó) và `acp_shared.angle_gate_request.
+atom_id`. `acp_shared.marketplace_portfolios.atom_snapshot` (nghi vấn nêu trong đề bài) quét
+JSONB text — **0 dòng chứa atom_id nào trong 44 atom sắp xoá**.
+
+**2b. Query cờ đỏ ban đầu**: `angle_gate_request.atom_id`: 6 dòng khớp; `acp_v2_slots.payload`
+(JSONB): 2 dòng khớp — cả 2 đều bị flag "leak" ở lần quét thô đầu tiên.
+
+**2c. Follow-up xác định chính xác chủ sở hữu** — với từng dòng khớp, so `tenant_id` của dòng đó
+với `owner_scope` của atom_id bị tham chiếu VÀ với danh sách 12 tenant sắp xoá:
+
+```
+angle_gate_request: cả 6 dòng đều tenant_id=6fbaf284... (test-n1-flow), atom_owner_scope=
+  6fbaf284... (test-n1-flow) — same_tenant_as_atom_owner=True, requester nằm trong 12-list=True
+acp_v2_slots: cả 2 dòng đều tenant_id=6fbaf284... (test-n1-flow), toàn bộ atom_id trong payload
+  đều thuộc chính test-n1-flow — requester nằm trong 12-list=True
+```
+
+**REAL CROSS-TENANT LEAK: False** (cả 2 điểm nghi vấn). Toàn bộ 8 dòng "khớp" chỉ là tenant tự
+tham chiếu atom của chính nó (angle_gate_request/acp_v2_slots của test-n1-flow trỏ tới atom của
+test-n1-flow) — không có tenant nào NGOÀI danh sách 12 tenant sắp xoá tham chiếu tới atom sắp
+bị xoá. Kết luận: **44 atom owner_scope an toàn để xoá, không rò rỉ tham chiếu chéo.**
+
+## 3. FK constraint thật (information_schema, không suy đoán)
+
+Chạy đúng query Nghiệp cung cấp (mở rộng thêm `delete_rule` từ `information_schema.
+referential_constraints` để biết CASCADE hay không):
+
+```
+shared.pipeline_runs.tenant_id             -> shared.tenants.tenant_id  (ON DELETE NO ACTION)
+shared.tenant_api_usage.tenant_id          -> shared.tenants.tenant_id  (ON DELETE NO ACTION)
+shared.tenant_brand_rule_versions.tenant_id -> shared.tenants.tenant_id (ON DELETE NO ACTION)
+shared.tenant_brand_rules.tenant_id        -> shared.tenants.tenant_id  (ON DELETE CASCADE)
+shared.tenant_export_config.tenant_id      -> shared.tenants.tenant_id  (ON DELETE CASCADE)
+shared.tenant_integrations.tenant_id       -> shared.tenants.tenant_id  (ON DELETE CASCADE)
+shared.tenant_seo_config.tenant_id         -> shared.tenants.tenant_id  (ON DELETE CASCADE)
+```
+
+**Chỉ 7 FK thật tồn tại, tất cả trỏ về `shared.tenants` — KHÔNG có FK nào trỏ về `tour_atoms`
+hay `tenant_onboarding`** (khớp với phát hiện cũ: `owner_scope` là free-text, không phải FK thật;
+`tenant_onboarding` không có ai FK vào nó). Toàn bộ 18 bảng còn lại trong danh sách dry-run
+(acp_shared.tenant_onboarding, tenant_config, tenant_atom_state, acp_quota_ledger, audit_log,
+angle_gate_request, content_piece, quarter_plan, year_plan, acp_v2_runs, acp_v2_slots,
+competitor_index_cache, gold_aa_internal.tenant_tour_versions, silver_aa_internal.review_queue,
+acp_contract.tour_atoms) **không có ràng buộc FK thật nào** — Postgres sẽ không chặn nếu xoá
+`shared.tenants` trước, nhưng vẫn nên xoá thủ công trước để tránh để lại row mồ côi.
+
+**Thứ tự cascade ĐÚNG theo FK thật**:
+1. **Bắt buộc xoá trước `shared.tenants`** (NO ACTION — Postgres sẽ chặn nếu không xoá trước):
+   `shared.pipeline_runs`, `shared.tenant_api_usage`, `shared.tenant_brand_rule_versions`.
+2. **Nên xoá trước để sạch dữ liệu** (không FK thật, không bị Postgres chặn, nhưng để tránh mồ
+   côi): 15 bảng còn lại có row (`acp_shared.*` × 9 bảng, `gold_aa_internal.tenant_tour_versions`,
+   `silver_aa_internal.review_queue`, `acp_contract.tour_atoms` theo owner_scope).
+3. **Xoá `shared.tenants`** (12 row) — tự động CASCADE dọn nốt `tenant_brand_rules` (9 row),
+   `tenant_export_config`/`tenant_integrations`/`tenant_seo_config` (0 row mỗi bảng).
+
+Toàn bộ chạy trong 1 transaction — nếu bước nào lỗi, transaction rollback toàn bộ, không để lại
+trạng thái nửa vời.
+
+## Kết luận — sẵn sàng DELETE, chờ xác nhận
+
+Cả 3 điểm Nghiệp yêu cầu đều sạch: (1) AA-471 không phụ thuộc, (2) không rò rỉ tham chiếu atom
+xuyên tenant, (3) thứ tự cascade xác nhận bằng FK thật. **Theo đúng yêu cầu, KHÔNG tự chạy DELETE
+dù cả 3 điểm đều sạch — dừng lại chờ Nghiệp xác nhận.**
+
+---
+---
+
+# AA-473 Phần 2 — THỰC THI DELETE (đã xác nhận, 2026-08-27)
+
+## Phát hiện quan trọng khi thực thi: kế hoạch cascade ở trên CHƯA ĐỦ — cần 2 lần sửa
+
+Dù đã tìm FK thật qua `information_schema` ở bước trước, khi chạy DELETE thật (transaction đầu
+tiên) gặp **`ForeignKeyViolationError`** ngay: `quarter_plan_version` có FK trỏ tới
+`quarter_plan.plan_id`, nhưng bảng `quarter_plan_version` **không có cột `tenant_id` trực tiếp**
+— nên bước quét 56 bảng ban đầu (chỉ tìm theo `column_name='tenant_id'`) hoàn toàn bỏ sót nó.
+Transaction rollback sạch (verify lại bằng SELECT COUNT ngay sau đó — `tenant_api_usage` vẫn
+đúng 380 row, `shared.tenants` vẫn đúng 12 row, không mất dữ liệu).
+
+Để không tiếp tục dò từng FK một cách bị động, đã dump **TOÀN BỘ 81 FK constraint thật trong DB**
+qua `pg_constraint` (không phụ thuộc `information_schema` view nữa — đáng tin hơn), phát hiện
+thêm 1 lỗi thứ 2 khi thử lại: `review_queue.tenant_tour_version_id -> tenant_tour_versions.id`
+(cũng không có cột `tenant_id` trên `tenant_tour_versions`... thực ra `tenant_tour_versions` CÓ
+`tenant_id`, nhưng thứ tự xoá đặt nó TRƯỚC `review_queue` — sai chiều). Rollback sạch lần 2 (verify
+lại lần nữa, khớp 100%).
+
+**Kết luận rút ra**: phương pháp "quét cột `tenant_id`" ở STEP0 ban đầu chỉ tìm được các bảng
+**trực tiếp** tham chiếu tenant — bỏ sót toàn bộ tầng **gián tiếp** (bảng A tham chiếu bảng B,
+bảng B mới tham chiếu tenants). Đã sửa bằng cách dump full FK graph qua `pg_constraint` và tính
+transitive closure (BFS) từ 19 bảng gốc — tìm thêm **8 bảng phụ thuộc gián tiếp**:
+`angle_gate_option`, `publish_log`, `quarter_plan_version`, `shared.acp_runs`, cùng 4 bảng
+CASCADE (`tenant_brand_rules`, `tenant_export_config`, `tenant_integrations`, `tenant_seo_config`
+— đã biết từ trước). Đồng thời phát hiện `quarter_plan` và `quarter_plan_version` tham chiếu
+CHÉO nhau (`quarter_plan.current_version_id -> quarter_plan_version.version_id` VÀ
+`quarter_plan_version.plan_id -> quarter_plan.plan_id`) — phải `UPDATE current_version_id=NULL`
+trước để phá vòng lặp rồi mới xoá được `quarter_plan_version`.
+
+**Trước khi chạy lại**, đã làm thêm 1 bước Nghiệp không yêu cầu nhưng thấy cần thiết (đúng tinh
+thần "không suy đoán" của cả task): kiểm tra CASCADE có vô tình xoá dữ liệu của tenant KHÁC không
+(VD `acp_v2_slots.run_id -> acp_v2_runs.run_id ON DELETE CASCADE` — nếu 1 tenant khác có
+`acp_v2_slots` trỏ vào `run_id` của test-n1-flow, xoá `acp_v2_runs` sẽ vô tình xoá luôn dữ liệu
+tenant đó). Query thật xác nhận: **0 dòng ngoại lai** ở cả 4 điểm CASCADE nghi vấn
+(`acp_deliver.pieces`, `acp_v2_slots`, `angle_gate_option`, `content_piece` — toàn bộ đều thuộc
+chính test-n1-flow).
+
+## Thứ tự cascade THẬT SỰ đúng (đã chạy thành công)
+
+```
+1. shared.pipeline_runs, shared.tenant_api_usage, shared.tenant_brand_rule_versions  (NO ACTION)
+2. UPDATE acp_shared.quarter_plan SET current_version_id = NULL  (phá vòng lặp)
+   DELETE acp_shared.quarter_plan_version WHERE plan_id IN (quarter_plan của 12 tenant)
+3. DELETE acp_shared.publish_log WHERE piece_id IN (content_piece của 12 tenant)  (trước content_piece)
+4. acp_quota_ledger, acp_v2_runs (cascade acp_v2_slots), acp_v2_slots, angle_gate_request
+   (cascade angle_gate_option + content_piece), audit_log, competitor_index_cache, content_piece,
+   tenant_atom_state, tenant_config, tenant_onboarding, review_queue, tenant_tour_versions
+   (review_queue PHẢI trước tenant_tour_versions — FK review_queue.tenant_tour_version_id)
+5. acp_shared.quarter_plan  (PHẢI trước year_plan — FK quarter_plan.year_plan_id)
+6. acp_shared.year_plan
+7. acp_contract.tour_atoms WHERE owner_scope IN (12 tenant_id)
+8. shared.tenants  (cuối cùng — cascade tự dọn tenant_brand_rules/export_config/integrations/seo_config)
+```
+
+## Kết quả DELETE thật (transaction đã COMMIT)
+
+| Bảng | Số row đã xoá |
+|---|---|
+| shared.pipeline_runs | 0 |
+| shared.tenant_api_usage | 380 |
+| shared.tenant_brand_rule_versions | 1 |
+| acp_shared.quarter_plan_version | 4 |
+| acp_shared.publish_log | 0 |
+| acp_shared.acp_quota_ledger | 4 |
+| acp_shared.acp_v2_runs | 2 |
+| acp_shared.acp_v2_slots | 0 (đã bị cascade xoá cùng acp_v2_runs trước đó) |
+| acp_shared.angle_gate_request | 6 |
+| acp_shared.audit_log | 4 |
+| acp_shared.competitor_index_cache | 1 |
+| acp_shared.content_piece | 0 (đã bị cascade xoá cùng angle_gate_request trước đó) |
+| acp_shared.tenant_atom_state | 19 |
+| acp_shared.tenant_config | 3 |
+| acp_shared.tenant_onboarding | 4 |
+| silver_aa_internal.review_queue | 12 |
+| gold_aa_internal.tenant_tour_versions | 17 |
+| acp_shared.quarter_plan | 1 |
+| acp_shared.year_plan | 1 |
+| acp_contract.tour_atoms (owner_scope) | 44 |
+| shared.tenants | 12 |
+
+**Trước COMMIT**: chạy lại toàn bộ 21 bảng + `quarter_plan_version`/`angle_gate_option`/
+`publish_log` (theo plan_id/request_id/piece_id đã capture trước khi xoá) — **TẤT CẢ = 0 row còn
+sót**, mới COMMIT. Không có mismatch nào.
+
+## Verify sau COMMIT
+
+**1. `SELECT COUNT(*) FROM shared.tenants`**: đúng **3** — `aa_internal` (Adventure Asia
+Internal), `wanderlux-travel` (WanderLux Travel), `exploreasia-co` (ExploreAsia Co.), tất cả
+`is_active=True`.
+
+**2. Live-verify qua API thật** (`GET https://api-cis.lumiguides.it.com/admin/tenants`,
+X-Admin-Secret): trả về đúng 3 tenant trên, **key `pending_tenants` không còn tồn tại trong
+response** (đã xoá khỏi code) — xác nhận PR #234 đã được Nghiệp merge (03:32:04Z) và deploy
+thành công trong lúc phiên làm việc Phần 2 này đang chạy: `gh pr view 234` → MERGED; `gh run
+list` → "Deploy Dev" run cho commit merge PR #234 → success; `aws ecs describe-services` → task
+def `aa-cis-dev-api:148`, `rolloutState: COMPLETED`. Do đó live-verify này xác nhận CẢ 2 việc
+cùng lúc: (a) dữ liệu 12 tenant đã sạch, (b) code Gate A đã thực sự deploy live, không chỉ nằm
+trong PR.
+
+Giới hạn: không click-through được UI đã đăng nhập thật qua curl (redirect 307 về login, như
+mọi trang admin Next.js client-rendered khác) — nhưng code frontend đã xác nhận sạch qua
+`next build` cục bộ (Phần 1) + response API không còn field `pending_tenants` (bằng chứng gián
+tiếp mạnh: UI không thể hiển thị "Pending onboarding" từ 1 field không tồn tại).
+
+**3. Spot-check 3 tenant còn lại — không bị ảnh hưởng gì** (so trước/sau ngay trong transaction):
+```
+aa_internal          tenant_config before=0 after=0 | tour_atoms before=0 after=0  UNCHANGED
+wanderlux-travel     tenant_config before=0 after=0 | tour_atoms before=7 after=7  UNCHANGED
+exploreasia-co       tenant_config before=1 after=1 | tour_atoms before=0 after=0  UNCHANGED
+```
+
+## Bài học cho lần sau
+
+Phương pháp "quét cột `tenant_id`" (dùng ở STEP0 gốc) đủ tốt để đo QUY MÔ dữ liệu (đếm bao nhiêu
+row), nhưng **không đủ để suy ra thứ tự XOÁ an toàn** — phải dump `pg_constraint` đầy đủ và tính
+transitive closure mỗi khi cần xoá cascade thật, không chỉ lọc theo tên bảng đích ban đầu. Task
+này an toàn tuyệt đối nhờ chạy trong transaction + verify zero-row trước COMMIT — 2 lần lỗi giữa
+chừng đều rollback sạch 100%, không có dữ liệu nào bị mất hay hỏng ở bất kỳ thời điểm nào.
+
+## Trạng thái AA-473 sau Phần 2
+
+- **Gate A**: code đã xoá (PR #234, merged + deployed live, task def :148) + data 12 tenant test
+  đã xoá thật. **HOÀN TẤT.**
+- **Nhánh 1 (Atomize/Curation)**: giữ nguyên, đã chứng minh sạch. Không cần làm gì thêm.
+- **Planning tab admin (Nhánh 3 / AA-474)**: KHÔNG xoá — tách sang AA-474 (Backlog), chờ quyết
+  định sản phẩm (xây T7 write UI trước khi tính xoá admin).
+- DB hiện chỉ còn 3 tenant thật: `aa_internal`, `wanderlux-travel`, `exploreasia-co`.
