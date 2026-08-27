@@ -20,6 +20,18 @@
 -- before acp_hitl_requests; the acp_output_rules constraint must be dropped explicitly (not via
 -- blanket CASCADE) before acp_hitl_requests, since acp_output_rules itself is NOT being dropped.
 --
+-- Application-logic confirmation (not just "migration runs clean" — Nghiep asked specifically for
+-- this, see docs/implementation-notes/AA-477.md "FK dependency re-check" section for the full
+-- trail): apply_output_rules() (api/services/acp_post_processor.py, the real N7/N8 production
+-- path) never reads source_hitl_id or joins acp_hitl_requests — grep-confirmed. The only writer
+-- of source_hitl_id, h3_rule_extractor.py::extract_and_save_rule(), has 0 live callers (its sole
+-- caller, v1_acp_gate.py::gate_reject(), was deleted earlier in this same PR) — and the live N7
+-- gates.py code itself documents (services/acp_produce/gates.py:916-921) that N7 was deliberately
+-- never wired into that path. Empirically verified too: inserted an orphan acp_output_rules row
+-- (source_hitl_id pointing at a nonexistent hitl_id, FK already dropped in the same test
+-- transaction) and called the REAL apply_output_rules() against it — rule matched, run_count
+-- incremented, OutputRuleViolation raised correctly. Rolled back, zero actual change.
+--
 -- 0 view depends on any of these 15 tables (checked via pg_depend).
 --
 -- Scope: this migration ONLY drops tables. Terraform removal of the 2 feeder Lambdas
