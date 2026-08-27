@@ -16,24 +16,19 @@ whole ACP v2 pipeline end to end.
 
 GET   /admin/atoms                    — list/filter, batch of 50 by default
 GET   /admin/atoms/summary            — dashboard counts + by-tour accordion data
-PATCH /admin/atoms/bulk               — star / soft-delete many atoms at once
 PATCH /admin/atoms/{atom_id}          — star / soft-delete / light text edit
-GET   /admin/atoms/preview-slotgrid   — runway_map -> plan_quarter ->
-                                         approve_quarter_plan -> allocate_month
-                                         for one tenant, returns the SlotGrid
-                                         (optional ?version_id= reads one
-                                         specific approved historical version
-                                         instead of the current one, AA-323
-                                         round 6 Phần A)
 
-Route order note: /atoms/bulk and /atoms/summary/preview-slotgrid are
-registered BEFORE /atoms/{atom_id} — this repo's own CRITICAL rule
-(CLAUDE.md: "/{id}/full MUST come BEFORE /{id}") applies here too, since
-FastAPI would otherwise greedily match "bulk" as {atom_id} on a PATCH
-/atoms/bulk request.
+Route order note: /atoms/summary is registered BEFORE /atoms/{atom_id} — this
+repo's own CRITICAL rule (CLAUDE.md: "/{id}/full MUST come BEFORE /{id}")
+applies here too, since FastAPI would otherwise greedily match "summary" as
+{atom_id} on a GET /atoms/summary request.
+
+AA-475: PATCH /admin/atoms/bulk and GET /admin/atoms/preview-slotgrid were
+deleted along with /admin/curation + /admin/curation/preview (their only
+callers, STEP0-confirmed no owner_scope/JWT path ever reached them from T6) —
+see docs/claude_audit/AA-475-step0-atomize-curation-teardown.md.
 """
 import json
-from datetime import date
 from decimal import Decimal
 from typing import Optional
 from uuid import UUID
@@ -44,21 +39,9 @@ from pydantic import BaseModel
 
 from api.routers.admin import verify_admin_secret
 from api.routers.auth import verify_jwt
-from services.acp_planning.allocator import allocate_month, allocate_month_from_db
-from services.acp_planning.quarter import (
-    approve_quarter_plan, fetch_approved_quarter_plan, fetch_current_version_no,
-    fetch_quarter_plan_version, plan_quarter,
-)
-from services.acp_planning.runway import runway_map
-from services.acp_planning.tenant_config import fetch_tenant_planning_config
 from services.acp_shared.atom_constants import THIN_TRIP_ATOM_MIN
 
 router = APIRouter(prefix="/admin", tags=["admin-atoms"])
-
-# AA_internal — the only tenant with real tour/atom data today (verified live,
-# AA-301 STEP 0: 793/793 raw_tours rows). Used as the default for the preview
-# endpoint's tenant_id query param so the demo works out of the box.
-_AA_INTERNAL_TENANT_ID = UUID("00000000-0000-0000-0000-000000000001")
 
 
 # ── AA-431 — tenant-JWT auth + owner_scope filter for list/summary/patch ────────
@@ -99,34 +82,6 @@ def _resolve_atom_owner_scope(
         return payload["sub"]
     verify_admin_secret(x_admin_secret)
     return None
-
-
-def _preview_month_for_quarter(year: int, quarter: int) -> int:
-    """AA-323 round 7 — single source of truth for "which month does a Slot
-    Grid Preview compute", used by BOTH preview_slotgrid() branches below.
-    Before this, the two branches derived `month` independently
-    (`?version_id=` used the quarter's first month; the no-`version_id`
-    default used `date.today().month`) — for the SAME (year, quarter) these
-    only agree when today happens to fall in the quarter's first month.
-    Live-verified round 7: for aa_internal's actually-current v6 (Q3 2026,
-    today=2026-08-13), that mismatch (month=7 vs month=8) made
-    `runway.stage("South Korea", "US", month)` return MOFU for one path and
-    BOFU for the other — same approved version, two different Slot Grids
-    (funnel_stage AND framework, since FRAMEWORK_TABLE keys off funnel_stage)
-    depending only on which UI button was clicked. Fix: derive month from
-    (year, quarter) alone — if it's the REAL current quarter, "what should
-    ship right now" is today's actual month (matches what the default,
-    no-`?version_id=` Preview button has always shown); otherwise (a
-    genuinely different quarter — a true historical version, or one that's
-    not yet current) there is no meaningful "today" for it, so it falls
-    back to the quarter's first month. This makes `?version_id=<the current
-    version's id>` and no `?version_id=` at all ALWAYS resolve to the exact
-    same (year, quarter, month) and therefore the exact same computed
-    SlotGrid — the invariant round 7 requires."""
-    today = date.today()
-    if (year, quarter) == (today.year, (today.month - 1) // 3 + 1):
-        return today.month
-    return (quarter - 1) * 3 + 1
 
 
 def _safe(row) -> dict:
@@ -351,68 +306,6 @@ async def atoms_summary(
     }
 
 
-# ── PATCH /admin/atoms/bulk — star / delete many atoms at once ─────────────
-
-class BulkAtomPatchRequest(BaseModel):
-    atom_ids: list[str]
-    starred: Optional[bool] = None
-    deleted: Optional[bool] = None
-
-
-@router.patch("/atoms/bulk")
-async def patch_atoms_bulk(
-    body: BulkAtomPatchRequest,
-    request: Request,
-    owner_scope: Optional[str] = Depends(_resolve_atom_owner_scope),
-):
-    """Star/soft-delete many atoms in a single UPDATE ... WHERE atom_id =
-    ANY($1), not N sequential PATCH calls — for the curation UI's
-    multi-select bulk actions. Only starred/deleted are supported in bulk
-    (no bulk text edit — editing many atoms' text to the same value isn't
-    a real use case).
-
-    AA-431: a tenant caller's UPDATE is also WHERE-scoped to owner_scope, not
-    just filtered on read — an atom_id belonging to another tenant/platform
-    silently matches 0 rows instead of being editable via a guessed id (IDOR)."""
-    if not body.atom_ids:
-        raise HTTPException(status_code=400, detail="atom_ids must not be empty")
-    if body.starred is None and body.deleted is None:
-        raise HTTPException(status_code=400, detail="no fields to update")
-
-    sets = []
-    params: list = []
-
-    def _set(column: str, value) -> None:
-        params.append(value)
-        sets.append(f"{column} = ${len(params)}")
-
-    if body.starred is not None:
-        _set("starred", body.starred)
-    if body.deleted is not None:
-        _set("deleted", body.deleted)
-    sets.append("updated_at = now()")
-
-    params.append(body.atom_ids)
-    atom_ids_idx = len(params)
-    scope_clause = ""
-    if owner_scope is not None:
-        params.append(owner_scope)
-        scope_clause = f" AND owner_scope = ${len(params)}"
-    query = f"""
-        UPDATE acp_contract.tour_atoms
-        SET {", ".join(sets)}
-        WHERE atom_id = ANY(${atom_ids_idx}){scope_clause} AND NOT is_empty_marker
-        RETURNING atom_id, tour_id, text, distinctiveness, starred, deleted,
-                  visual_potential, media, created_at, updated_at
-    """
-
-    pool = request.app.state.pool
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(query, *params)
-
-    return {"updated": [_safe(r) for r in rows], "updated_count": len(rows)}
-
-
 # ── PATCH /admin/atoms/{atom_id} — star / delete / light edit ──────────────
 
 class AtomPatchRequest(BaseModel):
@@ -479,153 +372,3 @@ async def patch_atom(
     if not row:
         raise HTTPException(status_code=404, detail=f"Atom {atom_id} not found (or is an empty-marker row)")
     return _safe(row)
-
-
-# ── GET /admin/atoms/preview-slotgrid — first visual look at N0->N6 ────────
-
-@router.get("/atoms/preview-slotgrid")
-async def preview_slotgrid(
-    request: Request,
-    tenant_id: str = Query(str(_AA_INTERNAL_TENANT_ID)),
-    version_id: Optional[str] = Query(None),
-    x_admin_secret: str = Header(None),
-):
-    """Runs the real N4/N5/N6 chain (services/acp_planning/) against the
-    just-curated atom pool for one tenant and returns the resulting
-    SlotGrid — the first screen in the whole ACP v2 build (N0-N6) that
-    shows anything visually, rather than test code + direct DB queries.
-
-    markets/channels come from acp_shared.tenant_config (AA-323 Gap 3,
-    migration 101, defaults to ["US"]/["blog"] if unset); capacity comes from
-    shared.tenants.posts_per_week (AA-384) — no more hardcoded constants.
-
-    AA-323 Gap 1: checks for a real Gate-B-approved quarter_plan_version
-    first (fetch_approved_quarter_plan) and reads N6 through
-    allocate_month_from_db() when one exists. Only falls back to the
-    in-memory "admin-preview-demo" auto-approve + allocate_month() path when
-    no approved plan exists yet for this tenant/year/quarter — this is what
-    makes the full create -> Gate B approve -> N6-reads-the-real-version
-    chain observable from this screen without a separate production
-    endpoint. Either way nothing here writes a NEW row — the demo path never
-    persisted (unchanged from AA-300); the real path only ever reads.
-
-    AA-323 round 6, Phần A: optional `version_id` reads one SPECIFIC
-    historical version (from the History tab's new "View in Slot Grid
-    Preview" link) instead of always the tenant/quarter's current approved
-    version. version_id alone determines tenant/year/quarter (via
-    fetch_quarter_plan_version) — the `tenant_id` query param is ignored
-    when version_id is given. Only an approved version may be previewed
-    (Gate B: N6 must never read an un-approved plan, historical or not) —
-    a pending/rejected version_id 400s with a clear reason rather than
-    silently allocating from it.
-
-    AA-323 round 7: `month` for BOTH branches now comes from the single
-    shared `_preview_month_for_quarter()` (see its docstring for the full
-    root-cause story) instead of each branch computing it independently —
-    that divergence was a real, live-verified bug: the exact same approved
-    version rendered two different Slot Grids (different funnel_stage AND
-    framework) depending only on whether it was reached via `?version_id=`
-    or the plain default link."""
-    verify_admin_secret(x_admin_secret)
-    pool = request.app.state.pool
-
-    version_row = None
-    if version_id:
-        try:
-            version_uuid = UUID(version_id)
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid version_id: {version_id!r}")
-        version_row = await fetch_quarter_plan_version(version_uuid, pool)
-        if version_row is None:
-            raise HTTPException(status_code=404, detail=f"Quarter plan version {version_id} not found")
-        if version_row["approval_status"] != "approved":
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Version v{version_row['version_no']} is '{version_row['approval_status']}', not "
-                    "approved — Gate B requires approval before a slot grid can be computed for it."
-                ),
-            )
-        tenant_uuid = version_row["tenant_id"]
-        year = version_row["year"]
-        quarter = version_row["quarter"]
-        month = _preview_month_for_quarter(year, quarter)
-    else:
-        try:
-            tenant_uuid = UUID(tenant_id)
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid tenant_id: {tenant_id!r}")
-        today = date.today()
-        year = today.year
-        quarter = (today.month - 1) // 3 + 1
-        month = _preview_month_for_quarter(year, quarter)
-
-    config = await fetch_tenant_planning_config(tenant_uuid, pool)
-    markets = config.markets
-    channels = config.channels
-    capacity_posts_per_week = config.capacity_posts_per_week
-
-    runway = await runway_map(tenant_uuid, year, markets, pool)
-
-    if version_row is not None:
-        quarter_plan = version_row["plan"]
-        demo_mode = False
-        version_no = version_row["version_no"]
-        grid = await allocate_month(
-            tenant_uuid, year, month, channels, capacity_posts_per_week,
-            quarter_plan, runway, markets[0], pool,
-        )
-        note = (
-            f"Reading historical quarter plan version v{version_no} (Q{quarter} {year}) — "
-            "not necessarily the tenant's current live version."
-        )
-    else:
-        # AA-323 round 7: confirmed (not assumed) that the in-memory demo
-        # path below can NEVER run while a real current_version_id exists —
-        # fetch_approved_quarter_plan()'s own query requires
-        # `qpv.version_id = qp.current_version_id AND qpv.approval_status =
-        # 'approved'`, so `demo_mode` is only True when no plan row exists
-        # yet, or current_version_id is unset. This is what round 5's live
-        # curl already showed (demo_mode=False, trip_ids matched v6
-        # byte-for-byte) — round 7 re-confirmed it live again after this
-        # round's changes; see TestPreviewSlotgridDemoNeverRunsWithCurrent
-        # in test_aa300_admin_atoms.py for the locked-in regression test.
-        quarter_plan = await fetch_approved_quarter_plan(tenant_uuid, year, quarter, pool)
-        demo_mode = quarter_plan is None
-        version_no = None
-        if demo_mode:
-            quarter_plan = await plan_quarter(
-                tenant_uuid, year, quarter, markets, capacity_posts_per_week, [], runway, pool,
-            )
-            approve_quarter_plan(quarter_plan, approved_by="admin-preview-demo")
-            grid = await allocate_month(
-                tenant_uuid, year, month, channels, capacity_posts_per_week,
-                quarter_plan, runway, markets[0], pool,
-            )
-            note = (
-                "No Gate B-approved quarter plan exists yet for this tenant/quarter — showing an "
-                "unpersisted preview auto-approved in-memory as \"admin-preview-demo\". Create and "
-                "approve a real plan via Quarter Plan Approval to replace this."
-            )
-        else:
-            # AA-323 round 5 — Việc 2: which persisted version this screen is reading.
-            version_no = await fetch_current_version_no(tenant_uuid, year, quarter, pool)
-            grid = await allocate_month_from_db(
-                tenant_uuid, year, month, channels, capacity_posts_per_week,
-                runway, markets[0], pool,
-            )
-            note = "Reading a real Gate B-approved quarter plan (not a preview)."
-
-    return {
-        "runway_cell_count": len(runway.cells),
-        "runway_cells": [c.model_dump(mode="json") for c in runway.cells],
-        "quarter_plan": quarter_plan.model_dump(mode="json"),
-        "quarter_plan_version_no": version_no,
-        "slot_grid": grid.model_dump(mode="json"),
-        "demo_params": {
-            "markets": markets, "channels": channels,
-            "capacity_posts_per_week": capacity_posts_per_week,
-            "demo_mode": demo_mode,
-            "note": note,
-        },
-    }
