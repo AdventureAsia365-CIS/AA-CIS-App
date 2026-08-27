@@ -1,10 +1,8 @@
 "use client";
 // app/admin/tenants/page.tsx — AA-159: lifecycle stats + country + count fix
-// AA-389: N1 onboarding UI (Gate A approve+status) added as a new "Onboarding" tab — see
-// OnboardingTabContent below.
-// AA-472: seed-atoms + angle-assign + Mirror removed from N1 (Hướng B — portfolio seeding was
-// never required, and angle was found to be the wrong concept at the tenant level; it belongs to
-// an individual T8 piece instead). Gate A approval is now the only remaining onboarding step.
+// AA-473: Gate A removed entirely (ADR-2026-038 §0.2) — a new tenant is is_active=true
+// immediately, no onboarding approval step left. The "Onboarding" tab and its pending-tenant
+// UI (added AA-389, trimmed AA-472) are gone.
 
 import { useState, useEffect, useCallback } from "react";
 import {
@@ -16,10 +14,6 @@ import {
   A, serif, mono, sans,
   Card, SLabel, Btn, Badge, LoadingScreen, TH, TD,
 } from "../_components/adminUi";
-
-function getCookie(name: string): string {
-  return document.cookie.split(";").find(c => c.trim().startsWith(`${name}=`))?.split("=")[1] ?? "";
-}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -52,23 +46,6 @@ interface Tenant {
 }
 
 interface NewApiKey { tenant_id: string; tenant_name: string; api_key: string; }
-
-// AA-389 (reopened): a newly-created tenant is is_active=false until Gate A approves it, so it
-// never appears in the `tenants` list above — this is its real onboarding progress instead of a
-// guess from is_active alone.
-interface PendingOnboarding {
-  gate_a_status: "not_started" | "pending" | "approved";
-}
-interface PendingTenant {
-  tenant_id: string;
-  name: string;
-  slug: string;
-  plan_tier: string;
-  posts_per_week: number;
-  country: string | null;
-  created_at: string;
-  onboarding: PendingOnboarding;
-}
 
 const PLAN_OPTIONS = ["starter", "growth", "business"];
 const PLAN_BADGE: Record<string, "blue" | "purple" | "green" | "red" | "gold"> = {
@@ -397,111 +374,6 @@ function ApiTabContent({ usage }: { usage: TenantDetails["api_usage"] }) {
     </div>
   );
 }
-// ─── Onboarding tab (AA-389: N1 Gate A) ───────────────────────────────────────
-// AA-472: seed-atoms and angle-assign are gone (Hướng B) — Gate A approval is now the only
-// onboarding step. Gate A is still REQUIRED/NEVER-auto (same pattern as Gate B, AA-388):
-// approved_by is read from the cis_user cookie (no free-text input, no default), the Approve
-// button only ever calls the real endpoint on an explicit click.
-
-interface GateAStatus {
-  tenant_id: string;
-  approval_status: "pending" | "approved";
-  approved_by: string | null;
-  approved_at: string | null;
-  created_at: string;
-  tenant_is_active: boolean;
-}
-
-function StepHeader({ label, done }: { label: string; done: boolean }) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-      <span style={{
-        width: 20, height: 20, borderRadius: "50%", flexShrink: 0,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        fontSize: 11, fontWeight: 700,
-        background: done ? "#D1FAE5" : A.redSoft,
-        color: done ? "#22C55E" : A.red,
-      }}>
-        {done ? <CheckCircle2 size={12} /> : 1}
-      </span>
-      <span style={{ fontSize: 13, fontWeight: 700, color: A.ink }}>{label}</span>
-    </div>
-  );
-}
-
-function OnboardingTabContent({ tenantId, onGateAApproved }: { tenantId: string; onGateAApproved: () => void }) {
-  const [loading, setLoading]           = useState(true);
-  const [gateA, setGateA]               = useState<GateAStatus | null>(null);
-  const [approving, setApproving]       = useState(false);
-  const [approveError, setApproveError] = useState("");
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const statusRes = await fetch(`/api/admin/tenants/${tenantId}/gate-a/status`);
-      if (statusRes.status === 404) { setGateA(null); return; }
-      if (!statusRes.ok) return;
-      setGateA(await statusRes.json());
-    } finally {
-      setLoading(false);
-    }
-  }, [tenantId]);
-
-  useEffect(() => { load(); }, [load]);
-
-  async function approveGateA() {
-    const approvedBy = getCookie("cis_user") ? decodeURIComponent(getCookie("cis_user")) : "";
-    if (!approvedBy) { setApproveError("No admin identity found — cannot approve without approved_by."); return; }
-    setApproving(true); setApproveError("");
-    try {
-      const res = await fetch(`/api/admin/tenants/${tenantId}/gate-a/approve`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ approved_by: approvedBy }),
-      });
-      const data = await res.json();
-      if (!res.ok) { setApproveError(data.detail ?? "Failed to approve Gate A"); return; }
-      setGateA(s => s ? {
-        ...s,
-        approval_status: data.approval_status,
-        approved_by: data.approved_by,
-        approved_at: data.approved_at,
-        tenant_is_active: true,
-      } : s);
-      onGateAApproved();
-    } catch { setApproveError("Connection error"); } finally { setApproving(false); }
-  }
-
-  if (loading) return <div style={{ padding: "12px 0", fontSize: 12, color: A.muted }}>Loading…</div>;
-  if (!gateA)  return <div style={{ padding: "12px 0", fontSize: 12, color: A.red }}>No onboarding record found for this tenant.</div>;
-
-  const approved = gateA.approval_status === "approved";
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ padding: "12px 14px", background: "#fff", border: `1px solid ${A.line}`, borderRadius: 8 }}>
-        <StepHeader label="Gate A — approve tenant activation" done={approved} />
-        {approved ? (
-          <div style={{ fontSize: 12, color: A.muted, display: "flex", alignItems: "center", gap: 6 }}>
-            <CheckCircle2 size={14} color="#22C55E" />
-            Approved by {gateA.approved_by} at {gateA.approved_at ? new Date(gateA.approved_at).toLocaleString() : "—"}
-          </div>
-        ) : (
-          <>
-            <div style={{ fontSize: 11.5, color: A.muted2, marginBottom: 8 }}>
-              Gate A is required and never auto-approved — the tenant only goes active after this button is clicked.
-            </div>
-            <Btn variant="primary" size="sm" disabled={approving} onClick={approveGateA}>
-              {approving
-                ? <><Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} /> Approving…</>
-                : <><CheckCircle2 size={12} /> Approve Gate A</>}
-            </Btn>
-            {approveError && <div style={{ marginTop: 8, fontSize: 11.5, color: A.red }}>{approveError}</div>}
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
 
 
 // ─── Planning tab (AA-323 Gap 3: N4-N6 markets/channels/capacity) ─────────────
@@ -703,16 +575,15 @@ function ActivityTabContent({ items }: { items: RewriteActivityItem[] }) {
 
 // ─── Tenant Detail Panel ──────────────────────────────────────────────────────
 
-type DTab = "onboarding" | "tours" | "pipeline" | "activity" | "planning" | "api" | "brand";
+type DTab = "tours" | "pipeline" | "activity" | "planning" | "api" | "brand";
 
-function TenantDetail({ tenantId, planTier, isActive, onGateAApproved }: {
-  tenantId: string; planTier: string; isActive: boolean; onGateAApproved: () => void;
+function TenantDetail({ tenantId, planTier }: {
+  tenantId: string; planTier: string;
 }) {
   const isInternal = planTier === "internal";
   const [data, setData]         = useState<TenantDetails | null>(null);
   const [loading, setLoading]   = useState(true);
-  // AA-389: a not-yet-active tenant is still mid-onboarding — land there by default instead of Tours.
-  const [tab, setTab]           = useState<DTab>(isActive ? "tours" : "onboarding");
+  const [tab, setTab]           = useState<DTab>("tours");
   const [activity, setActivity] = useState<RewriteActivityItem[]>([]);
 
   useEffect(() => {
@@ -744,7 +615,6 @@ function TenantDetail({ tenantId, planTier, isActive, onGateAApproved }: {
 
   const s = data.summary;
   const TABS: { key: DTab; label: string }[] = [
-    { key: "onboarding", label: "Onboarding" },
     { key: "tours",   label: `Tours (${data.rewritten_tours.length})` },
     ...(isInternal
       ? [{ key: "pipeline" as DTab, label: `Pipeline (${data.pipeline_runs.length})` }]
@@ -782,7 +652,6 @@ function TenantDetail({ tenantId, planTier, isActive, onGateAApproved }: {
           }}>{t.label}</button>
         ))}
       </div>
-      {tab === "onboarding" && <OnboardingTabContent tenantId={tenantId} onGateAApproved={onGateAApproved} />}
       {tab === "tours"    && <ToursTabContent    tours={data.rewritten_tours} toursView={data.summary.tours_view} />}
       {tab === "pipeline" && <PipelineTabContent runs={data.pipeline_runs}    pipelineNote={data.summary.pipeline_note} />}
       {tab === "activity" && <ActivityTabContent items={activity} />}
@@ -793,81 +662,6 @@ function TenantDetail({ tenantId, planTier, isActive, onGateAApproved }: {
   );
 }
 
-// ─── Pending onboarding section (AA-389 reopened) ─────────────────────────────
-// Newly-created tenants (is_active=false, pre-Gate A) are invisible in the active-tenants table
-// below by design (that table's own query filters is_active=true) — this section is the only
-// place in the UI they can be found and clicked back into. No activate shortcut lives here: the
-// only action is "Continue onboarding", which opens the same TenantDetail/Onboarding tab flow
-// used everywhere else, so Gate A stays the single approval path (see update_tenant() guard).
-
-function pendingStepLabel(o: PendingOnboarding): string {
-  return o.gate_a_status === "approved" ? "Gate A approved" : "Gate A pending approval";
-}
-
-function PendingTenantCard({ tenant, onGateAApproved }: {
-  tenant: PendingTenant; onGateAApproved: () => void;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const stepLabel = pendingStepLabel(tenant.onboarding);
-
-  return (
-    <div style={{ background: "#fff", border: `1px solid ${A.line}`, borderRadius: 10, padding: 14 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-        <div>
-          <div style={{ fontWeight: 600, color: A.ink, fontSize: 13 }}>{tenant.name}</div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 3 }}>
-            <code style={{ fontSize: 10.5, color: A.muted, fontFamily: mono }}>{tenant.slug}</code>
-            <Badge color={PLAN_BADGE[tenant.plan_tier] ?? "gray"}>{tenant.plan_tier}</Badge>
-            <span style={{ fontSize: 10.5, color: A.muted2, fontFamily: mono }}>{fmtD(tenant.created_at)}</span>
-          </div>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{
-            fontSize: 10.5, fontWeight: 700, padding: "3px 10px", borderRadius: 20,
-            background: A.redSoft, color: A.red, whiteSpace: "nowrap",
-          }}>
-            {stepLabel}
-          </span>
-          <Btn variant="primary" size="sm" onClick={() => setExpanded(!expanded)}>
-            {expanded ? <>Hide <ChevronUp size={12} /></> : <>Continue onboarding <ChevronDown size={12} /></>}
-          </Btn>
-        </div>
-      </div>
-      {expanded && (
-        <TenantDetail
-          tenantId={tenant.tenant_id} planTier={tenant.plan_tier} isActive={false}
-          onGateAApproved={onGateAApproved}
-        />
-      )}
-    </div>
-  );
-}
-
-function PendingOnboardingSection({ pending, onGateAApproved }: {
-  pending: PendingTenant[]; onGateAApproved: () => void;
-}) {
-  if (pending.length === 0) return null;
-  return (
-    <div style={{ marginBottom: 20 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-        <h2 style={{ fontFamily: serif, fontSize: 15, fontWeight: 500, color: A.ink, margin: 0 }}>
-          Pending onboarding
-        </h2>
-        <span style={{
-          fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 20,
-          background: A.redSoft, color: A.red,
-        }}>
-          {pending.length}
-        </span>
-      </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {pending.map(t => (
-          <PendingTenantCard key={t.tenant_id} tenant={t} onGateAApproved={onGateAApproved} />
-        ))}
-      </div>
-    </div>
-  );
-}
 
 // ─── Tenant Row ───────────────────────────────────────────────────────────────
 
@@ -889,8 +683,6 @@ function TenantRow({ tenant, onRotateKey, onDeleted }: {
         body: JSON.stringify({ is_active: !isActive }),
       });
       if (!res.ok) {
-        // AA-389: backend now rejects activating a tenant that hasn't cleared Gate A —
-        // surface that instead of silently flipping the UI as if it had succeeded.
         const body = await res.json().catch(() => ({}));
         alert(body.detail ?? "Failed to update tenant status");
         return;
@@ -992,8 +784,7 @@ function TenantRow({ tenant, onRotateKey, onDeleted }: {
         <tr>
           <td colSpan={7} style={{ padding: "0 16px 14px", background: A.bg }}>
             <TenantDetail
-              tenantId={tenant.tenant_id} planTier={tenant.plan_tier} isActive={isActive}
-              onGateAApproved={() => setIsActive(true)}
+              tenantId={tenant.tenant_id} planTier={tenant.plan_tier}
             />
           </td>
         </tr>
@@ -1006,7 +797,6 @@ function TenantRow({ tenant, onRotateKey, onDeleted }: {
 
 export default function TenantsPage() {
   const [tenants, setTenants]       = useState<Tenant[]>([]);
-  const [pendingTenants, setPendingTenants] = useState<PendingTenant[]>([]);
   const [loading, setLoading]       = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [newKey, setNewKey]         = useState<NewApiKey | null>(null);
@@ -1019,7 +809,6 @@ export default function TenantsPage() {
       if (!res.ok) { setError("Failed to load tenants"); return; }
       const data = await res.json();
       setTenants(data.tenants ?? []);
-      setPendingTenants(data.pending_tenants ?? []);
     } catch { setError("Connection error"); } finally { setLoading(false); }
   }, []);
 
@@ -1072,8 +861,6 @@ export default function TenantsPage() {
               <AlertCircle size={14} /> {error}
             </div>
           )}
-
-          <PendingOnboardingSection pending={pendingTenants} onGateAApproved={load} />
 
           {/* Summary cards */}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14, marginBottom: 20 }}>
