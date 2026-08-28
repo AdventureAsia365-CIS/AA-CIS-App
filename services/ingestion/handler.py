@@ -169,11 +169,25 @@ async def process_file(s3_bucket: str, s3_key: str, seo_mode: str = "standard") 
         # 2. Split records: new vs duplicate (normalized dedup against raw_tours)
         new_records: list[dict] = []
         staged_ids: list[str]  = []
+        in_file_drops: list[dict] = []
+        # AA-488 Gap 1: seen_keys tracks (src_name, provider) already assigned to new_records
+        # THIS run — without it, two rows in the same file with an identical key both miss the
+        # DB-existence query below (neither is inserted yet when the second row is checked) and
+        # both land in new_records, creating duplicate raw_tours rows from one upload.
+        seen_keys: set[tuple[str, str]] = set()
 
         for r in records:
             r["source_id"] = source_id
             r["batch_id"] = batch_id_new
             nname, nprov = normalize_group_key(r.get("src_name", ""), r.get("provider"))
+
+            if (nname, nprov) in seen_keys:
+                in_file_drops.append({
+                    "identifier": r.get("src_name") or "unknown",
+                    "reason": "duplicate_in_file",
+                })
+                continue
+
             existing = await conn.fetchrow("""
                 SELECT tour_id, source_group_id
                 FROM silver_aa_internal.raw_tours
@@ -199,6 +213,7 @@ async def process_file(s3_bucket: str, s3_key: str, seo_mode: str = "standard") 
                 )
                 staged_ids.append(staging_id)
             else:
+                seen_keys.add((nname, nprov))
                 r["source_group_id"] = str(uuid.uuid4())
                 r["source_version"]  = 1
                 r["source_status"]   = "active"
@@ -207,10 +222,10 @@ async def process_file(s3_bucket: str, s3_key: str, seo_mode: str = "standard") 
         ids, insert_failures = await tour_repo.insert_batch(new_records)
         await source_repo.update_status(source_id, "done", row_count=len(ids) + len(staged_ids))
 
-        drops = _summarize_drops(insert_failures)
+        drops = _summarize_drops(insert_failures + in_file_drops)
         if drops:
             logger.warning("ingest_rows_dropped", batch_id=batch_id_new, source_file=s3_key,
-                            rows_dropped=len(insert_failures), drops=drops)
+                            rows_dropped=len(insert_failures) + len(in_file_drops), drops=drops)
         await _write_ingest_details(conn, batch_id_new,
                                      rows_parsed=len(records), rows_landed=len(ids), drops=drops)
 
@@ -225,7 +240,7 @@ async def process_file(s3_bucket: str, s3_key: str, seo_mode: str = "standard") 
             "tours_staged":  len(staged_ids),
             "staged_ids":    staged_ids,
             "source_id":     batch_id,
-            "rows_dropped":  len(insert_failures),
+            "rows_dropped":  len(insert_failures) + len(in_file_drops),
         }
 
     except Exception as e:
