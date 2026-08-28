@@ -81,11 +81,17 @@ ls -lh "$DIST_DIR/"
 package_lambda "content_generation" "content" langchain langchain-core langgraph anthropic
 
 # AA-78: brand_brief_parser — flat layout (absolute imports, no services/ nesting)
+# Fix (this task): ZIP_PATH must be hyphenated (brand-brief-parser.zip) to match deploy-dev.yml's
+# `fn=brand-brief-parser` loop var and the real AWS Lambda function name
+# (aa-cis-dev-brand-brief-parser) -- the previous underscore name meant `[ -f "$ZIP" ]` in that
+# loop silently evaluated false and skipped deploying this Lambda entirely, with no error. Broken
+# since AA-78 (20/05/2026); confirmed via the live Lambda's downloaded code that it has run
+# unmodified since that day, never picking up any later fix (including AA-383, 46cf8c1).
 package_brand_brief_parser() {
-  local ZIP_PATH="$DIST_DIR/brand_brief_parser.zip"
+  local ZIP_PATH="$DIST_DIR/brand-brief-parser.zip"
   local TMP_DIR="$BUILD_DIR/brand_brief_parser"
   rm -rf "$TMP_DIR" && mkdir -p "$TMP_DIR"
-  echo "🔨 Packaging brand_brief_parser → brand_brief_parser.zip"
+  echo "🔨 Packaging brand_brief_parser → brand-brief-parser.zip"
   "$VENV_PIP" install --quiet --target "$TMP_DIR" --ignore-installed --no-compile \
     "python-docx==1.1.2" "psycopg2-binary==2.9.9" "pydantic==2.7.1" "boto3" || true
   cp "$APP_DIR/services/acp_brand_brief_parser"/*.py "$TMP_DIR/"
@@ -95,6 +101,6 @@ package_brand_brief_parser() {
   zip -r -q "$ZIP_PATH" .
   popd > /dev/null
   rm -rf "$TMP_DIR"
-  echo "   ✅ brand_brief_parser.zip ($(du -sh "$ZIP_PATH" | cut -f1))"
+  echo "   ✅ brand-brief-parser.zip ($(du -sh "$ZIP_PATH" | cut -f1))"
 }
 package_brand_brief_parser
