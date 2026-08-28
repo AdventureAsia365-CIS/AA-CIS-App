@@ -143,8 +143,11 @@ async def create_tenant(
                 # (e.g. the tenant's own company name) meant this placeholder row could never be
                 # found by any of those readers -- every tenant onboarded through this endpoint fell
                 # through to the generic AA_BRAND_IDENTITY_PROMPT fallback even with a row present
-                # and system_prompt non-empty, until upload_brand_brief() happened to fix brand_name
-                # too. Still overwritten later by the real brand-brief upload flow if one happens.
+                # and system_prompt non-empty. NOTE: prior to AA-383, upload_brand_brief()'s db.py
+                # upsert never touched brand_name at all (INSERT omitted the column entirely, would
+                # NOT-NULL-violate on a tenant with no seeded row here; UPDATE left it unchanged) --
+                # AA-383 made both branches set brand_name = 'default' explicitly, so it's now
+                # genuinely safe to say this seeded row is kept in sync by the real upload flow.
                 await conn.execute(
                     "INSERT INTO shared.tenant_brand_rules (tenant_id, brand_name) VALUES ($1, $2)",
                     tenant_id, "default",

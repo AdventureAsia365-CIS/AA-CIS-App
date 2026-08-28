@@ -32,6 +32,7 @@ def upsert_brand_rules(row: BrandRulesRow) -> str:
                 if existing:
                     cur.execute("""
                         UPDATE shared.tenant_brand_rules SET
+                            brand_name = 'default',
                             brand_type = %s,
                             core_idea = %s,
                             customer_segment = %s,
@@ -55,13 +56,17 @@ def upsert_brand_rules(row: BrandRulesRow) -> str:
                     ))
                     record_id = cur.fetchone()[0]
                 else:
+                    # AA-383: brand_name is TEXT NOT NULL with no column default (same constraint
+                    # AA-471 found in admin.py's create_tenant()) -- 'default' is the sentinel every
+                    # reader (fetch_brand_rubric_text(), _resolve_brand_rule()) filters on, not the
+                    # parsed docx's brand_name (which is only used for the system_prompt text).
                     cur.execute("""
                         INSERT INTO shared.tenant_brand_rules
-                            (tenant_id, brand_type, core_idea,
+                            (tenant_id, brand_name, brand_type, core_idea,
                              customer_segment, customer_mindset,
                              voice_examples, style_guide, forbidden_words,
                              system_prompt, source_docx_s3_key, target_markets)
-                        VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s, %s, %s)
+                        VALUES (%s, 'default', %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s, %s, %s)
                         RETURNING id
                     """, (
                         row.tenant_id, row.brand_type, row.core_idea,
