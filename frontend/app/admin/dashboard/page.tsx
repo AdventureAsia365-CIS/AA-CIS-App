@@ -79,8 +79,9 @@ function OverviewTab({ data }: { data: any }) {
           color="#22C55E"
         />
         <MetricCard
-          label="LLM Calls"
+          label="Content Versions"
           value={data.llm_calls ?? 0}
+          sub="1 row per generated tour version, not per LLM call — see AA-476"
           src="↳ generated_content · all runs"
           color={A.muted}
         />
@@ -163,10 +164,15 @@ function OverviewTab({ data }: { data: any }) {
       {models.length > 0 && (
         <Card>
           <SLabel>Model Usage</SLabel>
+          <div style={{ fontSize: 11, color: A.muted2, marginBottom: 8 }}>
+            &ldquo;Versions&rdquo; = generated_content rows per model, not individual LLM
+            invocations — one version can involve multiple real calls (retries, judge,
+            brand audit, repair). See AA-476.
+          </div>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <tr>
-                {["Model", "Calls", "Avg Score", "Total Cost", "Cost/Call"].map((h, i) => (
+                {["Model", "Versions", "Avg Score", "Total Cost", "Cost/Version"].map((h, i) => (
                   <th key={h} style={{ ...TH, textAlign: i > 0 ? "right" : "left" }}>{h}</th>
                 ))}
               </tr>

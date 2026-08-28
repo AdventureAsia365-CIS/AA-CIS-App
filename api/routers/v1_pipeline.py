@@ -555,6 +555,17 @@ async def reject_review(
             WHERE id = $1::uuid
         """, generated_content_id)
 
+        # AA-476: previously nothing here ever touched raw_tours.pipeline_status — a rejected
+        # tour stayed 'ingested' forever, which made the batch's pipeline_runs.status stick at
+        # 'ingesting' indefinitely (sync_batch_completion counted it as still-pending forever,
+        # even once every other tour in the batch was long done). See services/export/handler.py.
+        tour_row = await conn.fetchrow("""
+            SELECT tour_id FROM silver_aa_internal.generated_content WHERE id = $1::uuid
+        """, generated_content_id)
+        if tour_row and tour_row["tour_id"]:
+            from services.export.handler import mark_tour_rejected
+            await mark_tour_rejected(conn, str(tour_row["tour_id"]))
+
     # Send task failure to Step Functions only when a real token exists (is None → no SF, no export).
     if task_token is not None:
         try:

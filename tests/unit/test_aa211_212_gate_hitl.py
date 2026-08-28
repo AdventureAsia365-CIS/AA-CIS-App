@@ -207,14 +207,22 @@ async def test_reject_claims_then_409_and_never_exports():
     # AA-441: reject_review now also RETURNING generated_content_id (to reset
     # generated_content.status to 'rejected' — bug #5) and issues a second conn.execute() for
     # that UPDATE, alongside the pre-existing one the claim itself does.
-    conn.fetchrow = AsyncMock(side_effect=[{"step_fn_task_token": None, "generated_content_id": GCID}, None])
+    # AA-476: reject_review now also looks up tour_id (2nd fetchrow) to call
+    # mark_tour_rejected() — see services/export/handler.py.
+    conn.fetchrow = AsyncMock(side_effect=[
+        {"step_fn_task_token": None, "generated_content_id": GCID},
+        {"tour_id": TOUR_ID},
+        None,
+    ])
     conn.execute = AsyncMock(return_value="UPDATE 1")
     req = _make_request(_make_pool(conn))
 
-    with patch("services.export.handler.process_export", new=AsyncMock()) as mock_export:
+    with patch("services.export.handler.process_export", new=AsyncMock()) as mock_export, \
+         patch("services.export.handler.mark_tour_rejected", new=AsyncMock()) as mock_reject:
         first = await v1_pipeline.reject_review(REVIEW_ID, req, TENANT)
         assert first["status"] == "rejected"
         assert first["sf_notified"] is False
+        mock_reject.assert_awaited_once_with(conn, TOUR_ID)
 
         with pytest.raises(HTTPException) as exc:
             await v1_pipeline.reject_review(REVIEW_ID, req, TENANT)
@@ -229,14 +237,19 @@ async def test_reject_with_token_sends_task_failure():
     from api.routers import v1_pipeline
 
     conn = AsyncMock()
-    conn.fetchrow = AsyncMock(return_value={"step_fn_task_token": "tok-9", "generated_content_id": GCID})
+    conn.fetchrow = AsyncMock(side_effect=[
+        {"step_fn_task_token": "tok-9", "generated_content_id": GCID},
+        {"tour_id": TOUR_ID},
+    ])
     conn.execute = AsyncMock(return_value="UPDATE 1")
     req = _make_request(_make_pool(conn))
 
     sfn = MagicMock()
-    with patch.object(v1_pipeline, "_boto3") as mock_boto3:
+    with patch.object(v1_pipeline, "_boto3") as mock_boto3, \
+         patch("services.export.handler.mark_tour_rejected", new=AsyncMock()) as mock_reject:
         mock_boto3.client.return_value = sfn
         res = await v1_pipeline.reject_review(REVIEW_ID, req, TENANT)
 
     assert res["sf_notified"] is True
     sfn.send_task_failure.assert_called_once()
+    mock_reject.assert_awaited_once_with(conn, TOUR_ID)

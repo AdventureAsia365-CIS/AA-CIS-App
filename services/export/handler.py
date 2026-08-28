@@ -8,6 +8,59 @@ from shared.repository.published_catalog_repository import PublishedCatalogRepos
 
 logger = structlog.get_logger()
 
+# AA-476: terminal raw_tours.pipeline_status values that mean "this tour will never publish,
+# stop waiting on it" — anything else is still in flight. Before this fix the completion check
+# only recognized 'published', so a rejected/failed tour (which never got any pipeline_status
+# update at all — see mark_tour_rejected below) kept its batch's pipeline_runs.status stuck at
+# 'ingesting' forever even after every other tour in the batch finished.
+_TERMINAL_TOUR_STATUSES = ("published", "hitl_rejected", "failed")
+
+
+async def sync_batch_completion(conn, batch_id, silver: str = "silver_aa_internal") -> int:
+    """Recompute tours_passed + flip pipeline_runs.status to 'completed' once every tour in
+    the batch has reached a terminal outcome. Returns the remaining non-terminal tour count.
+    Shared by process_export() (tour → published) and mark_tour_rejected() (tour → rejected) —
+    this is the ONE place pipeline_runs.status ever advances, deliberately not duplicated."""
+    await conn.execute("""
+        UPDATE shared.pipeline_runs
+        SET tours_passed = (
+            SELECT COUNT(*) FROM silver_aa_internal.raw_tours
+            WHERE batch_id = $1::uuid AND pipeline_status = 'published'
+        )
+        WHERE batch_id = $1::uuid
+    """, batch_id)
+
+    pending = await conn.fetchval(f"""
+        SELECT COUNT(*) FROM {silver}.raw_tours
+        WHERE batch_id = $1::uuid
+          AND pipeline_status NOT IN {_TERMINAL_TOUR_STATUSES}
+    """, batch_id)
+
+    if pending == 0:
+        await conn.execute("""
+            UPDATE shared.pipeline_runs
+            SET status = 'completed', completed_at = NOW()
+            WHERE batch_id = $1::uuid AND status = 'ingesting'
+        """, batch_id)
+        logger.info("batch_completed", batch_id=str(batch_id))
+
+    return pending
+
+
+async def mark_tour_rejected(conn, tour_id: str) -> None:
+    """AA-476: reject_review() (api/routers/v1_pipeline.py) used to only flip
+    review_queue.review_status + generated_content.status — raw_tours.pipeline_status was
+    never touched, so a rejected tour stayed 'ingested' indefinitely and sync_batch_completion
+    counted it as still-pending forever, even once every other tour in the batch was done."""
+    row = await conn.fetchrow("""
+        UPDATE silver_aa_internal.raw_tours
+        SET pipeline_status = 'hitl_rejected'
+        WHERE tour_id = $1::uuid
+        RETURNING batch_id
+    """, tour_id)
+    if row and row["batch_id"]:
+        await sync_batch_completion(conn, row["batch_id"])
+
 
 async def process_export(version_id: str) -> dict:
     conn = await asyncpg.connect(get_database_url())
@@ -74,29 +127,9 @@ async def process_export(version_id: str) -> dict:
 
         # 4. Update tours_passed to exact published count (always, not just at end)
         if batch_id:
-            await conn.execute("""
-                UPDATE shared.pipeline_runs
-                SET tours_passed = (
-                    SELECT COUNT(*) FROM silver_aa_internal.raw_tours
-                    WHERE batch_id = $1::uuid AND pipeline_status = 'published'
-                )
-                WHERE batch_id = $1::uuid
-            """, batch_id)
-
-            pending = await conn.fetchval(f"""
-                SELECT COUNT(*) FROM {silver}.raw_tours
-                WHERE batch_id = $1::uuid
-                  AND pipeline_status != 'published'
-            """, batch_id)
+            pending = await sync_batch_completion(conn, batch_id, silver)
 
             if pending == 0:
-                await conn.execute("""
-                    UPDATE shared.pipeline_runs
-                    SET status = 'completed', completed_at = NOW()
-                    WHERE batch_id = $1::uuid AND status = 'ingesting'
-                """, batch_id)
-                logger.info("batch_completed", batch_id=str(batch_id))
-
                 # ACP-S1: manifest.json + EventBridge on batch completion
                 try:
                     from services.acp.handler import upload_manifest, publish_s1_completed
