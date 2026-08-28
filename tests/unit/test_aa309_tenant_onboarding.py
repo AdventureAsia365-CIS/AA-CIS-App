@@ -20,6 +20,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from api.routers import admin
+from services.acp_produce.brand import fetch_brand_rubric_text
+from services.content_generation.brand_standards import AA_BRAND_IDENTITY_PROMPT
 
 _TEST_SECRET = "test-admin-secret"
 
@@ -106,3 +108,77 @@ class TestCreateTenantIsActive:
         insert_args = conn.fetchval.call_args_list[1][0]
         assert "VALUES ($1, $2, $3::plan_tier_enum, $4, $5, $6, true)" in insert_args[0]
         assert insert_args[4] == 4  # posts_per_week bound param
+
+
+class TestCreateTenantSeedsFindableBrandRules:
+    """AA-471: create_tenant()'s placeholder tenant_brand_rules row must be seeded with
+    brand_name='default', not body.name -- every real reader (fetch_brand_rubric_text() in
+    services/acp_produce/brand.py, _resolve_brand_rule()'s no-brand_name branch in
+    admin_pipeline.py, the AA-198/AA-129 multi-brand convention since migration 044) queries
+    `WHERE brand_name = 'default'`. Before this fix, brand_name was seeded as the tenant's own
+    company name, so the row existed but could never be found by any real reader -- every
+    tenant onboarded through this endpoint silently fell through to the generic
+    AA_BRAND_IDENTITY_PROMPT fallback. Root cause + evidence: docs/implementation-notes/
+    AA-471.md."""
+
+    @pytest.mark.asyncio
+    async def test_brand_rules_insert_uses_default_not_tenant_name(self):
+        conn = _make_conn()
+        conn.fetchval.side_effect = [None, TENANT_ID, None]
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        body = admin.CreateTenantRequest(
+            name="WanderLux Travel", slug="wanderlux-travel", posts_per_week=4,
+        )
+        await admin.create_tenant(body, request, x_admin_secret=_TEST_SECRET)
+
+        brand_rules_calls = [
+            c for c in conn.execute.call_args_list if "tenant_brand_rules" in c.args[0]
+        ]
+        assert len(brand_rules_calls) == 1
+        _, tenant_id_param, brand_name_param = brand_rules_calls[0].args
+        assert tenant_id_param == TENANT_ID
+        assert brand_name_param == "default"
+        assert brand_name_param != body.name  # the exact AA-471 regression this guards against
+
+    @pytest.mark.asyncio
+    async def test_seeded_row_is_actually_findable_by_fetch_brand_rubric_text(self):
+        """Chains the write through the real reader, not just 'some brand_name got written':
+        simulates the real DB now holding exactly the row create_tenant() wrote, then runs
+        fetch_brand_rubric_text()'s own real WHERE clause against it -- confirms both halves
+        (write + read) agree, the way the live AA-471 verify confirmed against the real DB."""
+        conn = _make_conn()
+        conn.fetchval.side_effect = [None, TENANT_ID, None]
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        body = admin.CreateTenantRequest(
+            name="WanderLux Travel", slug="wanderlux-travel", posts_per_week=4,
+        )
+        await admin.create_tenant(body, request, x_admin_secret=_TEST_SECRET)
+
+        brand_rules_calls = [
+            c for c in conn.execute.call_args_list if "tenant_brand_rules" in c.args[0]
+        ]
+        _, seeded_tenant_id, seeded_brand_name = brand_rules_calls[0].args
+
+        async def _fake_fetchrow(query, tenant_id_param):
+            assert "brand_name = 'default'" in query  # the real reader's actual filter
+            row_matches = seeded_brand_name == "default" and tenant_id_param == str(seeded_tenant_id)
+            if row_matches:
+                return {
+                    "system_prompt": "You are writing for WanderLux Travel.",
+                    "style_guide": None,
+                    "forbidden_words": [],
+                    "good_examples": None,
+                }
+            return None
+
+        db = AsyncMock()
+        db.fetchrow.side_effect = _fake_fetchrow
+
+        result = await fetch_brand_rubric_text(db, str(seeded_tenant_id))
+
+        assert result != AA_BRAND_IDENTITY_PROMPT
+        assert "You are writing for WanderLux Travel." in result

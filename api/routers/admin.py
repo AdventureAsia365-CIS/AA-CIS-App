@@ -135,11 +135,19 @@ async def create_tenant(
                 # running create_tenant() against the real dev DB (not visible from reading the code
                 # or the schema in isolation). Pre-existing bug in AA-63's own code, not introduced
                 # by N1 -- fixed here because N1 categorically depends on create_tenant() succeeding.
-                # body.name is a real, already-available value (not a placeholder) -- overwritten
-                # later by the real brand-brief upload flow (upload_brand_brief()) if one happens.
+                # AA-471: brand_name must be the literal 'default' sentinel, not body.name -- every
+                # reader (fetch_brand_rubric_text() in services/acp_produce/brand.py,
+                # _resolve_brand_rule()'s no-brand_name branch in admin_pipeline.py, AA-198's whole
+                # multi-brand convention since migration 044) looks up the tenant's primary brand via
+                # `WHERE tenant_id = $1 AND brand_name = 'default'`. Seeding brand_name = body.name
+                # (e.g. the tenant's own company name) meant this placeholder row could never be
+                # found by any of those readers -- every tenant onboarded through this endpoint fell
+                # through to the generic AA_BRAND_IDENTITY_PROMPT fallback even with a row present
+                # and system_prompt non-empty, until upload_brand_brief() happened to fix brand_name
+                # too. Still overwritten later by the real brand-brief upload flow if one happens.
                 await conn.execute(
                     "INSERT INTO shared.tenant_brand_rules (tenant_id, brand_name) VALUES ($1, $2)",
-                    tenant_id, body.name,
+                    tenant_id, "default",
                 )
 
             # Onboarding audit trail
