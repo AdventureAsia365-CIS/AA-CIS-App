@@ -3220,6 +3220,16 @@ async def get_pipeline_metrics(
             GROUP BY 1 ORDER BY total_cost DESC
         """)
 
+        # AA-476 (STEP0, AA-438-05 bug #11): this counts generated_content ROWS (1 per tour
+        # version), NOT real LLM invocations. A version can involve multiple actual calls
+        # (retries, judge, brand_audit, flag_fix/repair) that aren't reliably reconstructable
+        # from persisted columns — checked brand_audit_status specifically and confirmed it's
+        # set to 'pass' on 3 separate no-LLM-call skip branches in brand_audit_node (missing
+        # `generated`, AA-206 judge-result reuse, missing OPENAI_API_KEY — the last of which is
+        # effectively 100% of rows right now, see AA-351 zero-credit finding), so it cannot be
+        # used to detect "a real call happened" either. An accurate count needs new
+        # instrumentation in services/content_generation/graph.py (out of scope here — dashboard-
+        # only fix). Frontend labels this "Versions", not "Calls", to match reality.
         models = await conn.fetch(f"""
             SELECT
                 CASE
@@ -3265,6 +3275,9 @@ async def get_pipeline_metrics(
             GROUP BY DATE(created_at)
         """, str(days))
 
+        # AA-476: same "rows, not real calls" caveat as the `models` query above — kept the
+        # response key name (llm_calls) to avoid a wider API contract change; the frontend
+        # displays it as "Content Versions", not "LLM Calls".
         llm_calls = await conn.fetchval(
             f"SELECT COUNT(*) FROM silver_{tenant_slug}.generated_content"
         )
