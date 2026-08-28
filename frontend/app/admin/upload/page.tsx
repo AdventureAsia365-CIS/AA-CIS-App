@@ -2,7 +2,7 @@
 
 import React, { useState, useRef, useCallback, useEffect } from "react";
 import {
-  Upload, CheckCircle, XCircle, ArrowRight, Loader2,
+  Upload, CheckCircle, XCircle, AlertCircle, ArrowRight, Loader2,
   ChevronDown, ChevronUp, FileText, Copy, RefreshCw, Search,
   Trash2, RotateCcw,
 } from "lucide-react";
@@ -1091,6 +1091,11 @@ function TourContentTab() {
     setStep(4);
 
     const batchIdsWithStaged: string[] = [];
+    // AA-488 Gap 2: distinguish "committed, but nothing new" from a real save — the toast (and
+    // the per-file/aggregate UI below) used to say "success" unconditionally even when every
+    // row in a file was already in the catalog (written=0, staged=0).
+    let anySuccess  = false;
+    let anyNewTours = false;
 
     await Promise.all(toCommit.map(async (fs) => {
       try {
@@ -1105,7 +1110,11 @@ function TourContentTab() {
         }
         const data: CommitResponse = await res.json();
         updateFile(fs.id, { status: "done", commitResult: data });
-        if ((data.tours_staged ?? 0) > 0 && data.batch_id) {
+        anySuccess = true;
+        const written = data.tours_written ?? data.tour_count ?? 0;
+        const staged  = data.tours_staged ?? 0;
+        if (written > 0 || staged > 0) anyNewTours = true;
+        if (staged > 0 && data.batch_id) {
           batchIdsWithStaged.push(data.batch_id);
         }
       } catch (err) {
@@ -1122,6 +1131,8 @@ function TourContentTab() {
       setDupBatchIds(batchIdsWithStaged);
       setStep(5);
       showToast("Tours saved. Duplicate tours need review.", "success");
+    } else if (anySuccess && !anyNewTours) {
+      showToast("No new tours — every row already exists in the catalog.", "success");
     } else {
       showToast(`Tours saved to database successfully`, "success");
     }
@@ -1135,6 +1146,15 @@ function TourContentTab() {
   const hasFilesToCommit = commitFileCount > 0;
   const allUploading = fileStates.some(f => f.status === "uploading" || f.status === "parsing");
   const allDone      = fileStates.length > 0 && fileStates.every(f => ["done", "error", "blocked-file"].includes(f.status));
+  // AA-488 Gap 2: a "done" file whose commit wrote nothing new (every row already in the
+  // catalog) is a real outcome, not a failure — but it must not look like a success either.
+  const fileHasNoNewTours = (fs: FileState) => {
+    const written = fs.commitResult?.tours_written ?? fs.commitResult?.tour_count ?? 0;
+    const staged  = fs.commitResult?.tours_staged ?? 0;
+    return written === 0 && staged === 0;
+  };
+  const doneFiles = fileStates.filter(f => f.status === "done");
+  const allDoneFilesHaveNoNewTours = doneFiles.length > 0 && doneFiles.every(fileHasNoNewTours);
 
   const fileStatusColor: Record<FileState["status"], string> = {
     pending: A.muted2, uploading: A.gold, parsing: A.gold,
@@ -1439,29 +1459,34 @@ function TourContentTab() {
           <Card>
             <SLabel>Saving to Database</SLabel>
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {fileStates.filter(f => f.status !== "blocked-file").map(fs => (
+              {fileStates.filter(f => f.status !== "blocked-file").map(fs => {
+                const noNewTours = fs.status === "done" && fileHasNoNewTours(fs);
+                return (
                 <div key={fs.id} style={{ display: "flex", alignItems: "center", gap: 12 }}>
                   <div style={{
                     width: 22, height: 22, borderRadius: "50%", flexShrink: 0,
                     display: "flex", alignItems: "center", justifyContent: "center",
-                    background: fs.status === "done" ? A.green
+                    background: fs.status === "done" ? (noNewTours ? A.gold : A.green)
                       : fs.status === "error" ? A.red : A.gold,
                   }}>
                     {fs.status === "committing"
                       ? <Loader2 size={12} style={{ color: "#fff", animation: "spin 1s linear infinite" }} />
                       : fs.status === "error"
                         ? <XCircle size={12} style={{ color: "#fff" }} />
-                        : <CheckCircle size={12} style={{ color: "#fff" }} />}
+                        : noNewTours
+                          ? <AlertCircle size={12} style={{ color: "#fff" }} />
+                          : <CheckCircle size={12} style={{ color: "#fff" }} />}
                   </div>
                   <span style={{ fontSize: 13, flex: 1, color: A.body }}>{fs.file.name}</span>
-                  <span style={{ fontSize: 12, fontWeight: 600, color: fileStatusColor[fs.status] }}>
+                  <span style={{ fontSize: 12, fontWeight: 600,
+                    color: fs.status === "done" && noNewTours ? A.gold : fileStatusColor[fs.status] }}>
                     {fs.status === "done"
                       ? (() => {
                           const written = fs.commitResult?.tours_written ?? fs.commitResult?.tour_count ?? 0;
                           const staged  = fs.commitResult?.tours_staged ?? 0;
-                          return staged > 0
-                            ? `${written} saved · ${staged} need review`
-                            : `${written} tours saved`;
+                          if (staged > 0) return `${written} saved · ${staged} need review`;
+                          if (written === 0) return "No new tours (all duplicates)";
+                          return `${written} tours saved`;
                         })()
                       : fileStatusLabel[fs.status]}
                   </span>
@@ -1469,10 +1494,24 @@ function TourContentTab() {
                     <span style={{ fontSize: 11, color: A.red }}>{fs.commitError}</span>
                   )}
                 </div>
-              ))}
+                );
+              })}
             </div>
 
-            {allDone && dupBatchIds.length === 0 && (
+            {allDone && dupBatchIds.length === 0 && allDoneFilesHaveNoNewTours && (
+              <div style={{ marginTop: 20 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8,
+                  color: A.gold, fontSize: 14, fontWeight: 600, marginBottom: 16 }}>
+                  <AlertCircle size={16} />
+                  No new tours — every row already exists in the catalog.
+                </div>
+                <div style={{ display: "flex", gap: 12 }}>
+                  <Btn variant="secondary" onClick={reset}>Upload More Files</Btn>
+                </div>
+              </div>
+            )}
+
+            {allDone && dupBatchIds.length === 0 && !allDoneFilesHaveNoNewTours && (
               <div style={{ marginTop: 20 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8,
                   color: "#15803D", fontSize: 14, fontWeight: 600, marginBottom: 16 }}>
