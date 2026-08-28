@@ -18,6 +18,7 @@ package, same dependency already used there.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 
 import structlog
@@ -101,7 +102,7 @@ async def generate_angles(
     request = LLMRequest(
         system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt, model_tier="sonnet", max_tokens=2048,
     )
-    resp = client.generate(request)
+    resp = await asyncio.to_thread(client.generate, request)
     parsed = _parse_response(resp.content)
     angles, recommended_index, reason = _validate(parsed)
     logger.info(
