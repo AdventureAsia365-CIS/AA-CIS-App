@@ -3,6 +3,7 @@
 Same conventions as test_aa444_marketplace_view.py: mocked asyncpg pool, `tenant=` dependency
 bypassed (called directly, not through FastAPI's Depends() machinery).
 """
+import datetime
 import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -195,6 +196,103 @@ class TestGetQuarterPlan:
         with pytest.raises(Exception) as exc_info:
             await v1_planning.get_quarter_plan(request, tenant={"sub": TENANT_ID}, year=2026, quarter=4)
         assert getattr(exc_info.value, "status_code", None) == 404
+
+
+class TestGetSlotSuggestions:
+    """AA-494 Step 4 — T8→slot-grid wiring (GET /v1/planning/slot-suggestions). Call order:
+    conn.fetchrow -> [fetch_approved_quarter_plan, _resolve_config]; conn.fetch ->
+    [fetch_tenant_trips, fetch_tenant_atoms_by_trip, fetch_used_atom_ids]."""
+
+    def _quarter_plan_payload(self, trip_ids=None):
+        return json.dumps({
+            "tenant_id": TENANT_ID, "year": 2026, "quarter": 3,
+            "trip_ids": [str(t) for t in (trip_ids or [])],
+        })
+
+    @pytest.mark.asyncio
+    async def test_404_when_no_finalized_quarter_plan(self):
+        conn = AsyncMock()
+        conn.fetchrow.return_value = None  # fetch_approved_quarter_plan -> None
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        with pytest.raises(Exception) as exc_info:
+            await v1_planning.get_slot_suggestions(request, tenant={"sub": TENANT_ID}, year=2026, month=9)
+        assert getattr(exc_info.value, "status_code", None) == 404
+
+    @pytest.mark.asyncio
+    async def test_atoms_by_id_and_free_atom_ids_built_from_tenants_own_atoms(self):
+        """An atom the tenant owns, with no content_piece written this month, must show up in
+        both atoms_by_id (enriched) and free_atom_ids — regardless of whether it landed in any
+        suggested slot (an empty trip_ids quarter plan produces no evergreen/campaign slots)."""
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [
+            {"payload": self._quarter_plan_payload(), "approved_by": f"tenant:{TENANT_ID}"},
+            {"posts_per_week": 3, "markets": None, "channels": None},
+        ]
+        conn.fetch.side_effect = [
+            [_trip_row()],   # fetch_tenant_trips
+            [_atom_row()],   # fetch_tenant_atoms_by_trip
+            [],               # fetch_used_atom_ids — nothing used this month
+        ]
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await v1_planning.get_slot_suggestions(
+            request, tenant={"sub": TENANT_ID}, year=2026, month=9,
+        )
+
+        assert "atom_1" in result["atoms_by_id"]
+        assert result["atoms_by_id"]["atom_1"]["trip_name"] == "Sapa Trek"
+        assert result["atoms_by_id"]["atom_1"]["destination"] == "Vietnam"
+        assert result["free_atom_ids"] == ["atom_1"]
+        assert result["used_atoms"] == {}
+        assert result["capacity_posts_per_week"] == 3
+
+    @pytest.mark.asyncio
+    async def test_used_atom_drops_out_of_free_list_but_stays_in_atoms_by_id(self):
+        """An atom with an approved content_piece this month is locked (Decision 6's rule) — it
+        must disappear from free_atom_ids but remain resolvable via atoms_by_id (a slot still
+        showing it as "already written" needs the atom's own text/trip_name)."""
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [
+            {"payload": self._quarter_plan_payload(), "approved_by": f"tenant:{TENANT_ID}"},
+            {"posts_per_week": 3, "markets": None, "channels": None},
+        ]
+        used_at = datetime.datetime(2026, 9, 5, tzinfo=datetime.timezone.utc)
+        conn.fetch.side_effect = [
+            [_trip_row()],
+            [_atom_row()],
+            [{"atom_id": "atom_1", "used_at": used_at, "channel": "blog"}],
+        ]
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await v1_planning.get_slot_suggestions(
+            request, tenant={"sub": TENANT_ID}, year=2026, month=9,
+        )
+
+        assert result["free_atom_ids"] == []
+        assert "atom_1" in result["atoms_by_id"]
+        assert result["used_atoms"]["atom_1"]["channel"] == "blog"
+        assert result["used_atoms"]["atom_1"]["used_at"] == used_at.isoformat()
+
+    @pytest.mark.asyncio
+    async def test_used_atoms_query_scoped_to_the_requested_month(self):
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [
+            {"payload": self._quarter_plan_payload(), "approved_by": f"tenant:{TENANT_ID}"},
+            {"posts_per_week": 3, "markets": None, "channels": None},
+        ]
+        conn.fetch.side_effect = [[_trip_row()], [_atom_row()], []]
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        await v1_planning.get_slot_suggestions(request, tenant={"sub": TENANT_ID}, year=2026, month=9)
+
+        used_atoms_call = conn.fetch.call_args_list[2]
+        assert used_atoms_call.args[2] == datetime.date(2026, 9, 1)
+        assert used_atoms_call.args[3] == datetime.date(2026, 10, 1)
 
 
 class TestAuthReusesV1ToursDependency:

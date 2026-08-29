@@ -39,6 +39,8 @@ duplicate that mapping logic.
 """
 from __future__ import annotations
 
+from datetime import date
+from typing import NamedTuple
 from uuid import UUID
 
 from .models import AtomRecord, Trip
@@ -69,6 +71,46 @@ _TENANT_ATOM_QUERY = """
     WHERE owner_scope = $1 AND NOT deleted AND NOT is_empty_marker
 """
 
+# AA-494 Decision 6 — the atom-availability rule, worded exactly per
+# docs/claude_tasks/AA-494-design-atom-angle-piece-reuse.md ("Atom-availability rule for the
+# month"): an atom is "used" (locked) for calendar month X if it has at least one content_piece
+# with status='approved' (the only status meaning "passed T10" — content_piece.status's real
+# value set as of migration 118 is processing/approved/held/failed, confirmed live 29/08/2026;
+# there is no ordinal "beyond approved" state to compare against, so the design doc's "at or
+# beyond approved" collapses to exactly status='approved') whose created_at (actual write date,
+# NOT the slot's pre-assigned plan month) falls within month X. A piece that never reaches
+# approved (held/failed, or still processing) does NOT lock the atom.
+#
+# Joins through angle_gate_request for atom_id/tenant_id/channel — content_piece itself has no
+# atom_id column (by design, migration 115's own header: a child table doesn't copy its parent's
+# fields). Reads angle_gate_request.channel (not content_piece.channel, which migration 124 added
+# but does not yet populate) since channel is still chosen at request-creation time as of this
+# migration — see migration 124's header for why the write-time-channel move is deferred.
+_USED_ATOMS_QUERY = """
+    SELECT agr.atom_id, MIN(cp.created_at) AS used_at,
+           (ARRAY_AGG(agr.channel ORDER BY cp.created_at))[1] AS channel
+    FROM acp_shared.content_piece cp
+    JOIN acp_shared.angle_gate_request agr ON agr.request_id = cp.angle_gate_request_id
+    WHERE agr.tenant_id = $1 AND cp.status = 'approved'
+      AND cp.created_at >= $2 AND cp.created_at < $3
+    GROUP BY agr.atom_id
+"""
+
+
+class UsedAtom(NamedTuple):
+    """One atom locked for a given month — `used_at` is the real write date (the atom's earliest
+    approved content_piece in that month), `channel` is the channel of that earliest piece
+    (best-effort provenance for the T7 slot-view's "already written" display, not itself part of
+    the availability rule)."""
+    used_at: str
+    channel: str
+
+
+def _month_bounds(year: int, month: int) -> tuple[date, date]:
+    start = date(year, month, 1)
+    end = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+    return start, end
+
 
 async def fetch_tenant_trips(tenant_id: UUID, pool) -> list[Trip]:
     """Replaces `runway.fetch_trips()` for T7 — one tenant's own rewritten tours only (via
@@ -92,4 +134,15 @@ async def fetch_tenant_atoms_by_trip(tenant_id: UUID, pool) -> dict[UUID, list[A
     return by_trip
 
 
-__all__ = ["fetch_tenant_trips", "fetch_tenant_atoms_by_trip"]
+async def fetch_used_atom_ids(tenant_id: UUID, year: int, month: int, pool) -> dict[str, UsedAtom]:
+    """AA-494 Decision 6 — the atom-availability rule. Returns every atom_id "used" (locked) for
+    calendar month `year`-`month`, keyed to its real write date + channel (see `_USED_ATOMS_QUERY`
+    above for the exact rule). Callers (T7's slot-view, T8's free-atom picker) treat any atom_id
+    NOT in this dict's keys as free for the month."""
+    start, end = _month_bounds(year, month)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(_USED_ATOMS_QUERY, tenant_id, start, end)
+    return {r["atom_id"]: UsedAtom(used_at=r["used_at"].isoformat(), channel=r["channel"]) for r in rows}
+
+
+__all__ = ["fetch_tenant_trips", "fetch_tenant_atoms_by_trip", "fetch_used_atom_ids", "UsedAtom"]
