@@ -88,7 +88,8 @@ _TENANT_ATOM_QUERY = """
 # migration — see migration 124's header for why the write-time-channel move is deferred.
 _USED_ATOMS_QUERY = """
     SELECT agr.atom_id, MIN(cp.created_at) AS used_at,
-           (ARRAY_AGG(agr.channel ORDER BY cp.created_at))[1] AS channel
+           (ARRAY_AGG(agr.channel ORDER BY cp.created_at))[1] AS channel,
+           (ARRAY_AGG(cp.angle_gate_request_id::text ORDER BY cp.created_at DESC))[1] AS request_id
     FROM acp_shared.content_piece cp
     JOIN acp_shared.angle_gate_request agr ON agr.request_id = cp.angle_gate_request_id
     WHERE agr.tenant_id = $1 AND cp.status = 'approved'
@@ -101,9 +102,19 @@ class UsedAtom(NamedTuple):
     """One atom locked for a given month — `used_at` is the real write date (the atom's earliest
     approved content_piece in that month), `channel` is the channel of that earliest piece
     (best-effort provenance for the T7 slot-view's "already written" display, not itself part of
-    the availability rule)."""
+    the availability rule).
+
+    AA-497 — `request_id` is the LATEST approved piece's angle_gate_request_id (not the earliest,
+    unlike `used_at`/`channel` above), so the T7 slot-view's "Change angle" action reopens
+    whichever request most recently produced a real, approved piece for this atom — the one a
+    tenant editing this slot actually means. Edge case, not solved here: nothing in this codebase
+    prevents create_request() from opening a genuinely SEPARATE request for the same (atom_id,
+    channel) pair (no uniqueness check ever existed) — if that ever happens, this picks the most
+    recently-written request among possibly-several, which is the best available default without
+    a broader "which request owns this atom+channel" model change (out of AA-497's scope)."""
     used_at: str
     channel: str
+    request_id: str
 
 
 def _month_bounds(year: int, month: int) -> tuple[date, date]:
@@ -142,7 +153,10 @@ async def fetch_used_atom_ids(tenant_id: UUID, year: int, month: int, pool) -> d
     start, end = _month_bounds(year, month)
     async with pool.acquire() as conn:
         rows = await conn.fetch(_USED_ATOMS_QUERY, tenant_id, start, end)
-    return {r["atom_id"]: UsedAtom(used_at=r["used_at"].isoformat(), channel=r["channel"]) for r in rows}
+    return {
+        r["atom_id"]: UsedAtom(used_at=r["used_at"].isoformat(), channel=r["channel"], request_id=r["request_id"])
+        for r in rows
+    }
 
 
 __all__ = ["fetch_tenant_trips", "fetch_tenant_atoms_by_trip", "fetch_used_atom_ids", "UsedAtom"]

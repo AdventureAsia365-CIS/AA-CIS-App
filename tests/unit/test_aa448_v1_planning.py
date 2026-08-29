@@ -371,7 +371,7 @@ class TestGetSlotSuggestions:
         conn.fetch.side_effect = [
             [_trip_row()],
             [_atom_row()],
-            [{"atom_id": "atom_1", "used_at": used_at, "channel": "blog"}],
+            [{"atom_id": "atom_1", "used_at": used_at, "channel": "blog", "request_id": "req-1"}],
         ]
         pool = _make_pool(conn)
         request = _make_request(pool)
@@ -384,6 +384,8 @@ class TestGetSlotSuggestions:
         assert "atom_1" in result["atoms_by_id"]
         assert result["used_atoms"]["atom_1"]["channel"] == "blog"
         assert result["used_atoms"]["atom_1"]["used_at"] == used_at.isoformat()
+        # AA-497 — request_id passes through so the T7 slot-view can offer "Change angle".
+        assert result["used_atoms"]["atom_1"]["request_id"] == "req-1"
 
     @pytest.mark.asyncio
     async def test_used_atoms_query_scoped_to_the_requested_month(self):

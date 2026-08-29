@@ -275,13 +275,45 @@ async def set_goal_and_generate(tenant_id: UUID, request_id: UUID, goal_key: str
     return await fetch_request(tenant_id, request_id, pool)
 
 
+async def reopen_request(tenant_id: UUID, request_id: UUID, pool) -> dict:
+    """AA-497 (AA-494 Decision 3) — the tenant-triggered action that moves an 'approved' request
+    back to 'reusable', unlocking choose_angle() below to re-point `chosen` at a different one of
+    the 3 already-generated angle_gate_option rows — no new LLM call, they were generated once by
+    set_goal_and_generate() and have sat in the DB ever since (AA-449's original design already
+    persisted all 3, just never exposed a way back to pick a different one after 'approved').
+
+    Only valid from 'approved' — a request that hasn't been approved yet has nothing to reopen
+    (call set_goal_and_generate()/choose_angle() normally instead), and a request already
+    'reusable' is already reopened. Raising WrongStatusError on a double-call (rather than a
+    silent no-op) makes that visible instead of hiding it."""
+    req = await _fetch_request_row(tenant_id, request_id, pool)
+    if req["status"] != "approved":
+        raise WrongStatusError(
+            f"request_id={request_id} is status={req['status']!r}, expected 'approved' — only "
+            "an approved request can be reopened for re-selection."
+        )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE acp_shared.angle_gate_request SET status = 'reusable', updated_at = now() "
+            "WHERE request_id = $1",
+            request_id,
+        )
+    return await fetch_request(tenant_id, request_id, pool)
+
+
 async def choose_angle(tenant_id: UUID, request_id: UUID, idx: int, pool) -> dict:
     """Workflow step 7 — the real 'gate': tenant picks 1 of the 3 (recommended or not, both
-    valid — workflow: 'có thể chọn theo đề xuất... hoặc chọn khác')."""
+    valid — workflow: 'có thể chọn theo đề xuất... hoặc chọn khác').
+
+    AA-497 — also callable from status='reusable' (reopen_request() above), not just the
+    original 'pending_choice' — re-points `chosen` at a different already-generated option, no
+    LLM call, and lands back on 'approved' exactly like the first-time choice does below (the
+    final UPDATE already sets 'approved' unconditionally, so that part needed no change)."""
     req = await _fetch_request_row(tenant_id, request_id, pool)
-    if req["status"] != "pending_choice":
+    if req["status"] not in ("pending_choice", "reusable"):
         raise WrongStatusError(
-            f"request_id={request_id} is status={req['status']!r}, expected 'pending_choice'."
+            f"request_id={request_id} is status={req['status']!r}, expected 'pending_choice' or "
+            "'reusable'."
         )
     if idx not in (0, 1, 2):
         raise AngleGateError(f"idx must be 0, 1, or 2, got {idx!r}")
@@ -295,11 +327,12 @@ async def choose_angle(tenant_id: UUID, request_id: UUID, idx: int, pool) -> dic
             )
             if updated == "UPDATE 0":
                 raise AngleGateError(f"No angle option idx={idx} for request_id={request_id}")
-            # AA-494 prerequisite fix — the other 2 options were never unset, so a future
-            # design that allows re-choosing a different angle after 'approved' would have T9
-            # silently read the wrong option (first chosen=true row by idx, not the latest
-            # choice). Harmless today only because the status guard above blocks calling this
-            # twice — explicit unset here removes that landmine ahead of any status redesign.
+            # AA-494 prerequisite fix (PR #253) — the other 2 options were never unset. Was
+            # harmless while the status guard blocked calling this twice; now that AA-497's
+            # 'reusable' reopen makes a second choose_angle() call real and reachable, this
+            # explicit unset is what makes T9 (services/acp_content_writing/service.py::
+            # start_write(), reads angles where chosen=true) pick up the LATEST choice instead
+            # of silently reading the first chosen=true row by idx.
             await conn.execute(
                 "UPDATE acp_shared.angle_gate_option SET chosen = false "
                 "WHERE request_id = $1 AND idx != $2",
@@ -321,7 +354,8 @@ async def fetch_request(tenant_id: UUID, request_id: UUID, pool) -> dict:
     async with pool.acquire() as conn:
         option_rows = await conn.fetch(
             """
-            SELECT idx, name, why_it_works, formula_fit, best_final_style, recommended, chosen
+            SELECT option_id, idx, name, why_it_works, formula_fit, best_final_style,
+                   recommended, chosen
             FROM acp_shared.angle_gate_option
             WHERE request_id = $1
             ORDER BY idx
@@ -345,5 +379,6 @@ async def fetch_request(tenant_id: UUID, request_id: UUID, pool) -> dict:
 
 __all__ = [
     "AngleGateError", "AtomNotFoundError", "RequestNotFoundError", "InvalidGoalError",
-    "WrongStatusError", "create_request", "set_goal_and_generate", "choose_angle", "fetch_request",
+    "WrongStatusError", "create_request", "set_goal_and_generate", "choose_angle",
+    "reopen_request", "fetch_request",
 ]

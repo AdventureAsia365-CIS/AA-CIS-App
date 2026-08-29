@@ -19,6 +19,10 @@ Endpoint shape (per docs/claude_tasks/AA-449-01-build-t8-angle-gate.md):
   POST /v1/angle-gate/requests/{id}/goal       — choose goal, generate 3 angles     [steps 2-6]
   GET  /v1/angle-gate/requests/{id}            — read request + angles             [any time]
   POST /v1/angle-gate/requests/{id}/choose     — tenant picks one, status=approved  [step 7]
+  POST /v1/angle-gate/requests/{id}/reopen     — AA-497 (AA-494 Decision 3): approved ->
+                                                   reusable, unlocking .../choose again to pick
+                                                   a different one of the 3 already-generated
+                                                   angles (no new LLM call)
 """
 from __future__ import annotations
 
@@ -126,3 +130,19 @@ async def choose(request_id: UUID, body: ChooseBody, request: Request, tenant=De
         raise HTTPException(status_code=409, detail=str(exc))
     except service.AngleGateError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post(
+    "/requests/{request_id}/reopen",
+    summary="Reopen an approved request to re-select a different already-generated angle "
+            "(AA-497 / AA-494 Decision 3) — no new LLM call",
+)
+async def reopen(request_id: UUID, request: Request, tenant=Depends(get_tenant)):
+    tenant_id = UUID(tenant["sub"])
+    pool = request.app.state.pool
+    try:
+        return await service.reopen_request(tenant_id, request_id, pool)
+    except service.RequestNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except service.WrongStatusError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))

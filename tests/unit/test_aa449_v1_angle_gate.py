@@ -145,3 +145,36 @@ class TestChoose:
             with pytest.raises(HTTPException) as exc:
                 await v1_angle_gate.choose(REQUEST_ID, body, _make_request(), tenant={"sub": TENANT_ID})
         assert exc.value.status_code == 422
+
+
+class TestReopen:
+    """AA-497 — POST /v1/angle-gate/requests/{id}/reopen."""
+
+    @pytest.mark.asyncio
+    async def test_success(self):
+        with patch.object(
+            v1_angle_gate.service, "reopen_request",
+            new=AsyncMock(return_value={"status": "reusable"}),
+        ):
+            result = await v1_angle_gate.reopen(REQUEST_ID, _make_request(), tenant={"sub": TENANT_ID})
+        assert result["status"] == "reusable"
+
+    @pytest.mark.asyncio
+    async def test_wrong_status_409(self):
+        with patch.object(
+            v1_angle_gate.service, "reopen_request",
+            new=AsyncMock(side_effect=service.WrongStatusError("not approved")),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await v1_angle_gate.reopen(REQUEST_ID, _make_request(), tenant={"sub": TENANT_ID})
+        assert exc.value.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_not_found_404(self):
+        with patch.object(
+            v1_angle_gate.service, "reopen_request",
+            new=AsyncMock(side_effect=service.RequestNotFoundError("nope")),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await v1_angle_gate.reopen(REQUEST_ID, _make_request(), tenant={"sub": TENANT_ID})
+        assert exc.value.status_code == 404

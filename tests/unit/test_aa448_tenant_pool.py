@@ -172,13 +172,34 @@ class TestFetchUsedAtomIds:
     @pytest.mark.asyncio
     async def test_returns_atom_id_keyed_dict_with_used_at_and_channel(self):
         used_at = datetime.datetime(2026, 9, 5, tzinfo=datetime.timezone.utc)
-        pool, _ = _mock_pool([{"atom_id": "atom_1", "used_at": used_at, "channel": "blog"}])
+        pool, _ = _mock_pool([{
+            "atom_id": "atom_1", "used_at": used_at, "channel": "blog", "request_id": "req-1",
+        }])
 
         used = await fetch_used_atom_ids(TENANT, 2026, 9, pool)
 
         assert set(used.keys()) == {"atom_1"}
         assert used["atom_1"].used_at == used_at.isoformat()
         assert used["atom_1"].channel == "blog"
+        # AA-497 — request_id lets the T7 slot-view reopen the request behind an already-written
+        # atom ("Change angle").
+        assert used["atom_1"].request_id == "req-1"
+
+    @pytest.mark.asyncio
+    async def test_request_id_picks_latest_not_earliest_piece(self):
+        """AA-497 — unlike used_at/channel (earliest piece), request_id must reflect the LATEST
+        approved piece for this atom (ARRAY_AGG ... ORDER BY cp.created_at DESC), since a reopen
+        + re-write can now produce a second, later piece for the same atom under a different (or
+        the same) request — pinning the SQL's ORDER BY direction, not just the Python return
+        shape, since a mocked single-row result can't distinguish "picked which row" on its own."""
+        pool, conn = _mock_pool([{
+            "atom_id": "atom_1", "used_at": datetime.datetime(2026, 9, 5, tzinfo=datetime.timezone.utc),
+            "channel": "blog", "request_id": "req-latest",
+        }])
+        await fetch_used_atom_ids(TENANT, 2026, 9, pool)
+
+        sql = conn.fetch.await_args.args[0]
+        assert "ARRAY_AGG(cp.angle_gate_request_id::text ORDER BY cp.created_at DESC)" in sql
 
     @pytest.mark.asyncio
     async def test_no_used_atoms_returns_empty_dict(self):

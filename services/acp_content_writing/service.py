@@ -93,6 +93,12 @@ async def start_write(
     from the pre-AA-466 synchronous contract for these specific conditions. On success, inserts
     the `content_piece` placeholder row (status='processing') and returns it — the router
     returns this as the 202 body, then launches run_write_background() with the piece_id."""
+    # AA-497 (AA-494 Decision 3) — verified this guard needs NO change. The reopen -> re-choose
+    # cycle (services/acp_angle_gate/service.py::reopen_request()/choose_angle()) always lands
+    # back on 'approved' before a second write can happen — choose_angle()'s final UPDATE sets
+    # 'approved' unconditionally regardless of whether it was called from 'pending_choice' or
+    # 'reusable' — so this function never actually sees status='reusable' in practice, confirming
+    # the design intent stated in AA-497's own task description.
     req = await angle_gate_service.fetch_request(tenant_id, request_id, pool)
     if req["status"] != "approved":
         raise RequestNotReadyError(
@@ -133,7 +139,16 @@ async def start_write(
     async with pool.acquire() as conn:
         brand_rubric_text = await fetch_brand_rubric_text(conn, str(tenant_id))
 
-    piece = await _insert_placeholder_piece(pool, tenant_id=tenant_id, request_id=request_id)
+    # AA-497 — angle_gate_option_id (migration 124's Decision 2 column, unpopulated until now):
+    # denormalized record of WHICH of the 3 options this specific piece was written from, so a
+    # piece's history stays accurate even after a later reopen()+re-choice changes `chosen` on
+    # the request. `chosen["option_id"]` is present because fetch_request() (AA-497) now selects
+    # it — a request written before this change has no rows to backfill (0 approved requests
+    # existed live as of this migration, confirmed via STEP0-refresh), so there's no gap to close.
+    option_id = chosen.get("option_id")
+    piece = await _insert_placeholder_piece(
+        pool, tenant_id=tenant_id, request_id=request_id, angle_gate_option_id=option_id,
+    )
 
     context = {
         "atom_text": atom_text, "goal": goal, "channel_style": channel_style,
@@ -145,17 +160,25 @@ async def start_write(
     return {"piece": piece, "context": context}
 
 
-async def _insert_placeholder_piece(pool, *, tenant_id: UUID, request_id: UUID) -> dict:
+async def _insert_placeholder_piece(
+    pool, *, tenant_id: UUID, request_id: UUID, angle_gate_option_id=None,
+) -> dict:
+    # AA-497 (migration 125) — attempt_number=1 is still correct as the INITIAL value for every
+    # new write session (T9's own internal retry loop, run_write_background(), overwrites it via
+    # _finalize_piece() with the final 1-or-2 it actually took) — this is no longer required to
+    # be unique per angle_gate_request_id (migration 125 dropped that constraint), since a
+    # reopened request can now have more than one content_piece row over time.
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO acp_shared.content_piece
-                (tenant_id, angle_gate_request_id, attempt_number, content_text, status)
-            VALUES ($1, $2, 1, '', 'processing')
+                (tenant_id, angle_gate_request_id, angle_gate_option_id, attempt_number,
+                 content_text, status)
+            VALUES ($1, $2, $3, 1, '', 'processing')
             RETURNING piece_id, tenant_id, angle_gate_request_id, attempt_number, content_text,
                       status, held_reason, gate_ledger, repair_log, created_at
             """,
-            tenant_id, request_id,
+            tenant_id, request_id, angle_gate_option_id,
         )
     return _row_to_dict(row)
 
