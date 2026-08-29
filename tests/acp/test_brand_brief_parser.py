@@ -1,10 +1,15 @@
+import sys
 from pathlib import Path
 
 import pytest
 
-from services.acp_brand_brief_parser.parser import parse_docx
+_LAMBDA_DIR = Path(__file__).parent.parent.parent / "services" / "acp_brand_brief_parser"
+if str(_LAMBDA_DIR) not in sys.path:
+    sys.path.insert(0, str(_LAMBDA_DIR))
 
-FIXTURES = Path(__file__).parent.parent.parent / "services/acp_brand_brief_parser/fixtures"
+from parser import parse_docx  # noqa: E402  (flat import — mirrors Lambda's own zip-flattened runtime)
+
+FIXTURES = _LAMBDA_DIR / "fixtures"
 
 
 def test_atlas_brief():
