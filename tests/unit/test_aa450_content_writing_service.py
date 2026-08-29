@@ -140,6 +140,47 @@ class TestStartWrite:
 
         assert result["context"]["cta"] == "Read the guide"
 
+    async def test_angle_gate_option_id_passed_through_to_insert(self):
+        """AA-497 — the placeholder INSERT now carries which angle_gate_option this piece was
+        written from (migration 124's column, populated for the first time here) so a later
+        reopen()+re-choice on the SAME request doesn't retroactively change what an OLD piece's
+        angle attribution shows (api/routers/v1_publish.py's own AA-497 fix reads this back)."""
+        option_id = uuid.uuid4()
+        angle_with_option = {**ANGLE, "option_id": option_id}
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [{"text": "atom text"}, _placeholder_row()]
+        pool = _make_pool(conn)
+
+        with patch.object(service.angle_gate_service, "fetch_request",
+                           new=AsyncMock(return_value=_request(angles=[angle_with_option]))), \
+             patch.object(service, "fetch_brand_audience", new=AsyncMock(return_value={})), \
+             patch.object(service, "fetch_brand_rubric_text", new=AsyncMock(return_value="rubric")), \
+             patch.object(service, "get_goal", return_value=GOAL):
+            await service.start_write(TENANT_ID, REQUEST_ID, pool)
+
+        insert_call = conn.fetchrow.call_args_list[1]
+        insert_sql, *params = insert_call.args
+        assert "angle_gate_option_id" in insert_sql
+        assert option_id in params
+
+    async def test_missing_option_id_on_legacy_angle_does_not_crash(self):
+        """A `chosen` dict without 'option_id' (shouldn't happen post-AA-497, but defensive) must
+        insert NULL, not raise a KeyError."""
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [{"text": "atom text"}, _placeholder_row()]
+        pool = _make_pool(conn)
+
+        with patch.object(service.angle_gate_service, "fetch_request", new=AsyncMock(return_value=_request())), \
+             patch.object(service, "fetch_brand_audience", new=AsyncMock(return_value={})), \
+             patch.object(service, "fetch_brand_rubric_text", new=AsyncMock(return_value="rubric")), \
+             patch.object(service, "get_goal", return_value=GOAL):
+            result = await service.start_write(TENANT_ID, REQUEST_ID, pool)
+
+        assert result["piece"]["status"] == "processing"
+        insert_call = conn.fetchrow.call_args_list[1]
+        _, *params = insert_call.args
+        assert None in params
+
 
 @pytest.mark.asyncio
 class TestRunWriteBackground:

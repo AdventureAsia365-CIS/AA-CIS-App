@@ -72,6 +72,11 @@ async def test_list_pending_returns_rows_scoped_to_tenant():
     assert channel_param == "blog"
     assert "status = 'approved'" in sql
     assert "pl.publish_id IS NULL" in sql
+    # AA-497 — angle_name joins via the denormalized FK first (mutable chosen=true is only a
+    # fallback for pre-AA-497 rows), so a reopen()+re-choice on this request doesn't retroactively
+    # change what an already-written piece's angle_name displays here.
+    assert "ago.option_id = cp.angle_gate_option_id" in sql
+    assert "cp.angle_gate_option_id IS NULL AND ago.request_id = agr.request_id" in sql
 
 
 @pytest.mark.asyncio
@@ -205,6 +210,11 @@ async def test_publish_success_writes_published_row():
     assert params[2] == "blog"      # channel
     assert params[3] == "published"  # status
     assert params[4] == "42"         # external_id
+
+    # AA-497 — the piece-lookup SELECT (first fetchrow call) joins angle_name via the
+    # denormalized FK first, same fix as list_pending()'s above.
+    piece_lookup_sql = conn.fetchrow.call_args_list[0][0][0]
+    assert "ago.option_id = cp.angle_gate_option_id" in piece_lookup_sql
 
 
 @pytest.mark.asyncio

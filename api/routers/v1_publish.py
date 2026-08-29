@@ -92,7 +92,12 @@ async def list_pending(request: Request, tenant=Depends(get_tenant)):
     content_piece rows for the blog channel that have no successful publish yet. A piece with a
     prior FAILED attempt (or none at all, or a since-unpublished one) still shows up here — only
     a row with a currently-'published' publish_log entry is excluded, so a failed/unpublished
-    piece stays retryable rather than disappearing."""
+    piece stays retryable rather than disappearing.
+
+    AA-497 — angle_name now joins via cp.angle_gate_option_id (denormalized at write time,
+    migration 124/AA-497) rather than ago.chosen=true, which is MUTABLE (AA-497's reopen action
+    can re-point it to a different option after this piece was already written) — falls back to
+    the old chosen=true join only for pre-AA-497 rows where angle_gate_option_id is NULL."""
     pool = request.app.state.pool
     tenant_id = tenant["sub"]
 
@@ -104,7 +109,9 @@ async def list_pending(request: Request, tenant=Depends(get_tenant)):
             FROM acp_shared.content_piece cp
             JOIN acp_shared.angle_gate_request agr ON agr.request_id = cp.angle_gate_request_id
             LEFT JOIN acp_shared.angle_gate_option ago
-                ON ago.request_id = agr.request_id AND ago.chosen = true
+                ON ago.option_id = cp.angle_gate_option_id
+                OR (cp.angle_gate_option_id IS NULL AND ago.request_id = agr.request_id
+                    AND ago.chosen = true)
             LEFT JOIN acp_shared.publish_log pl
                 ON pl.piece_id = cp.piece_id AND pl.status = 'published'
             WHERE cp.tenant_id = $1::uuid
@@ -139,7 +146,9 @@ async def publish(piece_id: UUID, request: Request, tenant=Depends(get_tenant)):
     existence leak). A retryable prior 'failed' publish_log row for this piece is updated in
     place rather than accumulating duplicate failure rows; a 'published' or 'unpublished' row is
     left untouched and a fresh attempt gets its own new row (preserves that row's real
-    unpublished_at/unpublished_by audit trail — AA-455's whole reason for those columns)."""
+    unpublished_at/unpublished_by audit trail — AA-455's whole reason for those columns).
+
+    AA-497 — same angle_gate_option_id-first join as list_pending() above, same reason."""
     pool = request.app.state.pool
     tenant_id = tenant["sub"]
 
@@ -150,7 +159,9 @@ async def publish(piece_id: UUID, request: Request, tenant=Depends(get_tenant)):
             FROM acp_shared.content_piece cp
             JOIN acp_shared.angle_gate_request agr ON agr.request_id = cp.angle_gate_request_id
             LEFT JOIN acp_shared.angle_gate_option ago
-                ON ago.request_id = agr.request_id AND ago.chosen = true
+                ON ago.option_id = cp.angle_gate_option_id
+                OR (cp.angle_gate_option_id IS NULL AND ago.request_id = agr.request_id
+                    AND ago.chosen = true)
             WHERE cp.piece_id = $1::uuid AND cp.tenant_id = $2::uuid
             """,
             piece_id, tenant_id,
