@@ -51,7 +51,8 @@ from services.acp_planning.quarter import (approve_quarter_plan_version, compute
                                            fetch_approved_quarter_plan, save_quarter_plan_version)
 from services.acp_planning.runway import compute_runway_map
 from services.acp_planning.tenant_config import TenantNotFoundError, fetch_tenant_planning_config
-from services.acp_planning.tenant_pool import fetch_tenant_atoms_by_trip, fetch_tenant_trips
+from services.acp_planning.tenant_pool import (fetch_tenant_atoms_by_trip, fetch_tenant_trips,
+                                                fetch_used_atom_ids)
 from services.acp_planning.trip_reallocation import confirm_trip_reallocation, suggest_trip_reallocation
 from services.acp_shared.content_metrics import (PieceNotFoundError, PieceNotOwnedError,
                                                  record_metric_snapshot, rollup_atom_weights)
@@ -210,6 +211,89 @@ async def get_slot_grid(
         raise HTTPException(status_code=409, detail=str(exc))
 
     return {"slot_grid": grid.model_dump(mode="json")}
+
+
+@router.get(
+    "/slot-suggestions",
+    summary="T7 slot-view + T8 atom-picker data — slot grid's suggested atoms, enriched, plus "
+            "this month's free-atom pool (AA-494 Decision 6 — suggestion only, never a gate)",
+)
+async def get_slot_suggestions(
+    request: Request, tenant=Depends(get_tenant),
+    year: int = Query(...), month: int = Query(..., ge=1, le=12),
+):
+    """AA-494 Step 4 — T8→slot-grid wiring. Reuses `get_slot_grid()`'s exact computation
+    (same config/trips/atoms/runway/quarter-plan fetch, same `compute_slot_grid()` call) rather
+    than duplicating it, then adds the two things the approved UI/UX design (design doc Decision
+    6) needs that the bare SlotGrid doesn't carry:
+      - `atoms_by_id`: full atom detail (text/activity_type/distinctiveness/trip_name/
+        destination) for every atom_id this tenant owns — both a slot's `atom_ids` (suggested)
+        and the free-atom list resolve against this ONE map, so the frontend never needs a
+        second lookup shape for "suggested" vs. "free" atom cards.
+      - `used_atoms` / `free_atom_ids`: the atom-availability rule (`fetch_used_atom_ids()`,
+        Step 3) — an atom with an approved content_piece written (real created_at) within this
+        calendar month is "used" and drops off `free_atom_ids`; everything else the tenant owns
+        is free, suggested-in-a-slot or not (picking a free atom outside its suggested slot is
+        explicitly allowed per Decision 6's product model — slots are a priority hint, not a
+        gate; `create_request()` itself still accepts ANY atom_id, unchanged by this endpoint).
+
+    Purely additive/read-only — does not persist anything (unlike `create_request()`'s optional
+    `year`/`month` persist-on-first-use path, AA-451), and does not change what `create_request()`
+    accepts. A slot whose suggested atoms are ALL used just shows as fully green in the UI; it is
+    never filtered out of the grid here, so the frontend can still render its "already written"
+    success state (design doc UI/UX: "A slot-card that's already been written flips to a
+    success/green state, showing which atom was used and the write date").
+    """
+    tenant_id = UUID(tenant["sub"])
+    pool = request.app.state.pool
+    quarter = (month - 1) // 3 + 1
+
+    quarter_plan = await fetch_approved_quarter_plan(tenant_id, year, quarter, pool)
+    if quarter_plan is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No finalized quarter plan for Q{quarter} {year} — finalize the quarter first.",
+        )
+
+    config = await _resolve_config(tenant_id, pool)
+    trips = await fetch_tenant_trips(tenant_id, pool)
+    trips_by_id = {t.id: t for t in trips}
+    atoms_by_trip = await fetch_tenant_atoms_by_trip(tenant_id, pool)
+    runway = compute_runway_map(tenant_id, year, trips, config.markets)
+
+    try:
+        grid = compute_slot_grid(
+            tenant_id, year, month, config.channels, config.capacity_posts_per_week,
+            quarter_plan, runway, trips_by_id, atoms_by_trip, config.markets[0],
+        )
+    except QuarterPlanNotApprovedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    used_atoms = await fetch_used_atom_ids(tenant_id, year, month, pool)
+
+    atoms_by_id: dict[str, dict] = {}
+    for trip_id, atoms in atoms_by_trip.items():
+        trip = trips_by_id.get(trip_id)
+        for atom in atoms:
+            atoms_by_id[atom.atom_id] = {
+                "atom_id": atom.atom_id,
+                "trip_id": str(trip_id),
+                "trip_name": trip.name if trip else None,
+                "destination": trip.destination if trip else None,
+                "text": atom.text,
+                "activity_type": atom.activity_type,
+                "distinctiveness": atom.distinctiveness,
+            }
+
+    free_atom_ids = [atom_id for atom_id in atoms_by_id if atom_id not in used_atoms]
+
+    return {
+        "slot_grid": grid.model_dump(mode="json"),
+        "atoms_by_id": atoms_by_id,
+        "used_atoms": {atom_id: u._asdict() for atom_id, u in used_atoms.items()},
+        "free_atom_ids": free_atom_ids,
+        "capacity_posts_per_week": config.capacity_posts_per_week,
+    }
 
 
 # ---------------------------------------------------------------- feedback loop (round 6)
