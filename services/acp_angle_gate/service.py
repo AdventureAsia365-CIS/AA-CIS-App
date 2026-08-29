@@ -281,6 +281,16 @@ async def choose_angle(tenant_id: UUID, request_id: UUID, idx: int, pool) -> dic
             )
             if updated == "UPDATE 0":
                 raise AngleGateError(f"No angle option idx={idx} for request_id={request_id}")
+            # AA-494 prerequisite fix — the other 2 options were never unset, so a future
+            # design that allows re-choosing a different angle after 'approved' would have T9
+            # silently read the wrong option (first chosen=true row by idx, not the latest
+            # choice). Harmless today only because the status guard above blocks calling this
+            # twice — explicit unset here removes that landmine ahead of any status redesign.
+            await conn.execute(
+                "UPDATE acp_shared.angle_gate_option SET chosen = false "
+                "WHERE request_id = $1 AND idx != $2",
+                request_id, idx,
+            )
             await conn.execute(
                 "UPDATE acp_shared.angle_gate_request SET status = 'approved', updated_at = now() "
                 "WHERE request_id = $1",

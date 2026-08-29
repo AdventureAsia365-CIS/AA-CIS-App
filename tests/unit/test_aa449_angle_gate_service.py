@@ -63,6 +63,45 @@ def _option_row(idx, recommended=False, chosen=False):
     }
 
 
+class _StatefulAngleOptionConn:
+    """AA-494 prerequisite fix test double — tracks angle_gate_option.chosen state directly
+    across multiple choose_angle() calls, unlike the AsyncMock-with-side_effect style the rest
+    of this file uses (which only checks call counts/args, not resulting DB state). Needed here
+    because the fix's correctness is specifically about final state after 2 calls, not just
+    which queries fire once."""
+    def __init__(self):
+        self.options = {0: False, 1: False, 2: False}
+        self.request_status = "pending_choice"
+
+    async def fetchrow(self, query, *args):
+        if "angle_gate_request" in query:
+            return _request_row(status=self.request_status, goal="promotion")
+        return None
+
+    async def fetch(self, query, *args):
+        return [_option_row(i, chosen=self.options[i]) for i in sorted(self.options)]
+
+    async def execute(self, query, *args):
+        if "SET chosen = true" in query:
+            _, idx = args
+            if idx not in self.options:
+                return "UPDATE 0"
+            self.options[idx] = True
+            return "UPDATE 1"
+        if "SET chosen = false" in query:
+            _, idx = args
+            n = 0
+            for i in self.options:
+                if i != idx:
+                    self.options[i] = False
+                    n += 1
+            return f"UPDATE {n}"
+        if "SET status = 'approved'" in query:
+            self.request_status = "approved"
+            return "UPDATE 1"
+        return "UPDATE 0"
+
+
 @pytest.mark.asyncio
 class TestCreateRequest:
     async def test_creates_request_for_owned_atom(self):
@@ -143,7 +182,7 @@ class TestChooseAngle:
     async def test_happy_path_sets_chosen_and_approved(self):
         conn = AsyncMock()
         conn.fetchrow.return_value = _request_row(status="pending_choice", goal="promotion")
-        conn.execute.side_effect = ["UPDATE 1", "UPDATE 1"]
+        conn.execute.side_effect = ["UPDATE 1", "UPDATE 2", "UPDATE 1"]
         pool = _make_pool(conn)
 
         with patch.object(service, "fetch_request", new=AsyncMock(return_value={"status": "approved"})):
@@ -152,6 +191,32 @@ class TestChooseAngle:
         assert result["status"] == "approved"
         status_update = [c for c in conn.execute.call_args_list if "SET status = 'approved'" in c[0][0]]
         assert len(status_update) == 1
+        # AA-494 prerequisite fix — the other 2 options must be explicitly unset in the same call.
+        unset_call = [c for c in conn.execute.call_args_list if "SET chosen = false" in c[0][0]]
+        assert len(unset_call) == 1
+        _, unset_request_id, unset_idx = unset_call[0][0]
+        assert (unset_request_id, unset_idx) == (REQUEST_ID, 1)
+
+    async def test_choosing_twice_unsets_previous_choice(self):
+        """The bug this fixes: choose_angle() used to leave a previously-chosen option's
+        chosen=true forever, so a future design that allows re-choosing a different angle
+        (Decision 3) would have T9 read the FIRST chosen=true row by idx, not the latest. The
+        live guard (status must be 'pending_choice') blocks a second real call today — this
+        test bypasses it via a stateful fake connection (resetting status between calls) so the
+        underlying data-mutation logic is verified now and stays meaningful once the guard is
+        loosened later, per the build task's own requirement."""
+        conn = _StatefulAngleOptionConn()
+        pool = _make_pool(conn)
+
+        await service.choose_angle(TENANT_ID, REQUEST_ID, 0, pool)
+        assert conn.options == {0: True, 1: False, 2: False}
+
+        conn.request_status = "pending_choice"  # simulate a future status allowing re-choice
+        await service.choose_angle(TENANT_ID, REQUEST_ID, 2, pool)
+
+        assert conn.options == {0: False, 1: False, 2: True}, (
+            "only the most recently chosen option should have chosen=true"
+        )
 
     async def test_wrong_status_raises(self):
         conn = AsyncMock()
