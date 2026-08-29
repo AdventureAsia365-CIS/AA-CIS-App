@@ -135,6 +135,7 @@ class TestSetGoalAndGenerate:
             _request_row(status="pending_goal"),  # _fetch_request_row (status check)
             _atom_row(),                          # _fetch_atom_for_tenant
             {"customer_segment": "Senior execs", "customer_mindset": "seek depth"},  # brand fetchrow
+            None,  # AA-469: fetch_search_demand_signal -> no seo_context row for this trip
         ]
         conn.fetch.return_value = []  # fetch_tenant_trips -> no trips (trip_name stays None, fine)
         pool = _make_pool(conn)
@@ -154,6 +155,62 @@ class TestSetGoalAndGenerate:
         # recommended=True only on idx 1
         recommended_flags = [c[0][-1] for c in insert_calls]
         assert recommended_flags == [False, True, False]
+
+    async def test_search_demand_signal_fetched_and_passed_when_trip_id_present(self):
+        """AA-469 Việc 4 — set_goal_and_generate() must actually resolve the DFS/PAA signal
+        (via fetch_search_demand_signal) and hand it to generate_angles(), not just accept the
+        new kwarg without ever populating it."""
+        from services.acp_shared.dfs_relevance import SearchDemandSignal
+        signal = SearchDemandSignal(
+            relevance="HIGH", people_also_ask=["q1"], related_keywords=["k1"],
+        )
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [
+            _request_row(status="pending_goal"),
+            _atom_row(),
+            {"customer_segment": "Senior execs", "customer_mindset": "seek depth"},
+        ]
+        conn.fetch.return_value = []
+        pool = _make_pool(conn)
+
+        angles = [
+            {"name": "A", "why_it_works": "wa", "formula_fit": "fa", "best_final_style": "sa"},
+            {"name": "B", "why_it_works": "wb", "formula_fit": "fb", "best_final_style": "sb"},
+            {"name": "C", "why_it_works": "wc", "formula_fit": "fc", "best_final_style": "sc"},
+        ]
+        mock_generate = AsyncMock(return_value=(angles, 0, "reason", 0.02))
+        with patch.object(service, "generate_angles", new=mock_generate), \
+             patch.object(service, "fetch_search_demand_signal", new=AsyncMock(return_value=signal)), \
+             patch.object(service, "fetch_request", new=AsyncMock(return_value={"status": "pending_choice"})):
+            await service.set_goal_and_generate(TENANT_ID, REQUEST_ID, "promotion", pool)
+
+        assert mock_generate.call_args.kwargs["search_demand"] is signal
+
+    async def test_search_demand_signal_skipped_when_no_trip_id(self):
+        """A request with no trip_id (atom not linked to a trip) must not attempt a seo_context
+        lookup at all — mirrors the existing trip_name/destination guard just above it."""
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [
+            _request_row(status="pending_goal", trip_id=None),
+            _atom_row(),
+            {"customer_segment": "Senior execs", "customer_mindset": "seek depth"},
+        ]
+        pool = _make_pool(conn)
+
+        angles = [
+            {"name": "A", "why_it_works": "wa", "formula_fit": "fa", "best_final_style": "sa"},
+            {"name": "B", "why_it_works": "wb", "formula_fit": "fb", "best_final_style": "sb"},
+            {"name": "C", "why_it_works": "wc", "formula_fit": "fc", "best_final_style": "sc"},
+        ]
+        mock_generate = AsyncMock(return_value=(angles, 0, "reason", 0.02))
+        mock_signal = AsyncMock()
+        with patch.object(service, "generate_angles", new=mock_generate), \
+             patch.object(service, "fetch_search_demand_signal", new=mock_signal), \
+             patch.object(service, "fetch_request", new=AsyncMock(return_value={"status": "pending_choice"})):
+            await service.set_goal_and_generate(TENANT_ID, REQUEST_ID, "promotion", pool)
+
+        mock_signal.assert_not_called()
+        assert mock_generate.call_args.kwargs["search_demand"] is None
 
     async def test_wrong_status_raises(self):
         conn = AsyncMock()

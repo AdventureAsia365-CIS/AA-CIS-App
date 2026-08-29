@@ -556,10 +556,41 @@ async def fetch_quarter_plan_version(version_id: UUID, pool) -> Optional[dict]:
     }
 
 
+async def fetch_quarter_plan_version_history(
+    tenant_id: UUID, year: int, quarter: int, pool,
+) -> list[dict]:
+    """AA-469 Việc 2 — list EVERY version_no ever saved for this tenant/year/quarter (not just
+    the one `current_version_id` points at, which `fetch_current_version_no()` above already
+    covers), for a tenant-facing history view. As STEP0 confirmed live (docs/claude_audit/
+    AA-469-viec2-step0-t7-edit-history-investigation.md §8), a tenant/quarter can accumulate
+    several `approved` versions over time — `approve_quarter_plan_version()` never revokes an
+    older version's `approval_status`, it only moves the pointer — so a tenant browsing history
+    needs the full list, not just "the current one" or "the most recent one".
+
+    Ordered newest-first (`version_no DESC`) — a history view reads top-to-bottom as "most
+    recent first", the same convention most changelog/version-picker UIs use. Pure read, same
+    division-of-responsibility as `fetch_quarter_plan_version()` just above: does not enforce
+    Gate B, does not decide what a non-approved version means for the caller."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT qpv.version_id, qpv.version_no, qpv.approval_status, qpv.approved_by,
+                   qpv.approved_at, qpv.created_at, qpv.source
+            FROM acp_shared.quarter_plan_version qpv
+            JOIN acp_shared.quarter_plan qp ON qp.plan_id = qpv.plan_id
+            WHERE qp.tenant_id = $1 AND qp.year = $2 AND qp.quarter = $3
+            ORDER BY qpv.version_no DESC
+            """,
+            tenant_id, year, quarter,
+        )
+    return [dict(r) for r in rows]
+
+
 __all__ = [
     "compute_quarter_plan", "fetch_atoms_by_trip", "plan_quarter",
     "approve_quarter_plan", "save_quarter_plan_version",
     "approve_quarter_plan_version", "fetch_approved_quarter_plan",
     "fetch_current_version_no", "fetch_quarter_plan_version",
+    "fetch_quarter_plan_version_history",
     "QuarterPlanVersionNotFoundError", "QuarterPlanVersionNotPendingError",
 ]

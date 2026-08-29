@@ -19,6 +19,7 @@ from services.acp_planning.quarter import fetch_approved_quarter_plan
 from services.acp_planning.runway import compute_runway_map
 from services.acp_planning.tenant_config import TenantNotFoundError, fetch_tenant_planning_config
 from services.acp_planning.tenant_pool import fetch_tenant_atoms_by_trip, fetch_tenant_trips
+from services.acp_shared.dfs_relevance import fetch_search_demand_signal
 
 logger = structlog.get_logger()
 
@@ -228,9 +229,22 @@ async def set_goal_and_generate(tenant_id: UUID, request_id: UUID, goal_key: str
             trip_name = trip.name
             destination = trip.destination
 
+    # AA-469 Việc 4 — DFS/PAA search-demand signal, the confirmed real gap from both this
+    # task's STEP0 and the prior AA-469 STEP0 (docs/claude_audit/
+    # AA-469-viec4-step0-t8-t11-chain-investigation.md §1-2): angle generation never read
+    # seo_context at any layer. Only fetched when the request has a trip_id (matches
+    # trip_name/destination's own guard just above — seo_context is keyed by tour_id, no
+    # signal to fetch for a tripless atom). `fetch_search_demand_signal()` returns None when
+    # this tour has no seo_context row at all — that's the common case for tours DFS hasn't
+    # run against, not an error; build_user_prompt() below omits the block entirely for None.
+    search_demand = None
+    if req["trip_id"]:
+        search_demand = await fetch_search_demand_signal(req["trip_id"], pool)
+
     angles, recommended_index, reason, cost_usd = await generate_angles(
         content_seed=atom["text"], goal=goal, channel=req["channel"],
         brand_audience=brand_audience, destination=destination, trip_name=trip_name,
+        search_demand=search_demand,
     )
 
     async with pool.acquire() as conn:

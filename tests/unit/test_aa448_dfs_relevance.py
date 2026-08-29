@@ -13,6 +13,7 @@ import pytest
 from services.acp_shared.dfs_relevance import (
     DfsRelevanceThresholds,
     fetch_dfs_relevance_by_tour,
+    fetch_search_demand_signal,
     score_dfs_relevance,
 )
 
@@ -135,3 +136,64 @@ class TestFetchDfsRelevanceByTourDbWrapper:
         result = await fetch_dfs_relevance_by_tour([tour_id], pool)
 
         assert result == {tour_id: "MED"}
+
+
+class TestFetchSearchDemandSignal:
+    """AA-469 Việc 4 — T8's single-tour variant (SearchDemandSignal), a different consumer
+    (angle-gen prompt) than fetch_dfs_relevance_by_tour()'s bulk T7 scoring shape above."""
+
+    @pytest.mark.asyncio
+    async def test_no_seo_context_row_returns_none(self):
+        conn = AsyncMock()
+        conn.fetchrow.return_value = None
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=conn)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        pool = MagicMock()
+        pool.acquire = MagicMock(return_value=ctx)
+
+        result = await fetch_search_demand_signal(uuid.uuid4(), pool)
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_real_asyncpg_string_shaped_jsonb_parsed(self):
+        """keyword_ideas/people_also_ask/related_keywords all arrive as raw JSON strings (same
+        no-jsonb-codec gap the bulk fetcher above already documents), not pre-parsed lists."""
+        conn = AsyncMock()
+        conn.fetchrow.return_value = {
+            "keyword_ideas": json.dumps([{"keyword": "sapa trekking", "search_volume": 720}]),
+            "people_also_ask": json.dumps(["is sapa safe?", "best month for sapa"]),
+            "related_keywords": json.dumps(["sapa tours", "sapa trekking tour"]),
+        }
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=conn)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        pool = MagicMock()
+        pool.acquire = MagicMock(return_value=ctx)
+
+        result = await fetch_search_demand_signal(uuid.uuid4(), pool)
+
+        assert result.relevance == "HIGH"
+        assert result.people_also_ask == ["is sapa safe?", "best month for sapa"]
+        assert result.related_keywords == ["sapa tours", "sapa trekking tour"]
+
+    @pytest.mark.asyncio
+    async def test_null_paa_and_related_columns_become_empty_lists_not_crash(self):
+        """A seo_context row can predate migration 069 (both columns nullable) — must not crash
+        on None, and must not confuse None with an empty-but-present list."""
+        conn = AsyncMock()
+        conn.fetchrow.return_value = {
+            "keyword_ideas": None, "people_also_ask": None, "related_keywords": None,
+        }
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=conn)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        pool = MagicMock()
+        pool.acquire = MagicMock(return_value=ctx)
+
+        result = await fetch_search_demand_signal(uuid.uuid4(), pool)
+
+        assert result.relevance == "MED"
+        assert result.people_also_ask == []
+        assert result.related_keywords == []

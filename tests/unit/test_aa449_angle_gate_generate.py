@@ -8,6 +8,7 @@ import pytest
 from services.acp_angle_gate import generate as gen_mod
 from services.acp_angle_gate.generate import AngleGenerationError, generate_angles
 from services.acp_angle_gate.goals import get_goal
+from services.acp_shared.dfs_relevance import SearchDemandSignal
 from shared.llm_client.models import LLMResponse
 
 GOAL = get_goal("promotion")
@@ -114,3 +115,49 @@ class TestGenerateAngles:
         assert GOAL["marketing_term"] in request.user_prompt
         assert "Ha Giang Loop" in request.user_prompt
         assert request.model_tier == "sonnet"
+
+    async def test_search_demand_signal_reaches_the_prompt(self):
+        """AA-469 Việc 4 — the confirmed real gap (DFS/PAA never fed angle generation) is fixed:
+        when a SearchDemandSignal is passed, its PAA/related-keyword text must actually reach
+        the LLM call, same "reaches the prompt" assertion style as
+        test_brand_audience_and_goal_reach_the_prompt above."""
+        client = _client_returning(json.dumps(_VALID_ANGLES))
+        signal = SearchDemandSignal(
+            relevance="HIGH",
+            people_also_ask=["is sapa safe to trek?"],
+            related_keywords=["sapa trekking tour"],
+        )
+        with patch.object(gen_mod, "LLMClient", return_value=client):
+            await generate_angles(
+                content_seed="seed", goal=GOAL, channel="blog", brand_audience={},
+                search_demand=signal,
+            )
+        request = client.generate.call_args[0][0]
+        assert "is sapa safe to trek?" in request.user_prompt
+        assert "sapa trekking tour" in request.user_prompt
+        assert "HIGH" in request.user_prompt
+
+    async def test_search_demand_signal_omitted_when_none(self):
+        """No seo_context row for this tour -> no SEARCH DEMAND block at all, not an empty one —
+        the prompt for a request with no signal stays exactly as it was before this change."""
+        client = _client_returning(json.dumps(_VALID_ANGLES))
+        with patch.object(gen_mod, "LLMClient", return_value=client):
+            await generate_angles(
+                content_seed="seed", goal=GOAL, channel="blog", brand_audience={},
+                search_demand=None,
+            )
+        request = client.generate.call_args[0][0]
+        assert "SEARCH DEMAND SIGNAL" not in request.user_prompt
+
+    async def test_search_demand_signal_with_no_paa_or_keywords_omitted(self):
+        """A signal object can exist (a seo_context row was found) but carry neither PAA nor
+        related keywords — must still omit the block, not render an empty one."""
+        client = _client_returning(json.dumps(_VALID_ANGLES))
+        signal = SearchDemandSignal(relevance="MED", people_also_ask=[], related_keywords=[])
+        with patch.object(gen_mod, "LLMClient", return_value=client):
+            await generate_angles(
+                content_seed="seed", goal=GOAL, channel="blog", brand_audience={},
+                search_demand=signal,
+            )
+        request = client.generate.call_args[0][0]
+        assert "SEARCH DEMAND SIGNAL" not in request.user_prompt
