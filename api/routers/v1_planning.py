@@ -48,7 +48,8 @@ from services.acp_planning.allocator import compute_slot_grid
 from services.acp_planning.lock_status import fetch_quarter_lock_status, is_quarter_fully_locked
 from services.acp_planning.models import QuarterPlanNotApprovedError
 from services.acp_planning.quarter import (approve_quarter_plan_version, compute_quarter_plan,
-                                           fetch_approved_quarter_plan, save_quarter_plan_version)
+                                           fetch_approved_quarter_plan, fetch_quarter_plan_version,
+                                           fetch_quarter_plan_version_history, save_quarter_plan_version)
 from services.acp_planning.runway import compute_runway_map
 from services.acp_planning.tenant_config import TenantNotFoundError, fetch_tenant_planning_config
 from services.acp_planning.tenant_pool import (fetch_tenant_atoms_by_trip, fetch_tenant_trips,
@@ -174,6 +175,61 @@ async def get_quarter_plan(
         "plan": plan.model_dump(mode="json"),
         "lock_status": [s.__dict__ for s in lock_status],
         "fully_locked": is_quarter_fully_locked(lock_status),
+    }
+
+
+@router.get(
+    "/quarter-plan/history",
+    summary="List every saved version of this tenant's quarter plan (AA-469 Việc 2)",
+)
+async def get_quarter_plan_history(
+    request: Request, tenant=Depends(get_tenant),
+    year: int = Query(...), quarter: int = Query(...),
+):
+    """Wires `fetch_quarter_plan_version_history()` (services/acp_planning/quarter.py) — the
+    tenant-facing version-picker list. Returns an empty list (not 404) for a quarter that was
+    never finalized — that's a real, valid answer for a history view ("nothing here yet"),
+    unlike `GET /quarter-plan`'s 404 for "there's no CURRENT plan to show me right now"."""
+    tenant_id = UUID(tenant["sub"])
+    pool = request.app.state.pool
+    versions = await fetch_quarter_plan_version_history(tenant_id, year, quarter, pool)
+    return {
+        "versions": [
+            {
+                "version_id": str(v["version_id"]), "version_no": v["version_no"],
+                "approval_status": v["approval_status"], "approved_by": v["approved_by"],
+                "approved_at": v["approved_at"].isoformat() if v["approved_at"] else None,
+                "created_at": v["created_at"].isoformat() if v["created_at"] else None,
+                "source": v["source"],
+            }
+            for v in versions
+        ],
+    }
+
+
+@router.get(
+    "/quarter-plan/versions/{version_id}",
+    summary="Read one specific historical quarter-plan version, by id (AA-469 Việc 2)",
+)
+async def get_quarter_plan_version_by_id(
+    version_id: UUID, request: Request, tenant=Depends(get_tenant),
+):
+    """Wires `fetch_quarter_plan_version()` (services/acp_planning/quarter.py, built for AA-323's
+    admin-side Preview screen — STEP0 confirmed it was never imported into this tenant router
+    before this task) — lets a tenant open ANY past version from `GET .../history` above,
+    approved or not, not only the current one. `version_id` is a global PK (not tenant-scoped in
+    the query itself, matching the underlying function's own contract) — the ownership check
+    below is what keeps this from leaking another tenant's plan by guessing/enumerating ids; a
+    cross-tenant version_id 404s identically to a nonexistent one, same "never leak existence"
+    convention `post_metric_snapshot()` below already uses for PieceNotOwnedError."""
+    tenant_id = UUID(tenant["sub"])
+    pool = request.app.state.pool
+    result = await fetch_quarter_plan_version(version_id, pool)
+    if result is None or result["tenant_id"] != tenant_id:
+        raise HTTPException(status_code=404, detail=f"No quarter plan version {version_id}")
+    return {
+        "version_no": result["version_no"], "approval_status": result["approval_status"],
+        "plan": result["plan"].model_dump(mode="json"),
     }
 
 

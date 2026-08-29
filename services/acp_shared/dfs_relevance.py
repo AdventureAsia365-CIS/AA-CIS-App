@@ -86,6 +86,14 @@ _SEO_CONTEXT_LATEST_QUERY = """
     ORDER BY tour_id, fetched_at DESC
 """
 
+_SEO_CONTEXT_SINGLE_TOUR_QUERY = """
+    SELECT keyword_ideas, people_also_ask, related_keywords
+    FROM silver_aa_internal.seo_context
+    WHERE tour_id = $1
+    ORDER BY fetched_at DESC
+    LIMIT 1
+"""
+
 
 async def fetch_dfs_relevance_by_tour(
     tour_ids: list[UUID], pool, thresholds: DfsRelevanceThresholds = _DEFAULT_THRESHOLDS,
@@ -119,7 +127,55 @@ async def fetch_dfs_relevance_by_tour(
     return out
 
 
+@dataclass(frozen=True)
+class SearchDemandSignal:
+    """AA-469 Việc 4 — a single-tour bundle of real search-demand data (DFS relevance + the raw
+    People-Also-Ask questions + related search terms, migration 069/AA-218), meant for T8's
+    angle-generation prompt (services/acp_angle_gate/prompts.py) — a DIFFERENT consumer than
+    `fetch_dfs_relevance_by_tour()` above (T7's quarter-plan scoring, which only ever needed the
+    3-bucket `Relevance` value, never the raw PAA/keyword text). Kept as its own function/type
+    rather than widening `fetch_dfs_relevance_by_tour()`'s bulk-by-list shape, since T8 always
+    resolves exactly one tour per request (the atom's own trip_id) — a single-row query matches
+    `_fetch_atom_for_tenant()`'s existing single-item convention in
+    services/acp_angle_gate/service.py, not a wasted bulk round trip for N=1."""
+    relevance: Relevance
+    people_also_ask: list[str]
+    related_keywords: list[str]
+
+
+async def fetch_search_demand_signal(
+    tour_id: UUID, pool, thresholds: DfsRelevanceThresholds = _DEFAULT_THRESHOLDS,
+) -> Optional[SearchDemandSignal]:
+    """Returns None when this tour has no seo_context row at all (T2 DFS never run against it) —
+    same "absent means no signal, not a zero" convention `fetch_dfs_relevance_by_tour()` already
+    uses; callers must treat None as "omit this block from the prompt", not as an empty-but-real
+    signal. `people_also_ask`/`related_keywords` are plain JSONB string arrays (migration 069) —
+    no per-item shape to unpack, unlike `keyword_ideas`."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(_SEO_CONTEXT_SINGLE_TOUR_QUERY, tour_id)
+    if row is None:
+        return None
+
+    def _as_list(value) -> list[str]:
+        if isinstance(value, str):
+            value = json.loads(value) if value else []
+        return [v for v in (value or []) if isinstance(v, str)]
+
+    ideas = row["keyword_ideas"]
+    if isinstance(ideas, str):
+        ideas = json.loads(ideas) if ideas else []
+    volumes = [
+        i.get("search_volume") for i in (ideas or [])
+        if isinstance(i, dict) and i.get("search_volume") is not None
+    ]
+    return SearchDemandSignal(
+        relevance=score_dfs_relevance(volumes, thresholds),
+        people_also_ask=_as_list(row["people_also_ask"]),
+        related_keywords=_as_list(row["related_keywords"]),
+    )
+
+
 __all__ = [
     "Relevance", "DfsRelevanceThresholds", "score_dfs_relevance",
-    "fetch_dfs_relevance_by_tour",
+    "fetch_dfs_relevance_by_tour", "SearchDemandSignal", "fetch_search_demand_signal",
 ]

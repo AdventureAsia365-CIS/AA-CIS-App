@@ -23,6 +23,7 @@ from services.acp_planning.quarter import (
     fetch_approved_quarter_plan,
     fetch_current_version_no,
     fetch_quarter_plan_version,
+    fetch_quarter_plan_version_history,
     save_quarter_plan_version,
 )
 
@@ -150,6 +151,25 @@ class FakeConn:
                 "approval_status": v["approval_status"], "approved_by": v["approved_by"],
             }
         raise AssertionError(f"Unhandled fetchrow query: {q!r}")
+
+    async def fetch(self, query, *params):
+        q = " ".join(query.split())
+        if "SELECT qpv.version_id, qpv.version_no, qpv.approval_status" in q:
+            tenant_id, year, quarter = params
+            plan_id = self.db.plans.get((tenant_id, year, quarter))
+            if plan_id is None:
+                return []
+            rows = [
+                {
+                    "version_id": vid, "version_no": v["version_no"],
+                    "approval_status": v["approval_status"], "approved_by": v["approved_by"],
+                    "approved_at": v["approved_at"], "created_at": v.get("created_at"),
+                    "source": v["source"],
+                }
+                for vid, v in self.db.versions.items() if v["plan_id"] == plan_id
+            ]
+            return sorted(rows, key=lambda r: r["version_no"], reverse=True)
+        raise AssertionError(f"Unhandled fetch query: {q!r}")
 
     async def _fetchval_version_no(self, params):
         tenant_id, year, quarter = params
@@ -416,3 +436,60 @@ class TestFetchQuarterPlanVersion:
         assert result_v1["approval_status"] == "approved"
         assert result_v1["version_no"] == 1
         assert result_v1["plan"].destination_shares == {"Sapa": 1.0}
+
+
+class TestFetchQuarterPlanVersionHistory:
+    """AA-469 Việc 2 — the tenant-facing history-view list (every version_no ever saved for a
+    tenant/year/quarter), not just the current one fetch_current_version_no() resolves."""
+
+    @pytest.mark.asyncio
+    async def test_empty_for_never_finalized_quarter(self, pool):
+        result = await fetch_quarter_plan_version_history(TENANT, 2026, 3, pool)
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_multiple_versions_all_returned_newest_first(self, pool):
+        """Same real scenario STEP0 confirmed live (docs/claude_audit/
+        AA-469-viec2-step0-t7-edit-history-investigation.md §8): several approved versions can
+        accumulate for one tenant/quarter, all still individually fetchable."""
+        plan = _plan()
+        v1 = await save_quarter_plan_version(plan, pool)
+        await approve_quarter_plan_version(v1, "tenant:x", pool)
+        plan_2 = _plan(destination_shares={"Sapa": 0.5, "Ha Giang": 0.5})
+        v2 = await save_quarter_plan_version(plan_2, pool)
+        await approve_quarter_plan_version(v2, "tenant:x", pool)
+
+        result = await fetch_quarter_plan_version_history(TENANT, 2026, 3, pool)
+
+        assert [r["version_no"] for r in result] == [2, 1]
+        assert result[0]["version_id"] == v2
+        assert result[0]["approval_status"] == "approved"
+        assert result[1]["version_id"] == v1
+
+    @pytest.mark.asyncio
+    async def test_pending_unapproved_version_still_listed(self, pool):
+        """A version that was saved but never approved (should not happen under Gate B Option A
+        auto-approve, but the function itself makes no approval_status assumption) still shows
+        up — this is a read, not a filter."""
+        plan = _plan()
+        v1 = await save_quarter_plan_version(plan, pool)  # never approved
+
+        result = await fetch_quarter_plan_version_history(TENANT, 2026, 3, pool)
+
+        assert len(result) == 1
+        assert result[0]["version_id"] == v1
+        assert result[0]["approval_status"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_scoped_to_the_requested_tenant_year_quarter(self, pool):
+        other_tenant = uuid.uuid4()
+        plan_a = _plan()
+        await save_quarter_plan_version(plan_a, pool)
+        plan_b = _plan(tenant_id=other_tenant)
+        await save_quarter_plan_version(plan_b, pool)
+        plan_c = _plan(quarter=4)
+        await save_quarter_plan_version(plan_c, pool)
+
+        result = await fetch_quarter_plan_version_history(TENANT, 2026, 3, pool)
+
+        assert len(result) == 1

@@ -198,6 +198,114 @@ class TestGetQuarterPlan:
         assert getattr(exc_info.value, "status_code", None) == 404
 
 
+class TestGetQuarterPlanHistory:
+    """AA-469 Việc 2 — GET /v1/planning/quarter-plan/history (wires
+    fetch_quarter_plan_version_history())."""
+
+    @pytest.mark.asyncio
+    async def test_empty_list_not_404_when_never_finalized(self):
+        """A quarter with zero saved versions is a valid, real answer for a history view — not
+        an error, unlike GET /quarter-plan's 404 for "no CURRENT plan"."""
+        conn = AsyncMock()
+        conn.fetch.return_value = []
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await v1_planning.get_quarter_plan_history(
+            request, tenant={"sub": TENANT_ID}, year=2026, quarter=4,
+        )
+        assert result == {"versions": []}
+
+    @pytest.mark.asyncio
+    async def test_multiple_versions_returned_newest_first_with_full_shape(self):
+        version_id_1, version_id_2 = uuid.uuid4(), uuid.uuid4()
+        t1 = datetime.datetime(2026, 8, 1, tzinfo=datetime.timezone.utc)
+        t2 = datetime.datetime(2026, 8, 24, tzinfo=datetime.timezone.utc)
+        conn = AsyncMock()
+        conn.fetch.return_value = [
+            {
+                "version_id": version_id_2, "version_no": 2, "approval_status": "approved",
+                "approved_by": f"tenant:{TENANT_ID}", "approved_at": t2, "created_at": t2,
+                "source": "standard",
+            },
+            {
+                "version_id": version_id_1, "version_no": 1, "approval_status": "approved",
+                "approved_by": f"tenant:{TENANT_ID}", "approved_at": t1, "created_at": t1,
+                "source": "standard",
+            },
+        ]
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await v1_planning.get_quarter_plan_history(
+            request, tenant={"sub": TENANT_ID}, year=2026, quarter=3,
+        )
+
+        versions = result["versions"]
+        assert len(versions) == 2
+        assert versions[0]["version_no"] == 2  # newest first, matches DB ORDER BY
+        assert versions[0]["version_id"] == str(version_id_2)
+        assert versions[0]["approved_at"] == t2.isoformat()
+        assert versions[1]["version_no"] == 1
+
+
+class TestGetQuarterPlanVersionById:
+    """AA-469 Việc 2 — GET /v1/planning/quarter-plan/versions/{version_id} (wires the
+    pre-existing, previously-unused fetch_quarter_plan_version())."""
+
+    def _payload(self):
+        return json.dumps({"tenant_id": TENANT_ID, "year": 2026, "quarter": 3})
+
+    @pytest.mark.asyncio
+    async def test_404_when_version_id_unknown(self):
+        conn = AsyncMock()
+        conn.fetchrow.return_value = None
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        with pytest.raises(Exception) as exc_info:
+            await v1_planning.get_quarter_plan_version_by_id(
+                uuid.uuid4(), request, tenant={"sub": TENANT_ID},
+            )
+        assert getattr(exc_info.value, "status_code", None) == 404
+
+    @pytest.mark.asyncio
+    async def test_404_when_version_belongs_to_another_tenant(self):
+        """Never leak existence of another tenant's version_id — same 404, not 403."""
+        other_tenant_id = uuid.uuid4()
+        conn = AsyncMock()
+        conn.fetchrow.return_value = {
+            "tenant_id": other_tenant_id, "year": 2026, "quarter": 3, "version_no": 1,
+            "payload": self._payload(), "approval_status": "approved", "approved_by": "tenant:x",
+        }
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        with pytest.raises(Exception) as exc_info:
+            await v1_planning.get_quarter_plan_version_by_id(
+                uuid.uuid4(), request, tenant={"sub": TENANT_ID},
+            )
+        assert getattr(exc_info.value, "status_code", None) == 404
+
+    @pytest.mark.asyncio
+    async def test_returns_own_historical_version(self):
+        conn = AsyncMock()
+        conn.fetchrow.return_value = {
+            "tenant_id": uuid.UUID(TENANT_ID), "year": 2026, "quarter": 3, "version_no": 1,
+            "payload": self._payload(), "approval_status": "approved",
+            "approved_by": f"tenant:{TENANT_ID}",
+        }
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await v1_planning.get_quarter_plan_version_by_id(
+            uuid.uuid4(), request, tenant={"sub": TENANT_ID},
+        )
+        assert result["version_no"] == 1
+        assert result["approval_status"] == "approved"
+        assert result["plan"]["year"] == 2026
+
+
 class TestGetSlotSuggestions:
     """AA-494 Step 4 — T8→slot-grid wiring (GET /v1/planning/slot-suggestions). Call order:
     conn.fetchrow -> [fetch_approved_quarter_plan, _resolve_config]; conn.fetch ->
