@@ -597,3 +597,22 @@ class TestFetchReviewList:
 
         query = conn.fetch.call_args.args[0]
         assert "gate_ledger" not in query and "repair_log" not in query and "held_reason" not in query
+
+    async def test_tenant_id_bound_as_both_uuid_and_text_params(self):
+        """Real bug caught by live-verify (30/08/2026, real RDS): the query used to reuse ONE
+        placeholder both bare (against cp.tenant_id, uuid) and cast ($1::text, against
+        ta.owner_scope, text) — asyncpg's single-preparation type inference picked ONE type for
+        it, and Postgres has no `uuid = text` operator, so every real call 500'd
+        ("UndefinedFunctionError: operator does not exist: uuid = text"). Mocked-pool unit tests
+        alone can't catch this (mocks don't validate real SQL type resolution) — this only
+        pins the fix shape: tenant_id must be bound as TWO separate params, uuid then str."""
+        conn = AsyncMock()
+        conn.fetch = AsyncMock(return_value=[])
+        pool = _make_pool(conn)
+        await service.fetch_review_list(TENANT_ID, pool)
+
+        args = conn.fetch.call_args.args
+        assert args[1] == TENANT_ID  # bound bare (uuid) — compared against cp.tenant_id
+        assert args[2] == str(TENANT_ID)  # bound as str (text) — compared against ta.owner_scope
+        query = args[0]
+        assert "$1::text" not in query, "reusing $1 both bare and ::text is the exact bug that shipped"
