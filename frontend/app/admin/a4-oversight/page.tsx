@@ -80,6 +80,20 @@ interface GateLedgerEntry {
   violations: string[];
 }
 
+interface ContentLogAngle {
+  name: string | null; why_it_works: string | null;
+  formula_fit: string | null; best_final_style: string | null;
+}
+
+interface ContentLogAtom {
+  text: string | null; activity_type: string | null;
+  emotional_hook: string | null; season_note: string | null;
+}
+
+interface ContentLogTour { name: string | null; destination: string | null }
+
+interface DfsPaaSnapshot { relevance: string; people_also_ask: string[]; related_keywords: string[] }
+
 interface ContentLogRow {
   piece_id: string;
   tenant_id: string;
@@ -92,8 +106,17 @@ interface ContentLogRow {
   status: string;
   held_reason: string | null;
   gate_ledger: GateLedgerEntry[];
+  gate_pass_count: number;
+  gate_total_count: number;
+  repair_log: unknown[];
   attempt_number: number;
   content_preview: string | null;
+  cta: string | null;
+  angle: ContentLogAngle | null;
+  atom: ContentLogAtom | null;
+  tour: ContentLogTour | null;
+  dfs_paa_snapshot: DfsPaaSnapshot | null;
+  publish_status: string;
   created_at: string | null;
 }
 
@@ -135,8 +158,23 @@ function publishStatusColor(status: string): "gray" | "amber" | "green" | "red" 
   return "gray"; // unpublished
 }
 
-function contentStatusColor(status: string): "amber" | "red" {
-  return status === "failed" ? "red" : "amber"; // held
+function contentStatusColor(status: string): "amber" | "red" | "green" | "blue" | "gray" {
+  // AA-501 — widened from held/failed-only to every status, since content-log now lists every
+  // content_piece row, not just failures.
+  if (status === "failed") return "red";
+  if (status === "held") return "amber";
+  if (status === "approved") return "green";
+  if (status === "processing") return "blue";
+  return "gray";
+}
+
+function contentPublishStatusColor(status: string): "green" | "amber" | "gray" {
+  // AA-501 — distinct from publishStatusColor() above: this reads content-log's own
+  // publish_status ("published"/"pending_publish"/"n/a"), not publish_log.status
+  // ("published"/"failed"/"unpublished") the Publish Log section reads.
+  if (status === "published") return "green";
+  if (status === "pending_publish") return "amber";
+  return "gray";
 }
 
 // ── Review Log section ───────────────────────────────────────────────────────
@@ -463,13 +501,14 @@ function ContentLogSection() {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
         <div>
           <h2 style={{ fontFamily: serif, fontSize: 18, fontWeight: 500, color: A.ink, margin: "0 0 4px" }}>
-            Content Log — T9/T10 Quality-Gate Outcomes
+            Content Log — T9/T10 Every Piece + Full Context
           </h2>
           <div style={{ fontSize: 12, color: A.muted }}>
-            acp_shared.content_piece rows that didn&apos;t reach approved — held (a real T10 gate
-            verdict, content shown to the tenant for review) or failed (a system error, no usable
-            content). Post-hoc pattern review, not a queue to action — AA does not gate tenant
-            content.
+            Every acp_shared.content_piece row (AA-501 — widened from held/failed-only: this is
+            the widest of the two AA-501 views, everything the tenant sees plus full gate/retry/
+            error/publish detail) — full write context (atom/tour/goal/angle/DFS-PAA) and, for
+            held/failed rows, per-gate pass/fail + the retry-feedback trail. Post-hoc pattern
+            review + lesson log, not a queue to action — AA does not gate tenant content.
           </div>
         </div>
         <input
@@ -498,13 +537,13 @@ function ContentLogSection() {
       ) : error ? (
         <div style={{ padding: 24, textAlign: "center", color: A.red }}>{error}</div>
       ) : rows.length === 0 ? (
-        <div style={{ padding: 24, textAlign: "center", color: A.muted2 }}>No held/failed pieces found.</div>
+        <div style={{ padding: 24, textAlign: "center", color: A.muted2 }}>No content pieces found.</div>
       ) : (
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ background: A.bg }}>
-                {["Tenant", "Goal / Channel", "Status", "Attempt", "Created", ""].map(h => (
+                {["Tenant", "Goal / Channel", "Status", "Gates", "Publish", "Attempt", "Created", ""].map(h => (
                   <th key={h} style={{
                     padding: "8px 12px", textAlign: "left", fontSize: 10.5, fontWeight: 600,
                     letterSpacing: "0.08em", textTransform: "uppercase", color: A.muted,
@@ -543,17 +582,50 @@ function ContentLogRowLine({ row, expanded, onToggle }: {
           <div style={{ fontFamily: mono, fontSize: 10.5, color: A.muted2 }}>{row.channel || "—"}</div>
         </td>
         <td style={td}><Badge color={contentStatusColor(row.status)}>{row.status}</Badge></td>
+        <td style={{ ...td, fontFamily: mono, fontSize: 11 }}>
+          {row.gate_total_count > 0 ? `${row.gate_pass_count}/${row.gate_total_count}` : "—"}
+        </td>
+        <td style={td}><Badge color={contentPublishStatusColor(row.publish_status)}>{row.publish_status}</Badge></td>
         <td style={td}>{row.attempt_number}</td>
         <td style={{ ...td, fontFamily: mono, fontSize: 11, color: A.muted }}>{fmtDate(row.created_at)}</td>
         <td style={{ ...td, textAlign: "center" }}>{expanded ? "▲" : "▼"}</td>
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={6} style={{ padding: "0 12px 14px", borderBottom: `1px solid ${A.line}` }}>
+          <td colSpan={8} style={{ padding: "0 12px 14px", borderBottom: `1px solid ${A.line}` }}>
             <div style={{ background: A.bg, borderRadius: 8, padding: 12, fontFamily: mono, fontSize: 11, color: A.body }}>
               <div style={{ marginBottom: 6, color: A.muted2 }}>
                 piece_id: {row.piece_id} · atom_id: {row.atom_id} · request_id: {row.angle_gate_request_id}
               </div>
+
+              {/* Full write context — same fields the tenant's own /portal/t10-review shows,
+                  plus (below) the technical detail the tenant never sees. */}
+              {row.angle && (
+                <div style={{ marginBottom: 6 }}>
+                  <strong>angle:</strong> {row.angle.name} — {row.angle.why_it_works} ({row.angle.formula_fit} · {row.angle.best_final_style})
+                </div>
+              )}
+              {row.atom && (
+                <div style={{ marginBottom: 6 }}>
+                  <strong>atom:</strong> {row.atom.text}
+                  {(row.atom.activity_type || row.atom.emotional_hook || row.atom.season_note) &&
+                    ` (${[row.atom.activity_type, row.atom.emotional_hook, row.atom.season_note].filter(Boolean).join(" · ")})`}
+                </div>
+              )}
+              {row.tour && (
+                <div style={{ marginBottom: 6 }}><strong>tour:</strong> {row.tour.name} ({row.tour.destination})</div>
+              )}
+              {row.dfs_paa_snapshot && (row.dfs_paa_snapshot.people_also_ask.length > 0 || row.dfs_paa_snapshot.related_keywords.length > 0) && (
+                <div style={{ marginBottom: 6 }}>
+                  <strong>dfs/paa ({row.dfs_paa_snapshot.relevance}):</strong>{" "}
+                  {row.dfs_paa_snapshot.people_also_ask.join("; ")}
+                  {row.dfs_paa_snapshot.related_keywords.length > 0 && ` — ${row.dfs_paa_snapshot.related_keywords.join(", ")}`}
+                </div>
+              )}
+              {row.cta && <div style={{ marginBottom: 6 }}><strong>cta:</strong> {row.cta}</div>}
+
+              {/* Technical detail — held_reason/gate_ledger/repair_log, deliberately NEVER shown
+                  on the tenant's own /portal/t10-review. */}
               {row.held_reason && (
                 <div style={{ marginBottom: 6 }}><strong>held_reason:</strong> {row.held_reason}</div>
               )}
@@ -562,6 +634,14 @@ function ContentLogRowLine({ row, expanded, onToggle }: {
                   <strong>{g.gate}</strong> — {g.passed ? "passed" : `FAILED: ${(g.violations || []).join("; ")}`}
                 </div>
               ))}
+              {row.repair_log && row.repair_log.length > 0 && (
+                <div style={{ marginTop: 8, marginBottom: 6 }}>
+                  <strong>repair_log:</strong>
+                  <pre style={{ margin: "4px 0 0", whiteSpace: "pre-wrap", fontSize: 10.5 }}>
+                    {JSON.stringify(row.repair_log, null, 2)}
+                  </pre>
+                </div>
+              )}
               {row.content_preview && (
                 <div style={{ marginTop: 8, color: A.muted2, whiteSpace: "pre-wrap" }}>
                   {row.content_preview}…

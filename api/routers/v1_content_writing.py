@@ -83,3 +83,31 @@ async def get_piece(piece_id: UUID, request: Request, tenant=Depends(get_tenant)
         return await service.fetch_piece(tenant_id, piece_id, pool)
     except service.ContentWritingError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get(
+    "/reviews",
+    summary="AA-501 — /portal/t10-review's list: one row per request (latest content_piece), "
+            "full write context embedded, WITHOUT gate/retry/error detail",
+)
+async def list_reviews(request: Request, tenant=Depends(get_tenant)):
+    tenant_id = UUID(tenant["sub"])
+    pool = request.app.state.pool
+    data = await service.fetch_review_list(tenant_id, pool)
+    return {"data": data, "total": len(data)}
+
+
+@router.get(
+    "/requests/{request_id}/review",
+    summary="AA-501 — tenant-facing pre-T11 review: full write context (atom/tour/goal/angle/"
+            "DFS-PAA/channel) + the latest content_piece, WITHOUT gate/retry/error detail",
+)
+async def get_review(request_id: UUID, request: Request, tenant=Depends(get_tenant)):
+    tenant_id = UUID(tenant["sub"])
+    pool = request.app.state.pool
+    try:
+        return await service.fetch_review(tenant_id, request_id, pool)
+    except RequestNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except service.ContentWritingError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))

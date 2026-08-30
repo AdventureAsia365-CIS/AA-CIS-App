@@ -163,3 +163,54 @@ class TestGetPiece:
             with pytest.raises(HTTPException) as exc:
                 await v1_content_writing.get_piece(PIECE_ID, _make_request(), tenant={"sub": TENANT_ID})
         assert exc.value.status_code == 404
+
+
+class TestListReviews:
+    """AA-501 — GET /v1/content-writing/reviews, the /portal/t10-review list."""
+
+    @pytest.mark.asyncio
+    async def test_returns_data_and_total(self):
+        items = [{"request_id": str(REQUEST_ID), "ready_state": "ready"}]
+        with patch.object(v1_content_writing.service, "fetch_review_list", new=AsyncMock(return_value=items)):
+            result = await v1_content_writing.list_reviews(_make_request(), tenant={"sub": TENANT_ID})
+        assert result == {"data": items, "total": 1}
+
+    @pytest.mark.asyncio
+    async def test_empty_list(self):
+        with patch.object(v1_content_writing.service, "fetch_review_list", new=AsyncMock(return_value=[])):
+            result = await v1_content_writing.list_reviews(_make_request(), tenant={"sub": TENANT_ID})
+        assert result == {"data": [], "total": 0}
+
+
+class TestGetReview:
+    """AA-501 — GET .../requests/{request_id}/review, the new tenant-facing pre-T11 screen
+    endpoint. service.fetch_review() itself is unit-tested in
+    test_aa450_content_writing_service.py::TestFetchReview — this only checks the router's
+    error-mapping (both possible not-found exceptions -> 404)."""
+
+    @pytest.mark.asyncio
+    async def test_success(self):
+        review = {"request_id": str(REQUEST_ID), "ready_state": "ready", "content_text": "final"}
+        with patch.object(v1_content_writing.service, "fetch_review", new=AsyncMock(return_value=review)):
+            result = await v1_content_writing.get_review(REQUEST_ID, _make_request(), tenant={"sub": TENANT_ID})
+        assert result["ready_state"] == "ready"
+
+    @pytest.mark.asyncio
+    async def test_request_not_found_404(self):
+        with patch.object(
+            v1_content_writing.service, "fetch_review",
+            new=AsyncMock(side_effect=RequestNotFoundError("nope")),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await v1_content_writing.get_review(REQUEST_ID, _make_request(), tenant={"sub": TENANT_ID})
+        assert exc.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_no_piece_written_yet_404(self):
+        with patch.object(
+            v1_content_writing.service, "fetch_review",
+            new=AsyncMock(side_effect=service.ContentWritingError("nothing written yet")),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await v1_content_writing.get_review(REQUEST_ID, _make_request(), tenant={"sub": TENANT_ID})
+        assert exc.value.status_code == 404

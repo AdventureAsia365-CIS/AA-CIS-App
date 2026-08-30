@@ -8,6 +8,7 @@ AA-466 split the single write_and_check() into:
                               the placeholder in place instead of inserting a final row.
 Covers Phase 1's confirmed architecture (max 2 attempts, non-repairable = immediate hold),
 STEP0's CTA-fallback decision, and AA-466's new failed/processing states."""
+import json
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -19,6 +20,7 @@ from services.acp_content_writing import service
 TENANT_ID = uuid.uuid4()
 REQUEST_ID = uuid.uuid4()
 PIECE_ID = uuid.uuid4()
+OPTION_ID = uuid.uuid4()
 
 GOAL = {"key": "promotion", "name": "Promotion", "description": "d", "logic": "AIDA", "marketing_term": "AIDA"}
 ANGLE = {"idx": 0, "name": "A", "why_it_works": "wa", "formula_fit": "AIDA",
@@ -321,3 +323,277 @@ class TestFetchPiece:
         pool = _make_pool(conn)
         with pytest.raises(service.ContentWritingError):
             await service.fetch_piece(TENANT_ID, uuid.uuid4(), pool)
+
+
+def _review_request(**over):
+    base = {
+        "request_id": str(REQUEST_ID), "tenant_id": str(TENANT_ID), "atom_id": "atom_abc123",
+        "trip_id": None, "channel": "facebook", "goal": "promotion", "cta": "Book now",
+        "status": "approved",
+        "dfs_paa_snapshot": {"relevance": "HIGH", "people_also_ask": ["q1"], "related_keywords": ["k1"]},
+        "created_at": "2026-08-24T00:00:00", "updated_at": "2026-08-24T00:00:00",
+        "angles": [{**ANGLE, "option_id": OPTION_ID}],
+    }
+    base.update(over)
+    return base
+
+
+def _review_piece_row(**over):
+    base = {
+        "piece_id": PIECE_ID, "status": "approved", "content_text": "final piece text",
+        "channel": "facebook", "angle_gate_option_id": OPTION_ID,
+        "created_at": datetime.now(timezone.utc),
+    }
+    base.update(over)
+    return base
+
+
+_ATOM_CONTEXT_ROW = {
+    "text": "Cross the bamboo bridge", "activity_type": "adventure",
+    "emotional_hook": "awe", "season_note": "dry season best",
+}
+
+
+@pytest.mark.asyncio
+class TestFetchReview:
+    """AA-501 — deliberately narrower than fetch_piece(): assembles full write context (atom/
+    tour/goal/angle/DFS-PAA/channel) but never returns gate_ledger/repair_log/held_reason. This
+    is a stricter contract than the T8/T9 wizard's own end-of-flow card (which uses fetch_piece()
+    and DOES show held_reason) — a deliberate divergence per Nghiệp's AA-501 build decision, not
+    a bug to reconcile with fetch_piece()'s behavior."""
+
+    async def test_happy_path_assembles_full_context_no_gate_detail(self):
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [_review_piece_row(), _ATOM_CONTEXT_ROW]
+        pool = _make_pool(conn)
+
+        with patch.object(service.angle_gate_service, "fetch_request",
+                           new=AsyncMock(return_value=_review_request())), \
+             patch.object(service, "get_goal", return_value=GOAL):
+            result = await service.fetch_review(TENANT_ID, REQUEST_ID, pool)
+
+        assert result["ready_state"] == "ready"
+        assert result["content_text"] == "final piece text"
+        assert result["channel"] == "facebook"
+        assert result["goal"] == {"key": "promotion", "label": "Promotion"}
+        assert result["angle"]["name"] == "A"
+        assert result["atom"]["activity_type"] == "adventure"
+        assert result["dfs_paa_snapshot"] == {
+            "relevance": "HIGH", "people_also_ask": ["q1"], "related_keywords": ["k1"],
+        }
+        assert "gate_ledger" not in result
+        assert "repair_log" not in result
+        assert "held_reason" not in result
+
+    async def test_held_piece_not_ready_but_content_still_shown(self):
+        """migration 115/118's own precedent: held keeps real writer output visible for review —
+        content_text is real here, just the ready_state hides WHY it's held."""
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [
+            _review_piece_row(status="held", content_text="drafted but held"), None,
+        ]
+        pool = _make_pool(conn)
+        with patch.object(service.angle_gate_service, "fetch_request",
+                           new=AsyncMock(return_value=_review_request())), \
+             patch.object(service, "get_goal", return_value=GOAL):
+            result = await service.fetch_review(TENANT_ID, REQUEST_ID, pool)
+
+        assert result["ready_state"] == "not_ready"
+        assert result["content_text"] == "drafted but held"
+
+    async def test_processing_piece_in_progress_no_content(self):
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [_review_piece_row(status="processing", content_text=""), None]
+        pool = _make_pool(conn)
+        with patch.object(service.angle_gate_service, "fetch_request",
+                           new=AsyncMock(return_value=_review_request())), \
+             patch.object(service, "get_goal", return_value=GOAL):
+            result = await service.fetch_review(TENANT_ID, REQUEST_ID, pool)
+
+        assert result["ready_state"] == "in_progress"
+        assert result["content_text"] is None
+
+    async def test_failed_piece_not_ready_no_content(self):
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [_review_piece_row(status="failed", content_text=""), None]
+        pool = _make_pool(conn)
+        with patch.object(service.angle_gate_service, "fetch_request",
+                           new=AsyncMock(return_value=_review_request())), \
+             patch.object(service, "get_goal", return_value=GOAL):
+            result = await service.fetch_review(TENANT_ID, REQUEST_ID, pool)
+
+        assert result["ready_state"] == "not_ready"
+        assert result["content_text"] is None
+
+    async def test_no_piece_written_yet_raises(self):
+        conn = AsyncMock()
+        conn.fetchrow.return_value = None  # no content_piece rows for this request at all
+        pool = _make_pool(conn)
+        with patch.object(service.angle_gate_service, "fetch_request",
+                           new=AsyncMock(return_value=_review_request())):
+            with pytest.raises(service.ContentWritingError):
+                await service.fetch_review(TENANT_ID, REQUEST_ID, pool)
+
+    async def test_query_orders_by_created_at_not_attempt_number(self):
+        """AA-497 (migration 125) — content_piece is no longer 1-row-per-request; the query must
+        pick the latest by created_at, never assume attempt_number orders a request's history."""
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [
+            _review_piece_row(content_text="latest after reopen"), _ATOM_CONTEXT_ROW,
+        ]
+        pool = _make_pool(conn)
+        with patch.object(service.angle_gate_service, "fetch_request",
+                           new=AsyncMock(return_value=_review_request())), \
+             patch.object(service, "get_goal", return_value=GOAL):
+            result = await service.fetch_review(TENANT_ID, REQUEST_ID, pool)
+
+        query = conn.fetchrow.call_args_list[0].args[0]
+        assert "ORDER BY created_at DESC" in query
+        assert "LIMIT 1" in query
+        assert "gate_ledger" not in query and "repair_log" not in query and "held_reason" not in query
+        assert result["content_text"] == "latest after reopen"
+
+    async def test_no_trip_id_no_tour_context_and_trips_never_fetched(self):
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [_review_piece_row(), _ATOM_CONTEXT_ROW]
+        pool = _make_pool(conn)
+        with patch.object(service.angle_gate_service, "fetch_request",
+                           new=AsyncMock(return_value=_review_request(trip_id=None))), \
+             patch.object(service, "get_goal", return_value=GOAL), \
+             patch.object(service, "fetch_tenant_trips") as mock_trips:
+            result = await service.fetch_review(TENANT_ID, REQUEST_ID, pool)
+
+        mock_trips.assert_not_called()
+        assert result["tour"] is None
+
+    async def test_channel_falls_back_to_request_when_piece_channel_null(self):
+        """Defensive fallback for pre-AA-469-Việc-4 rows where content_piece.channel is NULL —
+        same COALESCE(cp.channel, agr.channel) every other real read site uses."""
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [_review_piece_row(channel=None), _ATOM_CONTEXT_ROW]
+        pool = _make_pool(conn)
+        with patch.object(service.angle_gate_service, "fetch_request",
+                           new=AsyncMock(return_value=_review_request(channel="facebook"))), \
+             patch.object(service, "get_goal", return_value=GOAL):
+            result = await service.fetch_review(TENANT_ID, REQUEST_ID, pool)
+
+        assert result["channel"] == "facebook"
+
+
+def _review_list_row(**over):
+    base = {
+        "piece_id": PIECE_ID, "angle_gate_request_id": REQUEST_ID, "status": "approved",
+        "content_text": "final piece text", "created_at": datetime.now(timezone.utc),
+        "channel": "facebook", "goal": "promotion", "cta": "Book now",
+        "trip_id": None,
+        "dfs_paa_snapshot": {"relevance": "HIGH", "people_also_ask": ["q1"], "related_keywords": ["k1"]},
+        "angle_name": "A", "angle_why_it_works": "wa",
+        "angle_formula_fit": "AIDA", "angle_best_final_style": "warm",
+        "atom_text": "Cross the bamboo bridge", "atom_activity_type": "adventure",
+        "atom_emotional_hook": "awe", "atom_season_note": "dry season best",
+    }
+    base.update(over)
+    return base
+
+
+@pytest.mark.asyncio
+class TestFetchReviewList:
+    """AA-501 — GET /v1/content-writing/reviews, the /portal/t10-review list. One query (plus at
+    most one fetch_tenant_trips() call, never per-row) — no gate_ledger/repair_log/held_reason
+    anywhere, same contract as fetch_review()."""
+
+    async def test_happy_path_single_row(self):
+        conn = AsyncMock()
+        conn.fetch = AsyncMock(return_value=[_review_list_row()])
+        pool = _make_pool(conn)
+
+        with patch.object(service, "get_goal", return_value=GOAL):
+            result = await service.fetch_review_list(TENANT_ID, pool)
+
+        assert len(result) == 1
+        item = result[0]
+        assert item["request_id"] == str(REQUEST_ID)
+        assert item["piece_id"] == str(PIECE_ID)
+        assert item["ready_state"] == "ready"
+        assert item["content_text"] == "final piece text"
+        assert item["goal"] == {"key": "promotion", "label": "Promotion"}
+        assert item["angle"]["name"] == "A"
+        assert item["atom"]["activity_type"] == "adventure"
+        assert item["dfs_paa_snapshot"] == {
+            "relevance": "HIGH", "people_also_ask": ["q1"], "related_keywords": ["k1"],
+        }
+        assert "gate_ledger" not in item and "repair_log" not in item and "held_reason" not in item
+
+    async def test_empty_list(self):
+        conn = AsyncMock()
+        conn.fetch = AsyncMock(return_value=[])
+        pool = _make_pool(conn)
+        result = await service.fetch_review_list(TENANT_ID, pool)
+        assert result == []
+
+    async def test_held_row_content_shown_processing_row_content_hidden(self):
+        conn = AsyncMock()
+        conn.fetch = AsyncMock(return_value=[
+            _review_list_row(piece_id=uuid.uuid4(), status="held", content_text="drafted but held"),
+            _review_list_row(piece_id=uuid.uuid4(), status="processing", content_text=""),
+        ])
+        pool = _make_pool(conn)
+        with patch.object(service, "get_goal", return_value=GOAL):
+            result = await service.fetch_review_list(TENANT_ID, pool)
+
+        held, processing = result
+        assert held["ready_state"] == "not_ready" and held["content_text"] == "drafted but held"
+        assert processing["ready_state"] == "in_progress" and processing["content_text"] is None
+
+    async def test_trips_fetched_once_not_per_row_when_trip_ids_present(self):
+        """No N+1 — fetch_tenant_trips() must be called at most once for the whole list, not
+        once per row, even when multiple rows share/have a trip_id."""
+        trip_id = uuid.uuid4()
+        conn = AsyncMock()
+        conn.fetch = AsyncMock(return_value=[
+            _review_list_row(piece_id=uuid.uuid4(), trip_id=trip_id),
+            _review_list_row(piece_id=uuid.uuid4(), trip_id=trip_id),
+        ])
+        pool = _make_pool(conn)
+        trip = MagicMock(id=trip_id, destination="Vietnam")
+        trip.name = "Sapa Trek"  # Mock(name=...) is reserved for the mock's own repr name
+        mock_trips = AsyncMock(return_value=[trip])
+        with patch.object(service, "get_goal", return_value=GOAL), \
+             patch.object(service, "fetch_tenant_trips", new=mock_trips):
+            result = await service.fetch_review_list(TENANT_ID, pool)
+
+        mock_trips.assert_awaited_once()
+        assert all(item["tour"] == {"name": "Sapa Trek", "destination": "Vietnam"} for item in result)
+
+    async def test_no_trip_id_rows_never_call_fetch_tenant_trips(self):
+        conn = AsyncMock()
+        conn.fetch = AsyncMock(return_value=[_review_list_row(trip_id=None)])
+        pool = _make_pool(conn)
+        with patch.object(service, "get_goal", return_value=GOAL), \
+             patch.object(service, "fetch_tenant_trips") as mock_trips:
+            result = await service.fetch_review_list(TENANT_ID, pool)
+
+        mock_trips.assert_not_called()
+        assert result[0]["tour"] is None
+
+    async def test_dfs_paa_snapshot_parsed_when_json_string(self):
+        conn = AsyncMock()
+        conn.fetch = AsyncMock(return_value=[_review_list_row(
+            dfs_paa_snapshot=json.dumps({"relevance": "LOW", "people_also_ask": [], "related_keywords": []}),
+        )])
+        pool = _make_pool(conn)
+        with patch.object(service, "get_goal", return_value=GOAL):
+            result = await service.fetch_review_list(TENANT_ID, pool)
+
+        assert result[0]["dfs_paa_snapshot"] == {
+            "relevance": "LOW", "people_also_ask": [], "related_keywords": [],
+        }
+
+    async def test_query_never_selects_gate_or_repair_or_held_fields(self):
+        conn = AsyncMock()
+        conn.fetch = AsyncMock(return_value=[])
+        pool = _make_pool(conn)
+        await service.fetch_review_list(TENANT_ID, pool)
+
+        query = conn.fetch.call_args.args[0]
+        assert "gate_ledger" not in query and "repair_log" not in query and "held_reason" not in query

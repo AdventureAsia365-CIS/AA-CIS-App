@@ -49,7 +49,7 @@ def _request_row(**over):
     base = {
         "request_id": REQUEST_ID, "tenant_id": TENANT_ID, "atom_id": "atom_abc123",
         "trip_id": TRIP_ID, "channel": "facebook", "goal": None, "cta": None,
-        "status": "pending_goal",
+        "status": "pending_goal", "dfs_paa_snapshot": None,  # AA-501, migration 127
         "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
     }
     base.update(over)
@@ -213,6 +213,66 @@ class TestSetGoalAndGenerate:
         mock_signal.assert_not_called()
         assert mock_generate.call_args.kwargs["search_demand"] is None
 
+    async def test_dfs_paa_snapshot_persisted_when_signal_present(self):
+        """AA-501 (migration 127) — the SearchDemandSignal used to build the LLM prompt must be
+        persisted onto angle_gate_request.dfs_paa_snapshot in the SAME UPDATE that sets goal/
+        status, as a JSON-serialized snapshot (not re-fetched live later)."""
+        import json
+
+        from services.acp_shared.dfs_relevance import SearchDemandSignal
+        signal = SearchDemandSignal(relevance="HIGH", people_also_ask=["q1"], related_keywords=["k1"])
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [
+            _request_row(status="pending_goal"),
+            _atom_row(),
+            {"customer_segment": "Senior execs", "customer_mindset": "seek depth"},
+        ]
+        conn.fetch.return_value = []
+        pool = _make_pool(conn)
+
+        angles = [
+            {"name": "A", "why_it_works": "wa", "formula_fit": "fa", "best_final_style": "sa"},
+            {"name": "B", "why_it_works": "wb", "formula_fit": "fb", "best_final_style": "sb"},
+            {"name": "C", "why_it_works": "wc", "formula_fit": "fc", "best_final_style": "sc"},
+        ]
+        with patch.object(service, "generate_angles", new=AsyncMock(return_value=(angles, 0, "r", 0.02))), \
+             patch.object(service, "fetch_search_demand_signal", new=AsyncMock(return_value=signal)), \
+             patch.object(service, "fetch_request", new=AsyncMock(return_value={"status": "pending_choice"})):
+            await service.set_goal_and_generate(TENANT_ID, REQUEST_ID, "promotion", pool)
+
+        update_call = next(
+            c for c in conn.execute.call_args_list if "UPDATE acp_shared.angle_gate_request" in c[0][0]
+        )
+        _, _request_id, _goal_key, snapshot_json = update_call[0]
+        assert json.loads(snapshot_json) == {
+            "relevance": "HIGH", "people_also_ask": ["q1"], "related_keywords": ["k1"],
+        }
+
+    async def test_dfs_paa_snapshot_null_when_no_signal(self):
+        """No trip_id / no seo_context row -> fetch_search_demand_signal() returns None ->
+        dfs_paa_snapshot must be persisted as NULL, not an empty object."""
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [
+            _request_row(status="pending_goal", trip_id=None),
+            _atom_row(),
+            {"customer_segment": "Senior execs", "customer_mindset": "seek depth"},
+        ]
+        pool = _make_pool(conn)
+
+        angles = [
+            {"name": "A", "why_it_works": "wa", "formula_fit": "fa", "best_final_style": "sa"},
+            {"name": "B", "why_it_works": "wb", "formula_fit": "fb", "best_final_style": "sb"},
+            {"name": "C", "why_it_works": "wc", "formula_fit": "fc", "best_final_style": "sc"},
+        ]
+        with patch.object(service, "generate_angles", new=AsyncMock(return_value=(angles, 0, "r", 0.02))), \
+             patch.object(service, "fetch_request", new=AsyncMock(return_value={"status": "pending_choice"})):
+            await service.set_goal_and_generate(TENANT_ID, REQUEST_ID, "promotion", pool)
+
+        update_call = next(
+            c for c in conn.execute.call_args_list if "UPDATE acp_shared.angle_gate_request" in c[0][0]
+        )
+        assert update_call[0][3] is None
+
     async def test_wrong_status_raises(self):
         conn = AsyncMock()
         conn.fetchrow.return_value = _request_row(status="pending_choice")  # already past pending_goal
@@ -311,6 +371,35 @@ class TestFetchRequest:
         pool = _make_pool(conn)
         with pytest.raises(service.RequestNotFoundError):
             await service.fetch_request(TENANT_ID, REQUEST_ID, pool)
+
+    async def test_dfs_paa_snapshot_parsed_from_json_string(self):
+        """AA-501 — asyncpg has no jsonb codec registered on this app's connections (same gap
+        admin_a4.py's _parse_jsonb already works around), so dfs_paa_snapshot arrives as a raw
+        JSON string and must be parsed, not returned as-is."""
+        import json
+        conn = AsyncMock()
+        conn.fetchrow.return_value = _request_row(
+            status="pending_choice", goal="promotion",
+            dfs_paa_snapshot=json.dumps({"relevance": "MED", "people_also_ask": ["q"], "related_keywords": []}),
+        )
+        conn.fetch.return_value = []
+        pool = _make_pool(conn)
+
+        result = await service.fetch_request(TENANT_ID, REQUEST_ID, pool)
+
+        assert result["dfs_paa_snapshot"] == {
+            "relevance": "MED", "people_also_ask": ["q"], "related_keywords": [],
+        }
+
+    async def test_dfs_paa_snapshot_none_stays_none(self):
+        conn = AsyncMock()
+        conn.fetchrow.return_value = _request_row(status="pending_choice", goal="promotion")
+        conn.fetch.return_value = []
+        pool = _make_pool(conn)
+
+        result = await service.fetch_request(TENANT_ID, REQUEST_ID, pool)
+
+        assert result["dfs_paa_snapshot"] is None
 
 
 # AA-451 — create_request()'s optional year/month compute-and-persist path
