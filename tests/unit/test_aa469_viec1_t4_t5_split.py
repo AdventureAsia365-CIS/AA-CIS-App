@@ -242,6 +242,57 @@ async def test_atomize_endpoint_502_when_t5_fails():
 
 
 @pytest.mark.asyncio
+async def test_atomize_endpoint_502_persists_escalation_to_review_queue():
+    """AA-469 Việc 5 — the gap this endpoint's own comment used to flag ("Việc 5's future job")
+    is closed: a T5 failure must now ALSO be persisted (escalate_t5_atomize_failure(), same
+    silver_aa_internal.review_queue table/shape T3 already writes to and A4 already reads) —
+    not just returned to the tenant as a 502, which is exactly what test_atomize_endpoint_502_
+    when_t5_fails above already covered and is unaffected by this addition."""
+    conn = AsyncMock()
+    conn.fetchrow.return_value = _atomize_row()
+    pool = _pool_ctx(conn)
+    request = _FakeRequest(pool)
+    tenant = {"sub": TENANT_ID}
+
+    with patch("services.acp_produce.tenant_pipeline.run_t5_atomize",
+               AsyncMock(return_value={"status": "failed", "error": "BedrockError: boom"})), \
+         patch("services.acp_produce.tenant_pipeline.escalate_t5_atomize_failure",
+               AsyncMock()) as m_escalate:
+        with pytest.raises(HTTPException) as exc_info:
+            await v1_tours.atomize_version(VERSION_ID, request, tenant)
+
+    assert exc_info.value.status_code == 502
+    m_escalate.assert_awaited_once()
+    call_args = m_escalate.call_args.args
+    assert call_args[0] is pool
+    assert call_args[1] == TENANT_ID
+    assert call_args[2] == TOUR_ID
+    assert call_args[3] == VERSION_ID
+    assert "boom" in call_args[4]
+
+
+@pytest.mark.asyncio
+async def test_atomize_endpoint_502_still_raised_if_escalation_write_itself_fails():
+    """Best-effort: a broken review_queue INSERT (e.g. a transient DB error) must not hide the
+    real atomize failure from the tenant — they still get their 502 either way."""
+    conn = AsyncMock()
+    conn.fetchrow.return_value = _atomize_row()
+    pool = _pool_ctx(conn)
+    request = _FakeRequest(pool)
+    tenant = {"sub": TENANT_ID}
+
+    with patch("services.acp_produce.tenant_pipeline.run_t5_atomize",
+               AsyncMock(return_value={"status": "failed", "error": "BedrockError: boom"})), \
+         patch("services.acp_produce.tenant_pipeline.escalate_t5_atomize_failure",
+               AsyncMock(side_effect=RuntimeError("db down"))):
+        with pytest.raises(HTTPException) as exc_info:
+            await v1_tours.atomize_version(VERSION_ID, request, tenant)
+
+    assert exc_info.value.status_code == 502
+    assert "boom" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
 async def test_atomize_endpoint_idempotent_on_repeat_call():
     """Calling twice on unchanged content: run_t5_atomize()'s own source_hash check (already
     covered by test_aa445_t5_distinctiveness.py / the module's own idempotency design) returns
