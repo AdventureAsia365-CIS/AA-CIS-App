@@ -9,12 +9,10 @@ unchanged, no staff/admin path).
 Written fresh per ADR §0.5 — no import from services.acp_s4_social anywhere in this router or
 the services.acp_angle_gate package it calls into.
 
-Endpoint shape (per docs/claude_tasks/AA-449-01-build-t8-angle-gate.md):
-  POST /v1/angle-gate/requests               — create from (atom_id, channel[, year, month])
-                                                 [step 1; AA-451: optional year/month let this
-                                                 compute+persist a T7 slot on the spot to fill
-                                                 `cta`, see services/acp_angle_gate/service.py
-                                                 ::_compute_and_persist_slot_cta()]
+Endpoint shape (per docs/claude_tasks/AA-449-01-build-t8-angle-gate.md, AA-469 Việc 4's
+flow-order fix updates steps 1 and 8 below — was [atom+channel]->goal->angle->write, corrected
+to atom->goal->angle->CHANNEL->write):
+  POST /v1/angle-gate/requests               — create from atom_id ONLY               [step 1]
   GET  /v1/angle-gate/goals                   — static 8-goal list                 [step 2 data]
   POST /v1/angle-gate/requests/{id}/goal       — choose goal, generate 3 angles     [steps 2-6]
   GET  /v1/angle-gate/requests/{id}            — read request + angles             [any time]
@@ -23,6 +21,13 @@ Endpoint shape (per docs/claude_tasks/AA-449-01-build-t8-angle-gate.md):
                                                    reusable, unlocking .../choose again to pick
                                                    a different one of the 3 already-generated
                                                    angles (no new LLM call)
+  POST /v1/angle-gate/requests/{id}/channel    — AA-469 Việc 4 (NEW): tenant picks a channel,
+                                                   AFTER an angle is chosen, not before angle
+                                                   generation. Optional year/month (moved from
+                                                   the old create-request body, AA-451) let this
+                                                   compute+persist a T7 slot on the spot to fill
+                                                   `cta`, see services/acp_angle_gate/service.py
+                                                   ::_compute_and_persist_slot_cta()          [step 8]
 """
 from __future__ import annotations
 
@@ -42,12 +47,6 @@ router = APIRouter(prefix="/v1/angle-gate", tags=["tenant-angle-gate"])
 
 class CreateRequestBody(BaseModel):
     atom_id: str
-    channel: str
-    # AA-451: optional, backward-compatible — when given (and no T7 slot is already persisted
-    # for this atom+channel), create_request() computes+persists this tenant's month slot-grid
-    # on the spot to fill angle_gate_request.cta. Omitted -> unchanged pre-AA-451 behavior.
-    year: Optional[int] = None
-    month: Optional[int] = None
 
 
 class SetGoalBody(BaseModel):
@@ -58,26 +57,35 @@ class ChooseBody(BaseModel):
     idx: int
 
 
+class SetChannelBody(BaseModel):
+    channel: str
+    # AA-451, moved here from the old CreateRequestBody (AA-469 Việc 4) — optional,
+    # backward-compatible — when given (and no T7 slot is already persisted for this
+    # atom+channel), set_channel() computes+persists this tenant's month slot-grid on the spot
+    # to fill angle_gate_request.cta. Omitted -> cta stays whatever it already was (usually NULL,
+    # T9's own ask-the-tenant fallback still covers it).
+    year: Optional[int] = None
+    month: Optional[int] = None
+
+
 @router.get("/goals", summary="List the 8 content goals (Bang 1) a tenant can choose from")
 async def list_goals():
     return {"goals": GOALS}
 
 
-@router.post("/requests", summary="Create a new angle-gate request from (atom_id, channel) — workflow step 1")
+@router.post("/requests", summary="Create a new angle-gate request from an atom_id — workflow step 1")
 async def create_request(body: CreateRequestBody, request: Request, tenant=Depends(get_tenant)):
     tenant_id = UUID(tenant["sub"])
     pool = request.app.state.pool
     try:
-        req = await service.create_request(
-            tenant_id, body.atom_id, body.channel, pool, year=body.year, month=body.month,
-        )
+        req = await service.create_request(tenant_id, body.atom_id, pool)
     except service.AtomNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return {
         "request_id": str(req["request_id"]),
         "atom_id": req["atom_id"],
         "trip_id": str(req["trip_id"]) if req["trip_id"] else None,
-        "channel": req["channel"],
+        "channel": req["channel"],  # AA-469 Việc 4: always NULL here now — set at step 8
         "cta": req["cta"],  # AA-450: usually None today — see migration 114's header comment
         "status": req["status"],
     }
@@ -144,5 +152,25 @@ async def reopen(request_id: UUID, request: Request, tenant=Depends(get_tenant))
         return await service.reopen_request(tenant_id, request_id, pool)
     except service.RequestNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    except service.WrongStatusError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post(
+    "/requests/{request_id}/channel",
+    summary="Choose a channel — AA-469 Việc 4, workflow step 8, AFTER an angle is chosen "
+            "(was step 1, before angle generation, prior to this fix)",
+)
+async def set_channel(request_id: UUID, body: SetChannelBody, request: Request, tenant=Depends(get_tenant)):
+    tenant_id = UUID(tenant["sub"])
+    pool = request.app.state.pool
+    try:
+        return await service.set_channel(
+            tenant_id, request_id, body.channel, pool, year=body.year, month=body.month,
+        )
+    except service.RequestNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except service.InvalidChannelError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     except service.WrongStatusError as exc:
         raise HTTPException(status_code=409, detail=str(exc))

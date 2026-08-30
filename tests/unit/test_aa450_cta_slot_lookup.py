@@ -64,39 +64,10 @@ class TestFetchSlotCta:
         assert result is None
 
 
-@pytest.mark.asyncio
-class TestCreateRequestCtaWiring:
-    async def test_cta_from_matching_slot_flows_into_insert(self):
-        conn = AsyncMock()
-        conn.fetchrow.side_effect = [
-            _atom_row(),                            # _fetch_atom_for_tenant
-            {"cta_target": "Design This Journey"},   # _fetch_slot_cta
-            _request_row(cta="Design This Journey"),  # INSERT ... RETURNING
-        ]
-        pool = _make_pool(conn)
-
-        result = await service.create_request(TENANT_ID, "atom_abc123", "facebook", pool)
-
-        assert result["cta"] == "Design This Journey"
-        insert_query, *params = conn.fetchrow.call_args_list[2][0]
-        assert "INSERT INTO acp_shared.angle_gate_request" in insert_query
-        assert "cta" in insert_query
-        assert params[-1] == "Design This Journey"
-
-    async def test_no_matching_slot_inserts_null_cta_not_an_error(self):
-        conn = AsyncMock()
-        conn.fetchrow.side_effect = [
-            _atom_row(),         # _fetch_atom_for_tenant
-            None,                # _fetch_slot_cta — no matching slot (the realistic case today)
-            _request_row(cta=None),  # INSERT ... RETURNING
-        ]
-        pool = _make_pool(conn)
-
-        result = await service.create_request(TENANT_ID, "atom_abc123", "facebook", pool)
-
-        assert result["cta"] is None
-        insert_query, *params = conn.fetchrow.call_args_list[2][0]
-        assert params[-1] is None
+# AA-469 Việc 4 (flow-order fix) — TestCreateRequestCtaWiring removed from here. create_request()
+# no longer does any slot-CTA lookup at all (it doesn't know channel anymore) — that whole
+# mechanism (this class used to test) moved to services/acp_angle_gate/service.py::set_channel(),
+# now covered by tests/unit/test_aa449_angle_gate_service.py::TestSetChannel instead.
 
 
 @pytest.mark.asyncio

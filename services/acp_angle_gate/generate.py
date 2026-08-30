@@ -25,7 +25,6 @@ import structlog
 from json_repair import repair_json
 
 from services.acp_angle_gate.brand_audience import BrandAudience
-from services.acp_angle_gate.channel_style import ChannelStyle, get_channel_style
 from services.acp_angle_gate.goals import Goal
 from services.acp_angle_gate.prompts import SYSTEM_PROMPT, build_user_prompt
 from services.acp_shared.dfs_relevance import SearchDemandSignal
@@ -81,23 +80,21 @@ def _validate(parsed: dict) -> tuple[list[dict], int, str]:
 
 
 async def generate_angles(
-    *, content_seed: str, goal: Goal, channel: str, brand_audience: BrandAudience,
+    *, content_seed: str, goal: Goal, brand_audience: BrandAudience,
     destination: str | None = None, trip_name: str | None = None,
     search_demand: SearchDemandSignal | None = None,
 ) -> tuple[list[dict], int, str, float]:
     """Returns (angles, recommended_index, recommendation_reason, cost_usd). `angles` is a list
     of exactly 3 dicts with the 4 required fields — service.py persists these directly into
     angle_gate_option rows. Raises AngleGenerationError on anything that can't be salvaged into
-    a valid 3-angle set (never persists a partial/malformed result)."""
-    channel_style: ChannelStyle | None = get_channel_style(channel)
-    if channel_style is None:
-        # Defensive — services.acp_planning.models.Channel's Literal is the real gate on which
-        # channel strings can ever reach here; this only fires if that Literal and
-        # CHANNEL_STYLES_BY_KEY (channel_style.py) ever drift out of sync with each other.
-        raise AngleGenerationError(f"No channel style entry for channel={channel!r}")
+    a valid 3-angle set (never persists a partial/malformed result).
 
+    AA-469 Việc 4 (flow-order fix) — no `channel` param anymore. Channel is now chosen AFTER an
+    angle, not before angle generation — see this module's prompts.py sibling for why dropping
+    it here doesn't lose any real channel-fit (T9's write prompt re-applies the full channel
+    style block at write time regardless)."""
     user_prompt = build_user_prompt(
-        content_seed=content_seed, goal=goal, channel_style=channel_style,
+        content_seed=content_seed, goal=goal,
         brand_audience=brand_audience, destination=destination, trip_name=trip_name,
         search_demand=search_demand,
     )
@@ -109,7 +106,7 @@ async def generate_angles(
     parsed = _parse_response(resp.content)
     angles, recommended_index, reason = _validate(parsed)
     logger.info(
-        "angle_gate_angles_generated", goal=goal["key"], channel=channel,
+        "angle_gate_angles_generated", goal=goal["key"],
         model_used=resp.model_used, cost_usd=resp.cost_usd, recommended_index=recommended_index,
     )
     return angles, recommended_index, reason, resp.cost_usd

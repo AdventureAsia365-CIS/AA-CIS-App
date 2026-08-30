@@ -1,7 +1,13 @@
 """
-services.acp_angle_gate.service — T8 request lifecycle (workflow steps 1-7).
+services.acp_angle_gate.service — T8 request lifecycle (workflow steps 1-8).
 
-DB tables: acp_shared.angle_gate_request / angle_gate_option (migration 113).
+AA-469 Việc 4 (flow-order fix, this session) — corrected order (confirmed with Nghiệp):
+atom(+DFS/PAA+brand, server-side) -> Goal -> generate 3 angles -> pick 1 (step 7) -> pick
+Channel (step 8, NEW — see set_channel() below) -> T9 write. `channel` used to be a
+`create_request()` param and an input to angle generation; it is neither anymore.
+
+DB tables: acp_shared.angle_gate_request / angle_gate_option (migration 113, channel now
+nullable per migration 126).
 """
 from __future__ import annotations
 
@@ -11,6 +17,7 @@ from uuid import UUID
 import structlog
 
 from services.acp_angle_gate.brand_audience import fetch_brand_audience
+from services.acp_angle_gate.channel_style import get_channel_style
 from services.acp_angle_gate.generate import generate_angles
 from services.acp_angle_gate.goals import get_goal
 from services.acp_planning.allocator import compute_slot_grid, create_weekly_produce_run, persist_slot_grid
@@ -40,6 +47,11 @@ class RequestNotFoundError(AngleGateError):
 
 class InvalidGoalError(AngleGateError):
     pass
+
+
+class InvalidChannelError(AngleGateError):
+    """AA-469 Việc 4 (flow-order fix) — raised by set_channel() below for an unknown channel key,
+    mirroring InvalidGoalError's shape."""
 
 
 class WrongStatusError(AngleGateError):
@@ -157,31 +169,25 @@ async def _compute_and_persist_slot_cta(
     return await _fetch_slot_cta(tenant_id, atom_id, channel, pool)
 
 
-async def create_request(
-    tenant_id: UUID, atom_id: str, channel: str, pool,
-    year: Optional[int] = None, month: Optional[int] = None,
-) -> dict:
+async def create_request(tenant_id: UUID, atom_id: str, pool) -> dict:
     """Workflow step 1. Validates the atom belongs to this tenant (owner_scope check) up front —
     refuses a cross-tenant atom_id here rather than only failing later at generate time.
 
-    AA-451: `year`/`month` are optional and backward-compatible — omitted, behavior is
-    unchanged from before this change (`cta` may come back None, T9's existing ask-the-tenant
-    fallback still covers it). Supplied, and no slot is already persisted for this
-    (tenant, channel, atom), this computes-and-persists one on the spot (see
-    `_compute_and_persist_slot_cta()`)."""
+    AA-469 Việc 4 (flow-order fix, this session) — no `channel`/`year`/`month` params anymore.
+    Confirmed order: atom(+DFS/PAA+brand, fetched server-side) -> Goal -> 3 angles -> pick 1 ->
+    THEN channel (see set_channel() below) -> T9 write. `channel`/`cta` both start NULL; the
+    AA-451 slot-CTA prefill (`_fetch_slot_cta()`/`_compute_and_persist_slot_cta()`) moved to
+    set_channel() below, since it's genuinely keyed by channel and channel isn't known yet here."""
     atom = await _fetch_atom_for_tenant(tenant_id, atom_id, pool)
-    cta = await _fetch_slot_cta(tenant_id, atom_id, channel, pool)
-    if cta is None and year is not None and month is not None:
-        cta = await _compute_and_persist_slot_cta(tenant_id, atom_id, channel, year, month, pool)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO acp_shared.angle_gate_request (tenant_id, atom_id, trip_id, channel, cta)
-            VALUES ($1, $2, $3, $4, $5)
+            VALUES ($1, $2, $3, NULL, NULL)
             RETURNING request_id, tenant_id, atom_id, trip_id, channel, goal, cta, status,
                       created_at, updated_at
             """,
-            tenant_id, atom["atom_id"], atom["trip_id"], channel, cta,
+            tenant_id, atom["atom_id"], atom["trip_id"],
         )
     return dict(row)
 
@@ -242,7 +248,7 @@ async def set_goal_and_generate(tenant_id: UUID, request_id: UUID, goal_key: str
         search_demand = await fetch_search_demand_signal(req["trip_id"], pool)
 
     angles, recommended_index, reason, cost_usd = await generate_angles(
-        content_seed=atom["text"], goal=goal, channel=req["channel"],
+        content_seed=atom["text"], goal=goal,
         brand_audience=brand_audience, destination=destination, trip_name=trip_name,
         search_demand=search_demand,
     )
@@ -349,6 +355,54 @@ async def choose_angle(tenant_id: UUID, request_id: UUID, idx: int, pool) -> dic
     return await fetch_request(tenant_id, request_id, pool)
 
 
+async def set_channel(
+    tenant_id: UUID, request_id: UUID, channel: str, pool,
+    year: Optional[int] = None, month: Optional[int] = None,
+) -> dict:
+    """AA-469 Việc 4 (flow-order fix) — workflow step 8 (NEW): the tenant picks a Channel, AFTER
+    an angle is chosen, not before angle generation (see create_request()'s own header for the
+    corrected order). Only valid once an angle has been chosen (status 'approved') — picking a
+    channel before that would have nothing to attach it to as a real T9-ready request; a request
+    that's mid-reopen ('reusable', re-picking a different angle) is deliberately NOT a valid
+    target either, since choose_angle() always lands back on 'approved' anyway (same reasoning
+    T9's start_write() guard already documents).
+
+    Callable more than once while still 'approved' (before T9 writes) — e.g. the tenant picks a
+    channel, changes their mind, picks a different one; nothing downstream has consumed the first
+    choice yet. `angle_gate_request.channel` carries over UNCHANGED across a later reopen()/
+    re-choose-angle cycle (AA-497) — reopening only ever re-picks the ANGLE (per AA-497's own
+    documented scope), and the channel choice has no dependency on which specific angle was
+    picked (T9's write prompt applies the channel's style block independently of the angle's own
+    `best_final_style` — see acp_content_writing/prompts.py), so there is nothing to invalidate.
+
+    AA-451's slot-CTA prefill moves here from create_request() (this is genuinely where it
+    belongs now — it's keyed by channel, which wasn't known at creation time anymore). Never
+    overwrites an already-resolved `cta` (e.g. one T9 itself may resolve some other way in the
+    future) — only fills it in when still NULL."""
+    req = await _fetch_request_row(tenant_id, request_id, pool)
+    if req["status"] != "approved":
+        raise WrongStatusError(
+            f"request_id={request_id} is status={req['status']!r}, expected 'approved' — an "
+            "angle must be chosen (workflow step 7) before picking a channel."
+        )
+    if get_channel_style(channel) is None:
+        raise InvalidChannelError(f"Unknown channel: {channel!r}")
+
+    cta = req["cta"]
+    if cta is None:
+        cta = await _fetch_slot_cta(tenant_id, req["atom_id"], channel, pool)
+    if cta is None and year is not None and month is not None:
+        cta = await _compute_and_persist_slot_cta(tenant_id, req["atom_id"], channel, year, month, pool)
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE acp_shared.angle_gate_request SET channel = $2, cta = $3, updated_at = now() "
+            "WHERE request_id = $1",
+            request_id, channel, cta,
+        )
+    return await fetch_request(tenant_id, request_id, pool)
+
+
 async def fetch_request(tenant_id: UUID, request_id: UUID, pool) -> dict:
     req = await _fetch_request_row(tenant_id, request_id, pool)
     async with pool.acquire() as conn:
@@ -379,6 +433,6 @@ async def fetch_request(tenant_id: UUID, request_id: UUID, pool) -> dict:
 
 __all__ = [
     "AngleGateError", "AtomNotFoundError", "RequestNotFoundError", "InvalidGoalError",
-    "WrongStatusError", "create_request", "set_goal_and_generate", "choose_angle",
-    "reopen_request", "fetch_request",
+    "InvalidChannelError", "WrongStatusError", "create_request", "set_goal_and_generate",
+    "choose_angle", "reopen_request", "set_channel", "fetch_request",
 ]

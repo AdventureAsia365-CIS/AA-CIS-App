@@ -293,9 +293,10 @@ async def get_slot_suggestions(
         explicitly allowed per Decision 6's product model — slots are a priority hint, not a
         gate; `create_request()` itself still accepts ANY atom_id, unchanged by this endpoint).
 
-    Purely additive/read-only — does not persist anything (unlike `create_request()`'s optional
-    `year`/`month` persist-on-first-use path, AA-451), and does not change what `create_request()`
-    accepts. A slot whose suggested atoms are ALL used just shows as fully green in the UI; it is
+    Purely additive/read-only — does not persist anything (unlike `set_channel()`'s optional
+    `year`/`month` persist-on-first-use path, AA-451, moved there from `create_request()` by
+    AA-469 Việc 4's flow-order fix), and does not change what `create_request()` accepts. A slot
+    whose suggested atoms are ALL used just shows as fully green in the UI; it is
     never filtered out of the grid here, so the frontend can still render its "already written"
     success state (design doc UI/UX: "A slot-card that's already been written flips to a
     success/green state, showing which atom was used and the write date").
