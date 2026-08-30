@@ -97,7 +97,16 @@ async def list_pending(request: Request, tenant=Depends(get_tenant)):
     AA-497 — angle_name now joins via cp.angle_gate_option_id (denormalized at write time,
     migration 124/AA-497) rather than ago.chosen=true, which is MUTABLE (AA-497's reopen action
     can re-point it to a different option after this piece was already written) — falls back to
-    the old chosen=true join only for pre-AA-497 rows where angle_gate_option_id is NULL."""
+    the old chosen=true join only for pre-AA-497 rows where angle_gate_option_id is NULL.
+
+    AA-469 Việc 4 (flow-order fix) — filters/returns cp.channel (content_piece), not agr.channel
+    (angle_gate_request), for the exact same reason: angle_gate_request.channel is now settable
+    more than once (services/acp_angle_gate/service.py::set_channel(), step 8, callable
+    repeatedly while still 'approved') — a piece's OWN channel must stay pinned to whatever it
+    was actually written with, not whatever the request's channel later becomes for its next
+    write. Falls back to agr.channel only for pre-this-session rows where cp.channel is NULL
+    (0 such rows existed live at the time of this change, confirmed — this fallback is pure
+    defense, not a real backfill gap)."""
     pool = request.app.state.pool
     tenant_id = tenant["sub"]
 
@@ -105,7 +114,7 @@ async def list_pending(request: Request, tenant=Depends(get_tenant)):
         rows = await conn.fetch(
             """
             SELECT cp.piece_id::text, cp.content_text, cp.created_at,
-                   agr.channel, ago.name AS angle_name
+                   COALESCE(cp.channel, agr.channel) AS channel, ago.name AS angle_name
             FROM acp_shared.content_piece cp
             JOIN acp_shared.angle_gate_request agr ON agr.request_id = cp.angle_gate_request_id
             LEFT JOIN acp_shared.angle_gate_option ago
@@ -116,7 +125,7 @@ async def list_pending(request: Request, tenant=Depends(get_tenant)):
                 ON pl.piece_id = cp.piece_id AND pl.status = 'published'
             WHERE cp.tenant_id = $1::uuid
               AND cp.status = 'approved'
-              AND agr.channel = $2
+              AND COALESCE(cp.channel, agr.channel) = $2
               AND pl.publish_id IS NULL
             ORDER BY cp.created_at DESC
             """,
@@ -148,14 +157,19 @@ async def publish(piece_id: UUID, request: Request, tenant=Depends(get_tenant)):
     left untouched and a fresh attempt gets its own new row (preserves that row's real
     unpublished_at/unpublished_by audit trail — AA-455's whole reason for those columns).
 
-    AA-497 — same angle_gate_option_id-first join as list_pending() above, same reason."""
+    AA-497 — same angle_gate_option_id-first join as list_pending() above, same reason.
+
+    AA-469 Việc 4 — same cp.channel-first (COALESCE onto agr.channel) read as list_pending()
+    above, same reason (angle_gate_request.channel is no longer stable after a piece is
+    written — see set_channel())."""
     pool = request.app.state.pool
     tenant_id = tenant["sub"]
 
     async with pool.acquire() as conn:
         piece = await conn.fetchrow(
             """
-            SELECT cp.piece_id, cp.content_text, cp.status, agr.channel, ago.name AS angle_name
+            SELECT cp.piece_id, cp.content_text, cp.status,
+                   COALESCE(cp.channel, agr.channel) AS channel, ago.name AS angle_name
             FROM acp_shared.content_piece cp
             JOIN acp_shared.angle_gate_request agr ON agr.request_id = cp.angle_gate_request_id
             LEFT JOIN acp_shared.angle_gate_option ago

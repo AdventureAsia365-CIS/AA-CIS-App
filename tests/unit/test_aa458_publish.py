@@ -77,6 +77,11 @@ async def test_list_pending_returns_rows_scoped_to_tenant():
     # change what an already-written piece's angle_name displays here.
     assert "ago.option_id = cp.angle_gate_option_id" in sql
     assert "cp.angle_gate_option_id IS NULL AND ago.request_id = agr.request_id" in sql
+    # AA-469 Việc 4 (flow-order fix) — same reasoning, now for channel: reads cp.channel first
+    # (COALESCE onto agr.channel only for pre-this-session rows), because
+    # angle_gate_request.channel is no longer stable after a piece is written (set_channel() can
+    # be called again for the request's NEXT write).
+    assert "COALESCE(cp.channel, agr.channel)" in sql
 
 
 @pytest.mark.asyncio
@@ -215,6 +220,8 @@ async def test_publish_success_writes_published_row():
     # denormalized FK first, same fix as list_pending()'s above.
     piece_lookup_sql = conn.fetchrow.call_args_list[0][0][0]
     assert "ago.option_id = cp.angle_gate_option_id" in piece_lookup_sql
+    # AA-469 Việc 4 (flow-order fix) — same cp.channel-first read as list_pending()'s above.
+    assert "COALESCE(cp.channel, agr.channel)" in piece_lookup_sql
 
 
 @pytest.mark.asyncio

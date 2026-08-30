@@ -51,8 +51,9 @@ class ContentWritingError(Exception):
 
 
 class RequestNotReadyError(ContentWritingError):
-    """T9 requires angle_gate_request.status == 'approved' — a goal chosen and an angle chosen
-    (T8 workflow steps 1-7 complete)."""
+    """T9 requires angle_gate_request.status == 'approved' AND channel already set (T8 workflow
+    steps 1-8 complete — AA-469 Việc 4 added step 8, picking a channel, AFTER the angle choice
+    that used to be the last gate here)."""
 
 
 class MissingCTAError(ContentWritingError):
@@ -105,6 +106,17 @@ async def start_write(
             f"request_id={request_id} is status={req['status']!r}, expected 'approved' — "
             "T8's angle-choice step (workflow step 7) must be complete before T9 can write."
         )
+    if not req["channel"]:
+        # AA-469 Việc 4 (flow-order fix) — channel is now a separate step (8) AFTER angle
+        # choice, set via angle_gate_service.set_channel(), not a create_request() param
+        # anymore. Defensive in practice: the real UI always calls .../channel before ever
+        # reaching the write step, so this should be unreachable via the shipped flow — kept as
+        # a real error (not a silent fallback) if that invariant is ever violated, same
+        # reasoning as the "chosen is None" defensive check just below.
+        raise RequestNotReadyError(
+            f"request_id={request_id} has no channel set — T8's channel-choice step "
+            "(workflow step 8) must be complete before T9 can write."
+        )
     chosen = next((a for a in req["angles"] if a["chosen"]), None)
     if chosen is None:
         # Defensive — choose_angle() (T8) always sets exactly one chosen=true before flipping
@@ -146,8 +158,13 @@ async def start_write(
     # it — a request written before this change has no rows to backfill (0 approved requests
     # existed live as of this migration, confirmed via STEP0-refresh), so there's no gap to close.
     option_id = chosen.get("option_id")
+    # AA-469 Việc 4 (flow-order fix) — content_piece.channel (migration 124's Decision 2 column,
+    # unpopulated until now per that migration's own header) finally has a real value to write:
+    # channel is set on the request (angle_gate_service.set_channel(), step 8) before a write can
+    # even start (see the guard above), so req["channel"] is always real here.
     piece = await _insert_placeholder_piece(
         pool, tenant_id=tenant_id, request_id=request_id, angle_gate_option_id=option_id,
+        channel=req["channel"],
     )
 
     context = {
@@ -161,7 +178,7 @@ async def start_write(
 
 
 async def _insert_placeholder_piece(
-    pool, *, tenant_id: UUID, request_id: UUID, angle_gate_option_id=None,
+    pool, *, tenant_id: UUID, request_id: UUID, angle_gate_option_id=None, channel=None,
 ) -> dict:
     # AA-497 (migration 125) — attempt_number=1 is still correct as the INITIAL value for every
     # new write session (T9's own internal retry loop, run_write_background(), overwrites it via
@@ -172,13 +189,13 @@ async def _insert_placeholder_piece(
         row = await conn.fetchrow(
             """
             INSERT INTO acp_shared.content_piece
-                (tenant_id, angle_gate_request_id, angle_gate_option_id, attempt_number,
+                (tenant_id, angle_gate_request_id, angle_gate_option_id, channel, attempt_number,
                  content_text, status)
-            VALUES ($1, $2, $3, 1, '', 'processing')
+            VALUES ($1, $2, $3, $4, 1, '', 'processing')
             RETURNING piece_id, tenant_id, angle_gate_request_id, attempt_number, content_text,
                       status, held_reason, gate_ledger, repair_log, created_at
             """,
-            tenant_id, request_id, angle_gate_option_id,
+            tenant_id, request_id, angle_gate_option_id, channel,
         )
     return _row_to_dict(row)
 

@@ -81,14 +81,24 @@ _TENANT_ATOM_QUERY = """
 # NOT the slot's pre-assigned plan month) falls within month X. A piece that never reaches
 # approved (held/failed, or still processing) does NOT lock the atom.
 #
-# Joins through angle_gate_request for atom_id/tenant_id/channel — content_piece itself has no
-# atom_id column (by design, migration 115's own header: a child table doesn't copy its parent's
-# fields). Reads angle_gate_request.channel (not content_piece.channel, which migration 124 added
-# but does not yet populate) since channel is still chosen at request-creation time as of this
-# migration — see migration 124's header for why the write-time-channel move is deferred.
+# Joins through angle_gate_request for atom_id/tenant_id — content_piece itself has no atom_id
+# column (by design, migration 115's own header: a child table doesn't copy its parent's fields).
+#
+# AA-469 Việc 4 (flow-order fix) — `channel` now reads cp.channel (content_piece), NOT
+# agr.channel (angle_gate_request), a deliberate switch made THIS session: channel moved to a
+# separate step 8 (services/acp_angle_gate/service.py::set_channel()) that can be called more
+# than once on the same request while still 'approved' (pick a channel, change your mind, pick a
+# different one, before ever writing) — agr.channel is therefore no longer a stable per-piece
+# value the way it was when channel was fixed once at request-creation time (pre-this-session).
+# cp.channel (migration 124's column, populated by this session's change to
+# _insert_placeholder_piece()) is denormalized specifically so a piece's own channel stays
+# accurate regardless of what the parent request's channel is later changed to for its NEXT
+# write — same reasoning AA-497 already established for angle_gate_option_id on this same table.
+# 0 real content_piece rows existed at the time of this change (confirmed live) — no backfill
+# needed; every row from here on is written under the new code path and has cp.channel set.
 _USED_ATOMS_QUERY = """
     SELECT agr.atom_id, MIN(cp.created_at) AS used_at,
-           (ARRAY_AGG(agr.channel ORDER BY cp.created_at))[1] AS channel,
+           (ARRAY_AGG(cp.channel ORDER BY cp.created_at))[1] AS channel,
            (ARRAY_AGG(cp.angle_gate_request_id::text ORDER BY cp.created_at DESC))[1] AS request_id
     FROM acp_shared.content_piece cp
     JOIN acp_shared.angle_gate_request agr ON agr.request_id = cp.angle_gate_request_id

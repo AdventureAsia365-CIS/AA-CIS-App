@@ -35,10 +35,10 @@ def _make_pool(conn):
     return pool
 
 
-def _request(status="approved", cta="Book a consultation", angles=None):
+def _request(status="approved", cta="Book a consultation", angles=None, channel="facebook"):
     return {
         "request_id": str(REQUEST_ID), "tenant_id": str(TENANT_ID), "atom_id": "atom_abc123",
-        "trip_id": None, "channel": "facebook", "goal": "promotion", "cta": cta,
+        "trip_id": None, "channel": channel, "goal": "promotion", "cta": cta,
         "status": status, "created_at": "2026-08-24T00:00:00", "updated_at": "2026-08-24T00:00:00",
         "angles": angles if angles is not None else [ANGLE],
     }
@@ -126,6 +126,16 @@ class TestStartWrite:
             with pytest.raises(service.MissingCTAError):
                 await service.start_write(TENANT_ID, REQUEST_ID, pool)
 
+    async def test_no_channel_raises(self):
+        """AA-469 Việc 4 (flow-order fix) — channel is now set at a separate step 8
+        (angle_gate_service.set_channel()), AFTER angle choice, not at request creation. A
+        request that's 'approved' but never had a channel set must not reach the LLM call."""
+        pool = _make_pool(AsyncMock())
+        with patch.object(service.angle_gate_service, "fetch_request",
+                           new=AsyncMock(return_value=_request(channel=None))):
+            with pytest.raises(service.RequestNotReadyError):
+                await service.start_write(TENANT_ID, REQUEST_ID, pool)
+
     async def test_cta_override_used_when_stored_cta_is_null(self):
         conn = AsyncMock()
         conn.fetchrow.side_effect = [{"text": "atom text"}, _placeholder_row()]
@@ -162,6 +172,27 @@ class TestStartWrite:
         insert_sql, *params = insert_call.args
         assert "angle_gate_option_id" in insert_sql
         assert option_id in params
+
+    async def test_channel_passed_through_to_insert(self):
+        """AA-469 Việc 4 — content_piece.channel (migration 124's column, unpopulated until this
+        session) is now written on every placeholder INSERT, using the channel set on the request
+        (angle_gate_service.set_channel(), step 8) — closes the gap migration 124's own header
+        flagged."""
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [{"text": "atom text"}, _placeholder_row()]
+        pool = _make_pool(conn)
+
+        with patch.object(service.angle_gate_service, "fetch_request",
+                           new=AsyncMock(return_value=_request(channel="tiktok"))), \
+             patch.object(service, "fetch_brand_audience", new=AsyncMock(return_value={})), \
+             patch.object(service, "fetch_brand_rubric_text", new=AsyncMock(return_value="rubric")), \
+             patch.object(service, "get_goal", return_value=GOAL):
+            await service.start_write(TENANT_ID, REQUEST_ID, pool)
+
+        insert_call = conn.fetchrow.call_args_list[1]
+        insert_sql, *params = insert_call.args
+        assert "channel" in insert_sql
+        assert "tiktok" in params
 
     async def test_missing_option_id_on_legacy_angle_does_not_crash(self):
         """A `chosen` dict without 'option_id' (shouldn't happen post-AA-497, but defensive) must

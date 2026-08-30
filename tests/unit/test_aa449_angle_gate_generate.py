@@ -1,5 +1,11 @@
 """AA-449 — services/acp_angle_gate/generate.py. LLMClient is patched, same convention
-test_aa217_malformed_json_cost.py already uses for graph.py's generate_node()."""
+test_aa217_malformed_json_cost.py already uses for graph.py's generate_node().
+
+AA-469 Việc 4 (flow-order fix) — `channel`/`channel_style` removed from generate_angles()
+entirely (channel is now chosen AFTER an angle, at a new step 8 — see
+tests/unit/test_aa449_angle_gate_service.py::TestSetChannel). test_unknown_channel_raises_before_
+any_llm_call was removed with it — there is no channel to validate here anymore, that check moved
+to service.py::set_channel()."""
 import json
 from unittest.mock import MagicMock, patch
 
@@ -39,7 +45,7 @@ class TestGenerateAngles:
     async def test_valid_json_parsed(self):
         with patch.object(gen_mod, "LLMClient", return_value=_client_returning(json.dumps(_VALID_ANGLES))):
             angles, rec_idx, reason, cost = await generate_angles(
-                content_seed="Cross the bamboo bridge at dawn", goal=GOAL, channel="facebook",
+                content_seed="Cross the bamboo bridge at dawn", goal=GOAL,
                 brand_audience={"customer_segment": "Senior execs", "customer_mindset": "seek depth"},
             )
         assert len(angles) == 3
@@ -51,7 +57,7 @@ class TestGenerateAngles:
         fenced = "```json\n" + json.dumps(_VALID_ANGLES) + "\n```"
         with patch.object(gen_mod, "LLMClient", return_value=_client_returning(fenced)):
             angles, rec_idx, _reason, _cost = await generate_angles(
-                content_seed="seed", goal=GOAL, channel="tiktok", brand_audience={},
+                content_seed="seed", goal=GOAL, brand_audience={},
             )
         assert len(angles) == 3
 
@@ -60,7 +66,7 @@ class TestGenerateAngles:
         broken = json.dumps(_VALID_ANGLES).rstrip("}") + ",}"
         with patch.object(gen_mod, "LLMClient", return_value=_client_returning(broken)):
             angles, *_ = await generate_angles(
-                content_seed="seed", goal=GOAL, channel="email", brand_audience={},
+                content_seed="seed", goal=GOAL, brand_audience={},
             )
         assert len(angles) == 3
 
@@ -68,7 +74,7 @@ class TestGenerateAngles:
         bad = {"angles": [_VALID_ANGLES["angles"][0]], "recommended_index": 0}
         with patch.object(gen_mod, "LLMClient", return_value=_client_returning(json.dumps(bad))):
             with pytest.raises(AngleGenerationError):
-                await generate_angles(content_seed="seed", goal=GOAL, channel="blog", brand_audience={})
+                await generate_angles(content_seed="seed", goal=GOAL, brand_audience={})
 
     async def test_missing_field_raises(self):
         bad = {
@@ -80,24 +86,15 @@ class TestGenerateAngles:
         }
         with patch.object(gen_mod, "LLMClient", return_value=_client_returning(json.dumps(bad))):
             with pytest.raises(AngleGenerationError):
-                await generate_angles(content_seed="seed", goal=GOAL, channel="blog", brand_audience={})
+                await generate_angles(content_seed="seed", goal=GOAL, brand_audience={})
 
     async def test_bad_recommended_index_defaults_to_zero(self):
         bad_idx = dict(_VALID_ANGLES, recommended_index=99)
         with patch.object(gen_mod, "LLMClient", return_value=_client_returning(json.dumps(bad_idx))):
             _angles, rec_idx, _reason, _cost = await generate_angles(
-                content_seed="seed", goal=GOAL, channel="blog", brand_audience={},
+                content_seed="seed", goal=GOAL, brand_audience={},
             )
         assert rec_idx == 0
-
-    async def test_unknown_channel_raises_before_any_llm_call(self):
-        client = MagicMock()
-        with patch.object(gen_mod, "LLMClient", return_value=client):
-            with pytest.raises(AngleGenerationError):
-                await generate_angles(
-                    content_seed="seed", goal=GOAL, channel="not_a_real_channel", brand_audience={},
-                )
-        client.generate.assert_not_called()
 
     async def test_brand_audience_and_goal_reach_the_prompt(self):
         """The LLM call must actually receive the fixed brand audience (STEP0 §6) and the
@@ -105,7 +102,7 @@ class TestGenerateAngles:
         client = _client_returning(json.dumps(_VALID_ANGLES))
         with patch.object(gen_mod, "LLMClient", return_value=client):
             await generate_angles(
-                content_seed="Cross the bamboo bridge", goal=GOAL, channel="linkedin",
+                content_seed="Cross the bamboo bridge", goal=GOAL,
                 brand_audience={"customer_segment": "Senior executives", "customer_mindset": "seek depth"},
                 destination="Sapa", trip_name="Ha Giang Loop",
             )
@@ -115,6 +112,17 @@ class TestGenerateAngles:
         assert GOAL["marketing_term"] in request.user_prompt
         assert "Ha Giang Loop" in request.user_prompt
         assert request.model_tier == "sonnet"
+
+    async def test_no_channel_block_in_prompt(self):
+        """AA-469 Việc 4 (flow-order fix) — confirms the removal, not just that no error is
+        raised: no CHANNEL block/wording reaches this prompt at all anymore, since channel isn't
+        known yet at this step."""
+        client = _client_returning(json.dumps(_VALID_ANGLES))
+        with patch.object(gen_mod, "LLMClient", return_value=client):
+            await generate_angles(content_seed="seed", goal=GOAL, brand_audience={})
+        request = client.generate.call_args[0][0]
+        assert "CHANNEL:" not in request.user_prompt
+        assert "CHANNEL STRUCTURE" not in request.user_prompt
 
     async def test_search_demand_signal_reaches_the_prompt(self):
         """AA-469 Việc 4 — the confirmed real gap (DFS/PAA never fed angle generation) is fixed:
@@ -129,7 +137,7 @@ class TestGenerateAngles:
         )
         with patch.object(gen_mod, "LLMClient", return_value=client):
             await generate_angles(
-                content_seed="seed", goal=GOAL, channel="blog", brand_audience={},
+                content_seed="seed", goal=GOAL, brand_audience={},
                 search_demand=signal,
             )
         request = client.generate.call_args[0][0]
@@ -143,7 +151,7 @@ class TestGenerateAngles:
         client = _client_returning(json.dumps(_VALID_ANGLES))
         with patch.object(gen_mod, "LLMClient", return_value=client):
             await generate_angles(
-                content_seed="seed", goal=GOAL, channel="blog", brand_audience={},
+                content_seed="seed", goal=GOAL, brand_audience={},
                 search_demand=None,
             )
         request = client.generate.call_args[0][0]
@@ -156,7 +164,7 @@ class TestGenerateAngles:
         signal = SearchDemandSignal(relevance="MED", people_also_ask=[], related_keywords=[])
         with patch.object(gen_mod, "LLMClient", return_value=client):
             await generate_angles(
-                content_seed="seed", goal=GOAL, channel="blog", brand_audience={},
+                content_seed="seed", goal=GOAL, brand_audience={},
                 search_demand=signal,
             )
         request = client.generate.call_args[0][0]
