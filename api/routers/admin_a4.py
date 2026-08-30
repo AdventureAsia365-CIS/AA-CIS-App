@@ -25,6 +25,14 @@ STEP0 (docs/claude_audit/AA-455-01-step0-a4-force-unpublish.md §4/§7), this st
 `/admin/a4` router prefix here — no new route, so no middleware change needed. Still no
 flag/suspend — that stays deferred to the Command Center backlog (AA-255->259); force-unpublish
 is the one action this issue scoped in.
+
+AA-469 Việc 5 (30/08/2026) added a 4th use case: `GET /content-log` — T9/T10's quality-gate
+outcomes (`acp_shared.content_piece.gate_ledger`/`held_reason`, `status IN ('held','failed')`),
+the stage with the best structured error data of any LLM-using T-step but zero prior A4 path
+(STEP0: docs/claude_audit/AA-469-viec5-step0-a4-feedback-loop-investigation.md). T5 (atomize)
+failures did NOT need a new endpoint — they write into the SAME `review-log` table/join key as T3
+(see `services/acp_produce/tenant_pipeline.py::escalate_t5_atomize_failure()`), so they surface
+through the existing `/review-log` endpoint above automatically.
 """
 from __future__ import annotations
 
@@ -210,6 +218,81 @@ async def get_publish_log(
         for r in rows
     ]
     logger.info("a4_publish_log_queried", count=len(data), tenant_filter=tenant_id)
+    return {"data": data, "total": len(data), "tenant_filter": tenant_id}
+
+
+@router.get("/content-log")
+async def get_content_log(
+    request: Request,
+    tenant_id: Optional[str] = Query(None),
+    limit: int = Query(200, ge=1, le=500),
+    x_admin_secret: str = Header(None),
+):
+    """AA-469 Việc 5 — T9/T10's own gap, closed: `content_piece.gate_ledger`/`held_reason` is the
+    best structured error data of any LLM-using stage (per-gate pass/fail + violations, plus
+    `repair_log`'s retry-feedback trail) but had ZERO A4 path before this — the data existed,
+    only the read route was missing (STEP0's own "easiest gap to patch" ranking).
+
+    `status IN ('held', 'failed')` only — 'processing' is a transient in-flight placeholder
+    (nothing to review yet) and 'approved' is a real success (nothing to flag), matching
+    publish-log's own convention of surfacing outcomes worth oversight, not every row.
+
+    Same cross-tenant-by-default shape as review-log/publish-log above: optional `tenant_id`
+    filter, no hard tenant scoping — A4 is cross-tenant oversight by design (STEP0/AA-437), and
+    every other read endpoint here follows this exact pattern; no new scoping model invented.
+
+    `channel` reads `COALESCE(cp.channel, agr.channel)` — same reasoning AA-469 Việc 4's
+    flow-order fix already applied to `v1_publish.py`'s two queries on this same table:
+    `angle_gate_request.channel` is no longer stable after a piece is written (a request's
+    channel can be re-set via `set_channel()` before its NEXT write), so a piece's own
+    (denormalized, immutable-once-written) `cp.channel` is read first."""
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+
+    conditions = ["cp.status IN ('held', 'failed')"]
+    params: list = []
+    if tenant_id:
+        params.append(tenant_id)
+        conditions.append(f"cp.tenant_id = ${len(params)}::uuid")
+    where = " AND ".join(conditions)
+    params.append(limit)
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(f"""
+            SELECT
+                cp.piece_id::text, cp.tenant_id::text, t.name AS tenant_name, t.slug AS tenant_slug,
+                cp.angle_gate_request_id::text, agr.atom_id, agr.goal,
+                COALESCE(cp.channel, agr.channel) AS channel,
+                cp.status, cp.held_reason, cp.gate_ledger, cp.attempt_number,
+                LEFT(cp.content_text, 280) AS content_preview, cp.created_at
+            FROM acp_shared.content_piece cp
+            JOIN acp_shared.angle_gate_request agr ON agr.request_id = cp.angle_gate_request_id
+            LEFT JOIN shared.tenants t ON t.tenant_id = cp.tenant_id
+            WHERE {where}
+            ORDER BY cp.created_at DESC
+            LIMIT ${len(params)}
+        """, *params)
+
+    data = [
+        {
+            "piece_id": r["piece_id"],
+            "tenant_id": r["tenant_id"],
+            "tenant_name": r["tenant_name"],
+            "tenant_slug": r["tenant_slug"],
+            "angle_gate_request_id": r["angle_gate_request_id"],
+            "atom_id": r["atom_id"],
+            "goal": r["goal"],
+            "channel": r["channel"],
+            "status": r["status"],
+            "held_reason": r["held_reason"],
+            "gate_ledger": _parse_jsonb(r["gate_ledger"], []),
+            "attempt_number": r["attempt_number"],
+            "content_preview": r["content_preview"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        for r in rows
+    ]
+    logger.info("a4_content_log_queried", count=len(data), tenant_filter=tenant_id)
     return {"data": data, "total": len(data), "tenant_filter": tenant_id}
 
 

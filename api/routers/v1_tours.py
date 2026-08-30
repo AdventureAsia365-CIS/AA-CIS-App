@@ -1,9 +1,11 @@
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 from pydantic import BaseModel as _BM
 from api.routers.auth import verify_jwt
 
+logger = structlog.get_logger()
 router = APIRouter(prefix="/v1/tours", tags=["B2B Tours"])
 security = HTTPBearer()
 
@@ -789,11 +791,19 @@ async def atomize_version(
         country=row["country"] or "",
     )
     if result.get("status") == "failed":
-        # Real, not fabricated — same T5 error shape run_t5_atomize already logs to
-        # CloudWatch (Việc 5's future job is persisting this; out of scope here, but
-        # returning it to the caller now costs nothing and doesn't block that later
-        # work).
-        raise HTTPException(status_code=502, detail=result.get("error") or "Atomize failed")
+        # AA-469 Việc 5 — the gap this comment used to flag ("Việc 5's future job") is closed:
+        # persist the same error to silver_aa_internal.review_queue (A4's existing review-log
+        # already reads this table/join key, no new endpoint needed — see
+        # escalate_t5_atomize_failure()'s own docstring) BEFORE returning the 502 to the tenant.
+        # Best-effort: a failure to persist the escalation must not hide the real atomize error
+        # from the tenant, who still needs their own 502 either way.
+        error_msg = result.get("error") or "Atomize failed"
+        try:
+            from services.acp_produce.tenant_pipeline import escalate_t5_atomize_failure
+            await escalate_t5_atomize_failure(pool, tenant_id, row["tour_id"], version_id, error_msg)
+        except Exception:
+            logger.warning("t5_escalate_failed_not_persisted", version_id=version_id, exc_info=True)
+        raise HTTPException(status_code=502, detail=error_msg)
 
     import datetime as _dt
     return {

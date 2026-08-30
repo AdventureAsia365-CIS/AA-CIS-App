@@ -200,6 +200,44 @@ async def escalate_t3_failure(
                 structural_count=len(structural_issues), grounding_count=len(grounding_issues))
 
 
+async def escalate_t5_atomize_failure(
+    pool, tenant_id: str, tour_id: str, version_id: str, error: str,
+) -> None:
+    """AA-469 Việc 5 — T5's real gap, closed: `run_t5_atomize()`'s own failures (already
+    structured in code, `result["error"]` = `f"{type(e).__name__}: {e}"` or `f"invalid atom JSON
+    from model: {e}"`) used to only ever reach CloudWatch (`logger.error()`), never a table A4
+    reads. Mirrors `escalate_t3_failure()`'s exact row shape ABOVE — same table
+    (`silver_aa_internal.review_queue`), same 5 columns, same `escalate_detail` per-item shape
+    (`{check_id, field, description, source_span, suggested_fix}`) — deliberately NOT a new table/
+    schema, per Việc 5's own brief ("mirror T2's pattern if it fits, rather than inventing a new
+    one") and because `tenant_tour_version_id` (this function's own `version_id` param) is exactly
+    the join key `GET /admin/a4/review-log` already filters on (`IS NOT NULL`) — a T5 failure row
+    written here needs ZERO new A4 endpoint, it surfaces through the EXISTING review-log
+    automatically. `check_id` is prefixed `t5_atomize:` (vs. T3's `structural:`/`grounding:`) so
+    the frontend's existing per-check_id grouping/badge UI separates T5 from T3 rows without any
+    UI logic change — only that page's static header text needed updating (see AA-469.md).
+
+    Only 1 real call site exists for `run_t5_atomize()` as of AA-469 Việc 1 (its T2→T5-chain call
+    was removed) — `api/routers/v1_tours.py::atomize_version()`, the standalone trigger endpoint,
+    which already has `version_id`/`tour_id` in scope from its own DB read. Called from there,
+    not from inside `run_t5_atomize()` itself, which never learns `version_id` (it only knows
+    `tour_id`)."""
+    category = error.split(":", 1)[0].strip() if ":" in error else "failed"
+    detail = [{
+        "check_id": f"t5_atomize:{category}", "field": None,
+        "description": error, "source_span": None, "suggested_fix": None,
+    }]
+    summary = f"T5 atomize failed: {error[:200]}"
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO silver_aa_internal.review_queue
+                (tour_id, tenant_id, tenant_tour_version_id, failure_summary, escalate_detail)
+            VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5::jsonb)
+        """, tour_id, tenant_id, version_id, summary, json.dumps(detail))
+    logger.info("t5_escalated", tenant_id=tenant_id, tour_id=tour_id, version_id=version_id,
+                category=category)
+
+
 async def run_t5_atomize(tenant_id: str, tour_id: str, rewritten: dict, pool, country: str = "") -> dict:
     """T5 — decompose atoms from T4 output (tenant-rewritten), owner_scope=tenant_id.
     Reuses AA-299's proven prompt/parse pipeline, now living in

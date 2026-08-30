@@ -1,11 +1,16 @@
 "use client";
-// app/admin/a4-oversight/page.tsx — AA-437 [A4] Cross-Tenant Oversight v1 + AA-455 bước 1
+// app/admin/a4-oversight/page.tsx — AA-437 [A4] Cross-Tenant Oversight v1 + AA-455 bước 1 +
+// AA-469 Việc 5
 //
-// Three sections. First two are read-only, per Nghiep's decisions (Linear AA-437, 23/08/2026):
-//   1. Review Log — silver_aa_internal.review_queue T3 (QA-gate escalate) rows, the log AA-436
-//      redirected here once T3 stopped blocking tenants. Raw rows from the backend; grouped by
-//      check_id client-side (BE deliberately does no aggregation — STEP0's own recommendation,
-//      less logic server-side, same flat-list-first approach AtomsTab.tsx already uses).
+// Four sections, all read-only except Publish Log's one mutating action, per Nghiep's decisions
+// (Linear AA-437, 23/08/2026):
+//   1. Review Log — silver_aa_internal.review_queue rows, T3 (QA-gate escalate) AND (since
+//      AA-469 Việc 5) T5 (atomize failure) rows, same table/join key, distinguished only by
+//      check_id prefix (structural:/grounding: for T3, t5_atomize: for T5) — no BE/FE branching
+//      needed, the existing per-check_id grouping already separates them. Raw rows from the
+//      backend; grouped by check_id client-side (BE deliberately does no aggregation — STEP0's
+//      own recommendation, less logic server-side, same flat-list-first approach AtomsTab.tsx
+//      already uses).
 //   2. Trust Ramp — every acp_deliver.packets row with its own publish_mode. No per-tenant
 //      rollup: ramp state lives per-PACKET (STEP0 finding), so a tenant with multiple packets
 //      shows one row per packet, grouped visually by tenant, never collapsed to one number.
@@ -16,6 +21,10 @@
 //      middleware.ts (since AA-437), and a new route would repeat the exact 307-redirect bug
 //      AA-384/388/405/437 each independently hit (a page with no PROTECTED_ROUTES entry
 //      silently redirects to /login even with a valid admin session).
+//   4. Content Log (AA-469 Việc 5) — acp_shared.content_piece rows with status IN ('held',
+//      'failed'). T9/T10 had the best structured error data of any LLM-using stage
+//      (gate_ledger/held_reason) but zero A4 path before this — STEP0's own "easiest gap to
+//      patch" ranking (data already existed, only the read route was missing).
 //
 // Style/component pattern follows /admin/run-health (AA-259's own confirmed reference UI for
 // this kind of admin monitoring page) — Card/SLabel/Badge/TH/TD from adminUi.tsx, no new
@@ -65,6 +74,29 @@ interface PublishLogRow {
   created_at: string | null;
 }
 
+interface GateLedgerEntry {
+  gate: string;
+  passed: boolean;
+  violations: string[];
+}
+
+interface ContentLogRow {
+  piece_id: string;
+  tenant_id: string;
+  tenant_name: string | null;
+  tenant_slug: string | null;
+  angle_gate_request_id: string;
+  atom_id: string;
+  goal: string | null;
+  channel: string | null;
+  status: string;
+  held_reason: string | null;
+  gate_ledger: GateLedgerEntry[];
+  attempt_number: number;
+  content_preview: string | null;
+  created_at: string | null;
+}
+
 interface TrustRampRow {
   packet_id: string;
   tenant_id: string;
@@ -101,6 +133,10 @@ function publishStatusColor(status: string): "gray" | "amber" | "green" | "red" 
   if (status === "published") return "green";
   if (status === "failed") return "red";
   return "gray"; // unpublished
+}
+
+function contentStatusColor(status: string): "amber" | "red" {
+  return status === "failed" ? "red" : "amber"; // held
 }
 
 // ── Review Log section ───────────────────────────────────────────────────────
@@ -142,11 +178,13 @@ function ReviewLogSection() {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
         <div>
           <h2 style={{ fontFamily: serif, fontSize: 18, fontWeight: 500, color: A.ink, margin: "0 0 4px" }}>
-            Review Log — T3 QA-Gate Escalations
+            Review Log — T3/T5 Escalations
           </h2>
           <div style={{ fontSize: 12, color: A.muted }}>
-            silver_aa_internal.review_queue rows written when a tenant rewrite fails QA twice
-            (auto-passed to the tenant, logged here for pattern review — not a queue to action).
+            silver_aa_internal.review_queue rows: T3 QA-gate failures (auto-passed to the tenant,
+            logged here for pattern review) and, since AA-469 Việc 5, T5 atomize failures
+            (check_id prefixed t5_atomize: — filterable via the Checks badges below) — neither is
+            a queue to action, both are post-hoc pattern review.
           </div>
         </div>
         <input
@@ -385,6 +423,158 @@ function PublishLogSection() {
   );
 }
 
+// ── Content Log section (AA-469 Việc 5) ──────────────────────────────────────
+
+function ContentLogSection() {
+  const [rows, setRows] = useState<ContentLogRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [tenantFilter, setTenantFilter] = useState("");
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  const fetchData = useCallback(() => {
+    setLoading(true);
+    const params = new URLSearchParams({ limit: "200" });
+    if (tenantFilter.trim()) params.set("tenant_id", tenantFilter.trim());
+    fetch(`/api/admin/a4/content-log?${params}`)
+      .then(r => (r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`)))
+      .then(d => { setRows(d.data || []); setError(null); })
+      .catch(e => setError(String(e)))
+      .finally(() => setLoading(false));
+  }, [tenantFilter]);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  // Same client-side rollup pattern as Review Log above — counts how many rows each FAILED gate
+  // fired in, across the currently loaded set (passed gates don't count, only violations matter
+  // for pattern review).
+  const gateCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const row of rows) {
+      for (const g of row.gate_ledger || []) {
+        if (!g.passed) counts[g.gate] = (counts[g.gate] || 0) + 1;
+      }
+    }
+    return Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  }, [rows]);
+
+  return (
+    <Card style={{ marginBottom: 24 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+        <div>
+          <h2 style={{ fontFamily: serif, fontSize: 18, fontWeight: 500, color: A.ink, margin: "0 0 4px" }}>
+            Content Log — T9/T10 Quality-Gate Outcomes
+          </h2>
+          <div style={{ fontSize: 12, color: A.muted }}>
+            acp_shared.content_piece rows that didn&apos;t reach approved — held (a real T10 gate
+            verdict, content shown to the tenant for review) or failed (a system error, no usable
+            content). Post-hoc pattern review, not a queue to action — AA does not gate tenant
+            content.
+          </div>
+        </div>
+        <input
+          value={tenantFilter}
+          onChange={e => setTenantFilter(e.target.value)}
+          placeholder="Filter by tenant_id…"
+          style={{
+            padding: "6px 10px", borderRadius: 6, border: `1px solid ${A.line}`,
+            fontSize: 12, fontFamily: mono, width: 280, outline: "none",
+          }}
+        />
+      </div>
+
+      {gateCounts.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
+          {gateCounts.map(([gate, count]) => (
+            <Badge key={gate} color={count > 1 ? "amber" : "gray"}>
+              {gate} × {count}
+            </Badge>
+          ))}
+        </div>
+      )}
+
+      {loading ? (
+        <div style={{ padding: 24, textAlign: "center", color: A.muted }}>Loading…</div>
+      ) : error ? (
+        <div style={{ padding: 24, textAlign: "center", color: A.red }}>{error}</div>
+      ) : rows.length === 0 ? (
+        <div style={{ padding: 24, textAlign: "center", color: A.muted2 }}>No held/failed pieces found.</div>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ background: A.bg }}>
+                {["Tenant", "Goal / Channel", "Status", "Attempt", "Created", ""].map(h => (
+                  <th key={h} style={{
+                    padding: "8px 12px", textAlign: "left", fontSize: 10.5, fontWeight: 600,
+                    letterSpacing: "0.08em", textTransform: "uppercase", color: A.muted,
+                    borderBottom: `1px solid ${A.line}`,
+                  }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(row => (
+                <ContentLogRowLine key={row.piece_id} row={row}
+                  expanded={expanded === row.piece_id}
+                  onToggle={() => setExpanded(expanded === row.piece_id ? null : row.piece_id)} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function ContentLogRowLine({ row, expanded, onToggle }: {
+  row: ContentLogRow; expanded: boolean; onToggle: () => void;
+}) {
+  const td: React.CSSProperties = { padding: "10px 12px", borderBottom: `1px solid ${A.line}`, fontSize: 12.5, color: A.body, verticalAlign: "top" };
+  return (
+    <>
+      <tr onClick={onToggle} style={{ cursor: "pointer" }}>
+        <td style={td}>
+          <div style={{ fontWeight: 600 }}>{row.tenant_name || "—"}</div>
+          <div style={{ fontFamily: mono, fontSize: 10.5, color: A.muted2 }}>{row.tenant_slug || row.tenant_id.slice(0, 8)}</div>
+        </td>
+        <td style={td}>
+          <div>{row.goal || "—"}</div>
+          <div style={{ fontFamily: mono, fontSize: 10.5, color: A.muted2 }}>{row.channel || "—"}</div>
+        </td>
+        <td style={td}><Badge color={contentStatusColor(row.status)}>{row.status}</Badge></td>
+        <td style={td}>{row.attempt_number}</td>
+        <td style={{ ...td, fontFamily: mono, fontSize: 11, color: A.muted }}>{fmtDate(row.created_at)}</td>
+        <td style={{ ...td, textAlign: "center" }}>{expanded ? "▲" : "▼"}</td>
+      </tr>
+      {expanded && (
+        <tr>
+          <td colSpan={6} style={{ padding: "0 12px 14px", borderBottom: `1px solid ${A.line}` }}>
+            <div style={{ background: A.bg, borderRadius: 8, padding: 12, fontFamily: mono, fontSize: 11, color: A.body }}>
+              <div style={{ marginBottom: 6, color: A.muted2 }}>
+                piece_id: {row.piece_id} · atom_id: {row.atom_id} · request_id: {row.angle_gate_request_id}
+              </div>
+              {row.held_reason && (
+                <div style={{ marginBottom: 6 }}><strong>held_reason:</strong> {row.held_reason}</div>
+              )}
+              {(row.gate_ledger || []).map((g, i) => (
+                <div key={i} style={{ marginBottom: 4, color: g.passed ? A.muted2 : A.red }}>
+                  <strong>{g.gate}</strong> — {g.passed ? "passed" : `FAILED: ${(g.violations || []).join("; ")}`}
+                </div>
+              ))}
+              {row.content_preview && (
+                <div style={{ marginTop: 8, color: A.muted2, whiteSpace: "pre-wrap" }}>
+                  {row.content_preview}…
+                </div>
+              )}
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
 // ── Trust Ramp section ───────────────────────────────────────────────────────
 
 function TrustRampSection() {
@@ -495,12 +685,13 @@ export default function A4OversightPage() {
             Cross-Tenant Oversight
           </h1>
           <div style={{ fontSize: 12, color: A.muted, marginTop: 4 }}>
-            Post-hoc monitoring — AA does not gate tenant content at any T0-T11 step. Review Log
-            and Trust Ramp are read-only; Publish Log below is the one exception, per AA-455 —
-            force-unpublish is a safety-net intervention, not a content-approval gate.
+            Post-hoc monitoring — AA does not gate tenant content at any T0-T11 step. Review Log,
+            Content Log, and Trust Ramp are read-only; Publish Log below is the one exception, per
+            AA-455 — force-unpublish is a safety-net intervention, not a content-approval gate.
           </div>
         </div>
         <ReviewLogSection />
+        <ContentLogSection />
         <PublishLogSection />
         <TrustRampSection />
       </div>
