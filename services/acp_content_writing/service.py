@@ -507,12 +507,19 @@ _TENANT_REVIEWS_QUERY = """
             ON ago_chosen.request_id = agr.request_id AND ago_chosen.chosen = true
             AND cp.angle_gate_option_id IS NULL
         LEFT JOIN acp_contract.tour_atoms ta
-            ON ta.atom_id = agr.atom_id AND ta.owner_scope = $1::text
+            ON ta.atom_id = agr.atom_id AND ta.owner_scope = $2
         WHERE cp.tenant_id = $1
         ORDER BY cp.angle_gate_request_id, cp.created_at DESC
     ) latest
     ORDER BY latest.created_at DESC
 """
+# Live-verify (30/08/2026) caught a real bug here: using the SAME placeholder ($1) both bare
+# (compared to cp.tenant_id, a uuid column) and cast ($1::text, compared to ta.owner_scope, a
+# text column) makes asyncpg's single-preparation type inference pick ONE type for $1 across the
+# whole statement — it resolved to text (from the explicit cast), and Postgres then has no
+# `uuid = text` operator for the `cp.tenant_id = $1` comparison ("operator does not exist: uuid =
+# text"). Fixed by binding tenant_id twice as two separate, unambiguously-typed params ($1 uuid,
+# $2 text) — same value, no ambiguity for either placeholder.
 
 
 async def fetch_review_list(tenant_id: UUID, pool) -> list[dict]:
@@ -522,7 +529,7 @@ async def fetch_review_list(tenant_id: UUID, pool) -> list[dict]:
     fetch_review()'s own query (same precedent as admin_a4.py's content-log and v1_publish.py's
     /pending each keeping their own SQL rather than sharing an abstraction)."""
     async with pool.acquire() as conn:
-        rows = await conn.fetch(_TENANT_REVIEWS_QUERY, tenant_id)
+        rows = await conn.fetch(_TENANT_REVIEWS_QUERY, tenant_id, str(tenant_id))
 
     trips_by_id: dict[str, object] = {}
     if any(r["trip_id"] for r in rows):
