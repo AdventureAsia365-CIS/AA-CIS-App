@@ -32,6 +32,7 @@ def _request_row(**over):
     base = {
         "request_id": uuid.uuid4(), "tenant_id": TENANT_ID, "atom_id": "atom_abc123",
         "trip_id": TRIP_ID, "channel": "facebook", "goal": None, "cta": None, "status": "pending_goal",
+        "dfs_paa_snapshot": None,  # AA-501, migration 127
         "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
     }
     base.update(over)

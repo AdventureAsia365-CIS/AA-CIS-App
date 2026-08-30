@@ -233,23 +233,45 @@ async def get_content_log(
     `repair_log`'s retry-feedback trail) but had ZERO A4 path before this — the data existed,
     only the read route was missing (STEP0's own "easiest gap to patch" ranking).
 
-    `status IN ('held', 'failed')` only — 'processing' is a transient in-flight placeholder
-    (nothing to review yet) and 'approved' is a real success (nothing to flag), matching
-    publish-log's own convention of surfacing outcomes worth oversight, not every row.
+    AA-501 widened this from "held/failed only" to EVERY content_piece row, with full write
+    context (atom/tour/goal/angle/DFS-PAA/channel) added — per Nghiệp's explicit decision this is
+    the WIDEST of the two AA-501 views: "AA cần thấy MỌI THỨ tenant thấy, CỘNG THÊM chi tiết kỹ
+    thuật — không phải tập con khác biệt" (AA must see everything Tenant sees, PLUS technical
+    detail — not a different subset). The old held/failed-only filter would have hidden exactly
+    the 'approved'/'processing' rows a lesson-log/comparison use case needs to see alongside the
+    failures. `repair_log` (retry-feedback trail) is now selected too — it existed on the table
+    since migration 115 but this endpoint never fetched it (STEP0 §1.5's own flagged gap).
+
+    No real numeric "score" exists for T10 (per-criterion pass/fail, not T3's quality_score) —
+    `gate_pass_count`/`gate_total_count` are computed here from `gate_ledger`'s own pass/fail
+    entries as a summary, NOT a replacement for the full per-gate detail already in `gate_ledger`
+    (Nghiệp: "cần phải xem chi tiết được, biết nguyên nhân rõ ràng gate nào bị held" — a total
+    alone would not satisfy that).
+
+    `publish_status` (`published`/`pending_publish`/`n/a`) — a LEFT JOIN to
+    `acp_shared.publish_log` (`status = 'published'`, same convention `v1_publish.py`'s own
+    `/pending` query uses): `published` when a publish_log row exists, `pending_publish` when the
+    piece is `approved` but has none yet, `n/a` for anything not yet ready to publish at all
+    (`held`/`failed`/`processing`).
 
     Same cross-tenant-by-default shape as review-log/publish-log above: optional `tenant_id`
-    filter, no hard tenant scoping — A4 is cross-tenant oversight by design (STEP0/AA-437), and
-    every other read endpoint here follows this exact pattern; no new scoping model invented.
+    filter (already existed, unchanged), no hard tenant scoping — A4 is cross-tenant oversight by
+    design (STEP0/AA-437).
 
     `channel` reads `COALESCE(cp.channel, agr.channel)` — same reasoning AA-469 Việc 4's
-    flow-order fix already applied to `v1_publish.py`'s two queries on this same table:
-    `angle_gate_request.channel` is no longer stable after a piece is written (a request's
-    channel can be re-set via `set_channel()` before its NEXT write), so a piece's own
-    (denormalized, immutable-once-written) `cp.channel` is read first."""
+    flow-order fix already applied to `v1_publish.py`'s two queries on this same table.
+    `angle_gate_option`/`tour_atoms` joins follow the same option_id-first (AA-497) and
+    owner_scope=tenant_id conventions the tenant-facing `fetch_review()`
+    (services/acp_content_writing/service.py, AA-501) uses — `tour_atoms`'s `owner_scope` filter
+    here uses `cp.tenant_id` directly (a SQL column reference, not a bound per-request tenant_id
+    param — this endpoint is cross-tenant, unlike the tenant-scoped Python helper).
+
+    NOT built here (explicitly out of scope, AA-505 instead): LLM cost/token tracking — no such
+    column exists on any of these tables yet."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
 
-    conditions = ["cp.status IN ('held', 'failed')"]
+    conditions = ["1 = 1"]
     params: list = []
     if tenant_id:
         params.append(tenant_id)
@@ -261,20 +283,52 @@ async def get_content_log(
         rows = await conn.fetch(f"""
             SELECT
                 cp.piece_id::text, cp.tenant_id::text, t.name AS tenant_name, t.slug AS tenant_slug,
-                cp.angle_gate_request_id::text, agr.atom_id, agr.goal,
+                cp.angle_gate_request_id::text, agr.atom_id, agr.goal, agr.cta,
+                agr.dfs_paa_snapshot, agr.trip_id,
                 COALESCE(cp.channel, agr.channel) AS channel,
-                cp.status, cp.held_reason, cp.gate_ledger, cp.attempt_number,
-                LEFT(cp.content_text, 280) AS content_preview, cp.created_at
+                cp.status, cp.held_reason, cp.gate_ledger, cp.repair_log, cp.attempt_number,
+                LEFT(cp.content_text, 280) AS content_preview, cp.created_at,
+                COALESCE(ago.name, ago_chosen.name) AS angle_name,
+                COALESCE(ago.why_it_works, ago_chosen.why_it_works) AS angle_why_it_works,
+                COALESCE(ago.formula_fit, ago_chosen.formula_fit) AS angle_formula_fit,
+                COALESCE(ago.best_final_style, ago_chosen.best_final_style) AS angle_best_final_style,
+                ta.text AS atom_text, ta.activity_type AS atom_activity_type,
+                ta.emotional_hook AS atom_emotional_hook, ta.season_note AS atom_season_note,
+                rt.src_name AS tour_name, rt.country AS tour_destination,
+                pl.publish_id AS publish_id
             FROM acp_shared.content_piece cp
             JOIN acp_shared.angle_gate_request agr ON agr.request_id = cp.angle_gate_request_id
             LEFT JOIN shared.tenants t ON t.tenant_id = cp.tenant_id
+            LEFT JOIN acp_shared.angle_gate_option ago ON ago.option_id = cp.angle_gate_option_id
+            LEFT JOIN acp_shared.angle_gate_option ago_chosen
+                ON ago_chosen.request_id = agr.request_id AND ago_chosen.chosen = true
+                AND cp.angle_gate_option_id IS NULL
+            LEFT JOIN acp_contract.tour_atoms ta
+                ON ta.atom_id = agr.atom_id AND ta.owner_scope = cp.tenant_id::text
+            LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = agr.trip_id
+            LEFT JOIN acp_shared.publish_log pl
+                ON pl.piece_id = cp.piece_id AND pl.status = 'published'
             WHERE {where}
             ORDER BY cp.created_at DESC
             LIMIT ${len(params)}
         """, *params)
 
-    data = [
-        {
+    def _publish_status(status: str, published: bool) -> str:
+        if published:
+            return "published"
+        if status == "approved":
+            return "pending_publish"
+        return "n/a"
+
+    def _gate_counts(gate_ledger: list) -> dict:
+        passed = sum(1 for g in gate_ledger if isinstance(g, dict) and g.get("passed"))
+        return {"passed": passed, "total": len(gate_ledger)}
+
+    data = []
+    for r in rows:
+        gate_ledger = _parse_jsonb(r["gate_ledger"], [])
+        gate_counts = _gate_counts(gate_ledger)
+        data.append({
             "piece_id": r["piece_id"],
             "tenant_id": r["tenant_id"],
             "tenant_name": r["tenant_name"],
@@ -285,13 +339,28 @@ async def get_content_log(
             "channel": r["channel"],
             "status": r["status"],
             "held_reason": r["held_reason"],
-            "gate_ledger": _parse_jsonb(r["gate_ledger"], []),
+            "gate_ledger": gate_ledger,
+            "gate_pass_count": gate_counts["passed"],
+            "gate_total_count": gate_counts["total"],
+            "repair_log": _parse_jsonb(r["repair_log"], []),
             "attempt_number": r["attempt_number"],
             "content_preview": r["content_preview"],
+            "cta": r["cta"],
+            "angle": {
+                "name": r["angle_name"], "why_it_works": r["angle_why_it_works"],
+                "formula_fit": r["angle_formula_fit"], "best_final_style": r["angle_best_final_style"],
+            } if r["angle_name"] else None,
+            "atom": {
+                "text": r["atom_text"], "activity_type": r["atom_activity_type"],
+                "emotional_hook": r["atom_emotional_hook"], "season_note": r["atom_season_note"],
+            } if r["atom_text"] else None,
+            "tour": {
+                "name": r["tour_name"], "destination": r["tour_destination"],
+            } if r["tour_name"] else None,
+            "dfs_paa_snapshot": _parse_jsonb(r["dfs_paa_snapshot"], None),
+            "publish_status": _publish_status(r["status"], r["publish_id"] is not None),
             "created_at": r["created_at"].isoformat() if r["created_at"] else None,
-        }
-        for r in rows
-    ]
+        })
     logger.info("a4_content_log_queried", count=len(data), tenant_filter=tenant_id)
     return {"data": data, "total": len(data), "tenant_filter": tenant_id}
 

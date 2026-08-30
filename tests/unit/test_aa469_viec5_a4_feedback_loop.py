@@ -124,22 +124,42 @@ class TestGetContentLog:
             await get_content_log(req, tenant_id=None, limit=200, x_admin_secret="wrong")
         assert exc_info.value.status_code == 403
 
-    async def test_returns_held_and_failed_rows(self):
-        from api.routers.admin_a4 import get_content_log
-
-        row = {
+    @staticmethod
+    def _full_row(**over):
+        """AA-501 — every column the widened SELECT now returns. Held/failed rows are no longer
+        the only rows this endpoint returns (see test_returns_every_status_not_just_held_failed
+        below) — this fixture covers a 'held' row with a full angle/atom/tour/DFS-PAA context so
+        every new field has real coverage."""
+        base = {
             "piece_id": PIECE_ID, "tenant_id": TENANT_ID, "tenant_name": "WanderLux",
             "tenant_slug": "wanderlux-travel", "angle_gate_request_id": REQUEST_ID,
-            "atom_id": "atom_abc123", "goal": "engagement_conversation", "channel": "tiktok",
+            "atom_id": "atom_abc123", "goal": "engagement_conversation", "cta": "Book now",
+            "dfs_paa_snapshot": json.dumps(
+                {"relevance": "HIGH", "people_also_ask": ["q1"], "related_keywords": ["k1"]}
+            ),
+            "trip_id": TOUR_ID, "channel": "tiktok",
             "status": "held", "held_reason": "F1_grounding: unsupported claim",
             "gate_ledger": json.dumps([
                 {"gate": "F1_grounding", "passed": False, "violations": ["unsupported claim"]},
                 {"gate": "F6_cta_present", "passed": True, "violations": []},
             ]),
+            "repair_log": json.dumps([{"round": 1, "feedback": "add a source"}]),
             "attempt_number": 2, "content_preview": "Some real content...",
+            "angle_name": "Behind the Scenes", "angle_why_it_works": "curiosity",
+            "angle_formula_fit": "AIDA", "angle_best_final_style": "warm",
+            "atom_text": "Cross the bamboo bridge", "atom_activity_type": "adventure",
+            "atom_emotional_hook": "awe", "atom_season_note": "dry season best",
+            "tour_name": "Sapa Trek", "tour_destination": "Vietnam",
+            "publish_id": None,
             "created_at": datetime(2026, 8, 30, tzinfo=timezone.utc),
         }
-        pool, conn = _make_pool(fetch=[row])
+        base.update(over)
+        return base
+
+    async def test_returns_full_context_and_gate_detail(self):
+        from api.routers.admin_a4 import get_content_log
+
+        pool, conn = _make_pool(fetch=[self._full_row()])
         req = _make_request(pool)
 
         result = await get_content_log(req, tenant_id=None, limit=200, x_admin_secret=_TEST_SECRET)
@@ -150,9 +170,67 @@ class TestGetContentLog:
         assert item["channel"] == "tiktok"
         assert len(item["gate_ledger"]) == 2
         assert item["gate_ledger"][0]["gate"] == "F1_grounding"
+        assert item["gate_pass_count"] == 1
+        assert item["gate_total_count"] == 2
+        assert item["repair_log"] == [{"round": 1, "feedback": "add a source"}]
+        assert item["angle"] == {
+            "name": "Behind the Scenes", "why_it_works": "curiosity",
+            "formula_fit": "AIDA", "best_final_style": "warm",
+        }
+        assert item["atom"] == {
+            "text": "Cross the bamboo bridge", "activity_type": "adventure",
+            "emotional_hook": "awe", "season_note": "dry season best",
+        }
+        assert item["tour"] == {"name": "Sapa Trek", "destination": "Vietnam"}
+        assert item["dfs_paa_snapshot"] == {
+            "relevance": "HIGH", "people_also_ask": ["q1"], "related_keywords": ["k1"],
+        }
+        assert item["cta"] == "Book now"
+        assert item["publish_status"] == "n/a"  # held — not ready to publish at all
+
+    async def test_query_no_longer_hardcodes_held_failed_filter(self):
+        """AA-501 — widened from held/failed-only to every content_piece row (Nghiệp: 'AA cần
+        thấy MỌI THỨ tenant thấy, CỘNG THÊM chi tiết kỹ thuật' — not a different subset)."""
+        from api.routers.admin_a4 import get_content_log
+
+        pool, conn = _make_pool(fetch=[])
+        req = _make_request(pool)
+        await get_content_log(req, tenant_id=None, limit=200, x_admin_secret=_TEST_SECRET)
 
         sql = conn.fetch.call_args[0][0]
-        assert "cp.status IN ('held', 'failed')" in sql
+        assert "cp.status IN ('held', 'failed')" not in sql
+
+    async def test_publish_status_published_when_publish_log_row_exists(self):
+        from api.routers.admin_a4 import get_content_log
+
+        row = self._full_row(status="approved", held_reason=None, publish_id=str(uuid.uuid4()))
+        pool, conn = _make_pool(fetch=[row])
+        req = _make_request(pool)
+
+        result = await get_content_log(req, tenant_id=None, limit=200, x_admin_secret=_TEST_SECRET)
+        assert result["data"][0]["publish_status"] == "published"
+
+    async def test_publish_status_pending_when_approved_and_unpublished(self):
+        from api.routers.admin_a4 import get_content_log
+
+        row = self._full_row(status="approved", held_reason=None, publish_id=None)
+        pool, conn = _make_pool(fetch=[row])
+        req = _make_request(pool)
+
+        result = await get_content_log(req, tenant_id=None, limit=200, x_admin_secret=_TEST_SECRET)
+        assert result["data"][0]["publish_status"] == "pending_publish"
+
+    async def test_no_llm_cost_or_token_fields(self):
+        """AA-501 build task explicitly excludes cost/token tracking (split to AA-505) — this
+        endpoint must not fabricate or expose any such field."""
+        from api.routers.admin_a4 import get_content_log
+
+        pool, conn = _make_pool(fetch=[self._full_row()])
+        req = _make_request(pool)
+
+        result = await get_content_log(req, tenant_id=None, limit=200, x_admin_secret=_TEST_SECRET)
+        keys = set(result["data"][0].keys())
+        assert not any("cost" in k or "token" in k for k in keys)
 
     async def test_channel_reads_content_piece_first_coalesce_pattern(self):
         """Same COALESCE(cp.channel, agr.channel) fix AA-469 Việc 4 already applied to

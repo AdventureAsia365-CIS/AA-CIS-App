@@ -360,7 +360,222 @@ async def fetch_piece(tenant_id: UUID, piece_id: UUID, pool) -> dict:
     return _row_to_dict(row)
 
 
+# ── AA-501: tenant-facing pre-T11 review (deliberately narrower than fetch_piece() above) ──────
+
+_READY_STATE_MAP = {
+    "approved": "ready",
+    "processing": "in_progress",
+    "held": "not_ready",
+    "failed": "not_ready",
+}
+
+_LATEST_PIECE_FOR_REQUEST_QUERY = """
+    SELECT piece_id, status, content_text, channel, angle_gate_option_id, created_at
+    FROM acp_shared.content_piece
+    WHERE angle_gate_request_id = $1 AND tenant_id = $2
+    ORDER BY created_at DESC
+    LIMIT 1
+"""
+# Deliberately does NOT select gate_ledger/repair_log/held_reason — STEP0 §4's own
+# recommendation was to strip these at the SQL layer, not just the API response layer, so a
+# future field added to fetch_review()'s dict can never accidentally leak them by copying
+# fetch_piece()'s SELECT list.
+
+_ATOM_CONTEXT_QUERY = """
+    SELECT text, activity_type, emotional_hook, season_note
+    FROM acp_contract.tour_atoms
+    WHERE atom_id = $1 AND owner_scope = $2 AND NOT deleted AND NOT is_empty_marker
+"""
+
+
+async def _fetch_atom_context(tenant_id: UUID, atom_id: str, pool) -> Optional[dict]:
+    """Tenant-scoped atom context for the review screen (AA-501) — text/activity_type/
+    emotional_hook/season_note only, the fields the build task asked for (distinctiveness/
+    persona_fit/media are AA-internal signals, out of scope here). Same owner_scope=tenant_id
+    convention as this module's own _fetch_atom_text() / acp_angle_gate.service.
+    _fetch_atom_for_tenant() — not a new security pattern."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(_ATOM_CONTEXT_QUERY, atom_id, str(tenant_id))
+    return dict(row) if row else None
+
+
+async def fetch_review(tenant_id: UUID, request_id: UUID, pool) -> dict:
+    """AA-501 — the tenant-facing pre-T11 review: full write context (atom/tour/goal/angle/
+    DFS-PAA/channel) plus the latest content_piece for this request, WITHOUT any of T10's
+    technical detail. This is deliberately STRICTER than GET .../pieces/{piece_id}
+    (fetch_piece() above, which the T8/T9 wizard's own end-of-flow card uses and which DOES
+    return held_reason) — Nghiệp confirmed this divergence explicitly for the new screen, it is
+    not an inconsistency to reconcile.
+
+    `content_piece` is no longer 1-row-per-request since migration 125 (AA-497 reopen/re-write) —
+    picks the LATEST piece by created_at, never assumes attempt_number orders across a request's
+    lifetime (STEP0 §1's own warning).
+
+    Raises angle_gate_service.RequestNotFoundError (request doesn't exist / isn't this tenant's,
+    propagates from fetch_request() below) or ContentWritingError (request exists but T9 has
+    never written anything under it yet) — the router maps both to 404."""
+    req = await angle_gate_service.fetch_request(tenant_id, request_id, pool)
+
+    async with pool.acquire() as conn:
+        piece_row = await conn.fetchrow(_LATEST_PIECE_FOR_REQUEST_QUERY, request_id, tenant_id)
+    if piece_row is None:
+        raise ContentWritingError(
+            f"request_id={request_id} has no written content yet — T9's write step hasn't run "
+            "for this request."
+        )
+
+    # AA-469 Việc 4 — same COALESCE(cp.channel, agr.channel) every other real read site uses
+    # (v1_publish.py, admin_a4.py's content-log): a piece's own channel is immutable once
+    # written; the parent request's channel can move on to a different value before its NEXT
+    # write session.
+    channel = piece_row["channel"] or req["channel"]
+
+    # AA-497 — option_id-first join, chosen=true fallback only for pre-AA-497 rows with no
+    # angle_gate_option_id, same lesson v1_publish.py already applies (chosen is mutable after a
+    # reopen(), a piece's own angle_gate_option_id is not).
+    option_id = piece_row["angle_gate_option_id"]
+    angle = None
+    if option_id:
+        angle = next((a for a in req["angles"] if a["option_id"] == option_id), None)
+    if angle is None:
+        angle = next((a for a in req["angles"] if a["chosen"]), None)
+
+    atom_context = await _fetch_atom_context(tenant_id, req["atom_id"], pool)
+
+    tour_context = None
+    if req["trip_id"]:
+        trips = await fetch_tenant_trips(tenant_id, pool)
+        trip = next((t for t in trips if str(t.id) == req["trip_id"]), None)
+        if trip:
+            tour_context = {"name": trip.name, "destination": trip.destination}
+
+    goal_obj = get_goal(req["goal"]) if req["goal"] else None
+
+    ready_state = _READY_STATE_MAP.get(piece_row["status"], "not_ready")
+    # Content is only meaningful to show for approved/held — migration 115/118's own "held keeps
+    # real writer output visible for review, failed/processing never produced any" distinction.
+    # 'failed'/'processing' rows have content_text = '' by construction, never a partial draft.
+    content_text = piece_row["content_text"] if piece_row["status"] in ("approved", "held") else None
+
+    return {
+        "request_id": req["request_id"],
+        "channel": channel,
+        "ready_state": ready_state,
+        "content_text": content_text,
+        "goal": (
+            {"key": req["goal"], "label": goal_obj["name"] if goal_obj else req["goal"]}
+            if req["goal"] else None
+        ),
+        "angle": (
+            {
+                "name": angle["name"], "why_it_works": angle["why_it_works"],
+                "formula_fit": angle["formula_fit"], "best_final_style": angle["best_final_style"],
+            } if angle else None
+        ),
+        "atom": atom_context,
+        "tour": tour_context,
+        "dfs_paa_snapshot": req["dfs_paa_snapshot"],
+        "cta": req["cta"],
+        "created_at": piece_row["created_at"].isoformat(),
+    }
+
+
+# AA-501 — the browse-all-pieces list `/portal/t10-review` shows (build task: "Danh sách bài viết
+# theo channel, mỗi bài mở ra xem đủ ngữ cảnh"). One row per angle_gate_request (its LATEST
+# content_piece, same AA-497 "no longer 1:1" rule as fetch_review() above), full context embedded
+# directly — no separate per-row detail fetch, matching how admin_a4.py's content-log and this
+# app's other list endpoints already return everything up front rather than a paginated
+# expand-fetch. Deliberately does NOT select gate_ledger/repair_log/held_reason, same as
+# fetch_review().
+_TENANT_REVIEWS_QUERY = """
+    SELECT * FROM (
+        SELECT DISTINCT ON (cp.angle_gate_request_id)
+            cp.piece_id, cp.angle_gate_request_id, cp.status, cp.content_text,
+            cp.created_at,
+            COALESCE(cp.channel, agr.channel) AS channel, agr.goal, agr.cta,
+            agr.trip_id, agr.dfs_paa_snapshot,
+            COALESCE(ago.name, ago_chosen.name) AS angle_name,
+            COALESCE(ago.why_it_works, ago_chosen.why_it_works) AS angle_why_it_works,
+            COALESCE(ago.formula_fit, ago_chosen.formula_fit) AS angle_formula_fit,
+            COALESCE(ago.best_final_style, ago_chosen.best_final_style) AS angle_best_final_style,
+            ta.text AS atom_text, ta.activity_type AS atom_activity_type,
+            ta.emotional_hook AS atom_emotional_hook, ta.season_note AS atom_season_note
+        FROM acp_shared.content_piece cp
+        JOIN acp_shared.angle_gate_request agr ON agr.request_id = cp.angle_gate_request_id
+        LEFT JOIN acp_shared.angle_gate_option ago ON ago.option_id = cp.angle_gate_option_id
+        LEFT JOIN acp_shared.angle_gate_option ago_chosen
+            ON ago_chosen.request_id = agr.request_id AND ago_chosen.chosen = true
+            AND cp.angle_gate_option_id IS NULL
+        LEFT JOIN acp_contract.tour_atoms ta
+            ON ta.atom_id = agr.atom_id AND ta.owner_scope = $1::text
+        WHERE cp.tenant_id = $1
+        ORDER BY cp.angle_gate_request_id, cp.created_at DESC
+    ) latest
+    ORDER BY latest.created_at DESC
+"""
+
+
+async def fetch_review_list(tenant_id: UUID, pool) -> list[dict]:
+    """AA-501 — GET /v1/content-writing/reviews. One call, one query (plus one
+    fetch_tenant_trips() call, only when at least one row has a trip_id — never per-row) rather
+    than N+1 calls into fetch_review() per request; the SQL is intentionally independent of
+    fetch_review()'s own query (same precedent as admin_a4.py's content-log and v1_publish.py's
+    /pending each keeping their own SQL rather than sharing an abstraction)."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(_TENANT_REVIEWS_QUERY, tenant_id)
+
+    trips_by_id: dict[str, object] = {}
+    if any(r["trip_id"] for r in rows):
+        trips = await fetch_tenant_trips(tenant_id, pool)
+        trips_by_id = {str(t.id): t for t in trips}
+
+    items = []
+    for r in rows:
+        goal_obj = get_goal(r["goal"]) if r["goal"] else None
+        ready_state = _READY_STATE_MAP.get(r["status"], "not_ready")
+        content_text = r["content_text"] if r["status"] in ("approved", "held") else None
+
+        tour_context = None
+        trip_id = str(r["trip_id"]) if r["trip_id"] else None
+        if trip_id and trip_id in trips_by_id:
+            trip = trips_by_id[trip_id]
+            tour_context = {"name": trip.name, "destination": trip.destination}
+
+        snapshot = r["dfs_paa_snapshot"]
+        if isinstance(snapshot, str):
+            snapshot = json.loads(snapshot)
+
+        items.append({
+            "request_id": str(r["angle_gate_request_id"]),
+            "piece_id": str(r["piece_id"]),
+            "channel": r["channel"],
+            "ready_state": ready_state,
+            "content_text": content_text,
+            "goal": (
+                {"key": r["goal"], "label": goal_obj["name"] if goal_obj else r["goal"]}
+                if r["goal"] else None
+            ),
+            "angle": (
+                {
+                    "name": r["angle_name"], "why_it_works": r["angle_why_it_works"],
+                    "formula_fit": r["angle_formula_fit"], "best_final_style": r["angle_best_final_style"],
+                } if r["angle_name"] else None
+            ),
+            "atom": (
+                {
+                    "text": r["atom_text"], "activity_type": r["atom_activity_type"],
+                    "emotional_hook": r["atom_emotional_hook"], "season_note": r["atom_season_note"],
+                } if r["atom_text"] else None
+            ),
+            "tour": tour_context,
+            "dfs_paa_snapshot": snapshot,
+            "cta": r["cta"],
+            "created_at": r["created_at"].isoformat(),
+        })
+    return items
+
+
 __all__ = [
     "ContentWritingError", "RequestNotReadyError", "MissingCTAError", "MAX_ATTEMPTS",
-    "start_write", "run_write_background", "fetch_piece",
+    "start_write", "run_write_background", "fetch_piece", "fetch_review", "fetch_review_list",
 ]

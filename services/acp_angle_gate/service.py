@@ -11,6 +11,8 @@ nullable per migration 126).
 """
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
 from typing import Optional
 from uuid import UUID
 
@@ -197,7 +199,7 @@ async def _fetch_request_row(tenant_id: UUID, request_id: UUID, pool):
         row = await conn.fetchrow(
             """
             SELECT request_id, tenant_id, atom_id, trip_id, channel, goal, cta, status,
-                   created_at, updated_at
+                   dfs_paa_snapshot, created_at, updated_at
             FROM acp_shared.angle_gate_request
             WHERE request_id = $1 AND tenant_id = $2
             """,
@@ -253,15 +255,23 @@ async def set_goal_and_generate(tenant_id: UUID, request_id: UUID, goal_key: str
         search_demand=search_demand,
     )
 
+    # AA-501 (migration 127) — snapshot, not a live re-fetch: persist exactly the
+    # SearchDemandSignal the LLM saw for THIS request, so a later T2 DFS re-run on the same tour
+    # can never silently change what the review screen shows for an already-generated angle. None
+    # (no trip_id, or no seo_context row) stays NULL, not an empty object — same "absent means no
+    # signal" convention fetch_search_demand_signal() itself uses.
+    dfs_paa_snapshot = json.dumps(asdict(search_demand)) if search_demand else None
+
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
                 """
                 UPDATE acp_shared.angle_gate_request
-                SET goal = $2, status = 'pending_choice', updated_at = now()
+                SET goal = $2, status = 'pending_choice', updated_at = now(),
+                    dfs_paa_snapshot = $3::jsonb
                 WHERE request_id = $1
                 """,
-                request_id, goal_key,
+                request_id, goal_key, dfs_paa_snapshot,
             )
             for i, a in enumerate(angles):
                 await conn.execute(
@@ -416,6 +426,13 @@ async def fetch_request(tenant_id: UUID, request_id: UUID, pool) -> dict:
             """,
             request_id,
         )
+    # AA-501 — dfs_paa_snapshot (migration 127) arrives as a raw JSON string (no jsonb codec
+    # registered on this app's connections, same gap admin_a4.py's _parse_jsonb already works
+    # around for gate_ledger/escalate_detail) — parse defensively, NULL stays None.
+    snapshot = req["dfs_paa_snapshot"]
+    if isinstance(snapshot, str):
+        snapshot = json.loads(snapshot)
+
     return {
         "request_id": str(req["request_id"]),
         "tenant_id": str(req["tenant_id"]),
@@ -425,6 +442,7 @@ async def fetch_request(tenant_id: UUID, request_id: UUID, pool) -> dict:
         "goal": req["goal"],
         "cta": req["cta"],
         "status": req["status"],
+        "dfs_paa_snapshot": snapshot,
         "created_at": req["created_at"].isoformat(),
         "updated_at": req["updated_at"].isoformat(),
         "angles": [dict(o) for o in option_rows],
