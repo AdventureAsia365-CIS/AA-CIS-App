@@ -8,7 +8,7 @@
 #   → if found: return signed JWT { tenant_id, name, plan_tier, exp }
 #   → frontend stores JWT in cookie → middleware verifies JWT on each request
 #
-# JWT secret: JWT_SECRET env var (required)
+# JWT secret: JWT_SECRET env var (required, no fallback — AA-506)
 # JWT expiry: 24h
 
 import hashlib
@@ -24,7 +24,17 @@ from pydantic import BaseModel
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-JWT_SECRET   = os.environ.get("JWT_SECRET", "cis-dev-jwt-secret-change-in-prod")
+# AA-506: no hardcoded fallback. The old default ("cis-dev-jwt-secret-change-in-prod")
+# was committed to this repo's own history, so anyone who ever cloned it could forge a
+# valid tenant OR admin JWT against any deployment that forgot to set the real env var.
+# Fail fast at import time instead — a missing secret must stop the app from starting,
+# not silently sign tokens with a publicly-known string.
+JWT_SECRET = os.environ.get("JWT_SECRET")
+if not JWT_SECRET:
+    raise RuntimeError(
+        "JWT_SECRET env var is not set. Refusing to start — see Secrets Manager "
+        "aa-cis/dev/jwt-secret (AA-506); no hardcoded fallback is permitted."
+    )
 JWT_ALG      = "HS256"
 JWT_EXPIRY_H = 24
 
