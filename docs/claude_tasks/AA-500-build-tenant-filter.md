@@ -49,3 +49,28 @@ a different code path, and would have additionally broken N5 (`quarter.plan_quar
 (`allocator.allocate_month`) for any tenant with T5 atoms, since their `atoms_by_trip` would no
 longer match any entry in an empty `trips_by_id`. The revised prompt above (received mid-session,
 replacing the first) reaches the same conclusion independently and was used for the actual build.
+
+---
+
+## Follow-up build prompt (same day, after PR #271 merged+deployed) — "Cách B", verbatim
+
+Chốt: Cách B — fetch_trips() chỉ trả về tour đã có ≥1 atom (đã qua atomize T5), không trả về tour
+mới rewrite xong nhưng chưa atomize.
+
+Lý do: Slate (T7, AA-511) hiển thị/đề xuất theo atom (qua Segment/Route), không theo tour. Tour
+chưa atomize = không có atom nào cho Slate dùng = xuất hiện trong danh sách chỉ gây nhiễu, tenant
+bấm vào thấy trống. Lọc ngay từ gốc ở fetch_trips(), không đẩy việc lọc xuống Slate.
+
+Việc cần sửa: đổi câu query hiện tại từ không điều kiện atom (LEFT JOIN hoặc không JOIN
+tour_atoms) sang INNER JOIN tour_atoms (hoặc EXISTS subquery tương đương) — chỉ giữ tour có ít
+nhất 1 dòng trong tour_atoms. Với ví dụ thật đã đo (wanderlux-travel: 8 tour rewrite, 2 đã
+atomize) — sau khi sửa, fetch_trips() phải trả về đúng 2, không phải 8.
+
+Live-verify bổ sung: đối chiếu số tour trả về mới với đúng số tour có DISTINCT tour_id trong
+tour_atoms cho tenant đó (query trực tiếp DB) — phải khớp chính xác.
+
+exploreasia-co vẫn 0 tour là đúng (chưa rewrite gì) — không phải vấn đề.
+
+See `docs/implementation-notes/AA-500.md`'s "Follow-up (same day...) — 'Cách B'" section for the
+implementation + live-verify evidence (exact tour_id-set match, not just count match, confirmed
+for `wanderlux-travel`: 8 → 2).

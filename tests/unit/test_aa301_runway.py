@@ -258,18 +258,48 @@ class TestFetchTripsDbWrapper:
 
         assert len(trips) == 1
         assert trips[0].name == "DB Trip"
-        called_query, called_tenant_id = conn.fetch.call_args[0]
+        called_query, called_tenant_id, called_owner_scope = conn.fetch.call_args[0]
         assert called_tenant_id == TENANT
+        assert called_owner_scope == str(TENANT)
         assert "gold_aa_internal.tenant_tour_versions" in called_query
         assert "WHERE ttv.tenant_id = $1" in called_query
         assert "FROM acp_contract.v_trip_registry" not in called_query
 
     @pytest.mark.asyncio
-    async def test_no_tenant_tour_versions_rows_returns_empty_not_error(self):
-        """AA-500 decision (Nghiep-confirmed): a tenant with zero `tenant_tour_versions` rows —
+    async def test_query_requires_at_least_one_real_atom(self):
+        """AA-500 follow-up (same day, "Cách B", Nghiep decision) — `fetch_trips()` additionally
+        requires >=1 real `tour_atoms` row (`owner_scope = tenant_id`, not deleted, not an empty
+        marker) via `EXISTS`, on top of `tenant_tour_versions` membership. Slate (T7, AA-511)
+        shows/recommends by ATOM, not by tour — a rewritten-but-not-yet-atomized tour has no
+        atoms for Slate to use, so it would be pure noise if `fetch_trips()` still returned it.
+        Deliberately diverges from `tenant_pool.fetch_tenant_trips()`/`v1_marketplace.py`'s
+        atom-optional queries — see the function's own docstring for why that's correct."""
+        conn = AsyncMock()
+        conn.fetch.return_value = []
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=conn)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        pool = MagicMock()
+        pool.acquire = MagicMock(return_value=ctx)
+
+        await fetch_trips(TENANT, pool)
+
+        called_query, called_tenant_id, called_owner_scope = conn.fetch.call_args[0]
+        assert called_tenant_id == TENANT
+        assert called_owner_scope == str(TENANT)
+        assert "EXISTS" in called_query
+        assert "acp_contract.tour_atoms" in called_query
+        assert "ta.owner_scope = $2" in called_query
+        assert "NOT ta.deleted" in called_query
+        assert "NOT ta.is_empty_marker" in called_query
+
+    @pytest.mark.asyncio
+    async def test_no_qualifying_rows_returns_empty_not_error(self):
+        """AA-500 decision (Nghiep-confirmed): a tenant with zero rewritten+atomized trips —
         including aa_internal itself today, which has never run its own master catalog through
         the T1->T5 tenant-rewrite flow — gets an empty trip list, not an error. Fixing this for
-        aa_internal is an operational action (rewrite a tour via the portal), not a code branch."""
+        aa_internal is an operational action (rewrite+atomize a tour via the portal), not a code
+        branch."""
         conn = AsyncMock()
         conn.fetch.return_value = []
         ctx = AsyncMock()
