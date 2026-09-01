@@ -46,6 +46,60 @@ class DataForSEOClient:
         logger.info("dfs_keywords_fetched", seed=seed, location=location_name)
         return self._parse_keywords(data)
 
+    async def fetch_volumes_bulk(
+        self,
+        keywords: list[str],
+        location_code: int = DEFAULT_LOCATION_CODE,
+        language_code: str = DEFAULT_LANGUAGE_CODE,
+    ) -> dict[str, int | None]:
+        """AA-515 — search volume for MANY keywords, ONE market, in ONE request.
+
+        Confirmed via DataForSEO's own docs (AA-515 STEP0c) that the Live search_volume
+        endpoint takes exactly one task per call and one location per task, but that one task
+        carries up to 1000 keywords at the SAME flat per-request price as one keyword — this is
+        the coalescing lever services/acp_contract/segment_research.py's research loop batches
+        concurrent asks onto, unlike fetch_keywords() above (single seed, truncates to top 10,
+        built for T2's one-seed-per-tour use, not reused here).
+
+        Returns every keyword in `keywords`, even ones DataForSEO didn't return a row for
+        (mapped to None, "measured as no data" per this repo's own null-handling convention —
+        services/acp_shared/dfs_relevance.py already treats a present-but-null search_volume as
+        a real, distinct case from "no row at all"). Never raises — a request failure returns
+        every keyword mapped to None, same self-contained-on-error shape fetch_keyword_ideas()
+        above already uses, so a network hiccup degrades one place's research to "no measured
+        demand this run" rather than aborting the whole loop.
+        """
+        if not keywords:
+            return {}
+        payload = [{
+            "language_code": language_code,
+            "location_code": location_code,
+            "keywords":      keywords[:1000],
+        }]
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    f"{DATAFORSEO_BASE}/keywords_data/google_ads/search_volume/live",
+                    auth=self._auth(),
+                    json=payload,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as e:
+            logger.warning("dfs_volumes_bulk_failed", count=len(keywords), error=str(e))
+            return {kw: None for kw in keywords}
+
+        out: dict[str, int | None] = {kw: None for kw in keywords}
+        try:
+            results = data["tasks"][0]["result"] or []
+        except (KeyError, IndexError, TypeError):
+            results = []
+        for row in results:
+            if isinstance(row, dict) and row.get("keyword") in out:
+                out[row["keyword"]] = row.get("search_volume")
+        logger.info("dfs_volumes_bulk_fetched", count=len(keywords), location=location_code)
+        return out
+
     async def _serp_advanced(
         self,
         seed: str,

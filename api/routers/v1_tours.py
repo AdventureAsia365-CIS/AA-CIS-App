@@ -29,6 +29,40 @@ def get_pool(request: Request):
     return request.app.state.pool
 
 
+async def _run_ranking_pipeline(tenant_id: str, pool) -> None:
+    """AA-515 — research (demand for whatever Segments aren't already fresh) then rank-sum,
+    for one tenant's whole current Segment set. Launched via `asyncio.create_task()` right
+    after `run_segment_matching()` in `atomize_version()` below (background, not awaited — see
+    that call site's own comment). Swallows every exception itself (this is the top of its own
+    task, nothing awaits it to propagate one to) — logs and returns, same as every other
+    best-effort step already in this file.
+    """
+    try:
+        from services.acp_contract.atom_ranking import run_atom_ranking
+        from services.acp_contract.segment_research import run_segment_research
+        from services.seo_intelligence.seed_builder import (
+            LOCATION_CODE_TO_MARKET,
+            resolve_buyer_markets,
+        )
+        from shared.services.tenant_config_service import TenantConfigService
+
+        async with pool.acquire() as conn:
+            cfg = await TenantConfigService(conn).get_seo_config(tenant_id)
+
+        research_result = await run_segment_research(tenant_id, cfg.target_market, pool)
+        market_codes = [
+            LOCATION_CODE_TO_MARKET[loc]
+            for loc, _name, _lang in resolve_buyer_markets(cfg.target_market)
+        ]
+        ranking_result = await run_atom_ranking(tenant_id, market_codes, pool)
+        logger.info(
+            "t5_ranking_pipeline_done", tenant_id=tenant_id,
+            research=research_result, ranking=ranking_result,
+        )
+    except Exception:
+        logger.warning("t5_ranking_pipeline_failed", tenant_id=tenant_id, exc_info=True)
+
+
 # AA-469 Việc 1 — "already atomized" is DERIVED (no new column/migration), same precedent
 # as api/routers/admin_atoms.py's own owner_scope-agnostic atomized_at/atom_count subquery
 # (that file's GET /admin/atoms/summary, ~line 271) — this is the tenant-scoped equivalent,
@@ -803,6 +837,19 @@ async def atomize_version(
             await run_segment_matching(tenant_id, pool)
         except Exception:
             logger.warning("t5_segment_matching_failed", tenant_id=tenant_id, exc_info=True)
+
+        # AA-515 — ranking (research loop + rank-sum), fired in the BACKGROUND, not awaited.
+        # Real DataForSEO + Bedrock calls per NEW canonical_place can run well past the ~29s
+        # API Gateway timeout this repo has already documented for T8/T9 (CLAUDE.md's own
+        # AA-452 LIVE STATE entry) — atomize_version()'s own response must not block on it, the
+        # way T5's own atomize call already does. Strong-ref pattern (module-level
+        # _background_tasks + add_done_callback) is this file's own established one (AA-425,
+        # see its comment at the top of this file), same shape AA-466 also used elsewhere
+        # (services/acp_content_writing/service.py::run_write_background()).
+        import asyncio as _asyncio_ranking
+        _ranking_task = _asyncio_ranking.create_task(_run_ranking_pipeline(tenant_id, pool))
+        _background_tasks.add(_ranking_task)
+        _ranking_task.add_done_callback(_background_tasks.discard)
 
     if result.get("status") == "failed":
         # AA-469 Việc 5 — the gap this comment used to flag ("Việc 5's future job") is closed:
