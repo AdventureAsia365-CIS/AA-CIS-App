@@ -186,9 +186,20 @@ def compute_runway_map(tenant_id: UUID, year: int, trips: list[Trip], markets: l
 
 
 _TRIP_ROW_QUERY = """
-    SELECT id, name, destination, period, duration_raw, itinerary_source,
-           lifecycle_stage, trip_url, url_alive
-    FROM acp_contract.v_trip_registry
+    WITH latest_versions AS (
+        SELECT DISTINCT ON (ttv.published_tour_id) ttv.published_tour_id
+        FROM gold_aa_internal.tenant_tour_versions ttv
+        WHERE ttv.tenant_id = $1::uuid
+        ORDER BY ttv.published_tour_id, ttv.version_number DESC
+    )
+    SELECT
+        rt.tour_id AS id, pt.aa_name AS name, rt.country AS destination,
+        rt.period AS period, rt.duration AS duration_raw, rt.src_itineraries AS itinerary_source,
+        rt.lifecycle_stage AS lifecycle_stage, ttp.url AS trip_url, ttp.url_alive AS url_alive
+    FROM latest_versions lv
+    JOIN gold_aa_internal.published_tours pt ON pt.id = lv.published_tour_id
+    JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
+    LEFT JOIN acp_deliver.tenant_tour_pages ttp ON ttp.tour_id = rt.tour_id
 """
 
 
@@ -203,25 +214,34 @@ def _row_to_trip(row) -> Trip:
 
 
 async def fetch_trips(tenant_id: UUID, pool) -> list[Trip]:
-    # TEMP (2026-08-13, Nghiep decision, AA-323 round 6 Phần B): every tenant
-    # now reads the SAME full platform catalog (today == aa_internal's 763
-    # trips — v_trip_registry.tenant_id is backed by raw_tours.tenant_id,
-    # which is only ever aa_internal; no B2B ingestion pipeline writes
-    # raw_tours rows for any other tenant) instead of filtering
-    # `WHERE tenant_id = $1`. Live-DB finding this round: that filter meant
-    # EVERY non-aa_internal tenant saw 0 eligible trips on
-    # /admin/quarter-plan/create — including a tenant with a real,
-    # Gate-A-approved N1 onboarding (acp_shared.tenant_atom_state had 6 valid
-    # tour_ids for it), because tenant_atom_state was never what this query
-    # read from. Nghiep's explicit call: this is still the development
-    # stage — product/UX quality over licensing gates — so every tenant
-    # shares the full catalog until Marketplace/N1 licensing (D3/D4, PRD ACP
-    # v2) is actually built and wired into trip eligibility. REVISIT WHEN N1
-    # SHIPS — see AA-309. `tenant_id` stays a required param (used by
-    # compute_runway_map()'s RunwayMap.tenant_id and every other caller's
-    # signature) — only the WHERE clause is gone.
+    # AA-500 (2026-09-01, replaces the AA-323-round-6/AA-309 TEMP note below): reads the
+    # tenant's own T1->T5 pipeline output — `gold_aa_internal.tenant_tour_versions` (T4,
+    # "tour đã chọn/rewrite") joined to the trip's underlying raw_tours/published_tours row —
+    # NOT `acp_contract.v_trip_registry` (that view's `tenant_id` column is backed by
+    # `raw_tours.tenant_id`, which is only ever aa_internal; it is the right source for T1
+    # "browse the pool", never for T7 Slate/N4-N6 per-tenant planning). Byte-identical query
+    # to `tenant_pool.fetch_tenant_trips()` (AA-448, T7's own already-shipped, live-verified
+    # parallel function) — kept as a separate copy rather than one shared call to match this
+    # codebase's own existing precedent (`quarter.fetch_atoms_by_trip()`'s AA-461 fix is the
+    # same "duplicate the fix shape, don't restructure the import graph" call, see that
+    # function's docstring) and to avoid a circular import (`tenant_pool` already imports
+    # `_row_to_trip` from this module).
+    #
+    # A tenant with zero `tenant_tour_versions` rows (never rewritten anything via T1-T4) gets
+    # an empty list here, INCLUDING aa_internal itself today — aa_internal's 763-trip master
+    # catalog was never run through the tenant rewrite flow under its own tenant_id, so it is
+    # not "the tenant with the most trips" through this function anymore. This is intended,
+    # Nghiep-confirmed behavior (AA-500 decision, see docs/implementation-notes/AA-500.md): if
+    # aa_internal needs N4-N6 planning, the operational fix is to rewrite a tour for it via the
+    # portal like any other tenant (T1->T5), not a code branch here. Every other caller
+    # (`quarter.plan_quarter()`, `allocator.allocate_month()`) must treat an empty trip list as
+    # a valid, non-error outcome (verified: both already do — see AA-500 "Should know").
+    #
+    # Previous (AA-323 round 6 Phần B, 2026-08-13) TEMP behavior — read the FULL unfiltered
+    # `v_trip_registry` for every tenant, "REVISIT WHEN N1 SHIPS" — is superseded by this
+    # change; that revisit is this one.
     async with pool.acquire() as conn:
-        rows = await conn.fetch(_TRIP_ROW_QUERY)
+        rows = await conn.fetch(_TRIP_ROW_QUERY, tenant_id)
     return [_row_to_trip(r) for r in rows]
 
 
