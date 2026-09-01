@@ -18,6 +18,7 @@ from api.routers.auth import (
 from api.routers.v1_tours import router as v1_tours_router
 from api.routers.v1_marketplace import router as v1_marketplace_router
 from api.routers.v1_planning import router as v1_planning_router
+from api.routers.v1_planning import slate_router as v1_slate_router
 from api.routers.v1_route_hub import router as v1_route_hub_router
 from api.routers.v1_angle_gate import router as v1_angle_gate_router
 from api.routers.v1_content_writing import router as v1_content_writing_router
@@ -109,6 +110,7 @@ app.add_middleware(
 app.include_router(v1_tours_router)
 app.include_router(v1_marketplace_router)  # AA-444 — tenant Marketplace view
 app.include_router(v1_planning_router)  # AA-448 — T7 Content Planning (preview only so far)
+app.include_router(v1_slate_router)  # AA-511 — the Slate (GET /v1/slate, POST /v1/subjects/{id}/pick)
 app.include_router(v1_route_hub_router)  # AA-510 — Route/Hub derivation + Subject pick
 app.include_router(v1_angle_gate_router)  # AA-449 — T8 Angle Gate
 app.include_router(v1_content_writing_router)  # AA-450 — T9 Content Writing + T10-inline

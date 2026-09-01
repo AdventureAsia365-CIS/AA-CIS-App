@@ -1,5 +1,5 @@
 """
-api/routers/v1_route_hub.py — AA-510: Route/Hub read endpoints + Subject pick.
+api/routers/v1_route_hub.py — AA-510: Route/Hub read endpoints + route_pick.
 
 `/v1/*` tenant-JWT-only router, same convention as `v1_tours.py`/`v1_planning.py` (reuses
 `get_tenant` unchanged, no staff/admin path — ADR-2026-038 §0.2, tenant self-service).
@@ -8,12 +8,18 @@ Route/Hub themselves have no write endpoint here — they are entirely derived
 (`services/acp_contract/route_detection.py::run_route_detection()`, fired in the background
 right after T5 ranking, `v1_tours.py::_run_ranking_pipeline()`). This router only exposes what
 was last derived, plus the one real write in this layer: a tenant PICKING a Route, which
-snapshots it into a Subject (ADR 0024 — no live FK, ever, back into `route.route_id`).
+snapshots it into a route_pick (ADR 0024 — no live FK, ever, back into `route.route_id`).
 
-GET  /v1/routes            — this tenant's current Routes, ordered by score (best first)
-GET  /v1/hubs               — this tenant's Hubs (persist across rebuilds, never deleted)
-POST /v1/subjects           — snapshot one Route into a Subject (`{"route_id": "..."}` body)
-GET  /v1/subjects           — this tenant's picked Subjects, newest first
+Was `/v1/subjects` + `acp_contract.subject` at AA-510; renamed to `/v1/route-picks` +
+`acp_contract.route_pick` at AA-511 STEP0 (migration 132) — `acp_shared.subject` is a different,
+unrelated concept (the AA-511 Slate proposal) and the two names collided. The old
+`/v1/subjects` path had no real frontend consumer yet, so this is a deliberate breaking rename,
+not a versioned/compatibility change (see docs/implementation-notes/AA-510.md).
+
+GET  /v1/routes             — this tenant's current Routes, ordered by score (best first)
+GET  /v1/hubs                — this tenant's Hubs (persist across rebuilds, never deleted)
+POST /v1/route-picks         — snapshot one Route into a route_pick (`{"route_id": "..."}` body)
+GET  /v1/route-picks         — this tenant's route_picks, newest first
 """
 from __future__ import annotations
 
@@ -92,19 +98,19 @@ async def list_hubs(request: Request, tenant=Depends(get_tenant)):
     ]}
 
 
-class CreateSubjectRequest(BaseModel):
+class CreateRoutePickRequest(BaseModel):
     route_id: str
 
 
-@router.post("/subjects")
-async def pick_subject(
-    body: CreateSubjectRequest, request: Request, tenant=Depends(get_tenant),
+@router.post("/route-picks")
+async def pick_route(
+    body: CreateRoutePickRequest, request: Request, tenant=Depends(get_tenant),
 ):
     tenant_id = tenant["sub"]
     pool = get_pool(request)
-    from services.acp_contract.route_detection import create_subject
+    from services.acp_contract.route_detection import create_route_pick
 
-    result = await create_subject(
+    result = await create_route_pick(
         tenant_id, body.route_id, pool, selected_by=f"tenant:{tenant_id}",
     )
     if result is None:
@@ -115,30 +121,30 @@ async def pick_subject(
     return result
 
 
-@router.get("/subjects")
-async def list_subjects(request: Request, tenant=Depends(get_tenant)):
+@router.get("/route-picks")
+async def list_route_picks(request: Request, tenant=Depends(get_tenant)):
     tenant_id = tenant["sub"]
     pool = get_pool(request)
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT subject_id, hub_name, route_snapshot, selected_at, selected_by
-            FROM acp_contract.subject
+            SELECT route_pick_id, hub_name, route_snapshot, selected_at, selected_by
+            FROM acp_contract.route_pick
             WHERE tenant_id = $1::uuid
             ORDER BY selected_at DESC
         """, tenant_id)
-    subjects = []
+    route_picks = []
     for r in rows:
         snapshot = r["route_snapshot"]
         if isinstance(snapshot, str):
             snapshot = json.loads(snapshot)
-        subjects.append({
-            "subject_id": str(r["subject_id"]),
+        route_picks.append({
+            "route_pick_id": str(r["route_pick_id"]),
             "hub_name": r["hub_name"],
             "route_snapshot": snapshot,
             "selected_at": r["selected_at"].isoformat(),
             "selected_by": r["selected_by"],
         })
-    return {"subjects": subjects}
+    return {"route_picks": route_picks}
 
 
 __all__ = ["router"]

@@ -58,8 +58,49 @@ from services.acp_planning.trip_reallocation import confirm_trip_reallocation, s
 from services.acp_shared.content_metrics import (PieceNotFoundError, PieceNotOwnedError,
                                                  record_metric_snapshot, rollup_atom_weights)
 from services.acp_shared.dfs_relevance import fetch_dfs_relevance_by_tour
+from services.acp_shared.slate import (SubjectNotEligibleError, SubjectNotFoundError,
+                                        fetch_slate, pick_subject, propose_slate)
 
 router = APIRouter(prefix="/v1/planning", tags=["tenant-planning"])
+
+# AA-511 — the Slate (Weekly Slots' replacement, docs/claude_audit/
+# AA-511-step0-slate-investigation.md). A SEPARATE router in this same file, under a bare `/v1`
+# prefix rather than `/v1/planning`, so the paths match the build prompt's own literal spec
+# (`GET /v1/slate`, `POST /v1/subjects/{id}/pick`) exactly — everything above this point
+# (quarter-plan/slot-grid/metrics/trip-reallocation) is untouched, per the epic's own "giữ code
+# cũ, chỉ ngưng dùng, không xoá" rule; `compute_quarter_plan()`/`compute_slot_grid()` (imported
+# above) are still live code, just no longer the Slate's own input.
+slate_router = APIRouter(prefix="/v1", tags=["slate"])
+
+
+@slate_router.get("/slate", summary="AA-511 — this tenant's Slate: every Subject that has cleared a Channel's Bar")
+async def get_slate(request: Request, tenant=Depends(get_tenant)):
+    tenant_id = UUID(tenant["sub"])
+    pool = request.app.state.pool
+    await propose_slate(tenant_id, pool)
+    config = await _resolve_config(tenant_id, pool)
+    channels = await fetch_slate(tenant_id, pool)
+    return {
+        "channels": channels,
+        "posts_per_week": config.capacity_posts_per_week,
+    }
+
+
+@slate_router.post("/subjects/{subject_id}/pick", summary="AA-511 — pick a Subject, create its T8 angle_gate_request")
+async def post_pick_subject(
+    subject_id: UUID, request: Request, tenant=Depends(get_tenant),
+):
+    tenant_id = UUID(tenant["sub"])
+    pool = request.app.state.pool
+    try:
+        result = await pick_subject(
+            tenant_id, subject_id, pool, selected_by=f"tenant:{tenant_id}",
+        )
+    except SubjectNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No subject {subject_id} for this tenant")
+    except SubjectNotEligibleError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return result
 
 
 async def _resolve_config(tenant_id: UUID, pool):
@@ -415,4 +456,4 @@ async def post_trip_reallocation_confirm(
     )
 
 
-__all__ = ["router"]
+__all__ = ["router", "slate_router"]
