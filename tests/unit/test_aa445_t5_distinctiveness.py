@@ -48,8 +48,10 @@ async def test_distinctiveness_column_included_and_scored_per_atom():
     pool = _pool_ctx(conn)
 
     atoms_json = json.dumps({"atoms": [
-        {"text": "Cross the historic bamboo bridge at dawn before breakfast", "activity_type": "trek"},
-        {"text": "Private overnight kayak expedition through remote limestone caves", "activity_type": "other"},
+        {"place": "the historic bamboo bridge", "action": "cross at dawn before breakfast",
+         "activity_type": "trek"},
+        {"place": "remote limestone caves", "action": "private overnight kayak expedition through",
+         "activity_type": "other"},
     ]})
     competitor_idx = CompetitorIndex(phrases=[
         "Cross the historic bamboo bridge at dawn before breakfast in the village",
@@ -88,7 +90,7 @@ async def test_no_country_yields_empty_index_not_an_error():
     already handles this (empty domains -> empty index -> score_distinctiveness() -> MED)."""
     conn = _fake_conn()
     pool = _pool_ctx(conn)
-    atoms_json = json.dumps({"atoms": [{"text": "Some real atom text about the tour itself"}]})
+    atoms_json = json.dumps({"atoms": [{"place": "the tour itself", "action": "some real atom moment"}]})
 
     with patch("services.acp_produce.tenant_pipeline.invoke_claude",
                return_value=_FakeLLMResult(atoms_json)), \

@@ -10,25 +10,42 @@ import hashlib
 import re
 
 SYSTEM_PROMPT = """You extract content atoms from a tour's source material for a travel \
-marketing platform. An atom is one concrete, verbatim-derived moment from the trip — not a \
+marketing platform. An atom is one concrete, place-and-activity pair from the trip — not a \
 summary, not a paraphrase, not an invented detail.
 
-Extract concrete, verbatim-derived moments only. If input is thin or empty, return an empty \
-list — never invent content not present in the source text. Text must be a direct quote or \
-minimal trim of the source material — do not add facts, names, numbers, or descriptive \
-details that are not explicitly present in the input text, even if you know them to be true \
-from general knowledge.
+Extract concrete, verbatim-derived pairs only. If input is thin or empty, return an empty \
+list — never invent content not present in the source text. `place` and `action` must each be \
+a direct quote or minimal trim of the source material — do not add facts, names, numbers, or \
+descriptive details that are not explicitly present in the input text, even if you know them \
+to be true from general knowledge.
 
 Example of what NOT to do: if the input says "visit a hillside temple", the atom must say \
 only that — NOT "visit a 12th-century hillside temple famous for its hand-carved wooden \
 gates", even though such details might be true of similar temples in general. Any fact not \
-in the input text does not go in the atom, no matter how plausible or well-known.
+in the input text does not go in `place`/`action`, no matter how plausible or well-known.
+
+AA-509 — `place`/`action` rules (adapted from Ms. Thư's aa-social-media extractor,
+src/aa_social/stages/atoms.py):
+- One entry per place-and-activity pair the text states. Do not invent, combine, or summarise
+  across pairs.
+- `place` is the place as the source names it. A walk between two towns is one place, written
+  "A to B".
+- Name the place. Never refer back to one: "the trail", "the village", "this small town" are
+  not places — write what the text calls it.
+- The named landmark the activity is about is the place, not the town it sits in: "visit
+  Itsukushima Shrine on Miyajima Island" has `place` = "Itsukushima Shrine".
+- `action` is what happens there, a short verb phrase in the infinitive ("walk", "travel by
+  train", "explore", "eat dinner").
+- Include getting from one place to another and logistics (transfers, check-ins, flights) —
+  they are part of the record; `activity_type` below is what later separates transit/logistics
+  from what gets ranked, not this extraction step.
 
 Respond with ONLY a JSON object matching this exact contract:
 {
   "atoms": [
     {
-      "text": "verbatim-derived moment, 1-2 sentences",
+      "place": "the place, verbatim-derived",
+      "action": "short verb phrase, verbatim-derived",
       "activity_type": "trek|bike|food|culture|stay|transit|other",
       "emotional_hook": "string or null",
       "visual_potential": 1,
@@ -109,28 +126,52 @@ def normalise(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
 
 
-def content_hash_atom_id(tour_id: str, owner_scope: str, day_number: int, text: str) -> str:
-    """An Atom's identity, derived from what it is rather than when it arrived — AA-508, mirrors
-    aa-social-media's own atom_id() (src/aa_social/models.py), adapted to this schema's real
-    shape (STEP0/STEP0b, docs/claude_audit/AA-508-step0*.md):
+def content_hash_atom_id(
+    owner_scope: str, tour_id: str, day_number: int, place: str, action: str,
+) -> str:
+    """An Atom's identity, derived from what it is rather than when it arrived — AA-508/AA-509,
+    mirrors aa-social-media's own atom_id() (src/aa_social/models.py):
 
-    - The reference formula hashes (trip_code, day, place, action). This codebase's decompose
-      schema (SYSTEM_PROMPT above) has no separate place/action fields — one atom is one combined
-      `text` (the verbatim moment) plus a coarse `activity_type` enum. `text` is what gets hashed
-      here; it IS the place+action pair, just not split into two fields the way the reference
-      repo's extractor returns them.
-    - `owner_scope` (the rewriting tenant's id, or 'platform') is added to the hash input. The
-      reference repo has no multi-tenant concept (one SQLite file per brand), so its formula never
-      needed it. `tour_atoms.atom_id` here is a single GLOBAL primary key shared by every tenant
-      that has ever rewritten a given `tour_id` — without owner_scope in the hash, two tenants'
-      differently-worded rewrites of the same tour_id/day that happened to normalise to the same
-      `text` would collide on that one PK and silently overwrite each other's row.
+        atom_id = sha256(f"{owner_scope}|{trip_code}|{day}|{normalise(place)}|{normalise(action)}")
 
-    `tour_id` is used verbatim (not normalised), same as the reference formula treats `trip_code`;
-    `day_number` and `text` are normalised the same way normalise() does.
+    AA-509 build prompt reverted to this literal formula (place/action, not the combined `text`
+    AA-508 used as a stand-in before T5 decompose could produce place/action separately —
+    docs/claude_audit/AA-509-step0-schema-matching-investigation.md mục 4, Hướng A now chosen).
+    Argument order matches the literal formula (owner_scope, tour_id/trip_code, day, place,
+    action) — NOT AA-508's original (tour_id, owner_scope, day, text) order; every call site
+    updated accordingly.
+
+    `owner_scope` (the rewriting tenant's id, or 'platform') stays in the hash — AA-508's own
+    addition, kept per the build prompt's explicit instruction ("giữ nguyên"): the reference repo
+    has no multi-tenant concept, but `tour_atoms.atom_id` here is a single GLOBAL primary key
+    shared by every tenant that has ever rewritten a given `tour_id` — without owner_scope, two
+    tenants' differently-worded rewrites of the same tour_id/day that happened to normalise to
+    the same place/action would collide on that one PK and silently overwrite each other's row.
+
+    `owner_scope`/`tour_id` are used verbatim (not normalised), same as the reference formula
+    treats `trip_code`; `day_number`/`place`/`action` are normalised the same way normalise() does.
     """
-    parts = (str(tour_id), owner_scope, str(day_number), normalise(text))
+    parts = (owner_scope, str(tour_id), str(day_number), normalise(place), normalise(action))
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def derive_atom_text(place: str, action: str) -> str:
+    """AA-509 — `tour_atoms.text` stays a real, populated column (NOT dropped): it is read
+    directly by score_distinctiveness(), T9's content_seed, N7 research H2 titles,
+    slot_runner.py, and acp_angle_gate/service.py (grep-confirmed before this change, see
+    implementation notes Decision 1) — rewriting every one of those to read place+action
+    separately was real, unrequested blast radius, not this task's ask (Hướng A only asks T5's
+    decompose OUTPUT to split place/action). This derives the same combined view T5 used to get
+    straight from the LLM, now computed from the two fields it actually returns."""
+    place = (place or "").strip()
+    action = (action or "").strip()
+    if not place and not action:
+        return ""
+    if not action:
+        return place
+    if not place:
+        return action
+    return f"{place} — {action}"
 
 
 def day_fingerprint(day_title: str, day_body: str, model: str) -> str:

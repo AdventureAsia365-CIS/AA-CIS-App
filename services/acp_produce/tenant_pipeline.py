@@ -52,6 +52,7 @@ from services.acp_shared.atom_extraction import (
     build_user_prompt as _build_user_prompt,
     content_hash_atom_id as _content_hash_atom_id,
     day_fingerprint as _day_fingerprint,
+    derive_atom_text as _derive_atom_text,
     source_hash as _source_hash,
     strip_json_fence as _strip_json_fence,
 )
@@ -359,18 +360,23 @@ async def _atomize_whole_tour_legacy(
         if atoms:
             for atom in atoms:
                 atom_id = f"atom_{uuid.uuid4().hex[:10]}"
-                distinctiveness = score_distinctiveness(atom.get("text") or "", competitor_idx)
+                place = atom.get("place") or ""
+                action = atom.get("action") or ""
+                text = _derive_atom_text(place, action)
+                distinctiveness = score_distinctiveness(text, competitor_idx)
                 await conn.execute("""
                     INSERT INTO acp_contract.tour_atoms
-                        (atom_id, tour_id, owner_scope, text, activity_type, emotional_hook,
-                         visual_potential, persona_fit, season_note, starred, deleted, weight,
-                         source_hash, itinerary_day, distinctiveness, created_at, updated_at)
-                    VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13,
-                            $14, $15, now(), now())
-                """, atom_id, tour_id, tenant_id, atom.get("text"), atom.get("activity_type"),
-                    atom.get("emotional_hook"), atom.get("visual_potential", 1),
-                    json.dumps(atom.get("persona_fit") or []), atom.get("season_note"),
-                    False, False, 1.0, source_hash, atom.get("itinerary_day"), distinctiveness)
+                        (atom_id, tour_id, owner_scope, text, place, action, activity_type,
+                         emotional_hook, visual_potential, persona_fit, season_note, starred,
+                         deleted, weight, source_hash, itinerary_day, distinctiveness,
+                         created_at, updated_at)
+                    VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13,
+                            $14, $15, $16, $17, now(), now())
+                """, atom_id, tour_id, tenant_id, text, place or None, action or None,
+                    atom.get("activity_type"), atom.get("emotional_hook"),
+                    atom.get("visual_potential", 1), json.dumps(atom.get("persona_fit") or []),
+                    atom.get("season_note"), False, False, 1.0, source_hash,
+                    atom.get("itinerary_day"), distinctiveness)
                 inserted += 1
         else:
             marker_id = f"atom_marker_{uuid.uuid4().hex[:10]}"
@@ -461,8 +467,10 @@ async def _atomize_per_day(
         async with pool.acquire() as conn:
             if atoms:
                 for atom in atoms:
-                    text = atom.get("text") or ""
-                    atom_id = _content_hash_atom_id(tour_id, tenant_id, day_num, text)
+                    place = atom.get("place") or ""
+                    action = atom.get("action") or ""
+                    text = _derive_atom_text(place, action)
+                    atom_id = _content_hash_atom_id(tenant_id, tour_id, day_num, place, action)
                     distinctiveness = score_distinctiveness(text, competitor_idx)
                     # ON CONFLICT never touches starred/weight — starred is a human curation
                     # flag, weight is content_metrics.py's own learned value (usage-log-derived).
@@ -470,13 +478,15 @@ async def _atomize_per_day(
                     # every time a day's fingerprint happened to change.
                     await conn.execute("""
                         INSERT INTO acp_contract.tour_atoms
-                            (atom_id, tour_id, owner_scope, text, activity_type, emotional_hook,
-                             visual_potential, persona_fit, season_note, starred, deleted, weight,
-                             source_hash, itinerary_day, distinctiveness, created_at, updated_at)
-                        VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12,
-                                $13, $14, $15, now(), now())
+                            (atom_id, tour_id, owner_scope, text, place, action, activity_type,
+                             emotional_hook, visual_potential, persona_fit, season_note, starred,
+                             deleted, weight, source_hash, itinerary_day, distinctiveness,
+                             created_at, updated_at)
+                        VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12,
+                                $13, $14, $15, $16, $17, now(), now())
                         ON CONFLICT (atom_id) DO UPDATE SET
-                            text = excluded.text, activity_type = excluded.activity_type,
+                            text = excluded.text, place = excluded.place,
+                            action = excluded.action, activity_type = excluded.activity_type,
                             emotional_hook = excluded.emotional_hook,
                             visual_potential = excluded.visual_potential,
                             persona_fit = excluded.persona_fit,
@@ -484,14 +494,17 @@ async def _atomize_per_day(
                             source_hash = excluded.source_hash,
                             distinctiveness = excluded.distinctiveness,
                             deleted = false, updated_at = now()
-                    """, atom_id, tour_id, tenant_id, text, atom.get("activity_type"),
-                        atom.get("emotional_hook"), atom.get("visual_potential", 1),
+                    """, atom_id, tour_id, tenant_id, text, place or None, action or None,
+                        atom.get("activity_type"), atom.get("emotional_hook"),
+                        atom.get("visual_potential", 1),
                         json.dumps(atom.get("persona_fit") or []), atom.get("season_note"),
                         False, False, 1.0, source_hash, day_num, distinctiveness)
                     new_atom_ids.append(atom_id)
                     inserted += 1
             else:
-                marker_id = _content_hash_atom_id(tour_id, tenant_id, day_num, "__empty__")
+                marker_id = _content_hash_atom_id(
+                    tenant_id, tour_id, day_num, "__empty__", "__empty__",
+                )
                 await conn.execute("""
                     INSERT INTO acp_contract.tour_atoms
                         (atom_id, tour_id, owner_scope, text, starred, deleted,

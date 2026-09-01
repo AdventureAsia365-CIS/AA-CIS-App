@@ -123,6 +123,12 @@ _LIST_FROM = """
         WHERE NOT deleted AND NOT is_empty_marker
         GROUP BY tour_id
     ) tc ON tc.tour_id = ta.tour_id
+    -- AA-509 — Segment: LEFT JOIN, an atom atomized before migration 129 (or not yet
+    -- re-atomized since) has no place/action and so was never fed to segment_matching.py —
+    -- segment_id/canonical_* come back NULL for it, same "ungrouped" treatment the frontend
+    -- already gives an atom with no segment.
+    LEFT JOIN acp_contract.atom_segment_member asm ON asm.atom_id = ta.atom_id
+    LEFT JOIN acp_contract.atom_segment asg ON asg.segment_id = asm.segment_id
     WHERE NOT ta.is_empty_marker
 """
 
@@ -132,7 +138,8 @@ _LIST_SELECT_COLS = """
            ta.distinctiveness, ta.media, ta.starred, ta.deleted,
            ta.created_at, ta.updated_at,
            (ta.updated_at = ta.created_at) AS unreviewed,
-           tc.atom_count AS tour_atom_count
+           tc.atom_count AS tour_atom_count,
+           asm.segment_id, asg.canonical_place, asg.canonical_action
 """
 
 
