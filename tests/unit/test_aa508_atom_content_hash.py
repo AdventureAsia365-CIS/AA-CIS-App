@@ -7,6 +7,11 @@ entire tour. STEP0b cross-checked the reference repo (aa-social-media) directly:
 atom_id + a real ON CONFLICT UPSERT, gated per DAY by a fingerprint that BLOCKS the LLM call
 (not just logged after one).
 
+AA-509 updated this file's JSON mocking shape from a combined `text` field to separate
+`place`/`action` (T5 decompose now returns both — atom_extraction.py SYSTEM_PROMPT) and
+content_hash_atom_id()'s signature/argument order to the build prompt's literal formula
+(owner_scope, tour_id, day, place, action) — see that task's implementation notes Decision 2/4.
+
 Drives the real coroutine (services.acp_produce.tenant_pipeline.run_t5_atomize), same mocking
 shape as test_aa445_t5_distinctiveness.py (pool.acquire() fake, invoke_claude patched at its
 import site) — `itineraries` here is in the canonical "Day N — Title\\nBody" format (T4 reuses
@@ -21,7 +26,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from services.acp_produce import tenant_pipeline
-from services.acp_shared.atom_extraction import content_hash_atom_id, day_fingerprint, normalise
+from services.acp_shared.atom_extraction import (
+    content_hash_atom_id, day_fingerprint, derive_atom_text, normalise,
+)
 from services.acp_shared.competitor_index import CompetitorIndex
 
 TENANT_ID = "33333333-3333-3333-3333-333333333333"
@@ -58,28 +65,28 @@ class _FakeLLMResult:
         self.text = text
 
 
-def _day1_atoms_json(text="Walk through the Old Quarter"):
-    return json.dumps({"atoms": [{"text": text, "activity_type": "culture"}]})
+def _day1_atoms_json(place="Old Quarter", action="walk"):
+    return json.dumps({"atoms": [{"place": place, "action": action, "activity_type": "culture"}]})
 
 
-def _day2_atoms_json(text="Kayak through limestone caves at Halong Bay"):
-    return json.dumps({"atoms": [{"text": text, "activity_type": "trek"}]})
+def _day2_atoms_json(place="Halong Bay", action="kayak through limestone caves"):
+    return json.dumps({"atoms": [{"place": place, "action": action, "activity_type": "trek"}]})
 
 
 @pytest.mark.asyncio
 async def test_first_atomize_reads_every_day_content_hash_ids():
     """N days, first run: no fingerprint rows exist yet, so both days are read; every atom_id
-    matches content_hash_atom_id(tour_id, tenant_id, day_number, text) exactly — the real
-    formula, not a random UUID."""
+    matches content_hash_atom_id(tenant_id, tour_id, day_number, place, action) exactly — the
+    real formula, not a random UUID."""
     conn = _fake_conn(existing_fingerprints=[])
     pool = _pool_ctx(conn)
 
-    day1_text = "Walk through the Old Quarter"
-    day2_text = "Kayak through limestone caves at Halong Bay"
+    day1_place, day1_action = "Old Quarter", "walk"
+    day2_place, day2_action = "Halong Bay", "kayak through limestone caves"
 
     with patch("services.acp_produce.tenant_pipeline.invoke_claude",
-               side_effect=[_FakeLLMResult(_day1_atoms_json(day1_text)),
-                            _FakeLLMResult(_day2_atoms_json(day2_text))]), \
+               side_effect=[_FakeLLMResult(_day1_atoms_json(day1_place, day1_action)),
+                            _FakeLLMResult(_day2_atoms_json(day2_place, day2_action))]), \
          patch("services.acp_shared.competitor_index.build_competitor_index",
                new=AsyncMock(return_value=CompetitorIndex())):
         result = await tenant_pipeline.run_t5_atomize(
@@ -98,16 +105,23 @@ async def test_first_atomize_reads_every_day_content_hash_ids():
                      if "INSERT INTO acp_contract.tour_atoms" in c.args[0]]
     assert len(insert_calls) == 2
 
-    expected_id_day1 = content_hash_atom_id(TOUR_ID, TENANT_ID, 1, day1_text)
-    expected_id_day2 = content_hash_atom_id(TOUR_ID, TENANT_ID, 2, day2_text)
+    expected_id_day1 = content_hash_atom_id(TENANT_ID, TOUR_ID, 1, day1_place, day1_action)
+    expected_id_day2 = content_hash_atom_id(TENANT_ID, TOUR_ID, 2, day2_place, day2_action)
     actual_ids = {c.args[1] for c in insert_calls}  # atom_id is the 1st bind param ($1)
     assert actual_ids == {expected_id_day1, expected_id_day2}
+
+    # text stays populated (derived), place/action are the new real columns
+    texts = {c.args[4] for c in insert_calls}
+    assert texts == {derive_atom_text(day1_place, day1_action), derive_atom_text(day2_place, day2_action)}
+    places = {c.args[5] for c in insert_calls}
+    assert places == {day1_place, day2_place}
 
     # ON CONFLICT UPSERT, not a plain INSERT
     assert all("ON CONFLICT (atom_id) DO UPDATE" in c.args[0] for c in insert_calls)
 
-    # itinerary_day bound correctly per day (14th positional param, index 13)
-    itinerary_days = {c.args[14] for c in insert_calls}
+    # itinerary_day bound correctly per day (17th positional param, index 16 — shifted by 2 vs.
+    # pre-AA-509 since place/action are now 2 extra bind params ahead of it)
+    itinerary_days = {c.args[16] for c in insert_calls}
     assert itinerary_days == {1, 2}
 
     # fingerprint rows written for both days
@@ -122,8 +136,6 @@ async def test_first_atomize_reads_every_day_content_hash_ids():
 async def test_rerun_unchanged_skips_every_day_zero_llm_calls():
     """Re-atomizing with identical days (fingerprints already on file) reads nothing — zero
     invoke_claude() calls, atom_count=0, status='skipped'."""
-    day1_text = "Walk through the Old Quarter"
-    day2_text = "Kayak through limestone caves at Halong Bay"
     fp1 = day_fingerprint("Arrival in Hanoi",
                            "Walk through the Old Quarter and try street food.",
                            tenant_pipeline._T5_MODEL_TIER)
@@ -153,7 +165,6 @@ async def test_rerun_unchanged_skips_every_day_zero_llm_calls():
                    for c in conn.execute.call_args_list)
     assert not any("acp_contract.atomize_day_fingerprint" in c.args[0]
                    for c in conn.execute.call_args_list)
-    assert day1_text and day2_text  # sample text kept for readability, unused otherwise
 
 
 @pytest.mark.asyncio
@@ -170,10 +181,10 @@ async def test_one_day_changed_only_that_day_reatomizes_other_kept():
     ])
     pool = _pool_ctx(conn)
 
-    new_day1_text = "Visit the reconstructed Old Quarter market at dawn"
+    new_day1_place, new_day1_action = "Old Quarter market", "visit at dawn"
 
     with patch("services.acp_produce.tenant_pipeline.invoke_claude",
-               return_value=_FakeLLMResult(_day1_atoms_json(new_day1_text))) as m_llm, \
+               return_value=_FakeLLMResult(_day1_atoms_json(new_day1_place, new_day1_action))) as m_llm, \
          patch("services.acp_shared.competitor_index.build_competitor_index",
                new=AsyncMock(return_value=CompetitorIndex())):
         result = await tenant_pipeline.run_t5_atomize(
@@ -190,8 +201,9 @@ async def test_one_day_changed_only_that_day_reatomizes_other_kept():
     insert_calls = [c for c in conn.execute.call_args_list
                      if "INSERT INTO acp_contract.tour_atoms" in c.args[0]]
     assert len(insert_calls) == 1
-    assert insert_calls[0].args[14] == 1  # itinerary_day
-    assert insert_calls[0].args[1] == content_hash_atom_id(TOUR_ID, TENANT_ID, 1, new_day1_text)
+    assert insert_calls[0].args[16] == 1  # itinerary_day
+    assert insert_calls[0].args[1] == content_hash_atom_id(
+        TENANT_ID, TOUR_ID, 1, new_day1_place, new_day1_action)
 
     fp_calls = [c for c in conn.execute.call_args_list
                  if "INSERT INTO acp_contract.atomize_day_fingerprint" in c.args[0]]
@@ -226,7 +238,7 @@ async def test_llm_failure_on_one_day_keeps_other_days_committed():
     insert_calls = [c for c in conn.execute.call_args_list
                      if "INSERT INTO acp_contract.tour_atoms" in c.args[0]]
     assert len(insert_calls) == 1
-    assert insert_calls[0].args[14] == 2  # only Day 2 got written
+    assert insert_calls[0].args[16] == 2  # only Day 2 got written
 
     fp_calls = [c for c in conn.execute.call_args_list
                  if "INSERT INTO acp_contract.atomize_day_fingerprint" in c.args[0]]
@@ -237,7 +249,7 @@ async def test_llm_failure_on_one_day_keeps_other_days_committed():
 @pytest.mark.asyncio
 async def test_zero_atom_day_writes_deterministic_marker_not_random():
     """A day the model reads as truly empty still gets a marker row, but the marker's atom_id
-    is content-hash-deterministic (tour_id, owner_scope, day, '__empty__'), not
+    is content-hash-deterministic (owner_scope, tour_id, day, '__empty__', '__empty__'), not
     uuid4()-random — so a repeat empty-day read UPSERTs the same marker instead of piling up a
     new random one every time it's forced to re-run."""
     conn = _fake_conn(existing_fingerprints=[])
@@ -259,25 +271,25 @@ async def test_zero_atom_day_writes_deterministic_marker_not_random():
                      if "INSERT INTO acp_contract.tour_atoms" in c.args[0]
                      and "is_empty_marker" in c.args[0]]
     assert len(marker_calls) == 1
-    expected_marker_id = content_hash_atom_id(TOUR_ID, TENANT_ID, 1, "__empty__")
+    expected_marker_id = content_hash_atom_id(TENANT_ID, TOUR_ID, 1, "__empty__", "__empty__")
     assert marker_calls[0].args[1] == expected_marker_id
 
 
 def test_content_hash_atom_id_stable_and_tenant_scoped():
-    """Same (tour_id, tenant, day, text) -> same id across calls (re-run stability); a
-    different tenant on the same tour/day/text -> a different id (no cross-tenant PK collision
-    on tour_atoms' single global atom_id primary key)."""
-    id_a = content_hash_atom_id(TOUR_ID, TENANT_ID, 3, "Cross the historic bamboo bridge at dawn")
-    id_b = content_hash_atom_id(TOUR_ID, TENANT_ID, 3, "Cross the historic bamboo bridge at dawn")
+    """Same (owner_scope, tour_id, day, place, action) -> same id across calls (re-run
+    stability); a different tenant on the same tour/day/place/action -> a different id (no
+    cross-tenant PK collision on tour_atoms' single global atom_id primary key)."""
+    id_a = content_hash_atom_id(TENANT_ID, TOUR_ID, 3, "Bamboo Bridge", "cross at dawn")
+    id_b = content_hash_atom_id(TENANT_ID, TOUR_ID, 3, "Bamboo Bridge", "cross at dawn")
     assert id_a == id_b
 
     other_tenant = "99999999-9999-9999-9999-999999999999"
-    id_c = content_hash_atom_id(TOUR_ID, other_tenant, 3, "Cross the historic bamboo bridge at dawn")
+    id_c = content_hash_atom_id(other_tenant, TOUR_ID, 3, "Bamboo Bridge", "cross at dawn")
     assert id_c != id_a
 
     # normalise() is what absorbs cosmetic wording differences (case/punctuation), not the
     # hash itself skipping normalisation
-    id_d = content_hash_atom_id(TOUR_ID, TENANT_ID, 3, "CROSS the Historic Bamboo-Bridge at dawn!!")
+    id_d = content_hash_atom_id(TENANT_ID, TOUR_ID, 3, "Bamboo-Bridge!!", "CROSS at Dawn")
     assert id_d == id_a
 
 
@@ -285,3 +297,13 @@ def test_normalise_matches_reference_repo_formula():
     assert normalise("CROSS the Historic Bamboo-Bridge at dawn!!") == "cross the historic bamboo bridge at dawn"
     assert normalise("") == ""
     assert normalise(None) == ""
+
+
+def test_derive_atom_text_combines_place_and_action():
+    """AA-509 — tour_atoms.text is derived, not LLM-written, once T5 returns place/action
+    separately; still populated (not dropped) for score_distinctiveness()/T9/research/etc."""
+    assert derive_atom_text("Magome", "walk to Tsumago") == "Magome — walk to Tsumago"
+    assert derive_atom_text("Magome", "") == "Magome"
+    assert derive_atom_text("", "walk") == "walk"
+    assert derive_atom_text("", "") == ""
+    assert derive_atom_text(None, None) == ""

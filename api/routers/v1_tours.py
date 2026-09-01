@@ -790,6 +790,20 @@ async def atomize_version(
         tenant_id, row["tour_id"], rewritten, pool,
         country=row["country"] or "", version_id=version_id,
     )
+
+    # AA-509 — Segment: run right after T5, whenever it actually read/wrote anything (not on a
+    # pure "skipped" no-op re-atomize — existing Segments stay correct untouched then). Placed
+    # BEFORE the `status == "failed"` 502 below: a per-day run where SOME days fail still commits
+    # the successful days' atoms (tenant_pipeline.py's own docstring), so Segments should still
+    # pick those up. Best-effort, same pattern as escalate_t5_atomize_failure() just below — a
+    # Segment rebuild failure must not hide (or block) the real T5 result from the tenant.
+    if result.get("status") != "skipped":
+        try:
+            from services.acp_contract.segment_matching import run_segment_matching
+            await run_segment_matching(tenant_id, pool)
+        except Exception:
+            logger.warning("t5_segment_matching_failed", tenant_id=tenant_id, exc_info=True)
+
     if result.get("status") == "failed":
         # AA-469 Việc 5 — the gap this comment used to flag ("Việc 5's future job") is closed:
         # persist the same error to silver_aa_internal.review_queue (A4's existing review-log
