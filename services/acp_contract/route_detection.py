@@ -1,4 +1,8 @@
-"""services/acp_contract/route_detection.py — AA-510, Route/Hub detection + Subject snapshot.
+"""services/acp_contract/route_detection.py — AA-510, Route/Hub detection + route_pick snapshot.
+
+(`create_subject()`/`acp_contract.subject` renamed to `create_route_pick()`/
+`acp_contract.route_pick` at AA-511 STEP0, migration 132 — freed the name `subject` for the
+unrelated Slate-proposal concept `acp_shared.subject`.)
 
 Ported from Ms. Thư's aa-social-media `src/aa_social/routes.py` (`derive_routes()`/`families()`/
 `stops()`) and `stages/score.py`'s `_store_routes()` (rebuild-whole persistence). Full evidence
@@ -372,18 +376,23 @@ async def run_route_detection(tenant_id: str, pool) -> dict:
     }
 
 
-async def create_subject(
+async def create_route_pick(
     tenant_id: str, route_id: str, pool, selected_by: str | None = None,
 ) -> dict | None:
-    """Snapshot one Route into a Subject at the moment a marketer picks it (ADR 0024) — no
+    """Snapshot one Route into a route_pick at the moment a marketer picks it (ADR 0024) — no
     live FK, ever, into route.route_id (the same lesson the origin's own Subject layer learned
     the hard way, docs/adr/0024-a-subject-outlives-the-segment-it-came-from.md, applied one
     layer up here).
 
+    Named `create_subject()`/`acp_contract.subject` at AA-510; renamed here (AA-511 STEP0,
+    migration 132) to free the name `subject` for the unrelated Slate-proposal concept
+    `acp_shared.subject` this issue builds — the two are a different grain/purpose entirely, not
+    a compatibility rename.
+
     Returns None if the Route no longer exists for this tenant (already rebuilt away) — the
     caller's job to surface as "pick again", not this function's. Re-joins the underlying
     Segments at snapshot time (best-effort — a partial/empty join degrades the snapshot's
-    `stops` detail but never fails subject creation) so the snapshot is a human-readable,
+    `stops` detail but never fails route_pick creation) so the snapshot is a human-readable,
     self-sufficient record that no longer depends on anything staying in place afterward.
     """
     async with pool.acquire() as conn:
@@ -411,13 +420,17 @@ async def create_subject(
         """, route["tour_id"], segment_ids)
 
         snapshot = _build_snapshot(route, segment_ids, step_rows)
-        subject_id = await conn.fetchval("""
-            INSERT INTO acp_contract.subject (tenant_id, hub_name, route_snapshot, selected_by)
+        route_pick_id = await conn.fetchval("""
+            INSERT INTO acp_contract.route_pick (tenant_id, hub_name, route_snapshot, selected_by)
             VALUES ($1::uuid, $2, $3::jsonb, $4)
-            RETURNING subject_id
+            RETURNING route_pick_id
         """, tenant_id, route["hub_name"], json.dumps(snapshot), selected_by)
 
-    return {"subject_id": str(subject_id), "hub_name": route["hub_name"], "route_snapshot": snapshot}
+    return {
+        "route_pick_id": str(route_pick_id),
+        "hub_name": route["hub_name"],
+        "route_snapshot": snapshot,
+    }
 
 
 def _build_snapshot(route, segment_ids: list[str], step_rows) -> dict:
@@ -447,5 +460,5 @@ __all__ = [
     "Moment", "Route", "Stop",
     "LEAST_DAYS", "LEAST_PLACES", "MOST_DAYS", "SHARED_ENOUGH",
     "derive_routes", "families", "stops", "journey_name",
-    "run_route_detection", "create_subject",
+    "run_route_detection", "create_route_pick",
 ]
