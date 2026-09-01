@@ -51,7 +51,10 @@ If the itinerary is thin, return FEW atoms. Never pad. Returning 3 honest atoms 
 invented ones."""
 
 
-def build_user_prompt(row: dict) -> str:
+def _preamble_parts(row: dict) -> list[str]:
+    """TOUR/SUMMARY/HIGHLIGHTS lines shared by build_user_prompt() (whole-tour) and
+    build_day_user_prompt() (AA-508, per-day) — factored out so the two never drift
+    apart on what tour-level context the model sees."""
     parts = [f"TOUR: {row['name']}"]
     if row.get("aa_summary"):
         parts.append(f"SUMMARY: {row['aa_summary']}")
@@ -62,8 +65,28 @@ def build_user_prompt(row: dict) -> str:
             highlights = json.loads(highlights)
         if highlights:
             parts.append("HIGHLIGHTS:\n- " + "\n- ".join(str(h) for h in highlights))
+    return parts
+
+
+def build_user_prompt(row: dict) -> str:
+    parts = _preamble_parts(row)
     if row.get("itinerary_source"):
         parts.append(f"ITINERARY:\n{row['itinerary_source']}")
+    if row.get("inclusions"):
+        parts.append(f"INCLUSIONS:\n{row['inclusions']}")
+    if row.get("exclusions"):
+        parts.append(f"EXCLUSIONS:\n{row['exclusions']}")
+    return "\n\n".join(parts)
+
+
+def build_day_user_prompt(row: dict, day_number: int, day_title: str, day_body: str) -> str:
+    """AA-508 — per-day variant of build_user_prompt(). Same TOUR/SUMMARY/HIGHLIGHTS preamble for
+    context, but ITINERARY is scoped to this one day instead of the whole trip, so run_t5_atomize()
+    can call the model (and fingerprint/cache the result) per day instead of once for the whole
+    tour. SYSTEM_PROMPT (what counts as an atom, how decompose works) is untouched by this — only
+    what the model is shown changes, never what it's asked to do with it."""
+    parts = _preamble_parts(row)
+    parts.append(f"ITINERARY:\nDay {day_number} — {day_title}\n{day_body}")
     if row.get("inclusions"):
         parts.append(f"INCLUSIONS:\n{row['inclusions']}")
     if row.get("exclusions"):
@@ -76,6 +99,48 @@ def source_hash(row: dict) -> str:
     sent to the model, rather than re-deriving the field concatenation, guarantees the hash can
     never drift out of sync with what was actually decomposed."""
     return hashlib.sha256(build_user_prompt(row).encode("utf-8")).hexdigest()
+
+
+def normalise(text: str) -> str:
+    """AA-508 — same normalisation aa-social-media's own `_normalise()` uses (models.py) before
+    hashing: lowercase, every run of non-alphanumeric characters collapsed to one space, stripped.
+    Exported (not `_normalise`) — content_hash_atom_id() and any test/consumer that needs to
+    reproduce a hash input by hand both need it."""
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def content_hash_atom_id(tour_id: str, owner_scope: str, day_number: int, text: str) -> str:
+    """An Atom's identity, derived from what it is rather than when it arrived — AA-508, mirrors
+    aa-social-media's own atom_id() (src/aa_social/models.py), adapted to this schema's real
+    shape (STEP0/STEP0b, docs/claude_audit/AA-508-step0*.md):
+
+    - The reference formula hashes (trip_code, day, place, action). This codebase's decompose
+      schema (SYSTEM_PROMPT above) has no separate place/action fields — one atom is one combined
+      `text` (the verbatim moment) plus a coarse `activity_type` enum. `text` is what gets hashed
+      here; it IS the place+action pair, just not split into two fields the way the reference
+      repo's extractor returns them.
+    - `owner_scope` (the rewriting tenant's id, or 'platform') is added to the hash input. The
+      reference repo has no multi-tenant concept (one SQLite file per brand), so its formula never
+      needed it. `tour_atoms.atom_id` here is a single GLOBAL primary key shared by every tenant
+      that has ever rewritten a given `tour_id` — without owner_scope in the hash, two tenants'
+      differently-worded rewrites of the same tour_id/day that happened to normalise to the same
+      `text` would collide on that one PK and silently overwrite each other's row.
+
+    `tour_id` is used verbatim (not normalised), same as the reference formula treats `trip_code`;
+    `day_number` and `text` are normalised the same way normalise() does.
+    """
+    parts = (str(tour_id), owner_scope, str(day_number), normalise(text))
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def day_fingerprint(day_title: str, day_body: str, model: str) -> str:
+    """What one day's atomize reading depends on (AA-508) — mirrors aa-social-media's own
+    _fingerprint() (src/aa_social/stages/atoms.py): the day's own text, the decompose instruction
+    (SYSTEM_PROMPT), and the model. Change any of the three and the fingerprint changes — a
+    matching fingerprint means run_t5_atomize() would get the exact same reading calling the model
+    again, so it doesn't."""
+    joined = "\n\0".join((day_title or "", day_body or "", SYSTEM_PROMPT, model))
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
 def strip_json_fence(text: str) -> str:

@@ -39,6 +39,7 @@ Decisions (see docs/implementation-notes/AA-425.md for the full list):
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import uuid
@@ -47,16 +48,26 @@ import structlog
 
 from services.acp_shared.atom_extraction import (
     SYSTEM_PROMPT as _SYSTEM_PROMPT,
+    build_day_user_prompt as _build_day_user_prompt,
     build_user_prompt as _build_user_prompt,
+    content_hash_atom_id as _content_hash_atom_id,
+    day_fingerprint as _day_fingerprint,
     source_hash as _source_hash,
     strip_json_fence as _strip_json_fence,
 )
 from services.acp_shared.grounding import find_novel_numeric_claims
+from services.content_generation.itinerary_utils import parse_canonical_itinerary_days
 from shared.llm_client.bedrock_satellite import invoke_claude
 
 logger = structlog.get_logger()
 
 TENANT_QA_MAX_REPAIRS = 2  # AA-425 — separate from acp_produce.models.REPAIR_TOTAL_MAX (N7, =3)
+
+# AA-508 — model tier run_t5_atomize() calls invoke_claude() with, for both the per-day path and
+# the legacy whole-tour fallback. Named so day_fingerprint()'s "model" input and the actual call
+# can never drift apart (a fingerprint computed against one tier while the call uses another would
+# silently under- or over-invalidate the cache).
+_T5_MODEL_TIER = "sonnet"
 
 # Fields checked for both gates — same set graph.py's validate_node treats as the
 # rewrite's real prose output (name/seo_title/seo_meta excluded: short/derived,
@@ -238,7 +249,10 @@ async def escalate_t5_atomize_failure(
                 category=category)
 
 
-async def run_t5_atomize(tenant_id: str, tour_id: str, rewritten: dict, pool, country: str = "") -> dict:
+async def run_t5_atomize(
+    tenant_id: str, tour_id: str, rewritten: dict, pool, country: str = "",
+    version_id: str | None = None,
+) -> dict:
     """T5 — decompose atoms from T4 output (tenant-rewritten), owner_scope=tenant_id.
     Reuses AA-299's proven prompt/parse pipeline, now living in
     services/acp_shared/atom_extraction.py (AA-475 — moved out of the deleted
@@ -247,13 +261,6 @@ async def run_t5_atomize(tenant_id: str, tour_id: str, rewritten: dict, pool, co
     (_build_user_prompt, _SYSTEM_PROMPT, _strip_json_fence, invoke_claude) — the
     two changes AA-425 asks for: (1) `row` built from T4 output, not a
     v_trip_registry SELECT (raw source); (2) owner_scope=tenant_id, not 'platform'.
-
-    Idempotency fix vs. the old N2 platform-scope decompose (invisible there because
-    owner_scope was always 'platform' — never exercised with more than one owner
-    per tour_id): the source_hash lookup is scoped to (tour_id, owner_scope)
-    together, not tour_id alone, so two tenants rewriting the same underlying
-    tour_id can't read each other's most-recent atom row when deciding whether to
-    skip as unchanged.
 
     tour_id here MUST be silver_aa_internal.raw_tours.tour_id (acp_contract.
     tour_atoms.tour_id's FK target) — the caller passes published_tours.tour_id
@@ -267,6 +274,24 @@ async def run_t5_atomize(tenant_id: str, tour_id: str, rewritten: dict, pool, co
     notes Decision 1 for why (CompetitorIndex is tenant-relative; platform atoms have no single
     owning tenant). An empty/unresolvable country just yields an empty CompetitorIndex
     (score_distinctiveness() already handles that — returns MED), not an error.
+
+    AA-508 — dispatches to one of two paths, per STEP0/STEP0b (docs/claude_audit/AA-508-step0*.md):
+
+    - `_atomize_per_day()`: the new default. Splits `rewritten["itineraries"]` into individual
+      days (parse_canonical_itinerary_days(), the SAME "Day N — Title\\nBody" parser validate_node/
+      flag_fix_node already trust for this exact string — T4 reuses T2's engine, graph.py's
+      generate_node/_process_itineraries, so this format is what real T4 output actually is), then
+      atomizes/fingerprints/UPSERTs one day at a time instead of the whole tour in one shot.
+      Requires `version_id` (the fingerprint table's key, acp_contract.atomize_day_fingerprint) —
+      the one real call site (v1_tours.py::atomize_version()) always has it.
+    - `_atomize_whole_tour_legacy()`: the pre-AA-508 behavior, byte-for-byte. Used when the
+      itinerary isn't in canonical day format (parse_canonical_itinerary_days() returns {} —
+      "cannot determine", not "zero days", per its own docstring — e.g. older/legacy rewritten
+      content) or `version_id` is omitted (defensive: a future caller that forgets it gets the old
+      whole-tour behavior, not a mis-atomize where everything is silently attributed to day
+      None). Kept verbatim, not merged into the new path, specifically so this codebase's own
+      pre-existing tests (test_aa445_t5_distinctiveness.py, both cases pass `itineraries=""`)
+      keep exercising the real function unchanged.
     """
     row = {
         "id": tour_id,
@@ -275,8 +300,25 @@ async def run_t5_atomize(tenant_id: str, tour_id: str, rewritten: dict, pool, co
         "aa_highlights": rewritten.get("highlights") or [],
         "itinerary_source": rewritten.get("itineraries") or "",
     }
+    # Whole-tour hash — AA-508 keeps this (STEP0 build-task instruction: "giữ lại source_hash
+    # cấp-tour hiện có làm fallback/audit"). Still written onto every atom row either path
+    # produces; no longer what decides skip-or-not in the per-day path (the fingerprint table
+    # does), but still readable for audit/debugging and still what the legacy path skips on.
     source_hash = _source_hash(row)
 
+    days = parse_canonical_itinerary_days(row["itinerary_source"])
+    if not days or not version_id:
+        return await _atomize_whole_tour_legacy(tenant_id, tour_id, row, source_hash, pool, country)
+    return await _atomize_per_day(
+        tenant_id, tour_id, version_id, row, days, source_hash, pool, country,
+    )
+
+
+async def _atomize_whole_tour_legacy(
+    tenant_id: str, tour_id: str, row: dict, source_hash: str, pool, country: str,
+) -> dict:
+    """Pre-AA-508 behavior, unchanged (see run_t5_atomize()'s own docstring for when this runs).
+    Random atom_id, one LLM call for the whole itinerary, source_hash-over-the-whole-tour skip."""
     async with pool.acquire() as conn:
         latest_hash = await conn.fetchval(
             """SELECT source_hash FROM acp_contract.tour_atoms
@@ -291,9 +333,8 @@ async def run_t5_atomize(tenant_id: str, tour_id: str, rewritten: dict, pool, co
 
     prompt = _build_user_prompt(row)
     try:
-        import asyncio
         llm_result = await asyncio.to_thread(
-            invoke_claude, prompt, model="sonnet", max_tokens=4096, system=_SYSTEM_PROMPT,
+            invoke_claude, prompt, model=_T5_MODEL_TIER, max_tokens=4096, system=_SYSTEM_PROMPT,
         )
     except Exception as e:
         logger.error("t5_atomize_llm_failed", tour_id=tour_id, tenant_id=tenant_id,
@@ -344,3 +385,157 @@ async def run_t5_atomize(tenant_id: str, tour_id: str, rewritten: dict, pool, co
 
     logger.info("t5_atomize_done", tour_id=tour_id, tenant_id=tenant_id, atom_count=inserted)
     return {"status": "success", "atom_count": inserted}
+
+
+async def _atomize_per_day(
+    tenant_id: str, tour_id: str, version_id: str, row: dict, days: dict,
+    source_hash: str, pool, country: str,
+) -> dict:
+    """AA-508 — one day at a time: fingerprint-gated skip (blocks the LLM call, not just logged
+    after one), content-hash atom_id, real UPSERT. See atom_extraction.py::content_hash_atom_id()/
+    day_fingerprint() for the two hash formulas and their reasoning vs. the reference repo's.
+
+    Days are read SEQUENTIALLY, not concurrently (unlike aa-social-media's own 16-wide
+    ThreadPoolExecutor) — AA-418's own prior investigation (services/acp_produce/pipeline.py's
+    AA-416 comment) found concurrent invoke_claude() calls unverified-safe on this codebase's
+    Bedrock satellite setup (unverified acc3 quota under concurrency); one call at a time keeps
+    this inside the pattern already load-tested here, trading the reference repo's wall-clock
+    speed for that. A day that fails does not lose days already read: each day's atoms +
+    fingerprint row are written (and committed — no transaction spans more than one day, same
+    autocommit-per-statement shape the pre-AA-508 code already had) before moving to the next day,
+    mirroring the reference repo's own "committed before the failure is raised... keeps the days
+    that did answer" guarantee (atoms.py). A day whose LLM call or JSON parse fails simply keeps
+    no fingerprint row for itself, so the next call re-asks exactly that day and only that day.
+    """
+    async with pool.acquire() as conn:
+        existing = await conn.fetch(
+            """SELECT day_number, fingerprint_hash FROM acp_contract.atomize_day_fingerprint
+               WHERE tenant_tour_version_id = $1::uuid""",
+            version_id,
+        )
+    existing_fp = {r["day_number"]: r["fingerprint_hash"] for r in existing}
+
+    to_ask = []
+    for day_num in sorted(days):
+        day = days[day_num]
+        fp = _day_fingerprint(day["title"], day["body"], _T5_MODEL_TIER)
+        if existing_fp.get(day_num) != fp:
+            to_ask.append((day_num, day, fp))
+
+    if not to_ask:
+        logger.info("t5_atomize_all_days_skipped", tour_id=tour_id, version_id=version_id,
+                    day_count=len(days))
+        return {
+            "status": "skipped", "atom_count": 0,
+            "days_total": len(days), "days_read": 0, "days_skipped": len(days),
+        }
+
+    # AA-445-02 (B4/score_distinctiveness()) — built once for the whole call, reused across
+    # every day that gets read, same reasoning as the legacy path's own comment.
+    from services.acp_shared.competitor_index import build_competitor_index, score_distinctiveness
+    competitor_idx = await build_competitor_index(tenant_id, country, pool)
+
+    inserted = 0
+    days_read = 0
+    days_failed = []
+    for day_num, day, fp in to_ask:
+        prompt = _build_day_user_prompt(row, day_num, day["title"], day["body"])
+        try:
+            llm_result = await asyncio.to_thread(
+                invoke_claude, prompt, model=_T5_MODEL_TIER, max_tokens=4096, system=_SYSTEM_PROMPT,
+            )
+        except Exception as e:
+            logger.error("t5_atomize_day_llm_failed", tour_id=tour_id, version_id=version_id,
+                         day_number=day_num, error_type=type(e).__name__, error=str(e))
+            days_failed.append(day_num)
+            continue
+        try:
+            atoms = json.loads(_strip_json_fence(llm_result.text))["atoms"]
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            logger.error("t5_atomize_day_parse_failed", tour_id=tour_id, version_id=version_id,
+                         day_number=day_num, error=str(e))
+            days_failed.append(day_num)
+            continue
+
+        new_atom_ids = []
+        async with pool.acquire() as conn:
+            if atoms:
+                for atom in atoms:
+                    text = atom.get("text") or ""
+                    atom_id = _content_hash_atom_id(tour_id, tenant_id, day_num, text)
+                    distinctiveness = score_distinctiveness(text, competitor_idx)
+                    # ON CONFLICT never touches starred/weight — starred is a human curation
+                    # flag, weight is content_metrics.py's own learned value (usage-log-derived).
+                    # An UPSERT that reset either on every re-atomize would silently erase both
+                    # every time a day's fingerprint happened to change.
+                    await conn.execute("""
+                        INSERT INTO acp_contract.tour_atoms
+                            (atom_id, tour_id, owner_scope, text, activity_type, emotional_hook,
+                             visual_potential, persona_fit, season_note, starred, deleted, weight,
+                             source_hash, itinerary_day, distinctiveness, created_at, updated_at)
+                        VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12,
+                                $13, $14, $15, now(), now())
+                        ON CONFLICT (atom_id) DO UPDATE SET
+                            text = excluded.text, activity_type = excluded.activity_type,
+                            emotional_hook = excluded.emotional_hook,
+                            visual_potential = excluded.visual_potential,
+                            persona_fit = excluded.persona_fit,
+                            season_note = excluded.season_note,
+                            source_hash = excluded.source_hash,
+                            distinctiveness = excluded.distinctiveness,
+                            deleted = false, updated_at = now()
+                    """, atom_id, tour_id, tenant_id, text, atom.get("activity_type"),
+                        atom.get("emotional_hook"), atom.get("visual_potential", 1),
+                        json.dumps(atom.get("persona_fit") or []), atom.get("season_note"),
+                        False, False, 1.0, source_hash, day_num, distinctiveness)
+                    new_atom_ids.append(atom_id)
+                    inserted += 1
+            else:
+                marker_id = _content_hash_atom_id(tour_id, tenant_id, day_num, "__empty__")
+                await conn.execute("""
+                    INSERT INTO acp_contract.tour_atoms
+                        (atom_id, tour_id, owner_scope, text, starred, deleted,
+                         is_empty_marker, weight, source_hash, itinerary_day, created_at, updated_at)
+                    VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, now(), now())
+                    ON CONFLICT (atom_id) DO UPDATE SET
+                        deleted = false, source_hash = excluded.source_hash, updated_at = now()
+                """, marker_id, tour_id, tenant_id,
+                    "(zero-atom marker — no content, see is_empty_marker)",
+                    False, False, True, 1.0, source_hash, day_num)
+                new_atom_ids.append(marker_id)
+
+            # AA-508 — this day's content changed (that's why it was in `to_ask`) and may now
+            # produce FEWER atoms than a prior read of the same day did; soft-delete whichever of
+            # THIS day's previously-live atoms this read did not reproduce. Mirrors aa-social-
+            # media's own delete_missing() (atoms.py) — soft, not hard, per this table's existing
+            # admin-PATCH soft-delete convention (no hard DELETE precedent on tour_atoms).
+            await conn.execute("""
+                UPDATE acp_contract.tour_atoms SET deleted = true, updated_at = now()
+                WHERE tour_id = $1::uuid AND owner_scope = $2 AND itinerary_day = $3
+                  AND NOT deleted AND atom_id != ALL($4::text[])
+            """, tour_id, tenant_id, day_num, new_atom_ids)
+
+            await conn.execute("""
+                INSERT INTO acp_contract.atomize_day_fingerprint
+                    (tenant_tour_version_id, day_number, fingerprint_hash, atomized_at)
+                VALUES ($1::uuid, $2, $3, now())
+                ON CONFLICT (tenant_tour_version_id, day_number) DO UPDATE SET
+                    fingerprint_hash = excluded.fingerprint_hash, atomized_at = now()
+            """, version_id, day_num, fp)
+        days_read += 1
+
+    result = {
+        "status": "failed" if days_failed else "success",
+        "atom_count": inserted, "days_total": len(days),
+        "days_read": days_read, "days_skipped": len(days) - len(to_ask),
+    }
+    if days_failed:
+        result["error"] = (
+            f"day(s) {days_failed} failed to atomize "
+            f"({days_read} day(s) succeeded and were kept)"
+        )
+        result["days_failed"] = days_failed
+    logger.info("t5_atomize_per_day_done", tour_id=tour_id, version_id=version_id, **{
+        k: v for k, v in result.items() if k not in ("error",)
+    })
+    return result

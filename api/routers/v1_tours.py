@@ -788,7 +788,7 @@ async def atomize_version(
     from services.acp_produce.tenant_pipeline import run_t5_atomize
     result = await run_t5_atomize(
         tenant_id, row["tour_id"], rewritten, pool,
-        country=row["country"] or "",
+        country=row["country"] or "", version_id=version_id,
     )
     if result.get("status") == "failed":
         # AA-469 Việc 5 — the gap this comment used to flag ("Việc 5's future job") is closed:
