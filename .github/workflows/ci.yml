@@ -80,6 +80,7 @@ jobs:
           AWS_DEFAULT_REGION: us-west-1
           DATABASE_URL: postgresql://test:test@localhost:5432/test
           OPENAI_API_KEY: sk-test-dummy
+          JWT_SECRET: test-jwt-secret-ci-only-not-real
           DATAFORSEO_LOGIN: test
           DATAFORSEO_PASSWORD: test
           LANGFUSE_SECRET_KEY: test
@@ -156,6 +157,7 @@ jobs:
           AWS_REGION: us-west-1
           AWS_DEFAULT_REGION: us-west-1
           OPENAI_API_KEY: sk-test-dummy
+          JWT_SECRET: test-jwt-secret-ci-only-not-real
           DATAFORSEO_LOGIN: test
           DATAFORSEO_PASSWORD: test
           LANGFUSE_SECRET_KEY: test
