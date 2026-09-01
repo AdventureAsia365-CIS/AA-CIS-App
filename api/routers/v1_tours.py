@@ -36,6 +36,12 @@ async def _run_ranking_pipeline(tenant_id: str, pool) -> None:
     that call site's own comment). Swallows every exception itself (this is the top of its own
     task, nothing awaits it to propagate one to) — logs and returns, same as every other
     best-effort step already in this file.
+
+    AA-510 — Route/Hub detection runs right after ranking, in the SAME background task (not a
+    second create_task()): Route is built entirely from atom_ranking's own output, so a
+    detection run against a ranking result this same call just wrote is the natural ordering,
+    and a route_detection-only failure must not be allowed to silently starve on its own
+    unreferenced task the way AA-425's own comment (top of this file) already warned about.
     """
     try:
         from services.acp_contract.atom_ranking import run_atom_ranking
@@ -61,6 +67,14 @@ async def _run_ranking_pipeline(tenant_id: str, pool) -> None:
         )
     except Exception:
         logger.warning("t5_ranking_pipeline_failed", tenant_id=tenant_id, exc_info=True)
+        return
+
+    try:
+        from services.acp_contract.route_detection import run_route_detection
+        route_result = await run_route_detection(tenant_id, pool)
+        logger.info("t5_route_detection_done", tenant_id=tenant_id, route=route_result)
+    except Exception:
+        logger.warning("t5_route_detection_failed", tenant_id=tenant_id, exc_info=True)
 
 
 # AA-469 Việc 1 — "already atomized" is DERIVED (no new column/migration), same precedent
