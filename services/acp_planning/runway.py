@@ -200,6 +200,11 @@ _TRIP_ROW_QUERY = """
     JOIN gold_aa_internal.published_tours pt ON pt.id = lv.published_tour_id
     JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
     LEFT JOIN acp_deliver.tenant_tour_pages ttp ON ttp.tour_id = rt.tour_id
+    WHERE EXISTS (
+        SELECT 1 FROM acp_contract.tour_atoms ta
+        WHERE ta.tour_id = rt.tour_id AND ta.owner_scope = $2
+          AND NOT ta.deleted AND NOT ta.is_empty_marker
+    )
 """
 
 
@@ -219,29 +224,33 @@ async def fetch_trips(tenant_id: UUID, pool) -> list[Trip]:
     # "tour đã chọn/rewrite") joined to the trip's underlying raw_tours/published_tours row —
     # NOT `acp_contract.v_trip_registry` (that view's `tenant_id` column is backed by
     # `raw_tours.tenant_id`, which is only ever aa_internal; it is the right source for T1
-    # "browse the pool", never for T7 Slate/N4-N6 per-tenant planning). Byte-identical query
-    # to `tenant_pool.fetch_tenant_trips()` (AA-448, T7's own already-shipped, live-verified
-    # parallel function) — kept as a separate copy rather than one shared call to match this
-    # codebase's own existing precedent (`quarter.fetch_atoms_by_trip()`'s AA-461 fix is the
-    # same "duplicate the fix shape, don't restructure the import graph" call, see that
-    # function's docstring) and to avoid a circular import (`tenant_pool` already imports
-    # `_row_to_trip` from this module).
+    # "browse the pool", never for T7 Slate/N4-N6 per-tenant planning).
     #
-    # A tenant with zero `tenant_tour_versions` rows (never rewritten anything via T1-T4) gets
-    # an empty list here, INCLUDING aa_internal itself today — aa_internal's 763-trip master
-    # catalog was never run through the tenant rewrite flow under its own tenant_id, so it is
-    # not "the tenant with the most trips" through this function anymore. This is intended,
-    # Nghiep-confirmed behavior (AA-500 decision, see docs/implementation-notes/AA-500.md): if
-    # aa_internal needs N4-N6 planning, the operational fix is to rewrite a tour for it via the
-    # portal like any other tenant (T1->T5), not a code branch here. Every other caller
-    # (`quarter.plan_quarter()`, `allocator.allocate_month()`) must treat an empty trip list as
-    # a valid, non-error outcome (verified: both already do — see AA-500 "Should know").
+    # AA-500 follow-up (same day, "Cách B" — Nghiep decision): additionally requires >=1 real
+    # `tour_atoms` row (`owner_scope = tenant_id`, not deleted, not an empty marker — same
+    # existence filter `tenant_pool._TENANT_ATOM_QUERY`/`v1_marketplace._MARKETPLACE_QUERY`'s
+    # atom aggregate already use) via `EXISTS`, NOT just tenant_tour_versions membership. Reason
+    # (Nghiep): Slate (T7, AA-511) shows/recommends by ATOM (through Segment/Route), not by
+    # tour — a rewritten-but-not-yet-atomized tour has no atoms for Slate to use, so surfacing it
+    # here is pure noise (tenant clicks in, sees nothing). Filtered at the source, not pushed
+    # down into Slate. This is a DELIBERATE DIVERGENCE from `tenant_pool.fetch_tenant_trips()`
+    # (AA-448, T7's own parallel query) and `v1_marketplace._MARKETPLACE_QUERY` (AA-444), both of
+    # which still LEFT JOIN/COALESCE a 0-atom tour in rather than excluding it (that was the
+    # right call for THEIR purposes — a rewritten-but-empty tour is a real "still needs
+    # atomizing" gap signal for a tenant's own Marketplace/T7 view — but wrong for N4-N6's
+    # atom-driven Slate). Do not "fix" this divergence by copying one query's filter onto the
+    # other without re-checking which caller actually needs which semantics.
+    #
+    # A tenant with zero qualifying (rewritten AND atomized) trips gets an empty list here,
+    # INCLUDING aa_internal itself today — see docs/implementation-notes/AA-500.md for the full
+    # decision history. Every other caller (`quarter.plan_quarter()`, `allocator.allocate_month()`)
+    # must treat an empty trip list as a valid, non-error outcome (verified: both already do).
     #
     # Previous (AA-323 round 6 Phần B, 2026-08-13) TEMP behavior — read the FULL unfiltered
     # `v_trip_registry` for every tenant, "REVISIT WHEN N1 SHIPS" — is superseded by this
     # change; that revisit is this one.
     async with pool.acquire() as conn:
-        rows = await conn.fetch(_TRIP_ROW_QUERY, tenant_id)
+        rows = await conn.fetch(_TRIP_ROW_QUERY, tenant_id, str(tenant_id))
     return [_row_to_trip(r) for r in rows]
 
 
