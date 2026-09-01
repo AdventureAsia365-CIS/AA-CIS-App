@@ -233,17 +233,15 @@ class TestNoLlmCost:
 
 class TestFetchTripsDbWrapper:
     @pytest.mark.asyncio
-    async def test_query_reads_full_catalog_no_tenant_filter(self):
-        """AA-323 round 6, Phần B (Nghiep decision, 2026-08-13, TEMP) —
-        fetch_trips() used to filter `WHERE tenant_id = $1`, which live-DB
-        evidence showed left EVERY non-aa_internal tenant with 0 eligible
-        trips on /admin/quarter-plan/create, even one with a real
-        Gate-A-approved N1 onboarding (tenant_atom_state was never what this
-        query read from). Every tenant now reads the same full platform
-        catalog until Marketplace/N1 licensing (D3/D4) is built — see
-        runway.py's fetch_trips() docstring/comment for the full reasoning.
-        `tenant_id` stays a required param (unused for filtering now) so the
-        call signature doesn't ripple through every caller."""
+    async def test_query_reads_tenant_tour_versions_not_v_trip_registry(self):
+        """AA-500 (2026-09-01) — supersedes the AA-323 round 6 Phần B TEMP behavior this test
+        used to assert (every tenant reading the unfiltered `v_trip_registry` platform catalog).
+        `fetch_trips()` now reads the tenant's own T1->T5 pipeline output
+        (`gold_aa_internal.tenant_tour_versions` joined through to `raw_tours`/`published_tours`)
+        — the same source `tenant_pool.fetch_tenant_trips()` (AA-448) already uses for T7.
+        `v_trip_registry` (`raw_tours.tenant_id`, always aa_internal — confirmed live, AA-500
+        STEP0) is the wrong source for per-tenant planning; it stays correct only for T1
+        pool-browsing (`v1_tours.py`), untouched by this change."""
         conn = AsyncMock()
         conn.fetch.return_value = [{
             "id": uuid.uuid4(), "name": "DB Trip", "destination": "Testland",
@@ -260,6 +258,26 @@ class TestFetchTripsDbWrapper:
 
         assert len(trips) == 1
         assert trips[0].name == "DB Trip"
-        (called_query,) = conn.fetch.call_args[0]
-        assert "WHERE tenant_id" not in called_query
-        assert "FROM acp_contract.v_trip_registry" in called_query
+        called_query, called_tenant_id = conn.fetch.call_args[0]
+        assert called_tenant_id == TENANT
+        assert "gold_aa_internal.tenant_tour_versions" in called_query
+        assert "WHERE ttv.tenant_id = $1" in called_query
+        assert "FROM acp_contract.v_trip_registry" not in called_query
+
+    @pytest.mark.asyncio
+    async def test_no_tenant_tour_versions_rows_returns_empty_not_error(self):
+        """AA-500 decision (Nghiep-confirmed): a tenant with zero `tenant_tour_versions` rows —
+        including aa_internal itself today, which has never run its own master catalog through
+        the T1->T5 tenant-rewrite flow — gets an empty trip list, not an error. Fixing this for
+        aa_internal is an operational action (rewrite a tour via the portal), not a code branch."""
+        conn = AsyncMock()
+        conn.fetch.return_value = []
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=conn)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        pool = MagicMock()
+        pool.acquire = MagicMock(return_value=ctx)
+
+        trips = await fetch_trips(TENANT, pool)
+
+        assert trips == []
