@@ -37,12 +37,14 @@ def _make_pool(conn):
     return pool
 
 
-def _request(status="approved", cta="Book a consultation", angles=None, channel="facebook"):
+def _request(status="approved", cta="Book a consultation", angles=None, channel="facebook",
+             route_segment_ids=None, trip_id=None):
     return {
         "request_id": str(REQUEST_ID), "tenant_id": str(TENANT_ID), "atom_id": "atom_abc123",
-        "trip_id": None, "channel": channel, "goal": "promotion", "cta": cta,
+        "trip_id": trip_id, "channel": channel, "goal": "promotion", "cta": cta,
         "status": status, "created_at": "2026-08-24T00:00:00", "updated_at": "2026-08-24T00:00:00",
         "angles": angles if angles is not None else [ANGLE],
+        "route_segment_ids": route_segment_ids,  # AA-513
     }
 
 
@@ -214,6 +216,45 @@ class TestStartWrite:
         _, *params = insert_call.args
         assert None in params
 
+    async def test_route_pick_builds_route_segments_context_joined_atom_text(self):
+        """AA-513 — a Route/Blog pick (route_segment_ids set) must resolve EVERY Segment's own
+        (atom_id, text) pair into context["route_segments"], while atom_text (fed to the quality
+        GATES) stays the plain joined text — same as before this build, deliberately not
+        labeled (see docs/claude_audit/AA-513-step0-investigation.md §1's digit-pollution risk)."""
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [_placeholder_row()]  # only the INSERT — route path skips _fetch_atom_text
+        pool = _make_pool(conn)
+        segments = [("atom_seg1", "Cross the bamboo bridge at dawn"), ("atom_seg2", "Kayak the bay at sunset")]
+
+        with patch.object(service.angle_gate_service, "fetch_request",
+                           new=AsyncMock(return_value=_request(route_segment_ids=["seg1", "seg2"], trip_id="trip1"))), \
+             patch.object(service, "fetch_brand_audience", new=AsyncMock(return_value={})), \
+             patch.object(service, "fetch_brand_rubric_text", new=AsyncMock(return_value="rubric")), \
+             patch.object(service, "get_goal", return_value=GOAL), \
+             patch.object(service, "_fetch_route_segments", new=AsyncMock(return_value=segments)) as mock_fetch:
+            result = await service.start_write(TENANT_ID, REQUEST_ID, pool)
+
+        mock_fetch.assert_called_once_with(TENANT_ID, "trip1", ["seg1", "seg2"], pool)
+        assert result["context"]["route_segments"] == segments
+        assert result["context"]["atom_text"] == "Cross the bamboo bridge at dawn\n\nKayak the bay at sunset"
+
+    async def test_non_route_request_has_none_route_segments(self):
+        """Regression — a request with no route_segment_ids (every existing Segment pick or
+        atom-picker request) must NOT populate context["route_segments"], and must still fetch
+        the single-atom text exactly as before this build."""
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [{"text": "atom text"}, _placeholder_row()]
+        pool = _make_pool(conn)
+
+        with patch.object(service.angle_gate_service, "fetch_request", new=AsyncMock(return_value=_request())), \
+             patch.object(service, "fetch_brand_audience", new=AsyncMock(return_value={})), \
+             patch.object(service, "fetch_brand_rubric_text", new=AsyncMock(return_value="rubric")), \
+             patch.object(service, "get_goal", return_value=GOAL):
+            result = await service.start_write(TENANT_ID, REQUEST_ID, pool)
+
+        assert result["context"]["route_segments"] is None
+        assert result["context"]["atom_text"] == "atom text"
+
 
 @pytest.mark.asyncio
 class TestRunWriteBackground:
@@ -234,6 +275,31 @@ class TestRunWriteBackground:
         assert mock_finalize.call_args.kwargs["status"] == "approved"
         assert mock_finalize.call_args.kwargs["attempt_number"] == 1
         assert mock_finalize.call_args.kwargs["held_reason"] is None
+
+    async def test_route_segments_passed_through_to_write_content(self):
+        """AA-513 — context["route_segments"] (when present) must reach write_content(), not be
+        silently dropped between start_write() and the actual LLM call."""
+        segments = [("atom_seg1", "text1"), ("atom_seg2", "text2")]
+        with patch.object(service, "write_content", return_value=("final piece text", 0.02)) as mock_write, \
+             patch.object(service, "run_quality_gates", return_value=_passing_outcome()), \
+             patch.object(service, "_finalize_piece", new=AsyncMock(return_value=_finalized_row())):
+            await service.run_write_background(
+                REQUEST_ID, PIECE_ID, _context(route_segments=segments), pool=MagicMock(),
+            )
+
+        assert mock_write.call_args.kwargs["route_segments"] == segments
+
+    async def test_missing_route_segments_key_defaults_to_none(self):
+        """A context dict built without the "route_segments" key at all (every pre-AA-513
+        caller/test — the base `_context()` fixture itself has no such key) must not crash —
+        dict.get(), not context["route_segments"]."""
+        assert "route_segments" not in _context()  # sanity: base fixture really omits the key
+        with patch.object(service, "write_content", return_value=("final piece text", 0.02)) as mock_write, \
+             patch.object(service, "run_quality_gates", return_value=_passing_outcome()), \
+             patch.object(service, "_finalize_piece", new=AsyncMock(return_value=_finalized_row())):
+            await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())
+
+        assert mock_write.call_args.kwargs["route_segments"] is None
 
     async def test_retry_once_then_approved(self):
         with patch.object(service, "write_content", return_value=("draft 1", 0.02)) as mock_write, \
@@ -306,6 +372,45 @@ class TestRunWriteBackground:
         with patch.object(service, "write_content", side_effect=RuntimeError("boom")), \
              patch.object(service, "_finalize_piece", new=AsyncMock(side_effect=RuntimeError("db down"))):
             await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())  # no raise
+
+
+@pytest.mark.asyncio
+class TestFetchRouteSegments:
+    """AA-513 — services/acp_content_writing/service.py::_fetch_route_segments() itself (AA-511
+    Gap A's own `_fetch_route_text()` had zero direct test coverage before this build — added
+    here as part of touching/renaming it, not backfilled elsewhere)."""
+
+    async def test_resolves_every_segment_in_order(self):
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [
+            {"atom_id": "atom_seg1", "text": "text1"},
+            {"atom_id": "atom_seg2", "text": "text2"},
+        ]
+        pool = _make_pool(conn)
+        result = await service._fetch_route_segments(TENANT_ID, "trip1", ["seg1", "seg2"], pool)
+        assert result == [("atom_seg1", "text1"), ("atom_seg2", "text2")]
+
+    async def test_best_effort_skips_a_segment_rebuilt_away(self):
+        """A Segment whose live representative atom is gone (rebuilt away since pick time) is
+        silently skipped, not a hard failure — same "partial join degrades detail but doesn't
+        fail" precedent route_detection.py::create_route_pick() already sets."""
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [None, {"atom_id": "atom_seg2", "text": "text2"}]
+        pool = _make_pool(conn)
+        result = await service._fetch_route_segments(TENANT_ID, "trip1", ["seg1_gone", "seg2"], pool)
+        assert result == [("atom_seg2", "text2")]
+
+    async def test_all_segments_gone_raises(self):
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [None, None]
+        pool = _make_pool(conn)
+        with pytest.raises(service.ContentWritingError):
+            await service._fetch_route_segments(TENANT_ID, "trip1", ["gone1", "gone2"], pool)
+
+    async def test_missing_trip_id_raises(self):
+        pool = _make_pool(AsyncMock())
+        with pytest.raises(service.ContentWritingError):
+            await service._fetch_route_segments(TENANT_ID, None, ["seg1"], pool)
 
 
 @pytest.mark.asyncio
