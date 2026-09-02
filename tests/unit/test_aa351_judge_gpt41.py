@@ -2,10 +2,12 @@
 tests/unit/test_aa351_judge_gpt41.py — AA-351-03 GPT-4.1 alternative judge backend
 (services/acp_produce/judge_client.py::invoke_judge_gpt41()).
 
-Covers: (1) invoke_judge() still defaults to Nova Pro when JUDGE_MODEL is unset and no
-explicit model= is passed — production behavior (every gates.py call site) is unchanged
-by this addition, same as AA-351-02's gpt56 backend before it; (2) explicit model="gpt41"
-and the JUDGE_MODEL env var both route to the new backend; (3) the GPT-4.1 path uses a
+Covers: (1) invoke_judge() defaults to GPT-4.1 when JUDGE_MODEL is unset and no explicit
+model= is passed — AA-518 (02/09/2026) changed the default "nova_pro" -> "gpt41" as a
+deliberate TEMPORARY stand-in pending GPT-5.6 (AA-351) unblocking; Nova Pro stays fully
+selectable via explicit model="nova_pro" or JUDGE_MODEL=nova_pro, just no longer the
+default; (2) explicit model="gpt41" and the JUDGE_MODEL env var both route to the new
+backend; (3) the GPT-4.1 path uses a
 direct openai.OpenAI client (same construction judge_node.py already runs in production),
 NOT Bedrock/boto3, and NOT the full LLMClient.generate() fallback chain; (4) response
 parsing produces the same {text, model_used, provider, input_tokens, output_tokens} shape
@@ -42,15 +44,27 @@ def _openai_response(text: str, in_tok: int = 18, out_tok: int = 9):
     return resp
 
 
-def test_invoke_judge_defaults_to_nova_pro_when_env_unset(monkeypatch):
-    """No JUDGE_MODEL env var, no explicit model= -- must still be Nova Pro
-    (the production path every gates.py call site relies on), unaffected by
-    the gpt41 branch existing alongside gpt56."""
+def test_invoke_judge_defaults_to_gpt41_when_env_unset(monkeypatch):
+    """No JUDGE_MODEL env var, no explicit model= -- AA-518: default is now
+    GPT-4.1 (production path every gates.py call site relies on), a
+    deliberate temporary stand-in pending GPT-5.6 (AA-351) unblocking."""
+    monkeypatch.delenv("JUDGE_MODEL", raising=False)
+    fake_openai_client = MagicMock()
+    fake_openai_client.chat.completions.create.return_value = _openai_response('{"ok": true}')
+    with patch("openai.OpenAI", return_value=fake_openai_client):
+        result = invoke_judge("system", "user")
+    assert result["model_used"] == GPT41_MODEL
+
+
+def test_invoke_judge_nova_pro_still_selectable_explicitly(monkeypatch):
+    """AA-518 changed the DEFAULT away from Nova Pro, but the backend itself
+    is untouched -- explicit model="nova_pro" (or JUDGE_MODEL=nova_pro) must
+    still route there, for anyone who needs to fall back to it."""
     monkeypatch.delenv("JUDGE_MODEL", raising=False)
     fake_client = MagicMock()
     fake_client.invoke_model.return_value = _nova_response('{"ok": true}')
     with patch("services.acp_produce.judge_client.boto3.client", return_value=fake_client):
-        result = invoke_judge("system", "user")
+        result = invoke_judge("system", "user", model="nova_pro")
     assert result["model_used"] == NOVA_PRO_MODEL_ID
 
 

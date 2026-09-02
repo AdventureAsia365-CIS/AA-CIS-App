@@ -10,11 +10,23 @@ patching services.acp_produce.judge_client.boto3.client for the LLM gate.
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from services.acp_produce.gates import (SOCIAL_SEO_FAILURE_CODES, gate_banned_patterns,
                                           gate_brand_seo_audit, gate_brand_seo_audit_social,
                                           gate_brief_compliance, gate_faq_dedup,
                                           gate_route_to_sellable, gate_structural_variance)
 from services.acp_produce.models import Brief, KeywordRecord
+
+
+@pytest.fixture(autouse=True)
+def _pin_judge_model_to_nova_pro(monkeypatch):
+    """F9's tests here patch services.acp_produce.judge_client.boto3.client with
+    Nova/Converse-shaped mocks, none of it about which backend is the production
+    default. AA-518 (02/09/2026) changed invoke_judge()'s default "nova_pro" ->
+    "gpt41" -- pin it back here so these tests keep exercising the same Nova Pro
+    path/mock shape they always have."""
+    monkeypatch.setenv("JUDGE_MODEL", "nova_pro")
 
 
 def _bedrock_response(data: dict):

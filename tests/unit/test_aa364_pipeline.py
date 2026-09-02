@@ -25,6 +25,16 @@ RUN_ID = "11111111-1111-1111-1111-111111111111"
 TOUR_ID = "22222222-2222-2222-2222-222222222222"
 
 
+@pytest.fixture(autouse=True)
+def _pin_judge_model_to_nova_pro(monkeypatch):
+    """F8/F9 here are mocked via Nova/Converse-shaped _bedrock_response(), none
+    of it about which backend is the production default. AA-518 (02/09/2026)
+    changed invoke_judge()'s default "nova_pro" -> "gpt41" -- pin it back here
+    so this file keeps exercising the same Nova Pro path/mock shape it always
+    has."""
+    monkeypatch.setenv("JUDGE_MODEL", "nova_pro")
+
+
 class _Row(dict):
     def __getattr__(self, key):
         try:

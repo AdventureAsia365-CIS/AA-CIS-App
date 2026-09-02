@@ -1,5 +1,7 @@
 """
-services.acp_produce.judge_client — F8/F9 cross-weight judge (Nova Pro, acc2).
+services.acp_produce.judge_client — F8/F9 cross-weight judge. Production default is
+GPT-4.1 direct OpenAI as of AA-518 (02/09/2026) — see that section at the bottom of this
+docstring before assuming Nova Pro is still what runs live.
 
 ADR-2026-014/ADR-2026-027 (L3): the judge must run on a different model/vendor
 than the writer AND must never see the writer's generation prompt — only
@@ -39,10 +41,23 @@ backend (GPT-4.1, direct OpenAI API, no Bedrock/AWS at all), while GPT-5.6 Sol
 (AA-351-02) stayed blocked on an AWS-side access denial ~50+ min after the agreement
 was accepted (see docs/implementation-notes/AA-351-gpt56-judge-trial.md) — GPT-4.1 was
 already live infrastructure (services/content_generation/judge_node.py, ADR-2026-031
-T3) so this backend needed no new AWS setup and could run immediately. JUDGE_MODEL now
-accepts "nova_pro" (default) | "gpt56" | "gpt41". Same additive guarantee as AA-351:
-Nova Pro's code path is untouched, GPT-5.6's is untouched, every gates.py call site
-still defaults to Nova Pro in production.
+T3) so this backend needed no new AWS setup and could run immediately. JUDGE_MODEL
+accepted "nova_pro" (default at the time) | "gpt56" | "gpt41".
+
+AA-518 (02/09/2026) — a real STEP0 audit re-confirmed GPT-5.6 Sol is STILL AccessDenied
+on all 3 accounts, unchanged since AA-351 (see docs/implementation-notes/AA-518.md +
+memory project_aa519_llm_api_audit_02sep). Rather than keep N7's F8/F9 judge on a
+different backend than S1's judge (Nova Pro here, GPT-4.1 there) for no reason other
+than historical accident, invoke_judge()'s DEFAULT changed "nova_pro" -> "gpt41" —
+now both pipelines' judges run the same real backend. ECS task def sets JUDGE_MODEL=
+gpt41 explicitly (AA-CIS-Infra) as the actual production pin; the code default is
+belt-and-suspenders for anywhere that env var isn't set (local dev, tests that don't
+override it). Nova Pro's code path (invoke_judge() proper) is completely untouched —
+model="nova_pro" or JUDGE_MODEL=nova_pro still routes there exactly as before, it is
+simply no longer the default. THIS IS A DELIBERATE TEMPORARY CHOICE, not a final
+architecture decision — re-evaluate once GPT-5.6's access gate actually clears
+(AA-351). gates.py's 3 call sites needed no changes; they never passed model=
+explicitly and still don't.
 """
 from __future__ import annotations
 
@@ -100,9 +115,22 @@ def invoke_judge(
 
     `model`: explicit override for AA-351's comparison script ("nova_pro" |
     "gpt56" | "gpt41"). None (the default — every gates.py call site) falls
-    back to the JUDGE_MODEL env var, itself defaulting to "nova_pro" —
-    production behavior is unchanged unless JUDGE_MODEL is set."""
-    model = model or os.environ.get("JUDGE_MODEL", "nova_pro")
+    back to the JUDGE_MODEL env var.
+
+    AA-518 (02/09/2026) — default changed "nova_pro" -> "gpt41". GPT-5.6 Sol
+    (the intended long-term judge, AA-351) is still AccessDenied on all 3
+    accounts (control-plane agreement accepted, InvokeModel still blocked —
+    see docs/implementation-notes/AA-351-gpt56-judge-trial.md and the STEP0
+    audit this task followed up on). GPT-4.1 direct OpenAI is a DELIBERATE
+    TEMPORARY stand-in, not a final decision — same backend judge_node.py
+    (S1's judge) already uses in production, and unblocked again as of this
+    task (see [[project_aa351_gpt41_openai_zero_credits]] update). Re-evaluate
+    once AA-351's GPT-5.6 access gate actually clears. Nova Pro's code path
+    (invoke_judge() proper, below) is untouched -- override model="nova_pro"
+    still works for anyone who needs it back.
+    ECS task def sets JUDGE_MODEL=gpt41 explicitly (AA-CIS-Infra) so this
+    default is belt-and-suspenders, not the only thing pinning production."""
+    model = model or os.environ.get("JUDGE_MODEL", "gpt41")
     if model == "gpt56":
         return invoke_judge_gpt56(system_prompt, user_prompt, max_tokens)
     if model == "gpt41":
