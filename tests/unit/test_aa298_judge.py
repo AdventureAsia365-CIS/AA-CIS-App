@@ -14,8 +14,21 @@ verify checklist names explicitly:
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from services.acp_produce.gates import gate_brand_seo_audit, gate_framework
 from services.acp_produce.judge_client import NOVA_PRO_MODEL_ID, invoke_judge
+
+
+@pytest.fixture(autouse=True)
+def _pin_judge_model_to_nova_pro(monkeypatch):
+    """This whole file exercises gate_framework()/gate_brand_seo_audit()'s
+    parsing/scoring logic via Nova Pro's Converse-shaped mock responses, none
+    of it about which backend is the production default. AA-518 (02/09/2026)
+    changed invoke_judge()'s default "nova_pro" -> "gpt41" -- pin it back here
+    so every test in this file keeps exercising the same Nova Pro path/mock
+    shape it always has, independent of that production default."""
+    monkeypatch.setenv("JUDGE_MODEL", "nova_pro")
 
 
 def _bedrock_response(text: str):

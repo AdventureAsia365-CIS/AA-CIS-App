@@ -2,9 +2,11 @@
 tests/unit/test_aa351_judge_gpt56.py — AA-351 GPT-5.6 alternative judge backend
 (services/acp_produce/judge_client.py::invoke_judge_gpt56()).
 
-Covers: (1) invoke_judge() still defaults to Nova Pro when JUDGE_MODEL is unset
-and no explicit model= is passed — production behavior (every gates.py call
-site) is unchanged; (2) explicit model="gpt56" and the JUDGE_MODEL env var both
+Covers: (1) invoke_judge()'s Nova Pro backend stays fully selectable via explicit
+model="nova_pro" (AA-518, 02/09/2026, changed the DEFAULT to "gpt41" — see
+test_aa351_judge_gpt41.py::test_invoke_judge_defaults_to_gpt41_when_env_unset --
+Nova Pro itself is untouched, still selectable as a fallback); (2) explicit
+model="gpt56" and the JUDGE_MODEL env var both
 route to the new backend; (3) the GPT-5.6 path goes through the acc3 Bedrock
 satellite session (get_satellite_client), NOT a fresh boto3 client, and uses
 Converse (not invoke_model); (4) response parsing produces the same {text,
@@ -40,14 +42,15 @@ def _converse_response(text: str):
     }
 
 
-def test_invoke_judge_defaults_to_nova_pro_when_env_unset(monkeypatch):
-    """No JUDGE_MODEL env var, no explicit model= -- must still be Nova Pro
-    (the production path every gates.py call site relies on)."""
+def test_invoke_judge_nova_pro_still_selectable_explicitly(monkeypatch):
+    """AA-518 changed invoke_judge()'s DEFAULT away from Nova Pro (see
+    test_aa351_judge_gpt41.py), but the backend itself is untouched --
+    explicit model="nova_pro" must still route there."""
     monkeypatch.delenv("JUDGE_MODEL", raising=False)
     fake_client = MagicMock()
     fake_client.invoke_model.return_value = _nova_response('{"ok": true}')
     with patch("services.acp_produce.judge_client.boto3.client", return_value=fake_client) as mock_boto:
-        result = invoke_judge("system", "user")
+        result = invoke_judge("system", "user", model="nova_pro")
     mock_boto.assert_called_once_with("bedrock-runtime", region_name="us-west-1")
     assert result["model_used"] == NOVA_PRO_MODEL_ID
 

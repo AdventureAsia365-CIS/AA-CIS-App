@@ -65,11 +65,3 @@ def get_dataforseo_creds() -> tuple[str, str]:
     raw = _get_cached("dataforseo", fetch)
     data = json.loads(raw)
     return data["login"], data["password"]
-
-
-def get_anthropic_key() -> str:
-    """Get Anthropic API key from Secrets Manager or env."""
-    arn = os.environ.get("SECRET_ANTHROPIC_ARN")
-    if not arn:
-        return os.environ.get("ANTHROPIC_API_KEY", "")
-    return _get_cached("anthropic_key", lambda: _fetch_secret_sdk(arn))
