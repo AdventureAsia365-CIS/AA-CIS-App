@@ -163,7 +163,8 @@ class TestRunQualityGates:
                 cta="Book now", goal_key="promotion", brand_rubric_text="rubric", channel="facebook",
             )
         assert outcome["passed"] is True
-        assert len(outcome["gate_ledger"]) == 6  # cta + grounding + banned + length + f8 + f9
+        # AA-514: + promises_an_option (runs for every channel now, not just blog)
+        assert len(outcome["gate_ledger"]) == 7  # cta + grounding + banned + promises + length + f8 + f9
 
     def test_first_det_failure_used_for_repair_targeting(self):
         rubric = qg.get_framework_rubric("promotion")

@@ -1,6 +1,8 @@
 """AA-450 — services/acp_content_writing/generate.py. LLMClient is patched, same convention
-test_aa449_angle_gate_generate.py already uses (write_content/rewrite_with_feedback have no JSON
-to parse — T9's output is plain final content, not structured JSON, per SKILL_v2.md)."""
+test_aa449_angle_gate_generate.py already uses. Non-blog channels' output is still plain final
+content, not structured JSON (per SKILL_v2.md) — AA-514 added a 3rd return value (seo_meta,
+all-None for non-blog) to both functions; see test_aa514_content_writing_seo_envelope.py for the
+blog-channel JSON-envelope path."""
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -30,18 +32,19 @@ def _client_returning(content: str):
 class TestWriteContent:
     def test_returns_content_and_cost(self):
         with patch.object(gen_mod, "LLMClient", return_value=_client_returning("Final piece text.")):
-            content, cost = write_content(
+            content, cost, seo_meta = write_content(
                 content_seed="Cross the bamboo bridge at dawn", goal=GOAL,
                 channel_style=CHANNEL_STYLE, brand_audience=BRAND_AUDIENCE, angle=ANGLE,
                 cta="Book a consultation",
             )
         assert content == "Final piece text."
         assert cost == 0.01
+        assert seo_meta == {"seo_title": None, "meta_description": None, "slug": None}
 
     def test_strips_markdown_fence(self):
         fenced = "```text\nFinal piece text.\n```"
         with patch.object(gen_mod, "LLMClient", return_value=_client_returning(fenced)):
-            content, _cost = write_content(
+            content, _cost, _seo_meta = write_content(
                 content_seed="seed", goal=GOAL, channel_style=CHANNEL_STYLE,
                 brand_audience=BRAND_AUDIENCE, angle=ANGLE, cta="Book now",
             )
@@ -77,7 +80,7 @@ class TestRewriteWithFeedback:
     def test_feedback_reaches_the_prompt(self):
         client = _client_returning("revised piece")
         with patch.object(gen_mod, "LLMClient", return_value=client):
-            content, _cost = rewrite_with_feedback(
+            content, _cost, _seo_meta = rewrite_with_feedback(
                 content_seed="seed", goal=GOAL, channel_style=CHANNEL_STYLE,
                 brand_audience=BRAND_AUDIENCE, angle=ANGLE, cta="Book now",
                 revision_feedback=["banned pattern -> 'breathtaking'", "no CTA present"],

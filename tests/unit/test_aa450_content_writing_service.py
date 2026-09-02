@@ -38,13 +38,14 @@ def _make_pool(conn):
 
 
 def _request(status="approved", cta="Book a consultation", angles=None, channel="facebook",
-             route_segment_ids=None, trip_id=None):
+             route_segment_ids=None, trip_id=None, dfs_paa_snapshot=None):
     return {
         "request_id": str(REQUEST_ID), "tenant_id": str(TENANT_ID), "atom_id": "atom_abc123",
         "trip_id": trip_id, "channel": channel, "goal": "promotion", "cta": cta,
         "status": status, "created_at": "2026-08-24T00:00:00", "updated_at": "2026-08-24T00:00:00",
         "angles": angles if angles is not None else [ANGLE],
         "route_segment_ids": route_segment_ids,  # AA-513
+        "dfs_paa_snapshot": dfs_paa_snapshot,  # AA-514
     }
 
 
@@ -238,6 +239,36 @@ class TestStartWrite:
         assert result["context"]["route_segments"] == segments
         assert result["context"]["atom_text"] == "Cross the bamboo bridge at dawn\n\nKayak the bay at sunset"
 
+    async def test_keyword_resolved_from_dfs_paa_snapshot_first_related_keyword(self):
+        """AA-514 — reuses T8's own already-snapshotted signal (AA-501, migration 127), no new
+        DFS call."""
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [{"text": "atom text"}, _placeholder_row()]
+        pool = _make_pool(conn)
+        snapshot = {"relevance": "HIGH", "people_also_ask": [], "related_keywords": ["laos temples", "vientiane"]}
+
+        with patch.object(service.angle_gate_service, "fetch_request",
+                           new=AsyncMock(return_value=_request(dfs_paa_snapshot=snapshot))), \
+             patch.object(service, "fetch_brand_audience", new=AsyncMock(return_value={})), \
+             patch.object(service, "fetch_brand_rubric_text", new=AsyncMock(return_value="rubric")), \
+             patch.object(service, "get_goal", return_value=GOAL):
+            result = await service.start_write(TENANT_ID, REQUEST_ID, pool)
+
+        assert result["context"]["keyword"] == "laos temples"
+
+    async def test_no_snapshot_keyword_is_none(self):
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [{"text": "atom text"}, _placeholder_row()]
+        pool = _make_pool(conn)
+
+        with patch.object(service.angle_gate_service, "fetch_request", new=AsyncMock(return_value=_request())), \
+             patch.object(service, "fetch_brand_audience", new=AsyncMock(return_value={})), \
+             patch.object(service, "fetch_brand_rubric_text", new=AsyncMock(return_value="rubric")), \
+             patch.object(service, "get_goal", return_value=GOAL):
+            result = await service.start_write(TENANT_ID, REQUEST_ID, pool)
+
+        assert result["context"]["keyword"] is None
+
     async def test_non_route_request_has_none_route_segments(self):
         """Regression — a request with no route_segment_ids (every existing Segment pick or
         atom-picker request) must NOT populate context["route_segments"], and must still fetch
@@ -264,7 +295,7 @@ class TestRunWriteBackground:
     the INSERT side."""
 
     async def test_happy_path_first_attempt_approved(self):
-        with patch.object(service, "write_content", return_value=("final piece text", 0.02)) as mock_write, \
+        with patch.object(service, "write_content", return_value=("final piece text", 0.02, {})) as mock_write, \
              patch.object(service, "rewrite_with_feedback") as mock_rewrite, \
              patch.object(service, "run_quality_gates", return_value=_passing_outcome()), \
              patch.object(service, "_finalize_piece", new=AsyncMock(return_value=_finalized_row())) as mock_finalize:
@@ -276,11 +307,48 @@ class TestRunWriteBackground:
         assert mock_finalize.call_args.kwargs["attempt_number"] == 1
         assert mock_finalize.call_args.kwargs["held_reason"] is None
 
+    async def test_seo_meta_from_write_content_reaches_gates_and_finalize(self):
+        """AA-514 — write_content()'s 3rd return value (seo_meta) must reach BOTH
+        run_quality_gates() (so gate_seo_surface() has something to check) and _finalize_piece()
+        (so it actually gets persisted), not be silently dropped."""
+        seo_meta = {"seo_title": "A Title", "meta_description": "d" * 130 + ".", "slug": "a-slug"}
+        with patch.object(service, "write_content", return_value=("final piece text", 0.02, seo_meta)), \
+             patch.object(service, "run_quality_gates", return_value=_passing_outcome()) as mock_gates, \
+             patch.object(service, "_finalize_piece", new=AsyncMock(return_value=_finalized_row())) as mock_finalize:
+            await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())
+
+        assert mock_gates.call_args.kwargs["seo_title"] == "A Title"
+        assert mock_gates.call_args.kwargs["meta_description"] == seo_meta["meta_description"]
+        assert mock_gates.call_args.kwargs["slug"] == "a-slug"
+        assert mock_finalize.call_args.kwargs["seo_title"] == "A Title"
+        assert mock_finalize.call_args.kwargs["meta_description"] == seo_meta["meta_description"]
+        assert mock_finalize.call_args.kwargs["slug"] == "a-slug"
+
+    async def test_keyword_passed_through_to_write_content_and_gates(self):
+        with patch.object(service, "write_content", return_value=("final piece text", 0.02, {})) as mock_write, \
+             patch.object(service, "run_quality_gates", return_value=_passing_outcome()) as mock_gates, \
+             patch.object(service, "_finalize_piece", new=AsyncMock(return_value=_finalized_row())):
+            await service.run_write_background(
+                REQUEST_ID, PIECE_ID, _context(keyword="laos temples"), pool=MagicMock(),
+            )
+
+        assert mock_write.call_args.kwargs["keyword"] == "laos temples"
+        assert mock_gates.call_args.kwargs["keyword"] == "laos temples"
+
+    async def test_missing_keyword_key_defaults_to_none(self):
+        assert "keyword" not in _context()  # sanity: base fixture omits the key
+        with patch.object(service, "write_content", return_value=("final piece text", 0.02, {})) as mock_write, \
+             patch.object(service, "run_quality_gates", return_value=_passing_outcome()), \
+             patch.object(service, "_finalize_piece", new=AsyncMock(return_value=_finalized_row())):
+            await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())
+
+        assert mock_write.call_args.kwargs["keyword"] is None
+
     async def test_route_segments_passed_through_to_write_content(self):
         """AA-513 — context["route_segments"] (when present) must reach write_content(), not be
         silently dropped between start_write() and the actual LLM call."""
         segments = [("atom_seg1", "text1"), ("atom_seg2", "text2")]
-        with patch.object(service, "write_content", return_value=("final piece text", 0.02)) as mock_write, \
+        with patch.object(service, "write_content", return_value=("final piece text", 0.02, {})) as mock_write, \
              patch.object(service, "run_quality_gates", return_value=_passing_outcome()), \
              patch.object(service, "_finalize_piece", new=AsyncMock(return_value=_finalized_row())):
             await service.run_write_background(
@@ -294,7 +362,7 @@ class TestRunWriteBackground:
         caller/test — the base `_context()` fixture itself has no such key) must not crash —
         dict.get(), not context["route_segments"]."""
         assert "route_segments" not in _context()  # sanity: base fixture really omits the key
-        with patch.object(service, "write_content", return_value=("final piece text", 0.02)) as mock_write, \
+        with patch.object(service, "write_content", return_value=("final piece text", 0.02, {})) as mock_write, \
              patch.object(service, "run_quality_gates", return_value=_passing_outcome()), \
              patch.object(service, "_finalize_piece", new=AsyncMock(return_value=_finalized_row())):
             await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())
@@ -302,8 +370,8 @@ class TestRunWriteBackground:
         assert mock_write.call_args.kwargs["route_segments"] is None
 
     async def test_retry_once_then_approved(self):
-        with patch.object(service, "write_content", return_value=("draft 1", 0.02)) as mock_write, \
-             patch.object(service, "rewrite_with_feedback", return_value=("draft 2", 0.02)) as mock_rewrite, \
+        with patch.object(service, "write_content", return_value=("draft 1", 0.02, {})) as mock_write, \
+             patch.object(service, "rewrite_with_feedback", return_value=("draft 2", 0.02, {})) as mock_rewrite, \
              patch.object(service, "run_quality_gates",
                            side_effect=[_failing_outcome(), _passing_outcome()]), \
              patch.object(service, "_finalize_piece",
@@ -317,8 +385,8 @@ class TestRunWriteBackground:
         assert mock_fin.call_args.kwargs["attempt_number"] == 2
 
     async def test_retry_exhausted_still_failing_holds_at_max_two_attempts(self):
-        with patch.object(service, "write_content", return_value=("draft 1", 0.02)), \
-             patch.object(service, "rewrite_with_feedback", return_value=("draft 2", 0.02)) as mock_rewrite, \
+        with patch.object(service, "write_content", return_value=("draft 1", 0.02, {})), \
+             patch.object(service, "rewrite_with_feedback", return_value=("draft 2", 0.02, {})) as mock_rewrite, \
              patch.object(service, "run_quality_gates",
                            side_effect=[_failing_outcome(), _failing_outcome()]), \
              patch.object(service, "_finalize_piece",
@@ -330,7 +398,7 @@ class TestRunWriteBackground:
         assert mock_fin.call_args.kwargs["held_reason"] == "F2_banned_patterns: F2_banned_patterns violation"
 
     async def test_non_repairable_failure_holds_immediately_no_rewrite(self):
-        with patch.object(service, "write_content", return_value=("draft 1", 0.02)) as mock_write, \
+        with patch.object(service, "write_content", return_value=("draft 1", 0.02, {})) as mock_write, \
              patch.object(service, "rewrite_with_feedback") as mock_rewrite, \
              patch.object(service, "run_quality_gates",
                            return_value=_failing_outcome(gate="F6_cta_present", repairable=False)), \
@@ -357,7 +425,7 @@ class TestRunWriteBackground:
         assert mock_fin.call_args.kwargs["content_text"] == ""
 
     async def test_exception_during_gate_check_marks_failed_not_held(self):
-        with patch.object(service, "write_content", return_value=("draft 1", 0.02)), \
+        with patch.object(service, "write_content", return_value=("draft 1", 0.02, {})), \
              patch.object(service, "run_quality_gates", side_effect=ValueError("gate crashed")), \
              patch.object(service, "_finalize_piece",
                            new=AsyncMock(return_value=_finalized_row(status="failed"))) as mock_fin:
@@ -428,6 +496,30 @@ class TestFetchPiece:
         pool = _make_pool(conn)
         with pytest.raises(service.ContentWritingError):
             await service.fetch_piece(TENANT_ID, uuid.uuid4(), pool)
+
+    async def test_seo_fields_read_back(self):
+        """AA-514 — a blog piece's persisted seo_title/meta_description/slug round-trip through
+        fetch_piece(), not silently dropped on read."""
+        conn = AsyncMock()
+        conn.fetchrow.return_value = _finalized_row(
+            seo_title="A Title", meta_description="A description.", slug="a-slug",
+        )
+        pool = _make_pool(conn)
+        result = await service.fetch_piece(TENANT_ID, uuid.uuid4(), pool)
+        assert result["seo_title"] == "A Title"
+        assert result["meta_description"] == "A description."
+        assert result["slug"] == "a-slug"
+
+    async def test_missing_seo_columns_default_to_none(self):
+        """A row shape without the 3 new columns at all (defensive, shouldn't happen against the
+        real SELECT list post-migration-136) must not KeyError."""
+        conn = AsyncMock()
+        conn.fetchrow.return_value = _finalized_row()  # no seo_title/meta_description/slug keys
+        pool = _make_pool(conn)
+        result = await service.fetch_piece(TENANT_ID, uuid.uuid4(), pool)
+        assert result["seo_title"] is None
+        assert result["meta_description"] is None
+        assert result["slug"] is None
 
 
 def _review_request(**over):

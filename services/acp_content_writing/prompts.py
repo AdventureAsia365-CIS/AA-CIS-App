@@ -73,6 +73,36 @@ BLOG-SPECIFIC FORMAT REQUIREMENTS (this channel only — required markup, not a 
   be removed before the reader ever sees this piece — write the surrounding sentence exactly as
   if the tag weren't there; it must never change your wording or read as part of the sentence."""
 
+# AA-514 — blog channel's writer-output contract becomes a JSON envelope (full port of the
+# origin's structured Piece.seo_title/meta_description/slug fields, Nghiệp-confirmed real
+# architecture decision — see docs/claude_audit/AA-514-step0-investigation.md §4). Appended
+# AFTER whichever _BLOG_FORMAT_INSTRUCTIONS(_ROUTE) variant already ran — those still describe
+# what goes INSIDE "body"; this describes the envelope around it. Non-blog channels never see
+# this block, so their output contract (plain text) is completely unchanged.
+_SEO_ENVELOPE_INSTRUCTIONS = """
+
+OUTPUT FORMAT FOR THIS CHANNEL ONLY — return ONLY valid JSON, no markdown fence, no commentary,
+in exactly this shape:
+{{
+  "seo_title": "<the SEO search-result headline, <=60 characters, containing the target keyword>",
+  "meta_description": "<the search-result snippet, 120-158 characters, a complete sentence ending
+in '.', '!' or '?', containing the target keyword>",
+  "slug": "<lowercase-kebab-case URL slug, <=60 characters, e.g. 'wat-sisaket-vientiane'>",
+  "body": "<the full piece itself, exactly as specified above — every H2/FAQ/citation-tag
+requirement above applies to THIS field, not to seo_title/meta_description/slug>"
+}}
+{keyword_line}"""
+
+
+def _keyword_line(keyword: str | None) -> str:
+    if not keyword:
+        return (
+            "No target keyword was supplied for this piece — write seo_title/meta_description "
+            "naturally, without forcing one in."
+        )
+    return f"TARGET SEO KEYWORD (must appear in both seo_title and meta_description): {keyword}"
+
+
 SYSTEM_PROMPT = """You are a strategy-led English content writer for a premium travel brand.
 
 Write ONE finished piece of content for the exact channel, goal, and angle given below — not a
@@ -100,7 +130,7 @@ def build_user_prompt(
     brand_audience: BrandAudience, angle: dict, cta: str,
     destination: str | None = None, trip_name: str | None = None,
     revision_feedback: list[str] | None = None, atom_id: str | None = None,
-    route_segments: list[tuple[str, str]] | None = None,
+    route_segments: list[tuple[str, str]] | None = None, keyword: str | None = None,
 ) -> str:
     """`angle` is the chosen `angle_gate_option` row (name/why_it_works/formula_fit/
     best_final_style). `revision_feedback` (AA-450 Phase 1's confirmed retry shape — specific,
@@ -175,6 +205,8 @@ def build_user_prompt(
             _BLOG_FORMAT_INSTRUCTIONS_ROUTE if is_route_aware
             else _BLOG_FORMAT_INSTRUCTIONS.format(atom_id=atom_id or "atom")
         )
+        # AA-514 — every blog response is the JSON envelope, revision or not.
+        prompt += _SEO_ENVELOPE_INSTRUCTIONS.format(keyword_line=_keyword_line(keyword))
     return prompt
 
 

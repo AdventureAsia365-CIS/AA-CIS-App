@@ -136,7 +136,7 @@ def _judge_raw(**fields) -> dict:
 
 
 class TestRunQualityGatesChannelDispatch:
-    def test_non_blog_channel_still_runs_exactly_6_gates(self):
+    def test_non_blog_channel_still_runs_exactly_7_gates(self):
         rubric = qg.get_framework_rubric("promotion")
         f8_data = {"items": [{"criterion": c, "score": "1", "evidence": "q"} for c in rubric]}
         f9_data = {"status": "pass", "brand_fit": "1", "cta_clear": "1", "human_read": "1",
@@ -147,12 +147,13 @@ class TestRunQualityGatesChannelDispatch:
                 cta="Book now", goal_key="promotion", brand_rubric_text="rubric", channel="tiktok",
             )
         gates = [g["gate"] for g in outcome["gate_ledger"]]
+        # AA-514: promises_an_option now runs for every channel (origin's own channels=None).
         assert gates == [
-            "F6_cta_present", "F1_grounding", "F2_banned_patterns", "F4_extreme_length",
-            "F8_framework", "F9_brand_voice",
+            "F6_cta_present", "F1_grounding", "F2_banned_patterns", "promises_an_option",
+            "F4_extreme_length", "F8_framework", "F9_brand_voice",
         ]
 
-    def test_blog_channel_runs_all_9_gates(self):
+    def test_blog_channel_runs_all_11_gates(self):
         rubric = qg.get_framework_rubric("promotion")
         f8_data = {"items": [{"criterion": c, "score": "1", "evidence": "q"} for c in rubric]}
         f9_data = {"status": "pass", "brand_fit": "1", "cta_clear": "1", "human_read": "1",
@@ -162,10 +163,13 @@ class TestRunQualityGatesChannelDispatch:
             outcome = qg.run_quality_gates(
                 content_text=body, atom_text="the trail", cta="Book now", goal_key="promotion",
                 brand_rubric_text="rubric", channel="blog",
+                seo_title="Trail Guide", meta_description="x" * 130 + ".", slug="trail-guide",
             )
         gates = [g["gate"] for g in outcome["gate_ledger"]]
+        # AA-514: + promises_an_option (after F2) and F4_seo_surface (after F4, blog-only).
         assert gates == [
-            "F6_cta_present", "F1_grounding", "F2_banned_patterns", "F4_extreme_length",
+            "F6_cta_present", "F1_grounding", "F2_banned_patterns", "promises_an_option",
+            "F4_extreme_length", "F4_seo_surface",
             "F5_atom_density", "F3_structural_variance", "F7_faq_dedup",
             "F8_framework", "F9_brand_voice",
         ]
@@ -244,7 +248,7 @@ class TestWriteAndCheckStripsTagsBeforeOutput:
         ]
         passing_outcome = {"passed": True, "gate_ledger": tagged_violation_ledger, "first_failure": None}
 
-        with patch.object(service, "write_content", return_value=(TAGGED_BLOG_CONTENT, 0.02)), \
+        with patch.object(service, "write_content", return_value=(TAGGED_BLOG_CONTENT, 0.02, {})), \
              patch.object(service, "run_quality_gates", return_value=passing_outcome), \
              patch.object(service, "_finalize_piece", new=AsyncMock(side_effect=_capturing_finalize(finalized))):
             await service.run_write_background(REQUEST_ID, uuid.uuid4(), _context(), pool=MagicMock())
@@ -270,8 +274,8 @@ class TestWriteAndCheckStripsTagsBeforeOutput:
         held_first_failure = failing_ledger[1]
         failing_outcome = {"passed": False, "gate_ledger": failing_ledger, "first_failure": held_first_failure}
 
-        with patch.object(service, "write_content", return_value=(TAGGED_BLOG_CONTENT, 0.02)), \
-             patch.object(service, "rewrite_with_feedback", return_value=(TAGGED_BLOG_CONTENT, 0.02)), \
+        with patch.object(service, "write_content", return_value=(TAGGED_BLOG_CONTENT, 0.02, {})), \
+             patch.object(service, "rewrite_with_feedback", return_value=(TAGGED_BLOG_CONTENT, 0.02, {})), \
              patch.object(service, "run_quality_gates", return_value=failing_outcome), \
              patch.object(service, "_finalize_piece", new=AsyncMock(side_effect=_capturing_finalize(finalized))):
             await service.run_write_background(REQUEST_ID, uuid.uuid4(), _context(), pool=MagicMock())
@@ -291,7 +295,7 @@ class TestWriteAndCheckStripsTagsBeforeOutput:
             "first_failure": None,
         }
 
-        with patch.object(service, "write_content", return_value=("Plain facebook post.", 0.02)) as mock_write, \
+        with patch.object(service, "write_content", return_value=("Plain facebook post.", 0.02, {})) as mock_write, \
              patch.object(service, "run_quality_gates", return_value=passing_outcome) as mock_gates, \
              patch.object(service, "_finalize_piece", new=AsyncMock(side_effect=_capturing_finalize(finalized))):
             await service.run_write_background(REQUEST_ID, uuid.uuid4(), _context(channel="facebook"), pool=MagicMock())
