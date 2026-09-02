@@ -22,6 +22,7 @@ from services.acp_angle_gate.brand_audience import fetch_brand_audience
 from services.acp_angle_gate.channel_style import get_channel_style
 from services.acp_angle_gate.generate import generate_angles
 from services.acp_angle_gate.goals import get_goal
+from services.acp_angle_gate.ranking import rank_angles
 from services.acp_planning.allocator import compute_slot_grid, create_weekly_produce_run, persist_slot_grid
 from services.acp_planning.models import QuarterPlanNotApprovedError
 from services.acp_planning.quarter import fetch_approved_quarter_plan
@@ -199,7 +200,7 @@ async def _fetch_request_row(tenant_id: UUID, request_id: UUID, pool):
         row = await conn.fetchrow(
             """
             SELECT request_id, tenant_id, atom_id, trip_id, channel, goal, cta, status,
-                   dfs_paa_snapshot, created_at, updated_at, route_segment_ids
+                   dfs_paa_snapshot, created_at, updated_at, route_segment_ids, subject_id
             FROM acp_shared.angle_gate_request
             WHERE request_id = $1 AND tenant_id = $2
             """,
@@ -255,6 +256,27 @@ async def set_goal_and_generate(tenant_id: UUID, request_id: UUID, goal_key: str
         search_demand=search_demand,
     )
 
+    # AA-512 — measurable ranking (ADR 0004), replacing the LLM's own opinion, ONLY when channel
+    # is already known (a Subject-driven request — channel fixed from the Subject at creation).
+    # Avoid-list violations are channel-scoped and genuinely can't be computed before a channel is
+    # known — never true for the legacy atom-picker path (channel picked at step 8, AFTER angles
+    # already exist) — so that path keeps the LLM's own recommended_index unchanged, no
+    # regression. See docs/claude_audit/AA-512-step0-investigation.md §2.
+    ranking_evidence = None
+    if req["channel"]:
+        channel_style = get_channel_style(req["channel"])
+        avoid_text = channel_style["avoid"] if channel_style else ""
+        asked_questions = search_demand.people_also_ask if search_demand else []
+        ranking_evidence, recommended_index = rank_angles(
+            angles, claimed_answers=[a.get("answers", []) for a in angles],
+            asked_questions=asked_questions, avoid_text=avoid_text,
+        )
+        logger.info(
+            "angle_gate_measurable_ranking", request_id=str(request_id),
+            recommended_index=recommended_index,
+            scores=[e.score for e in ranking_evidence],
+        )
+
     # AA-501 (migration 127) — snapshot, not a live re-fetch: persist exactly the
     # SearchDemandSignal the LLM saw for THIS request, so a later T2 DFS re-run on the same tour
     # can never silently change what the review screen shows for an already-generated angle. None
@@ -274,15 +296,18 @@ async def set_goal_and_generate(tenant_id: UUID, request_id: UUID, goal_key: str
                 request_id, goal_key, dfs_paa_snapshot,
             )
             for i, a in enumerate(angles):
+                evidence = ranking_evidence[i] if ranking_evidence else None
                 await conn.execute(
                     """
                     INSERT INTO acp_shared.angle_gate_option
                         (request_id, idx, name, why_it_works, formula_fit, best_final_style,
-                         recommended)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                         recommended, answers, violations)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb)
                     """,
                     request_id, i, a["name"], a["why_it_works"], a["formula_fit"],
                     a["best_final_style"], i == recommended_index,
+                    json.dumps(evidence.answers) if evidence else None,
+                    json.dumps(evidence.violations) if evidence else None,
                 )
     logger.info(
         "angle_gate_goal_set", request_id=str(request_id), goal=goal_key,
@@ -419,13 +444,29 @@ async def fetch_request(tenant_id: UUID, request_id: UUID, pool) -> dict:
         option_rows = await conn.fetch(
             """
             SELECT option_id, idx, name, why_it_works, formula_fit, best_final_style,
-                   recommended, chosen
+                   recommended, chosen, answers, violations
             FROM acp_shared.angle_gate_option
             WHERE request_id = $1
             ORDER BY idx
             """,
             request_id,
         )
+        # AA-512 — fixed header data (Subject + Channel, "không sửa được ở đây"): joined live,
+        # same LEFT JOIN/stale-but-harmless convention services/acp_shared/slate.py::fetch_slate()
+        # already documents for a Segment/Route that's since been rebuilt away. NULL subject_id
+        # (the legacy atom-picker path) simply returns no row — every field below stays None.
+        subject_row = None
+        if req["subject_id"] is not None:
+            subject_row = await conn.fetchrow(
+                """
+                SELECT s.score, asg.canonical_place, asg.canonical_action, r.hub_name
+                FROM acp_shared.subject s
+                LEFT JOIN acp_contract.atom_segment asg ON asg.segment_id = s.segment_id
+                LEFT JOIN acp_contract.route r ON r.route_id = s.route_id
+                WHERE s.subject_id = $1
+                """,
+                req["subject_id"],
+            )
     # AA-501 — dfs_paa_snapshot (migration 127) arrives as a raw JSON string (no jsonb codec
     # registered on this app's connections, same gap admin_a4.py's _parse_jsonb already works
     # around for gate_ledger/escalate_detail) — parse defensively, NULL stays None.
@@ -438,6 +479,15 @@ async def fetch_request(tenant_id: UUID, request_id: UUID, pool) -> dict:
     route_segment_ids = req["route_segment_ids"]
     if isinstance(route_segment_ids, str):
         route_segment_ids = json.loads(route_segment_ids)
+
+    def _parse_option(o) -> dict:
+        d = dict(o)
+        # AA-512 — same no-jsonb-codec gap as dfs_paa_snapshot/route_segment_ids above. NULL
+        # (never ranked — see migration 135's header) stays None, not [].
+        for key in ("answers", "violations"):
+            if isinstance(d[key], str):
+                d[key] = json.loads(d[key])
+        return d
 
     return {
         "request_id": str(req["request_id"]),
@@ -452,7 +502,15 @@ async def fetch_request(tenant_id: UUID, request_id: UUID, pool) -> dict:
         "route_segment_ids": route_segment_ids,
         "created_at": req["created_at"].isoformat(),
         "updated_at": req["updated_at"].isoformat(),
-        "angles": [dict(o) for o in option_rows],
+        "angles": [_parse_option(o) for o in option_rows],
+        # AA-512 — fixed header (Subject + Channel, not editable here). All None for the legacy
+        # atom-picker path (no subject_id) or a Subject whose Segment/Route was rebuilt away
+        # since picking (LEFT JOIN, see this function's own comment above).
+        "subject_id": str(req["subject_id"]) if req["subject_id"] else None,
+        "subject_score": float(subject_row["score"]) if subject_row and subject_row["score"] is not None else None,
+        "subject_place": subject_row["canonical_place"] if subject_row else None,
+        "subject_action": subject_row["canonical_action"] if subject_row else None,
+        "subject_hub_name": subject_row["hub_name"] if subject_row else None,
     }
 
 
