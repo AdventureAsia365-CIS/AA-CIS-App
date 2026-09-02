@@ -81,6 +81,48 @@ async def _fetch_atom_text(tenant_id: UUID, atom_id: str, pool) -> str:
     return row["text"]
 
 
+_ROUTE_SEGMENT_TEXT_QUERY = """
+    SELECT m.atom_id, ta.text
+    FROM acp_contract.atom_segment_member m
+    JOIN acp_contract.tour_atoms ta ON ta.atom_id = m.atom_id
+    WHERE m.segment_id = $1 AND ta.tour_id = $2::uuid
+      AND ta.owner_scope = $3::text
+      AND NOT m.is_alias AND NOT ta.deleted AND NOT ta.is_empty_marker
+    ORDER BY m.atom_id LIMIT 1
+"""
+
+
+async def _fetch_route_text(tenant_id: UUID, trip_id: Optional[str], segment_ids: list[str], pool) -> str:
+    """AA-511 Gap A (2026-09-02) — the write seed for a Route/Blog pick: every Segment's live
+    representative atom text, joined in the Route's own day order. Same per-Segment resolution
+    `services/acp_shared/slate.py::_resolve_representative_atom()` already uses for its OWN
+    single-atom fallback (identical query, one tour_id filter, first live non-alias member atom)
+    — applied here to every Segment in the walk, not just the first.
+
+    Best-effort per Segment (matches `route_detection.py::create_route_pick()`'s own precedent,
+    "a partial/empty join degrades the snapshot's detail but never fails route_pick creation") —
+    a Segment rebuilt away since pick time is silently skipped rather than failing the whole
+    write; only an ENTIRELY empty join (every Segment gone) raises, since there would be nothing
+    left to write from.
+    """
+    if not trip_id:
+        raise ContentWritingError(
+            "route_segment_ids is set but trip_id is missing — cannot resolve any Segment's atom."
+        )
+    texts: list[str] = []
+    async with pool.acquire() as conn:
+        for segment_id in segment_ids:
+            row = await conn.fetchrow(_ROUTE_SEGMENT_TEXT_QUERY, segment_id, trip_id, str(tenant_id))
+            if row is not None:
+                texts.append(row["text"])
+    if not texts:
+        raise ContentWritingError(
+            f"None of route_segment_ids={segment_ids!r} resolved to a live atom for trip_id="
+            f"{trip_id!r} — the Route was rebuilt away. Refresh the Slate and pick again."
+        )
+    return "\n\n".join(texts)
+
+
 def _held_reason_from(first_failure: dict) -> str:
     return f"{first_failure['gate']}: {'; '.join(first_failure['violations'][:3])}"
 
@@ -131,7 +173,14 @@ async def start_write(
             "migration 114) and no cta_override was supplied in the write request."
         )
 
-    atom_text = await _fetch_atom_text(tenant_id, req["atom_id"], pool)
+    # AA-511 Gap A — a Route/Blog pick carries its whole walk (`route_segment_ids`, migration
+    # 134); every other request (Segment pick, or the pre-Slate atom-picker) keeps the original
+    # single-atom seed. Only the seed text changes — goal/angle/CTA/brand context below are
+    # already request-level, not atom-level, and untouched by this branch.
+    if req.get("route_segment_ids"):
+        atom_text = await _fetch_route_text(tenant_id, req["trip_id"], req["route_segment_ids"], pool)
+    else:
+        atom_text = await _fetch_atom_text(tenant_id, req["atom_id"], pool)
     goal = get_goal(req["goal"])
     if goal is None:
         raise ContentWritingError(f"request_id={request_id} has an unknown goal={req['goal']!r}")

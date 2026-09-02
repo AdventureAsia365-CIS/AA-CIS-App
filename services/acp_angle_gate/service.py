@@ -199,7 +199,7 @@ async def _fetch_request_row(tenant_id: UUID, request_id: UUID, pool):
         row = await conn.fetchrow(
             """
             SELECT request_id, tenant_id, atom_id, trip_id, channel, goal, cta, status,
-                   dfs_paa_snapshot, created_at, updated_at
+                   dfs_paa_snapshot, created_at, updated_at, route_segment_ids
             FROM acp_shared.angle_gate_request
             WHERE request_id = $1 AND tenant_id = $2
             """,
@@ -433,6 +433,12 @@ async def fetch_request(tenant_id: UUID, request_id: UUID, pool) -> dict:
     if isinstance(snapshot, str):
         snapshot = json.loads(snapshot)
 
+    # AA-511 Gap A (migration 134) — arrives as a raw JSON string, same no-jsonb-codec gap
+    # dfs_paa_snapshot already works around above. NULL for a Segment pick / pre-Slate request.
+    route_segment_ids = req["route_segment_ids"]
+    if isinstance(route_segment_ids, str):
+        route_segment_ids = json.loads(route_segment_ids)
+
     return {
         "request_id": str(req["request_id"]),
         "tenant_id": str(req["tenant_id"]),
@@ -443,6 +449,7 @@ async def fetch_request(tenant_id: UUID, request_id: UUID, pool) -> dict:
         "cta": req["cta"],
         "status": req["status"],
         "dfs_paa_snapshot": snapshot,
+        "route_segment_ids": route_segment_ids,
         "created_at": req["created_at"].isoformat(),
         "updated_at": req["updated_at"].isoformat(),
         "angles": [dict(o) for o in option_rows],
