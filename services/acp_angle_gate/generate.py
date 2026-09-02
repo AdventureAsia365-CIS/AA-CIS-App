@@ -71,6 +71,13 @@ def _validate(parsed: dict) -> tuple[list[dict], int, str]:
         missing = [f for f in _REQUIRED_ANGLE_FIELDS if not a.get(f)]
         if missing:
             raise AngleGenerationError(f"Angle {i} missing required field(s): {missing}")
+        # AA-512 — "answers" is a soft field (unlike the 4 required ones above): an angle
+        # genuinely answering zero of the supplied PAA questions is a valid, common outcome, not
+        # a malformed response. Coerce anything not a clean list[str] to [] rather than raising —
+        # ranking.py::rank_angles() re-verifies every claim anyway, so a garbage claim here just
+        # fails to match, never crashes or corrupts a stored row.
+        claimed = a.get("answers")
+        a["answers"] = [c for c in claimed if isinstance(c, str)] if isinstance(claimed, list) else []
     recommended_index = parsed.get("recommended_index")
     if recommended_index not in (0, 1, 2):
         logger.warning("angle_gate_bad_recommended_index", value=recommended_index)
