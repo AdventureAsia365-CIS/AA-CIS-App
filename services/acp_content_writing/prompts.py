@@ -51,6 +51,28 @@ BLOG-SPECIFIC FORMAT REQUIREMENTS (this channel only — required markup, not a 
   removed before the reader ever sees this piece — write the surrounding sentence exactly as if
   the tag weren't there; it must never change your wording or read as part of the sentence."""
 
+# AA-513 — route-aware variant, used INSTEAD of _BLOG_FORMAT_INSTRUCTIONS only when
+# `route_segments` has more than one moment (a Route/Blog pick walking >=2 Segments). The single-
+# moment instruction above stays byte-identical and is still used for every other case (1 moment,
+# or no route_segments at all) — see build_user_prompt()'s own docstring for why this can't just
+# always be the route-aware version (a single literal id needs no "which moment" disambiguation).
+_BLOG_FORMAT_INSTRUCTIONS_ROUTE = """
+
+BLOG-SPECIFIC FORMAT REQUIREMENTS (this channel only — required markup, not a style suggestion):
+- Structure the body with real markdown H2 headers: a line starting with exactly "## " for every
+  major section (e.g. "## Why Southern Laos"). Do not skip this.
+- If, and only if, the piece includes a FAQ section, put it LAST, headed by a line that is
+  exactly "## FAQ", followed by one or more Q/A pairs in this exact format and nothing else:
+  **Q: <question>**
+  A: <answer>
+- The CONTENT SEED below is organized into several moments along the route, each preceded by its
+  own citation id (shown as "[Moment id=<id>]"). Immediately after every sentence that uses a
+  specific fact, number, or detail drawn from one of these moments, append the tag [R:<id>] using
+  THAT MOMENT'S OWN id exactly as shown — never a different moment's id, and never invent an id.
+  A sentence with no such detail needs no tag. This tag is internal provenance markup that will
+  be removed before the reader ever sees this piece — write the surrounding sentence exactly as
+  if the tag weren't there; it must never change your wording or read as part of the sentence."""
+
 SYSTEM_PROMPT = """You are a strategy-led English content writer for a premium travel brand.
 
 Write ONE finished piece of content for the exact channel, goal, and angle given below — not a
@@ -78,6 +100,7 @@ def build_user_prompt(
     brand_audience: BrandAudience, angle: dict, cta: str,
     destination: str | None = None, trip_name: str | None = None,
     revision_feedback: list[str] | None = None, atom_id: str | None = None,
+    route_segments: list[tuple[str, str]] | None = None,
 ) -> str:
     """`angle` is the chosen `angle_gate_option` row (name/why_it_works/formula_fit/
     best_final_style). `revision_feedback` (AA-450 Phase 1's confirmed retry shape — specific,
@@ -87,9 +110,34 @@ def build_user_prompt(
     unaffected): only used when `channel_style['channel'] == 'blog'`, to fill in
     `_BLOG_FORMAT_INSTRUCTIONS`' citation tag. `None`/empty falls back to the literal id "atom"
     rather than emitting a malformed `[R:]` tag — real callers (service.py) always have the
-    real atom_id, this fallback only guards a caller that forgets to pass one."""
+    real atom_id, this fallback only guards a caller that forgets to pass one.
+
+    `route_segments` (AA-513, keyword-only, defaults to `None` so every pre-AA-513 caller/test is
+    unaffected): a Route/Blog pick's own `[(atom_id, text), ...]` in day order (`services/
+    acp_content_writing/service.py::_fetch_route_segments()`). When this has MORE THAN ONE
+    moment, the CONTENT SEED section below is rendered as labeled moments instead of the flat
+    `content_seed` string, and `_BLOG_FORMAT_INSTRUCTIONS_ROUTE` (not the single-moment variant)
+    tells the model to tag a fact with its OWN moment's id. A single-element or empty
+    `route_segments` behaves exactly like `None` — one moment needs no "which one"
+    disambiguation, so the plain `content_seed`/single-id instruction is used, byte-identical to
+    every non-Route caller."""
     segment = brand_audience.get("customer_segment") or "discerning travellers"
     mindset = brand_audience.get("customer_mindset") or "a well-travelled, detail-oriented mindset"
+
+    # AA-513 — a real Route walk (>1 moment): render the CONTENT SEED as labeled moments instead
+    # of the flat string, so the model can be told which moment each fact came from. Exactly 1
+    # moment (or none) is treated the same as no route_segments at all — see this function's own
+    # docstring for why a single moment needs no disambiguation. Gated on channel=='blog' too —
+    # route_segments is only ever populated for a Route/Blog pick (`grain: "route"` is blog-only,
+    # services/acp_shared/slate.py::CHANNEL_BARS — every other channel is `grain: "segment"`), so
+    # this mirrors that real domain invariant rather than assuming a caller respects it.
+    is_route_aware = (
+        channel_style["channel"] == "blog" and bool(route_segments) and len(route_segments) > 1
+    )
+    seed_text = (
+        "\n\n".join(f"[Moment id={mid}]\n{text}" for mid, text in route_segments)
+        if is_route_aware else content_seed
+    )
 
     lines = [
         f"CHANNEL: {channel_style['display_name']}",
@@ -110,7 +158,7 @@ def build_user_prompt(
         "",
         f"CALL TO ACTION TO INCLUDE: {cta}",
         "",
-        f"CONTENT SEED (the only source of facts — do not add facts beyond this):\n{content_seed}",
+        f"CONTENT SEED (the only source of facts — do not add facts beyond this):\n{seed_text}",
     ]
     if destination:
         lines.insert(-2, f"DESTINATION: {destination}")
@@ -123,7 +171,10 @@ def build_user_prompt(
         )
     prompt = "\n".join(lines)
     if channel_style["channel"] == "blog":
-        prompt += _BLOG_FORMAT_INSTRUCTIONS.format(atom_id=atom_id or "atom")
+        prompt += (
+            _BLOG_FORMAT_INSTRUCTIONS_ROUTE if is_route_aware
+            else _BLOG_FORMAT_INSTRUCTIONS.format(atom_id=atom_id or "atom")
+        )
     return prompt
 
 

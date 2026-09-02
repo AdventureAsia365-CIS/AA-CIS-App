@@ -92,35 +92,46 @@ _ROUTE_SEGMENT_TEXT_QUERY = """
 """
 
 
-async def _fetch_route_text(tenant_id: UUID, trip_id: Optional[str], segment_ids: list[str], pool) -> str:
-    """AA-511 Gap A (2026-09-02) — the write seed for a Route/Blog pick: every Segment's live
-    representative atom text, joined in the Route's own day order. Same per-Segment resolution
-    `services/acp_shared/slate.py::_resolve_representative_atom()` already uses for its OWN
-    single-atom fallback (identical query, one tour_id filter, first live non-alias member atom)
-    — applied here to every Segment in the walk, not just the first.
+async def _fetch_route_segments(
+    tenant_id: UUID, trip_id: Optional[str], segment_ids: list[str], pool,
+) -> list[tuple[str, str]]:
+    """AA-511 Gap A (2026-09-02) — every Segment's live representative atom, in the Route's own
+    day order. Same per-Segment resolution `services/acp_shared/slate.py::
+    _resolve_representative_atom()` already uses for its OWN single-atom fallback (identical
+    query, one tour_id filter, first live non-alias member atom) — applied here to every Segment
+    in the walk, not just the first.
 
     Best-effort per Segment (matches `route_detection.py::create_route_pick()`'s own precedent,
     "a partial/empty join degrades the snapshot's detail but never fails route_pick creation") —
     a Segment rebuilt away since pick time is silently skipped rather than failing the whole
     write; only an ENTIRELY empty join (every Segment gone) raises, since there would be nothing
     left to write from.
-    """
+
+    AA-513 — returns `(atom_id, text)` pairs, not just joined text (was `_fetch_route_text()`
+    before this build): the prompt now needs to know WHICH atom_id backs each Segment's text, so
+    it can tell the model to tag a fact with THAT Segment's own id rather than one blanket id for
+    the whole piece (the real gap AA-513 closes — see docs/claude_audit/
+    AA-513-step0-investigation.md §1). `atom_text` for the quality GATES (gate_grounding()/
+    gate_banned_patterns()) is still built by joining just the text half of each pair — see
+    start_write() below — deliberately NOT the labeled prompt text, to avoid a real risk this
+    STEP0 flagged: an atom_id like "atom_00af646e46" contains digits that
+    find_novel_numeric_claims() would otherwise pick up as a false "supporting number"."""
     if not trip_id:
         raise ContentWritingError(
             "route_segment_ids is set but trip_id is missing — cannot resolve any Segment's atom."
         )
-    texts: list[str] = []
+    segments: list[tuple[str, str]] = []
     async with pool.acquire() as conn:
         for segment_id in segment_ids:
             row = await conn.fetchrow(_ROUTE_SEGMENT_TEXT_QUERY, segment_id, trip_id, str(tenant_id))
             if row is not None:
-                texts.append(row["text"])
-    if not texts:
+                segments.append((row["atom_id"], row["text"]))
+    if not segments:
         raise ContentWritingError(
             f"None of route_segment_ids={segment_ids!r} resolved to a live atom for trip_id="
             f"{trip_id!r} — the Route was rebuilt away. Refresh the Slate and pick again."
         )
-    return "\n\n".join(texts)
+    return segments
 
 
 def _held_reason_from(first_failure: dict) -> str:
@@ -177,8 +188,17 @@ async def start_write(
     # 134); every other request (Segment pick, or the pre-Slate atom-picker) keeps the original
     # single-atom seed. Only the seed text changes — goal/angle/CTA/brand context below are
     # already request-level, not atom-level, and untouched by this branch.
+    #
+    # AA-513 — `route_segments` (None for every non-Route request, unchanged legacy behavior)
+    # carries each Segment's own (atom_id, text) pair so prompts.py can label them separately and
+    # ask the model to tag a fact with the RIGHT Segment's id, not one blanket id for the whole
+    # piece. `atom_text` (fed to the quality GATES below, gate_grounding()/gate_banned_patterns())
+    # stays the plain joined text either way — deliberately NOT the labeled prompt text, see
+    # _fetch_route_segments()'s own docstring for why.
+    route_segments: Optional[list[tuple[str, str]]] = None
     if req.get("route_segment_ids"):
-        atom_text = await _fetch_route_text(tenant_id, req["trip_id"], req["route_segment_ids"], pool)
+        route_segments = await _fetch_route_segments(tenant_id, req["trip_id"], req["route_segment_ids"], pool)
+        atom_text = "\n\n".join(text for _, text in route_segments)
     else:
         atom_text = await _fetch_atom_text(tenant_id, req["atom_id"], pool)
     goal = get_goal(req["goal"])
@@ -221,7 +241,7 @@ async def start_write(
         "brand_audience": brand_audience, "chosen": chosen, "cta": cta,
         "destination": destination, "trip_name": trip_name,
         "brand_rubric_text": brand_rubric_text, "channel": req["channel"],
-        "atom_id": req["atom_id"],
+        "atom_id": req["atom_id"], "route_segments": route_segments,
     }
     return {"piece": piece, "context": context}
 
@@ -264,6 +284,10 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
     brand_audience, chosen, cta = context["brand_audience"], context["chosen"], context["cta"]
     destination, trip_name = context["destination"], context["trip_name"]
     brand_rubric_text, channel, atom_id = context["brand_rubric_text"], context["channel"], context["atom_id"]
+    # AA-513 — None for every non-Route request (dict.get, not context["route_segments"]:
+    # backward-compatible with any pre-AA-513 caller/test that builds a context dict by hand
+    # without this key).
+    route_segments = context.get("route_segments")
 
     attempt = 1  # bound before the try block so the except handler always has a real value
     try:
@@ -280,6 +304,7 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
                     write_content, content_seed=atom_text, goal=goal, channel_style=channel_style,
                     brand_audience=brand_audience, angle=chosen, cta=cta,
                     destination=destination, trip_name=trip_name, atom_id=atom_id,
+                    route_segments=route_segments,
                 )
             else:
                 content_text, cost = await asyncio.to_thread(
@@ -287,6 +312,7 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
                     brand_audience=brand_audience, angle=chosen, cta=cta,
                     revision_feedback=repair_log[-1]["violations"],
                     destination=destination, trip_name=trip_name, atom_id=atom_id,
+                    route_segments=route_segments,
                 )
             total_cost += cost
 

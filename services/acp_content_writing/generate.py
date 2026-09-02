@@ -58,16 +58,22 @@ def write_content(
     *, content_seed: str, goal: Goal, channel_style: ChannelStyle,
     brand_audience: BrandAudience, angle: dict, cta: str,
     destination: str | None = None, trip_name: str | None = None, atom_id: str | None = None,
+    route_segments: list[tuple[str, str]] | None = None,
 ) -> tuple[str, float]:
     """Attempt 1 — SKILL_v2.md workflow step 9, fresh write. Returns (content_text, cost_usd).
 
     `atom_id` (AA-452, defaults to `None` so every pre-AA-452 caller/test is unaffected): passed
     straight through to `build_user_prompt()` — only consumed there, and only for `channel=='blog'`
-    (see that function's own docstring)."""
+    (see that function's own docstring).
+
+    `route_segments` (AA-513, defaults to `None` so every pre-AA-513 caller/test is unaffected):
+    a Route/Blog pick's own (atom_id, text) pairs in day order — passed straight through, see
+    build_user_prompt()'s own docstring."""
     user_prompt = build_user_prompt(
         content_seed=content_seed, goal=goal, channel_style=channel_style,
         brand_audience=brand_audience, angle=angle, cta=cta,
         destination=destination, trip_name=trip_name, atom_id=atom_id,
+        route_segments=route_segments,
     )
     client = LLMClient()
     request = LLMRequest(system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt,
@@ -80,6 +86,7 @@ def rewrite_with_feedback(
     *, content_seed: str, goal: Goal, channel_style: ChannelStyle,
     brand_audience: BrandAudience, angle: dict, cta: str, revision_feedback: list[str],
     destination: str | None = None, trip_name: str | None = None, atom_id: str | None = None,
+    route_segments: list[tuple[str, str]] | None = None,
 ) -> tuple[str, float]:
     """Attempt 2 (the only retry — Phase 1's confirmed cap of 2 total attempts) — the SAME
     write call, with `revision_feedback` (the specific gate/violation strings T10 failed on,
@@ -92,7 +99,7 @@ def rewrite_with_feedback(
         content_seed=content_seed, goal=goal, channel_style=channel_style,
         brand_audience=brand_audience, angle=angle, cta=cta,
         destination=destination, trip_name=trip_name, revision_feedback=revision_feedback,
-        atom_id=atom_id,
+        atom_id=atom_id, route_segments=route_segments,
     )
     client = LLMClient()
     request = LLMRequest(system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt,
