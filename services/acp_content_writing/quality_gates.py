@@ -45,9 +45,13 @@ logger = structlog.get_logger()
 _SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'‘’“”])")
 
 # AA-452 — blog-only citation tag, same shape as acp_produce/gates.py::TAG_RE (referenced, not
-# imported — ADR §0.5). T9 has exactly one atom per piece, so unlike N7 there is no
-# closed-world/multi-id check to make against this pattern — its only job here is "does this
-# stretch of text have >=1 citation at all" (gate_atom_density(), F5).
+# imported — ADR §0.5). T9 has exactly one atom per piece for 7 of 8 channels and every non-Route
+# Segment pick (AA-513 STEP0 corrected this comment — a Route/Blog pick can carry several
+# Segments' own distinct ids, see services/acp_content_writing/service.py::
+# _fetch_route_segments()) — but there is still no closed-world/multi-id CHECK made against this
+# pattern (unlike N7): its only job here is "does this stretch of text have >=1 citation at all,
+# of ANY id" (gate_atom_density(), F5) — this generic capture group already matches any id,
+# whether there's one or several in the piece, with no code change needed for AA-513.
 TAG_RE = re.compile(r"\[(?:R|F):([^\]]+)\]")
 
 # Same window constant as acp_produce/gates.py::ATOM_DENSITY_WORDS — CONTEXT.md §1.6.1's "every
