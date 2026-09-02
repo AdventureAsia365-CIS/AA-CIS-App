@@ -236,12 +236,21 @@ async def start_write(
         channel=req["channel"],
     )
 
+    # AA-514 — the SEO keyword gate_seo_surface() checks title/meta against, reused from T8's OWN
+    # already-snapshotted signal (AA-501, migration 127) rather than a new DFS call: the first
+    # related keyword T8 saw when generating angles for this exact request. `None` (no snapshot,
+    # or an empty related_keywords list) is a real, common case — prompts.py's own
+    # `_keyword_line()` already has a no-keyword instruction for it, not a bug to work around.
+    dfs_snapshot = req.get("dfs_paa_snapshot") or {}
+    related_keywords = dfs_snapshot.get("related_keywords") or []
+    keyword = related_keywords[0] if related_keywords else None
+
     context = {
         "atom_text": atom_text, "goal": goal, "channel_style": channel_style,
         "brand_audience": brand_audience, "chosen": chosen, "cta": cta,
         "destination": destination, "trip_name": trip_name,
         "brand_rubric_text": brand_rubric_text, "channel": req["channel"],
-        "atom_id": req["atom_id"], "route_segments": route_segments,
+        "atom_id": req["atom_id"], "route_segments": route_segments, "keyword": keyword,
     }
     return {"piece": piece, "context": context}
 
@@ -288,6 +297,8 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
     # backward-compatible with any pre-AA-513 caller/test that builds a context dict by hand
     # without this key).
     route_segments = context.get("route_segments")
+    # AA-514 — same dict.get() backward-compatibility as route_segments above.
+    keyword = context.get("keyword")
 
     attempt = 1  # bound before the try block so the except handler always has a real value
     try:
@@ -297,28 +308,35 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
         repair_log: list[dict] = []
         status = "held"
         held_reason = "unreachable"  # overwritten every branch below; kept non-None for mypy/clarity
+        # AA-514 — the LATEST attempt's own seo_meta is what gets persisted, same "final attempt
+        # wins" precedent content_text/gate_ledger already follow — {} (all-None) for every
+        # non-blog channel, see generate.py's own write_content()/rewrite_with_feedback() docstring.
+        seo_meta: dict = {"seo_title": None, "meta_description": None, "slug": None}
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
             if attempt == 1:
-                content_text, cost = await asyncio.to_thread(
+                content_text, cost, seo_meta = await asyncio.to_thread(
                     write_content, content_seed=atom_text, goal=goal, channel_style=channel_style,
                     brand_audience=brand_audience, angle=chosen, cta=cta,
                     destination=destination, trip_name=trip_name, atom_id=atom_id,
-                    route_segments=route_segments,
+                    route_segments=route_segments, keyword=keyword,
                 )
             else:
-                content_text, cost = await asyncio.to_thread(
+                content_text, cost, seo_meta = await asyncio.to_thread(
                     rewrite_with_feedback, content_seed=atom_text, goal=goal, channel_style=channel_style,
                     brand_audience=brand_audience, angle=chosen, cta=cta,
                     revision_feedback=repair_log[-1]["violations"],
                     destination=destination, trip_name=trip_name, atom_id=atom_id,
-                    route_segments=route_segments,
+                    route_segments=route_segments, keyword=keyword,
                 )
             total_cost += cost
 
             outcome = await asyncio.to_thread(
                 run_quality_gates, content_text=content_text, atom_text=atom_text, cta=cta,
                 goal_key=goal["key"], brand_rubric_text=brand_rubric_text, channel=channel,
+                route_segments=route_segments, keyword=keyword,
+                seo_title=seo_meta.get("seo_title"), meta_description=seo_meta.get("meta_description"),
+                slug=seo_meta.get("slug"),
             )
             gate_ledger = outcome["gate_ledger"]
 
@@ -359,6 +377,8 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
             pool, piece_id=piece_id, attempt_number=attempt,
             content_text=content_text, status=status, held_reason=held_reason,
             gate_ledger=gate_ledger, repair_log=repair_log,
+            seo_title=seo_meta.get("seo_title"), meta_description=seo_meta.get("meta_description"),
+            slug=seo_meta.get("slug"),
         )
         logger.info(
             "t9_write_and_check_done", request_id=str(request_id), status=status,
@@ -385,19 +405,27 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
 async def _finalize_piece(
     pool, *, piece_id: UUID, attempt_number: int, content_text: str,
     status: str, held_reason: Optional[str], gate_ledger: list[dict], repair_log: list[dict],
+    seo_title: Optional[str] = None, meta_description: Optional[str] = None,
+    slug: Optional[str] = None,
 ) -> dict:
+    # AA-514 — seo_title/meta_description/slug default None (the exception handler's own
+    # "failed" finalize call above never has a real seo_meta to pass, and every non-blog piece
+    # is None either way) — same "NULL means never populated/not applicable" convention every
+    # other blog-only column in this schema already uses (migration 136's own header comment).
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             UPDATE acp_shared.content_piece
             SET attempt_number = $2, content_text = $3, status = $4, held_reason = $5,
-                gate_ledger = $6::jsonb, repair_log = $7::jsonb
+                gate_ledger = $6::jsonb, repair_log = $7::jsonb,
+                seo_title = $8, meta_description = $9, slug = $10
             WHERE piece_id = $1
             RETURNING piece_id, tenant_id, angle_gate_request_id, attempt_number, content_text,
-                      status, held_reason, gate_ledger, repair_log, created_at
+                      status, held_reason, gate_ledger, repair_log, created_at,
+                      seo_title, meta_description, slug
             """,
             piece_id, attempt_number, content_text, status, held_reason,
-            json.dumps(gate_ledger), json.dumps(repair_log),
+            json.dumps(gate_ledger), json.dumps(repair_log), seo_title, meta_description, slug,
         )
     return _row_to_dict(row)
 
@@ -416,6 +444,12 @@ def _row_to_dict(row) -> dict:
         "gate_ledger": json.loads(gate_ledger) if isinstance(gate_ledger, str) else gate_ledger,
         "repair_log": json.loads(repair_log) if isinstance(repair_log, str) else repair_log,
         "created_at": row["created_at"].isoformat(),
+        # AA-514 — None for every non-blog piece and every pre-AA-514 row. `_insert_placeholder_
+        # piece()`'s own RETURNING doesn't select these 3 columns (nothing to return before T9
+        # has even run) — asyncpg Record has no .get(), so membership is checked via .keys().
+        "seo_title": row["seo_title"] if "seo_title" in row.keys() else None,
+        "meta_description": row["meta_description"] if "meta_description" in row.keys() else None,
+        "slug": row["slug"] if "slug" in row.keys() else None,
     }
 
 
@@ -424,7 +458,8 @@ async def fetch_piece(tenant_id: UUID, piece_id: UUID, pool) -> dict:
         row = await conn.fetchrow(
             """
             SELECT piece_id, tenant_id, angle_gate_request_id, attempt_number, content_text,
-                   status, held_reason, gate_ledger, repair_log, created_at
+                   status, held_reason, gate_ledger, repair_log, created_at,
+                   seo_title, meta_description, slug
             FROM acp_shared.content_piece
             WHERE piece_id = $1 AND tenant_id = $2
             """,

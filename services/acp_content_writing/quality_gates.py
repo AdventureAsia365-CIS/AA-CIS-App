@@ -27,6 +27,21 @@ generate.py (see that module's docstring). `run_quality_gates()` (the one functi
 calls) is also synchronous for the same reason; service.py wraps the WHOLE call in
 `asyncio.to_thread()`, not each gate individually, since every gate for one attempt always runs
 together on the same request.
+
+AA-514: 2 more gates, ported from `src/aa_social/gates/__init__.py`'s GATES tuple (11 origin
+gates total, read verbatim — docs/claude_audit/AA-514-step0-investigation.md):
+  - `gate_promises_an_option()` — NOT F-numbered (genuinely new, no N7/T10 analog to extend).
+    Runs for EVERY channel (origin's own `channels=None`), never auto-fixed (ADR 0023 flag-not-
+    block — the same reasoning F8/F9's judge-scored fields already aren't auto-repaired, just
+    disclosed as a violation for a human to read).
+  - `gate_seo_surface()` — a sibling of F4_extreme_length (grouped under the "F4 family" in the
+    ledger, kept as its own function for clarity rather than folding 2 concerns into 1), blog-only,
+    `repairable=True` — participates in the SAME uniform attempt-2 rewrite loop F2_banned_patterns
+    already does (STEP0 §3 corrected a stale premise: T10 has no distinct "3-rounds-per-gate-type"
+    mechanism the way the origin's own `repair()` does; MAX_ATTEMPTS=2 is a flat, gate-agnostic
+    cap already applied uniformly here — "join the existing fixable treatment", not build a new
+    one). Needs `content_piece.seo_title`/`meta_description`/`slug` (migration 136, AA-514) — a
+    real architecture fork Nghiệp confirmed directly (full port, not a heuristic substitute).
 """
 from __future__ import annotations
 
@@ -57,6 +72,36 @@ TAG_RE = re.compile(r"\[(?:R|F):([^\]]+)\]")
 # Same window constant as acp_produce/gates.py::ATOM_DENSITY_WORDS — CONTEXT.md §1.6.1's "every
 # 200-300 words" resolved to the upper bound, ported verbatim, not re-decided.
 ATOM_DENSITY_WORDS = 300
+
+# AA-514 — ported verbatim from the origin's `reference/offered-phrases.toml` (not re-authored;
+# see docs/claude_audit/AA-514-step0-investigation.md §5). Said of something the traveller has
+# not bought (at_a_price) or something included but not compulsory (offered) — both want the same
+# hedge in the prose, so gate_promises_an_option() treats them as one list, same as the origin.
+_OFFERED_PHRASES = frozenset({
+    "additional cost", "at own expense", "at your own expense", "extra charge",
+    "not included", "own expense", "pre-book", "pre-bookable", "supplementary charge",
+    "supplement",
+    "at your leisure", "can be arranged", "choice is yours", "for those who",
+    "if desired", "if time allows", "if you prefer", "if you wish", "may wish",
+    "on request", "optional", "optionally", "perhaps", "should you wish",
+    "the option of", "those who wish", "upon request", "you may choose",
+    "you may visit", "your choice",
+})
+# What a sentence has to say for an offered moment to be described rather than promised — read
+# by the gate, ported verbatim from the same reference file.
+_HEDGE_PHRASES = frozenset({
+    "can ", "choose", "could ", "if ", "may ", "might ", "offer", "on request",
+    "opt ", "option", "perhaps", "possible", "prefer", "there is time",
+    "those who", "time to", "want to", "wish", "you can", "you may",
+})
+
+# AA-514 — exact numeric thresholds ported verbatim from the origin's own
+# `reference/gate-thresholds.toml` (not invented), for gate_seo_surface().
+_SEO_TITLE_MAX_CHARS = 60
+_META_DESCRIPTION_MIN_CHARS = 120
+_META_DESCRIPTION_MAX_CHARS = 158
+_SLUG_MAX_CHARS = 60
+_SLUG_RE = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 
 # Strips a citation tag AND one leading space if present, so "sentence. [R:id] Next." doesn't
 # leave a double space where the tag used to sit ("sentence.  Next.") — "sentence.[R:id] Next."
@@ -207,6 +252,73 @@ def gate_banned_patterns(content_text: str, atom_text: str) -> GateResultLite:
     return _result("F2_banned_patterns", violations)
 
 
+# ---------------------------------------------------------------- promises an option (new, AA-514)
+
+def gate_promises_an_option(
+    content_text: str, atom_text: str, route_segments: Optional[list[tuple[str, str]]] = None,
+) -> GateResultLite:
+    """AA-514 — ADR 0023 (flag-not-block, Ms. Thư repo) + ADR 0026 ("an offered moment is ranked
+    and never promised"): a sentence citing an OFFERED (optional/at-a-price) moment must hedge it
+    ("there is time to visit...", "you may choose to...") rather than state it as something the
+    reader will definitely do ("visit the..."). `never repairable` — this is a judgement call
+    about what the sentence claims, same class of gap gate_grounding()/F1 already leaves to a
+    human rather than asking a model to insert a hedge (which the origin's own docstring warns
+    "will hedge the whole paragraph into mush").
+
+    Applies to EVERY channel (origin's own `channels=None`), not just blog — but the DETECTION
+    shape differs by whether real per-sentence citation tags exist (AA-513, blog Route pick
+    only):
+      - `route_segments` given (>1 real Segment): map each cited sentence to ITS OWN Segment's
+        text via the tag it actually carries, and check ONLY that Segment's own offered-ness —
+        a sentence tagged with a non-offered Segment is never flagged even if another Segment in
+        the same piece is offered.
+      - Otherwise (every non-blog channel, and every single-atom blog piece): T9's whole seed is
+        the ONE atom `content_text` is written from, so if THAT atom's own text carries an
+        offered-phrase, every substantive sentence in the piece is checked for a hedge — there is
+        no second, unrelated source in the piece to accidentally flag.
+
+    Known, disclosed approximation (single-atom branch only): a sentence that is not actually
+    ABOUT the offered moment at all (a pure CTA line, a brand-framing opener) can still be
+    checked, since T9 has no per-sentence topic boundary to exclude it — the origin's own
+    per-sentence tag check avoids this by construction (every checked sentence carries a real
+    citation), which the multi-Segment branch above already replicates faithfully. Not fixed
+    here — flagged as a real, narrow false-positive surface for a future refinement, not a
+    silent gap.
+    """
+    violations: list[str] = []
+    if route_segments and len(route_segments) > 1:
+        text_by_id = {aid: text for aid, text in route_segments}
+        for sent in _SENT_SPLIT_RE.split(content_text or ""):
+            tags = TAG_RE.findall(sent)
+            offered_ids = [t for t in tags if t in text_by_id and _is_offered(text_by_id[t])]
+            if not offered_ids:
+                continue
+            plain = strip_citation_tags(sent).lower()
+            if any(h in plain for h in _HEDGE_PHRASES):
+                continue
+            violations.append(
+                f"{', '.join(sorted(set(offered_ids)))} is offered rather than included, and "
+                f"this states it as done: '{strip_citation_tags(sent.strip())[:120]}'"
+            )
+    elif _is_offered(atom_text):
+        for sent in _SENT_SPLIT_RE.split(content_text or ""):
+            plain = strip_citation_tags(sent).lower()
+            if not plain.strip():
+                continue
+            if any(h in plain for h in _HEDGE_PHRASES):
+                continue
+            violations.append(
+                f"content seed is offered rather than included, and this states it as done: "
+                f"'{strip_citation_tags(sent.strip())[:120]}'"
+            )
+    return _result("promises_an_option", violations, repairable=False)
+
+
+def _is_offered(text: str) -> bool:
+    plain = (text or "").lower()
+    return any(phrase in plain for phrase in _OFFERED_PHRASES)
+
+
 # ---------------------------------------------------------------- F4-adjusted (extreme length only)
 
 # STEP0/build task's own explicit instruction: no hardcoded exact per-channel word limit (no
@@ -225,6 +337,59 @@ def gate_extreme_length(content_text: str) -> GateResultLite:
     if length > _MAX_CHARS:
         return _result("F4_extreme_length", [f"content is {length} chars — far beyond any real channel example"])
     return _result("F4_extreme_length", [])
+
+
+# ---------------------------------------------------------------- F4 family: SEO surface (new, AA-514, blog only)
+
+def gate_seo_surface(
+    seo_title: Optional[str], meta_description: Optional[str], slug: Optional[str],
+    keyword: Optional[str],
+) -> GateResultLite:
+    """AA-514 — ported from `gates/shape.py::seo_surface()` (thresholds verbatim from
+    `gate-thresholds.toml`). Blog-only (dispatch in run_quality_gates(), not here — same
+    "gate functions stay channel-agnostic" shape F3/F5/F7 already use). `repairable=True` —
+    joins F2_banned_patterns in the existing uniform attempt-2 rewrite loop (STEP0 §3 corrected
+    premise: no separate "3 rounds" mechanism exists in T10 to build).
+
+    All 3 fields come from the SAME JSON envelope the blog-channel writer now returns alongside
+    `content_text` (prompts.py/generate.py, AA-514) — `None` means the writer's JSON response
+    was missing that key entirely (a real parse gap, not "field legitimately empty"), reported
+    as its own violation rather than silently skipped."""
+    violations: list[str] = []
+    kw = (keyword or "").lower()
+
+    if not seo_title:
+        violations.append("no SEO title — the search headline is not optional")
+    else:
+        if len(seo_title) > _SEO_TITLE_MAX_CHARS:
+            violations.append(
+                f"SEO title is {len(seo_title)} characters — it truncates above {_SEO_TITLE_MAX_CHARS}"
+            )
+        if kw and kw not in seo_title.lower():
+            violations.append(f"SEO title does not contain the keyword '{keyword}'")
+
+    if not meta_description:
+        violations.append("no meta description — the search snippet is not optional")
+    else:
+        length = len(meta_description)
+        if not (_META_DESCRIPTION_MIN_CHARS <= length <= _META_DESCRIPTION_MAX_CHARS):
+            violations.append(
+                f"meta description is {length} characters — outside "
+                f"{_META_DESCRIPTION_MIN_CHARS}-{_META_DESCRIPTION_MAX_CHARS}"
+            )
+        if not meta_description.rstrip().endswith((".", "!", "?")):
+            violations.append("meta description is not a complete sentence")
+        if kw and kw not in meta_description.lower():
+            violations.append(f"meta description does not contain the keyword '{keyword}'")
+
+    if not slug:
+        violations.append("no slug")
+    elif not _SLUG_RE.fullmatch(slug):
+        violations.append(f"slug '{slug}' is not lowercase-kebab")
+    elif len(slug) > _SLUG_MAX_CHARS:
+        violations.append(f"slug is {len(slug)} characters — over {_SLUG_MAX_CHARS}")
+
+    return _result("F4_seo_surface", violations)
 
 
 # ---------------------------------------------------------------- F8-adjusted (framework judge)
@@ -352,16 +517,27 @@ def gate_atom_density(content_text: str) -> GateResultLite:
 
 # ---------------------------------------------------------------- F3-adjusted (structural variance, blog only)
 
-def gate_structural_variance(content_text: str) -> GateResultLite:
+def gate_structural_variance(
+    content_text: str, route_segments: Optional[list[tuple[str, str]]] = None,
+) -> GateResultLite:
     """AA-452 gate map — F3 port, channel=='blog' only (dispatch in run_quality_gates()). Ported
     from acp_produce/gates.py::gate_structural_variance() (referenced, not imported): (1) at
-    least one genuinely one-sentence paragraph exists, (2) with >=3 H2 (`## `) sections, the
-    longest is >=1.4x the second-longest, (3) at most 1 bulleted list. Runs on content WITH
-    citation tags still present — paragraph/section boundaries are blank-line/`## `-delimited,
-    tag tokens inside a paragraph don't affect either boundary, so no stripping is needed here
-    (unlike gate_extreme_length(), which run_quality_gates() deliberately calls on the STRIPPED
-    text since a citation tag shouldn't count toward a length ceiling meant to bound what the
-    tenant reads)."""
+    least one genuinely one-sentence paragraph exists, (2) variance check (below), (3) at most 1
+    bulleted list. Runs on content WITH citation tags still present — paragraph/section
+    boundaries are blank-line/`## `-delimited, tag tokens inside a paragraph don't affect either
+    boundary, so no stripping is needed here (unlike gate_extreme_length(), which
+    run_quality_gates() deliberately calls on the STRIPPED text since a citation tag shouldn't
+    count toward a length ceiling meant to bound what the tenant reads).
+
+    AA-514 — (2), the variance check itself, is now ROUTE-AWARE when `route_segments` carries
+    >1 real Segment: instead of comparing lengths between ANY H2 sections (which might not
+    correlate to a Segment at all), each section is mapped to the Segment whose own id is cited
+    most inside it (first citation found, same "representative" convention
+    `_fetch_route_segments()`/AA-513 already use elsewhere), and variance is measured strictly
+    BETWEEN those Segment-mapped sections — the real ask ("biến thiên GIỮA CÁC ĐOẠN TƯƠNG ỨNG
+    TỪNG SEGMENT", not between arbitrary H2s). Falls back to the original generic H2 check,
+    byte-identical, when `route_segments` is None or has <=1 Segment (every non-Route blog
+    piece, unchanged from before this build)."""
     body = content_text or ""
     violations: list[str] = []
     paras = [p for p in body.split("\n\n") if p.strip() and not p.startswith("#")]
@@ -373,7 +549,23 @@ def gate_structural_variance(content_text: str) -> GateResultLite:
         violations.append("no one-sentence paragraph found (variance rule)")
 
     sections = re.split(r"^## ", body, flags=re.MULTILINE)[1:]
-    if len(sections) >= 3:
+    if route_segments and len(route_segments) > 1:
+        segment_ids = {aid for aid, _ in route_segments}
+        by_segment: dict[str, int] = {}
+        for sec in sections:
+            tags = [t for t in TAG_RE.findall(sec) if t in segment_ids]
+            if tags:
+                seg_id = tags[0]
+                by_segment[seg_id] = by_segment.get(seg_id, 0) + len(sec.split())
+        if len(by_segment) < 2:
+            violations.append(
+                "fewer than 2 Segment-mapped sections found — cannot measure route-aware variance"
+            )
+        else:
+            lens = sorted(by_segment.values())
+            if lens[-1] < lens[-2] * 1.4:
+                violations.append("no Segment-section is notably longer than the others (route-aware variance)")
+    elif len(sections) >= 3:
         lens = sorted(len(s.split()) for s in sections)
         if lens and lens[-1] < lens[-2] * 1.4:
             violations.append("no section is notably longer than the others")
@@ -431,6 +623,9 @@ class QualityCheckOutcome(TypedDict):
 def run_quality_gates(
     *, content_text: str, atom_text: str, cta: Optional[str], goal_key: str,
     brand_rubric_text: str, channel: str,
+    route_segments: Optional[list[tuple[str, str]]] = None,
+    seo_title: Optional[str] = None, meta_description: Optional[str] = None,
+    slug: Optional[str] = None, keyword: Optional[str] = None,
 ) -> QualityCheckOutcome:
     """Runs the T10 gate stack for ONE attempt. CTA-presence runs first and short-circuits every
     other gate on failure (same "don't pay for a judge call on content that was always going to
@@ -450,7 +645,15 @@ def run_quality_gates(
     `content_text` — citation tags are internal markup and shouldn't count toward a length
     ceiling meant to bound what the tenant actually reads; every other gate below still sees the
     tagged text, since F1/F5/F3/F7 all need it (F1/F5 read the tags directly; F3/F7 just don't
-    need it stripped, see their own docstrings)."""
+    need it stripped, see their own docstrings).
+
+    AA-514: `gate_promises_an_option()` runs for EVERY channel (origin's own `channels=None`,
+    right after F2 — deliberately unaffected by the blog-only branch below) — `route_segments`
+    (None for every non-Route request, unchanged default) lets it map a cited sentence to its
+    OWN Segment when one exists. `gate_seo_surface()` (F4 family) is blog-only, alongside the
+    existing 3 blog-only DET gates — `seo_title`/`meta_description`/`slug`/`keyword` are all
+    `None` for every non-blog channel (nothing to check, matches every other blog-only gate's
+    own "channel decides, not the gate function" convention)."""
     cta_result = gate_cta_present(cta)
     ledger = [cta_result]
     if not cta_result["passed"]:
@@ -461,12 +664,14 @@ def run_quality_gates(
         cta_result,
         gate_grounding(content_text, atom_text),
         gate_banned_patterns(content_text, atom_text),
+        gate_promises_an_option(content_text, atom_text, route_segments),
         gate_extreme_length(length_check_text),
     ]
     if channel == "blog":
         gate_ledger += [
+            gate_seo_surface(seo_title, meta_description, slug, keyword),
             gate_atom_density(content_text),
-            gate_structural_variance(content_text),
+            gate_structural_variance(content_text, route_segments),
             gate_faq_dedup(content_text),
         ]
     gate_ledger += [
@@ -484,7 +689,7 @@ def run_quality_gates(
 __all__ = [
     "GateResultLite", "QualityCheckOutcome", "TAG_RE", "ATOM_DENSITY_WORDS",
     "strip_citation_tags", "deep_strip_citation_tags", "gate_cta_present", "gate_grounding",
-    "gate_banned_patterns", "gate_extreme_length", "gate_atom_density",
-    "gate_structural_variance", "gate_faq_dedup", "gate_framework", "gate_brand_voice",
-    "run_quality_gates",
+    "gate_banned_patterns", "gate_promises_an_option", "gate_extreme_length", "gate_seo_surface",
+    "gate_atom_density", "gate_structural_variance", "gate_faq_dedup", "gate_framework",
+    "gate_brand_voice", "run_quality_gates",
 ]

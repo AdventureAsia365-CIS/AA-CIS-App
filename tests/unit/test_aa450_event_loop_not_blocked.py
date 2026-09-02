@@ -46,11 +46,11 @@ def _context():
     }
 
 
-def _slow_sync_write(*args, **kwargs) -> tuple[str, float]:
+def _slow_sync_write(*args, **kwargs) -> tuple[str, float, dict]:
     """Stands in for the real generate.py::write_content() -> LLMClient.generate() ->
     boto3 invoke_model_with_response_stream(), a synchronous, blocking HTTP call."""
     time.sleep(_SIMULATED_BEDROCK_LATENCY_SECONDS)
-    return "final piece text", 0.02
+    return "final piece text", 0.02, {}
 
 
 def _fast_passing_gates(*args, **kwargs):

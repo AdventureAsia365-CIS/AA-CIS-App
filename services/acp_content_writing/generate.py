@@ -21,6 +21,10 @@ instruction, not patched in later after a production incident the way N7's own f
 """
 from __future__ import annotations
 
+import json
+
+from json_repair import repair_json
+
 from services.acp_angle_gate.brand_audience import BrandAudience
 from services.acp_angle_gate.channel_style import ChannelStyle
 from services.acp_angle_gate.goals import Goal
@@ -34,6 +38,34 @@ from shared.llm_client.models import LLMRequest
 # newsletter ceiling, ~600 words ≈ 800 output tokens) with real margin, not tuned per channel
 # (STEP0 confirmed no per-channel number has a real source to tune against yet).
 _MAX_TOKENS = 2048
+
+
+class SeoEnvelopeError(Exception):
+    """AA-514 — the blog channel's JSON envelope ({"seo_title","meta_description","slug","body"})
+    couldn't be parsed even after json-repair salvage. Raised rather than silently falling back
+    to treating the raw response as plain body text — a malformed envelope on the ONE channel
+    that's supposed to produce one is a real write failure (same "never silently persist a
+    malformed result" precedent services/acp_angle_gate/generate.py::AngleGenerationError
+    already sets for T8's own JSON contract), not a shape to guess at."""
+
+
+def _parse_blog_envelope(raw: str) -> tuple[str, dict]:
+    """Returns (body, seo_meta) — seo_meta = {"seo_title", "meta_description", "slug"}, each
+    `None` if the key was missing or not a string (a real parse gap, not "legitimately empty" —
+    quality_gates.py::gate_seo_surface() reports a missing field as its own violation either
+    way, so no information is lost by not distinguishing the two here)."""
+    text = _strip_fences(raw)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = repair_json(text, return_objects=True)
+    if not isinstance(data, dict) or not isinstance(data.get("body"), str) or not data["body"].strip():
+        raise SeoEnvelopeError(f"Could not parse blog JSON envelope (missing/empty 'body'): {raw[:300]!r}")
+    seo_meta = {
+        key: data.get(key) if isinstance(data.get(key), str) else None
+        for key in ("seo_title", "meta_description", "slug")
+    }
+    return data["body"], seo_meta
 
 
 def _strip_fences(raw: str) -> str:
@@ -58,9 +90,13 @@ def write_content(
     *, content_seed: str, goal: Goal, channel_style: ChannelStyle,
     brand_audience: BrandAudience, angle: dict, cta: str,
     destination: str | None = None, trip_name: str | None = None, atom_id: str | None = None,
-    route_segments: list[tuple[str, str]] | None = None,
-) -> tuple[str, float]:
-    """Attempt 1 — SKILL_v2.md workflow step 9, fresh write. Returns (content_text, cost_usd).
+    route_segments: list[tuple[str, str]] | None = None, keyword: str | None = None,
+) -> tuple[str, float, dict]:
+    """Attempt 1 — SKILL_v2.md workflow step 9, fresh write. Returns (content_text, cost_usd,
+    seo_meta) — `seo_meta` is `{"seo_title": None, "meta_description": None, "slug": None}` for
+    every non-blog channel (the writer's output contract for those 7 is UNCHANGED, still plain
+    text — see build_user_prompt()'s own docstring); for blog, the response is a JSON envelope
+    (AA-514) parsed by `_parse_blog_envelope()`.
 
     `atom_id` (AA-452, defaults to `None` so every pre-AA-452 caller/test is unaffected): passed
     straight through to `build_user_prompt()` — only consumed there, and only for `channel=='blog'`
@@ -68,44 +104,54 @@ def write_content(
 
     `route_segments` (AA-513, defaults to `None` so every pre-AA-513 caller/test is unaffected):
     a Route/Blog pick's own (atom_id, text) pairs in day order — passed straight through, see
-    build_user_prompt()'s own docstring."""
+    build_user_prompt()'s own docstring.
+
+    `keyword` (AA-514, defaults to `None`): the SEO keyword gate_seo_surface() checks title/meta
+    against — passed straight through, only used for `channel=='blog'`."""
     user_prompt = build_user_prompt(
         content_seed=content_seed, goal=goal, channel_style=channel_style,
         brand_audience=brand_audience, angle=angle, cta=cta,
         destination=destination, trip_name=trip_name, atom_id=atom_id,
-        route_segments=route_segments,
+        route_segments=route_segments, keyword=keyword,
     )
     client = LLMClient()
     request = LLMRequest(system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt,
                           model_tier="sonnet", max_tokens=_MAX_TOKENS)
     resp = client.generate(request)
-    return _strip_fences(resp.content), resp.cost_usd
+    if channel_style["channel"] == "blog":
+        body, seo_meta = _parse_blog_envelope(resp.content)
+        return body, resp.cost_usd, seo_meta
+    return _strip_fences(resp.content), resp.cost_usd, {"seo_title": None, "meta_description": None, "slug": None}
 
 
 def rewrite_with_feedback(
     *, content_seed: str, goal: Goal, channel_style: ChannelStyle,
     brand_audience: BrandAudience, angle: dict, cta: str, revision_feedback: list[str],
     destination: str | None = None, trip_name: str | None = None, atom_id: str | None = None,
-    route_segments: list[tuple[str, str]] | None = None,
-) -> tuple[str, float]:
+    route_segments: list[tuple[str, str]] | None = None, keyword: str | None = None,
+) -> tuple[str, float, dict]:
     """Attempt 2 (the only retry — Phase 1's confirmed cap of 2 total attempts) — the SAME
     write call, with `revision_feedback` (the specific gate/violation strings T10 failed on,
     Phase 1 §2a's confirmed "specific, not generic" feedback shape) appended to the prompt. A
     fresh full write from the same brief, not a diff/patch — same "return the full corrected
     text, never a partial section" contract N7's own repair.py documents, kept here because it's
     the right contract, not because it's ported code (this module imports nothing from
-    services.acp_produce.repair)."""
+    services.acp_produce.repair). Returns (content_text, cost_usd, seo_meta) — see
+    write_content()'s own docstring for the shape."""
     user_prompt = build_user_prompt(
         content_seed=content_seed, goal=goal, channel_style=channel_style,
         brand_audience=brand_audience, angle=angle, cta=cta,
         destination=destination, trip_name=trip_name, revision_feedback=revision_feedback,
-        atom_id=atom_id, route_segments=route_segments,
+        atom_id=atom_id, route_segments=route_segments, keyword=keyword,
     )
     client = LLMClient()
     request = LLMRequest(system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt,
                           model_tier="sonnet", max_tokens=_MAX_TOKENS)
     resp = client.generate(request)
-    return _strip_fences(resp.content), resp.cost_usd
+    if channel_style["channel"] == "blog":
+        body, seo_meta = _parse_blog_envelope(resp.content)
+        return body, resp.cost_usd, seo_meta
+    return _strip_fences(resp.content), resp.cost_usd, {"seo_title": None, "meta_description": None, "slug": None}
 
 
-__all__ = ["write_content", "rewrite_with_feedback"]
+__all__ = ["SeoEnvelopeError", "write_content", "rewrite_with_feedback"]
