@@ -51,16 +51,18 @@ def _request_row(**over):
         "trip_id": TRIP_ID, "channel": "facebook", "goal": None, "cta": None,
         "status": "pending_goal", "dfs_paa_snapshot": None,  # AA-501, migration 127
         "route_segment_ids": None,  # AA-511 Gap A, migration 134
+        "subject_id": None,  # AA-512, migration 133 (subject_id) — fetch_request()'s header join
         "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
     }
     base.update(over)
     return base
 
 
-def _option_row(idx, recommended=False, chosen=False):
+def _option_row(idx, recommended=False, chosen=False, answers=None, violations=None):
     return {
         "idx": idx, "name": f"Angle {idx}", "why_it_works": "why", "formula_fit": "AIDA",
         "best_final_style": "style", "recommended": recommended, "chosen": chosen,
+        "answers": answers, "violations": violations,  # AA-512, migration 135
     }
 
 
@@ -154,9 +156,15 @@ class TestSetGoalAndGenerate:
         assert result["status"] == "pending_choice"
         insert_calls = [c for c in conn.execute.call_args_list if "angle_gate_option" in c[0][0]]
         assert len(insert_calls) == 3
-        # recommended=True only on idx 1
-        recommended_flags = [c[0][-1] for c in insert_calls]
-        assert recommended_flags == [False, True, False]
+        # AA-512 — channel is "facebook" (set by _request_row()'s default) here, so measurable
+        # ranking now runs and OVERRIDES the LLM's own recommended_index=1: all 3 angles tie at
+        # (0 violations, 0 answers) since none claims an "answers" field and none of their
+        # "w{a,b,c}" text matches facebook's avoid-list — ranking.py's documented tie-break picks
+        # the earliest idx, so idx 0 wins, not the LLM's original idx 1. See
+        # TestSetGoalAndGenerate::test_measurable_ranking_overrides_llm_recommendation below for
+        # a case where the 3 angles actually differ.
+        recommended_flags = [c[0][7] for c in insert_calls]
+        assert recommended_flags == [True, False, False]
 
     async def test_search_demand_signal_fetched_and_passed_when_trip_id_present(self):
         """AA-469 Việc 4 — set_goal_and_generate() must actually resolve the DFS/PAA signal
@@ -273,6 +281,81 @@ class TestSetGoalAndGenerate:
             c for c in conn.execute.call_args_list if "UPDATE acp_shared.angle_gate_request" in c[0][0]
         )
         assert update_call[0][3] is None
+
+    async def test_measurable_ranking_overrides_llm_recommendation(self):
+        """AA-512 — ADR 0004: when channel is known (Subject-driven request), the LLM's own
+        recommended_index (here 2, "C per LLM") must be OVERRIDDEN by the measurable formula:
+        fewest avoid-list violations first, then most real PAA-answered questions. Angle 0
+        contains linkedin's own avoid-list phrase ("hard sell") -> disqualified regardless of its
+        PAA claim. Angle 1 is clean and correctly claims the one real PAA question (case/
+        punctuation differs, still matches via _plain() normalization). Angle 2 is clean but
+        claims nothing -> Angle 1 must win: 0 violations (tied with 2) but more real answers."""
+        import json
+
+        from services.acp_shared.dfs_relevance import SearchDemandSignal
+        signal = SearchDemandSignal(
+            relevance="HIGH", people_also_ask=["Is Sapa safe to trek?"], related_keywords=[],
+        )
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [
+            _request_row(status="pending_goal", channel="linkedin"),
+            _atom_row(),
+            {"customer_segment": "Senior execs", "customer_mindset": "seek depth"},
+        ]
+        conn.fetch.return_value = []
+        pool = _make_pool(conn)
+
+        angles = [
+            {"name": "A", "why_it_works": "a hard sell pitch", "formula_fit": "fa",
+             "best_final_style": "sa", "answers": ["is sapa safe to trek?"]},
+            {"name": "B", "why_it_works": "wb", "formula_fit": "fb",
+             "best_final_style": "sb", "answers": ["is sapa safe to trek?!"]},  # matches via _plain()
+            {"name": "C", "why_it_works": "wc", "formula_fit": "fc",
+             "best_final_style": "sc", "answers": []},
+        ]
+        with patch.object(service, "generate_angles", new=AsyncMock(return_value=(angles, 2, "C per LLM", 0.02))), \
+             patch.object(service, "fetch_search_demand_signal", new=AsyncMock(return_value=signal)), \
+             patch.object(service, "fetch_request", new=AsyncMock(return_value={"status": "pending_choice"})):
+            await service.set_goal_and_generate(TENANT_ID, REQUEST_ID, "promotion", pool)
+
+        insert_calls = [c for c in conn.execute.call_args_list if "angle_gate_option" in c[0][0]]
+        recommended_flags = [c[0][7] for c in insert_calls]
+        assert recommended_flags == [False, True, False]
+        violations_by_idx = {c[0][2]: json.loads(c[0][9]) for c in insert_calls}
+        answers_by_idx = {c[0][2]: json.loads(c[0][8]) for c in insert_calls}
+        assert any("hard sell" in v for v in violations_by_idx[0])
+        assert violations_by_idx[1] == []
+        assert answers_by_idx[1] == ["Is Sapa safe to trek?"]  # real question text, not the claim
+
+    async def test_legacy_atom_picker_path_keeps_llm_recommendation_no_ranking(self):
+        """AA-512 — channel is NULL (the legacy, dead-but-present atom-picker path, channel only
+        set later at step 8) -> ranking must NOT run (avoid-list is channel-scoped, can't be
+        computed yet): recommended_index stays the LLM's own choice, answers/violations columns
+        stay NULL, no regression on this path."""
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [
+            _request_row(status="pending_goal", channel=None),
+            _atom_row(),
+            {"customer_segment": "Senior execs", "customer_mindset": "seek depth"},
+            None,  # fetch_search_demand_signal -> no seo_context row
+        ]
+        conn.fetch.return_value = []
+        pool = _make_pool(conn)
+
+        angles = [
+            {"name": "A", "why_it_works": "wa", "formula_fit": "fa", "best_final_style": "sa"},
+            {"name": "B", "why_it_works": "wb", "formula_fit": "fb", "best_final_style": "sb"},
+            {"name": "C", "why_it_works": "wc", "formula_fit": "fc", "best_final_style": "sc"},
+        ]
+        with patch.object(service, "generate_angles", new=AsyncMock(return_value=(angles, 2, "C per LLM", 0.02))), \
+             patch.object(service, "fetch_request", new=AsyncMock(return_value={"status": "pending_choice"})):
+            await service.set_goal_and_generate(TENANT_ID, REQUEST_ID, "promotion", pool)
+
+        insert_calls = [c for c in conn.execute.call_args_list if "angle_gate_option" in c[0][0]]
+        recommended_flags = [c[0][7] for c in insert_calls]
+        assert recommended_flags == [False, False, True]  # unchanged LLM pick (idx 2)
+        for c in insert_calls:
+            assert c[0][8] is None and c[0][9] is None  # answers/violations stay NULL
 
     async def test_wrong_status_raises(self):
         conn = AsyncMock()

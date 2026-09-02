@@ -34,7 +34,7 @@ An "angle" here means: one specific strategic approach to the SAME content seed/
 a chosen goal and its marketing formula. The 3 angles you generate must be genuinely different \
 approaches — not 3 small wording variations of the same idea.
 
-Each angle needs exactly 4 fields:
+Each angle needs exactly 4 required fields, plus a 5th when questions are supplied below:
 - name: a short, specific label for this angle (not generic, e.g. not just "Angle 1")
 - why_it_works: 1-2 sentences, a concrete business reason this angle fits the goal/audience — \
 never vague ("this is engaging")
@@ -44,6 +44,10 @@ formula, given below) and briefly how this specific angle realizes it
 eventually written — tone, shape, opening approach — general to the angle itself, not tied to \
 any one channel (channel-specific format/structure rules are applied separately, later, once a \
 channel is chosen)
+- answers: (AA-512) a list of the questions from "Travelers also ask" below that THIS SPECIFIC \
+angle would genuinely answer if written — quoted EXACTLY as given, word for word. Claim only \
+what the angle really covers: an angle answering 2 questions well beats one listing 6 it barely \
+touches. Empty list if none of the given questions fit this angle, or if no questions were given.
 
 Never invent facts, statistics, testimonials, or claims not present in the content seed given to \
 you. If the content seed lacks a concrete detail a strong angle would want, say so honestly \
@@ -59,14 +63,18 @@ angle around it.
 Return ONLY valid JSON, no markdown fences, no commentary, in exactly this shape:
 {
   "angles": [
-    {"name": "...", "why_it_works": "...", "formula_fit": "...", "best_final_style": "..."},
-    {"name": "...", "why_it_works": "...", "formula_fit": "...", "best_final_style": "..."},
-    {"name": "...", "why_it_works": "...", "formula_fit": "...", "best_final_style": "..."}
+    {"name": "...", "why_it_works": "...", "formula_fit": "...", "best_final_style": "...", "answers": []},
+    {"name": "...", "why_it_works": "...", "formula_fit": "...", "best_final_style": "...", "answers": []},
+    {"name": "...", "why_it_works": "...", "formula_fit": "...", "best_final_style": "...", "answers": []}
   ],
   "recommended_index": 0,
   "recommendation_reason": "short reason this one is the strongest of the 3"
 }
-recommended_index must be 0, 1, or 2."""
+recommended_index must be 0, 1, or 2. NOTE: when a channel is already known for this request \
+(most requests today, via the Slate — see services/acp_angle_gate/service.py), the caller \
+RE-RANKS the 3 angles itself by measurable criteria (real PAA-answer count, checked against your \
+"answers" claims, and channel avoid-list violations) and may override recommended_index — your \
+own recommendation is only the fallback for the rare request where no channel is known yet."""
 
 
 def build_user_prompt(
@@ -104,7 +112,10 @@ def build_user_prompt(
         lines = [f"SEARCH DEMAND SIGNAL (real traveler search behavior for this destination — "
                  f"see system prompt for how to use this):\nRelevance: {search_demand.relevance}"]
         if search_demand.people_also_ask:
-            lines.append("Travelers also ask: " + "; ".join(search_demand.people_also_ask[:5]))
+            # AA-512 — the FULL pool, not capped at 5 like before: an angle's "answers" claim is
+            # now server-verified against exactly this list (services/acp_angle_gate/ranking.py),
+            # so truncating it here would make a real answered question unmatchable.
+            lines.append("Travelers also ask: " + "; ".join(search_demand.people_also_ask))
         if search_demand.related_keywords:
             lines.append("Related search terms: " + ", ".join(search_demand.related_keywords[:8]))
         parts.append("\n".join(lines))
