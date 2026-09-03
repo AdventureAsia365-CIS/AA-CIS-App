@@ -136,7 +136,8 @@ def _record_t9_write_call(resp, channel: str, *, attempt: int, tenant_id, angle_
     here."""
     record_call_sync(
         stage="t9_write", role="writer", model=resp.model_used,
-        tokens_in=getattr(resp, "input_tokens", None), tokens_out=getattr(resp, "output_tokens", None), cost_usd=resp.cost_usd,
+        tokens_in=getattr(resp, "input_tokens", None), tokens_out=getattr(resp, "output_tokens", None),
+        cost_usd=resp.cost_usd,
         tenant_id=tenant_id, angle_gate_request_id=angle_gate_request_id,
         quality_signal={"channel": channel, "attempt": attempt, "output_len_chars": len(resp.content)},
     )

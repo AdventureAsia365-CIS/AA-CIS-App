@@ -127,7 +127,8 @@ async def generate_angles(
     if pool is not None:
         await record_call_with_pool(
             pool, stage="t8_angle_gen", role="writer", model=resp.model_used,
-            tokens_in=getattr(resp, "input_tokens", None), tokens_out=getattr(resp, "output_tokens", None), cost_usd=resp.cost_usd,
+            tokens_in=getattr(resp, "input_tokens", None), tokens_out=getattr(resp, "output_tokens", None),
+            cost_usd=resp.cost_usd,
             tenant_id=str(tenant_id) if tenant_id else None,
             angle_gate_request_id=str(request_id) if request_id else None,
             quality_signal=quality_signal,
@@ -135,7 +136,8 @@ async def generate_angles(
     else:
         await record_call(
             stage="t8_angle_gen", role="writer", model=resp.model_used,
-            tokens_in=getattr(resp, "input_tokens", None), tokens_out=getattr(resp, "output_tokens", None), cost_usd=resp.cost_usd,
+            tokens_in=getattr(resp, "input_tokens", None), tokens_out=getattr(resp, "output_tokens", None),
+            cost_usd=resp.cost_usd,
             tenant_id=str(tenant_id) if tenant_id else None,
             angle_gate_request_id=str(request_id) if request_id else None,
             quality_signal=quality_signal,

@@ -105,7 +105,8 @@ class LLMClient:
                            account=fallback_acct, reason="acc2 T1 + T1.5a failed")
                 return resp
             except Exception as e:
-                logger.warning("t1_5b_satellite_failed_trying_t2", model=BEDROCK_SONNET, account=fallback_acct, error=str(e))
+                logger.warning("t1_5b_satellite_failed_trying_t2", model=BEDROCK_SONNET,
+                               account=fallback_acct, error=str(e))
 
         # T2: Claude Haiku — fast / default tier, or Sonnet fallback
         try:
@@ -124,7 +125,8 @@ class LLMClient:
             logger.info("t2_5a_satellite_used", model=BEDROCK_HAIKU, account=primary_acct, reason="acc2 T2 failed")
             return resp
         except Exception as e:
-            logger.warning("t2_5a_satellite_failed_trying_t2_5b", model=BEDROCK_HAIKU, account=primary_acct, error=str(e))
+            logger.warning("t2_5a_satellite_failed_trying_t2_5b", model=BEDROCK_HAIKU,
+                           account=primary_acct, error=str(e))
 
         # T2.5b: Claude Haiku qua satellite FALLBACK account
         try:
