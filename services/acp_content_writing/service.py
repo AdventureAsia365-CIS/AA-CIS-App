@@ -47,12 +47,12 @@ logger = structlog.get_logger()
 
 MAX_ATTEMPTS = 2  # Phase 1 §2c/§3 — confirmed cap, not N7's 3-8 range
 
-# AA-499 (Decision 5) — same 0.92 threshold Nghiệp already confirmed (Q6=B, 25/07/2026, AA-332
-# origin, cited in AA-484's Linear comment) for the CROSS-tenant blocking gate. Reused verbatim
-# for this within-tenant, non-blocking flag rather than picking a second number with no basis —
-# a shared threshold for the same underlying question ("is this near-duplicate content?") is a
-# more defensible default than inventing a separate one for the softer, flag-only case.
-_WITHIN_TENANT_REUSE_THRESHOLD = 0.92
+# AA-499/AA-484 — the ONE similarity threshold Nghiệp confirmed (Q6=B, 25/07/2026, AA-332
+# origin, cited in AA-484's Linear comment), for BOTH the within-tenant `within_tenant_reuse`
+# flag (AA-499) and the cross-tenant `F10_cannibalization_cross_tenant` BLOCKING gate (AA-484) —
+# a shared threshold for the same underlying question ("is this near-duplicate content?") is
+# more defensible than inventing a second number for the softer, flag-only case.
+_REUSE_SIMILARITY_THRESHOLD = 0.92
 
 
 class ContentWritingError(Exception):
@@ -88,6 +88,21 @@ async def _fetch_atom_text(tenant_id: UUID, atom_id: str, pool) -> str:
     if row is None:
         raise ContentWritingError(f"atom_id={atom_id!r} not found for this tenant")
     return row["text"]
+
+
+async def _tenant_missing_brand_rules(tenant_id: str, pool) -> bool:
+    """AA-484 — a cheap diagnostic-only check (called only when a cannibalization match already
+    fired, see run_write_background()'s own comment), NOT a gate on its own: True when this
+    tenant has no active `shared.tenant_brand_rules` row, the exact `brand_rules = {}` fallback
+    condition `api/routers/v1_tours.py::rewrite_tour()` silently accepts (AA-425's own real
+    finding, cited in this issue's own Linear description, is that this produces generic,
+    convergence-prone LLM output — plausible root cause worth surfacing, not proof)."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT 1 FROM shared.tenant_brand_rules WHERE tenant_id = $1::uuid AND is_active = true LIMIT 1",
+            tenant_id,
+        )
+    return row is None
 
 
 _ROUTE_SEGMENT_TEXT_QUERY = """
@@ -344,6 +359,12 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
         # wins" precedent content_text/gate_ledger already follow — {} (all-None) for every
         # non-blog channel, see generate.py's own write_content()/rewrite_with_feedback() docstring.
         seo_meta: dict = {"seo_title": None, "meta_description": None, "slug": None}
+        # AA-499/AA-484 — this attempt's own embedding, computed inside the loop (not just after
+        # it) because AA-484's cannibalization gate needs it BEFORE run_quality_gates() runs, on
+        # EVERY attempt (a real blocking gate has to be re-checked on the retry, same as every
+        # other gate). Kept across the loop and reused (not recomputed) by the post-loop
+        # within-tenant reuse check below — one embedding call per attempt, not two.
+        embedding: list[float] | None = None
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
             if attempt == 1:
@@ -365,12 +386,42 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
                 )
             total_cost += cost
 
+            # AA-484 — cross-tenant cannibalization check, done HERE (before run_quality_gates(),
+            # which stays synchronous/pool-free — see quality_gates.gate_cannibalization()'s own
+            # docstring) so it's a real re-checked-every-attempt BLOCKING gate, not a post-hoc
+            # note. tenant_id guard mirrors AA-499's own (real in production, only a hand-built
+            # test context could omit it). Soft-fail: a failed/empty embedding just means no
+            # cannibalization_match — never itself a reason to hold.
+            embedding = None
+            cannibalization_match: dict | None = None
+            if tenant_id:
+                embed_text = strip_citation_tags(content_text)
+                embedding = await asyncio.to_thread(compute_embedding, embed_text)
+                if embedding is not None:
+                    cross_matches = await find_similar_pieces(
+                        embedding, pool, cross_tenant=True,
+                        exclude_tenant_id=UUID(tenant_id), limit=1,
+                    )
+                    if cross_matches and cross_matches[0].similarity >= _REUSE_SIMILARITY_THRESHOLD:
+                        top = cross_matches[0]
+                        # AA-484's own issue text (STEP0, citing AA-425's real finding): the
+                        # highest-risk group for cannibalization is a tenant with NO active
+                        # tenant_brand_rules (brand_rules={} fallback -> generic LLM drift ->
+                        # higher chance of converging on similar wording). One extra query, only
+                        # on the rare path where a match already fired — surfaced as a diagnostic
+                        # hint in the held reason, not a separate gate.
+                        cannibalization_match = {
+                            "piece_id": top.piece_id, "tenant_id": top.tenant_id,
+                            "similarity": top.similarity,
+                            "writer_missing_brand_rules": await _tenant_missing_brand_rules(tenant_id, pool),
+                        }
+
             outcome = await asyncio.to_thread(
                 run_quality_gates, content_text=content_text, atom_text=atom_text, cta=cta,
                 goal_key=goal["key"], brand_rubric_text=brand_rubric_text, channel=channel,
                 route_segments=route_segments, keyword=keyword,
                 seo_title=seo_meta.get("seo_title"), meta_description=seo_meta.get("meta_description"),
-                slug=seo_meta.get("slug"),
+                slug=seo_meta.get("slug"), cannibalization_match=cannibalization_match,
             )
             gate_ledger = outcome["gate_ledger"]
             flags = outcome["flags"]
@@ -409,45 +460,42 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
         if held_reason:
             held_reason = strip_citation_tags(held_reason)
 
-        # AA-499 (Decision 5) — embedding + within-tenant reuse flag, 'approved' only (a held
-        # piece never ships, nothing useful to compare it against or index it for). Runs AFTER
-        # the gate loop concludes, never affects gate pass/fail — a pure metadata annotation on
-        # an already-decided outcome, not a new gate (quality_gates.py's run_quality_gates() is a
-        # synchronous, pool-free function; giving it DB+Bedrock access for one soft signal would
-        # be a bigger structural change than this issue's own scope). Soft-fail throughout: an
-        # embedding call failure, or a similarity query with nothing to compare against, both
-        # just leave `embedding`/this flag absent — never blocks persistence.
-        embedding: list[float] | None = None
-        # tenant_id is always real in production (start_write() always sets it, AA-505) — the
-        # `and tenant_id` guard only matters for a hand-built test context dict that omits it;
-        # never silently skips a real write's embedding.
-        if status == "approved" and tenant_id:
-            embedding = await asyncio.to_thread(compute_embedding, content_text)
-            if embedding is not None:
-                similar = await find_similar_pieces(
-                    embedding, pool, tenant_id=UUID(tenant_id), exclude_piece_id=piece_id, limit=1,
-                )
-                # Only the SAME tenant, a DIFFERENT atom — Decision 4's own history block
-                # already covers "avoid repeating an angle for the SAME atom"; this is the
-                # complementary case: two different atoms converging on near-identical content.
-                match = next((s for s in similar if s.atom_id != atom_id), None)
-                if match and match.similarity >= _WITHIN_TENANT_REUSE_THRESHOLD:
-                    flags.append({
-                        "gate": "within_tenant_reuse", "blocking": False,
-                        "similarity": round(match.similarity, 4), "similar_piece_id": match.piece_id,
-                        "violations": [
-                            f"This piece reads very similar (cosine similarity "
-                            f"{match.similarity:.2f}) to a piece already written for a "
-                            f"different atom on this account."
-                        ],
-                    })
+        # AA-499 (Decision 5) — within-tenant reuse flag, 'approved' only (a held piece never
+        # ships, nothing useful to compare it against or index it for). Reuses the LAST attempt's
+        # own `embedding` (computed above, inside the loop, for AA-484's cannibalization check on
+        # that same attempt's content_text) rather than recomputing — one embedding call per
+        # attempt total, not two. Never affects gate pass/fail — a pure metadata annotation on an
+        # already-decided outcome. Soft-fail throughout: a missing embedding (call failed, or
+        # tenant_id absent) just leaves this flag absent — never blocks persistence.
+        if status == "approved" and embedding is not None and tenant_id:
+            similar = await find_similar_pieces(
+                embedding, pool, tenant_id=UUID(tenant_id), exclude_piece_id=piece_id, limit=1,
+            )
+            # Only the SAME tenant, a DIFFERENT atom — Decision 4's own history block
+            # already covers "avoid repeating an angle for the SAME atom"; this is the
+            # complementary case: two different atoms converging on near-identical content.
+            match = next((s for s in similar if s.atom_id != atom_id), None)
+            if match and match.similarity >= _REUSE_SIMILARITY_THRESHOLD:
+                flags.append({
+                    "gate": "within_tenant_reuse", "blocking": False,
+                    "similarity": round(match.similarity, 4), "similar_piece_id": match.piece_id,
+                    "violations": [
+                        f"This piece reads very similar (cosine similarity "
+                        f"{match.similarity:.2f}) to a piece already written for a "
+                        f"different atom on this account."
+                    ],
+                })
 
         await _finalize_piece(
             pool, piece_id=piece_id, attempt_number=attempt,
             content_text=content_text, status=status, held_reason=held_reason,
             gate_ledger=gate_ledger, repair_log=repair_log, flags=flags,
             seo_title=seo_meta.get("seo_title"), meta_description=seo_meta.get("meta_description"),
-            slug=seo_meta.get("slug"), content_summary=summary, content_embedding=embedding,
+            slug=seo_meta.get("slug"), content_summary=summary,
+            # AA-484 now computes `embedding` on EVERY attempt (for the cannibalization gate),
+            # not just when approved — persist it only for the real approved outcome, same
+            # "held piece never ships, nothing useful to index it for" rule AA-499 set.
+            content_embedding=embedding if status == "approved" else None,
         )
         logger.info(
             "t9_write_and_check_done", request_id=str(request_id), status=status,

@@ -136,7 +136,7 @@ def _judge_raw(**fields) -> dict:
 
 
 class TestRunQualityGatesChannelDispatch:
-    def test_non_blog_channel_still_runs_exactly_7_gates(self):
+    def test_non_blog_channel_still_runs_exactly_8_gates(self):
         rubric = qg.get_framework_rubric("promotion")
         f8_data = {"items": [{"criterion": c, "score": "1", "evidence": "q"} for c in rubric]}
         f9_data = {"status": "pass", "brand_fit": "1", "cta_clear": "1", "human_read": "1",
@@ -148,12 +148,14 @@ class TestRunQualityGatesChannelDispatch:
             )
         gates = [g["gate"] for g in outcome["gate_ledger"]]
         # AA-514: promises_an_option now runs for every channel (origin's own channels=None).
+        # AA-484: F10_cannibalization_cross_tenant runs for every channel too, right after F2 —
+        # a `None` cannibalization_match (this test's default) always passes with 0 violations.
         assert gates == [
-            "F6_cta_present", "F1_grounding", "F2_banned_patterns", "promises_an_option",
-            "F4_extreme_length", "F8_framework", "F9_brand_voice",
+            "F6_cta_present", "F1_grounding", "F2_banned_patterns", "F10_cannibalization_cross_tenant",
+            "promises_an_option", "F4_extreme_length", "F8_framework", "F9_brand_voice",
         ]
 
-    def test_blog_channel_runs_all_11_gates(self):
+    def test_blog_channel_runs_all_12_gates(self):
         rubric = qg.get_framework_rubric("promotion")
         f8_data = {"items": [{"criterion": c, "score": "1", "evidence": "q"} for c in rubric]}
         f9_data = {"status": "pass", "brand_fit": "1", "cta_clear": "1", "human_read": "1",
@@ -167,9 +169,10 @@ class TestRunQualityGatesChannelDispatch:
             )
         gates = [g["gate"] for g in outcome["gate_ledger"]]
         # AA-514: + promises_an_option (after F2) and F4_seo_surface (after F4, blog-only).
+        # AA-484: + F10_cannibalization_cross_tenant, right after F2 (before promises_an_option).
         assert gates == [
-            "F6_cta_present", "F1_grounding", "F2_banned_patterns", "promises_an_option",
-            "F4_extreme_length", "F4_seo_surface",
+            "F6_cta_present", "F1_grounding", "F2_banned_patterns", "F10_cannibalization_cross_tenant",
+            "promises_an_option", "F4_extreme_length", "F4_seo_surface",
             "F5_atom_density", "F3_structural_variance", "F7_faq_dedup",
             "F8_framework", "F9_brand_voice",
         ]
@@ -300,7 +303,8 @@ class TestWriteAndCheckStripsTagsBeforeOutput:
             "flags": [],
         }
 
-        with patch.object(service, "write_content", return_value=("Plain facebook post.", 0.02, {}, None)) as mock_write, \
+        with patch.object(service, "write_content",
+                          return_value=("Plain facebook post.", 0.02, {}, None)) as mock_write, \
              patch.object(service, "run_quality_gates", return_value=passing_outcome) as mock_gates, \
              patch.object(service, "_finalize_piece", new=AsyncMock(side_effect=_capturing_finalize(finalized))):
             await service.run_write_background(REQUEST_ID, uuid.uuid4(), _context(channel="facebook"), pool=MagicMock())

@@ -10,15 +10,12 @@ mechanism, two call sites)." `find_similar_pieces()` IS that shared mechanism �
 - `cross_tenant=False` (this build's own consumption — see
   `services.acp_content_writing.service`'s within-tenant reuse flag): scoped to `$1 = tenant_id`,
   a soft/informational signal only (`flags`, non-blocking, ADR 0023's shape).
-- `cross_tenant=True` (NOT consumed by any code in THIS build — provided as reusable
-  infrastructure for AA-484's cannibalization gate, which `blocks` this issue in Linear and whose
-  origin design, AA-332, already has a Nghiệp-confirmed decision (Q6=B, 25/07/2026, cited in
-  AA-484's own Linear comment) to run cross-tenant cosine similarity as a real BLOCKING gate at
-  threshold 0.92 — that confirmed decision is what licenses building the cross-tenant CAPABILITY
-  here; wiring it into anything tenant-visible remains AA-484's own scope, deliberately not
-  built in this issue, per this issue's own explicit "cần xác nhận với Nghiệp, không tự suy diễn"
-  caution about anything BEYOND that already-confirmed gate use). No tenant-facing endpoint in
-  this codebase exposes cross-tenant results as of this build.
+- `cross_tenant=True` — AA-484's own real consumption (`services.acp_content_writing.
+  quality_gates.gate_cannibalization()`, a real BLOCKING T10 gate at the Nghiệp-confirmed 0.92
+  threshold, Q6=B/25/07/2026, AA-332 origin). `exclude_tenant_id` filters out the writing
+  tenant's OWN pieces (same-tenant duplicates are AA-499's `within_tenant_reuse` flag's concern,
+  not this gate's) — required in practice for AA-484's own use, optional here so the plain
+  "search everything" case (any future caller that genuinely wants that) still works.
 """
 from __future__ import annotations
 
@@ -44,8 +41,8 @@ _WITHIN_TENANT_QUERY = """
     LIMIT $4
 """
 
-# Same shape, no tenant_id WHERE clause — real cross-tenant scan. Not called by any code in this
-# build (see this module's own header) — exercised only by its own unit tests, ready for AA-484.
+# Same shape, no tenant_id WHERE clause — real cross-tenant scan (AA-484's own consumption).
+# $3 excludes the writing tenant's OWN pieces (see this module's own header on why).
 _CROSS_TENANT_QUERY = """
     SELECT cp.piece_id, cp.tenant_id, agr.atom_id, cp.angle_gate_request_id,
            1 - (cp.content_embedding <=> $1::vector) AS similarity
@@ -53,8 +50,9 @@ _CROSS_TENANT_QUERY = """
     JOIN acp_shared.angle_gate_request agr ON cp.angle_gate_request_id = agr.request_id
     WHERE cp.status = 'approved' AND cp.content_embedding IS NOT NULL
       AND ($2::uuid IS NULL OR cp.piece_id != $2)
+      AND ($3::uuid IS NULL OR cp.tenant_id != $3)
     ORDER BY cp.content_embedding <=> $1::vector
-    LIMIT $3
+    LIMIT $4
 """
 
 
@@ -68,14 +66,18 @@ class SimilarPiece:
 
 async def find_similar_pieces(
     embedding: list[float], pool, *, tenant_id: Optional[UUID] = None,
-    cross_tenant: bool = False, exclude_piece_id: Optional[UUID] = None, limit: int = 5,
+    cross_tenant: bool = False, exclude_piece_id: Optional[UUID] = None,
+    exclude_tenant_id: Optional[UUID] = None, limit: int = 5,
 ) -> list[SimilarPiece]:
     """Returns up to `limit` approved pieces most similar to `embedding`, most similar first —
     NOT pre-filtered by any threshold (the caller decides what similarity counts as "too
     similar" for its own use case; a fixed threshold here would bake one call site's judgment
     into shared infrastructure). `tenant_id` is required unless `cross_tenant=True` (a within-
     tenant query with no tenant to scope by is a caller bug, not a valid "search everything"
-    request — use `cross_tenant=True` explicitly for that)."""
+    request — use `cross_tenant=True` explicitly for that). `exclude_tenant_id` only applies to
+    the `cross_tenant=True` path (AA-484's own use — see this module's own header); ignored
+    (not an error) if passed alongside `cross_tenant=False`, where `tenant_id` already scopes
+    the query to exactly one tenant and an exclude would either be redundant or contradictory."""
     if not cross_tenant and tenant_id is None:
         raise ValueError("tenant_id is required unless cross_tenant=True")
     vector_literal = embedding_to_pgvector_literal(embedding)
@@ -83,7 +85,8 @@ async def find_similar_pieces(
         if cross_tenant:
             rows = await conn.fetch(
                 _CROSS_TENANT_QUERY, vector_literal,
-                str(exclude_piece_id) if exclude_piece_id else None, limit,
+                str(exclude_piece_id) if exclude_piece_id else None,
+                str(exclude_tenant_id) if exclude_tenant_id else None, limit,
             )
         else:
             rows = await conn.fetch(
