@@ -164,7 +164,9 @@ class TestRunQualityGates:
             )
         assert outcome["passed"] is True
         # AA-514: + promises_an_option (runs for every channel now, not just blog)
-        assert len(outcome["gate_ledger"]) == 7  # cta + grounding + banned + promises + length + f8 + f9
+        # AA-484: + F10_cannibalization_cross_tenant (runs for every channel, no match here since
+        # this call passes no cannibalization_match — always passes with 0 violations).
+        assert len(outcome["gate_ledger"]) == 8  # cta+grounding+banned+cannibalization+promises+length+f8+f9
 
     def test_first_det_failure_used_for_repair_targeting(self):
         rubric = qg.get_framework_rubric("promotion")

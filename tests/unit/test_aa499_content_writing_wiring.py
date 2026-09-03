@@ -1,9 +1,14 @@
-"""AA-499 (AA-494 Decision 5) — services/acp_content_writing/service.py's own wiring:
-compute_embedding()/find_similar_pieces() called only for 'approved' pieces, embedding reaches
-_finalize_piece(), a within-tenant/different-atom match above threshold becomes a non-blocking
-flag. Mirrors test_aa450_content_writing_service.py's own mocking shape (same file's
-_context()/_passing_outcome() helpers duplicated locally rather than imported, to keep this
-file independently readable — same pattern test_aa452_t10_nine_gates.py already uses)."""
+"""AA-499/AA-484 — services/acp_content_writing/service.py's own embedding wiring.
+
+Every attempt (approved OR held) computes an embedding (when tenant_id is present) and does a
+CROSS-tenant lookup for AA-484's cannibalization gate — that gate needs to be re-checked on
+every retry, same as every other T10 gate. Only on the FINAL 'approved' outcome does the
+service additionally do a WITHIN-tenant lookup (the AA-499 reuse flag) and persist the
+embedding at all (a held piece never ships, nothing to index it for).
+
+Mirrors test_aa450_content_writing_service.py's own mocking shape (`_context()`/
+`_passing_outcome()` helpers duplicated locally rather than imported, same pattern
+test_aa452_t10_nine_gates.py already uses)."""
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -57,37 +62,49 @@ def _failing_outcome(gate="F2_banned_patterns", repairable=True):
 
 
 @pytest.mark.asyncio
-class TestEmbeddingOnlyRunsForApproved:
+class TestEmbeddingComputedEveryAttempt:
     async def test_approved_piece_computes_and_persists_embedding(self):
         with patch.object(service, "write_content", return_value=("final piece text", 0.02, {}, None)), \
-             patch.object(service, "run_quality_gates", return_value=_passing_outcome()), \
+             patch.object(service, "run_quality_gates", return_value=_passing_outcome()) as mock_gates, \
              patch.object(service, "compute_embedding", return_value=EMBEDDING) as mock_compute, \
              patch.object(service, "find_similar_pieces", new=AsyncMock(return_value=[])) as mock_find, \
              patch.object(service, "_finalize_piece", new=AsyncMock(return_value=_finalized_row())) as mock_finalize:
             await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())
 
         mock_compute.assert_called_once_with("final piece text")
-        mock_find.assert_awaited_once()
-        assert mock_find.call_args.kwargs["tenant_id"] == TENANT_ID
-        assert mock_find.call_args.kwargs["exclude_piece_id"] == PIECE_ID
+        # 2 calls: cross-tenant (cannibalization, inside the loop) + within-tenant (reuse flag,
+        # after the loop, approved-only).
+        assert mock_find.await_count == 2
+        cross_call = next(c for c in mock_find.call_args_list if c.kwargs.get("cross_tenant"))
+        within_call = next(c for c in mock_find.call_args_list if not c.kwargs.get("cross_tenant"))
+        assert cross_call.kwargs["exclude_tenant_id"] == TENANT_ID
+        assert within_call.kwargs["tenant_id"] == TENANT_ID
+        assert within_call.kwargs["exclude_piece_id"] == PIECE_ID
         assert mock_finalize.call_args.kwargs["content_embedding"] == EMBEDDING
+        # run_quality_gates() got the (empty, no cannibalization match) result explicitly.
+        assert mock_gates.call_args.kwargs["cannibalization_match"] is None
 
-    async def test_held_piece_never_computes_embedding(self):
+    async def test_held_piece_computes_embedding_for_cannibalization_but_never_persists_it(self):
+        """Real behavior change from AA-499's own original design: embedding IS computed on a
+        held attempt now (AA-484's gate needs it), but content_embedding still only persists for
+        the real approved outcome — 'held piece never ships, nothing to index it for' still holds
+        at the PERSISTENCE layer, just not at the COMPUTE layer anymore."""
         with patch.object(service, "write_content", return_value=("draft", 0.02, {}, None)), \
              patch.object(service, "rewrite_with_feedback", return_value=("draft 2", 0.02, {}, None)), \
              patch.object(service, "run_quality_gates",
                            side_effect=[_failing_outcome(repairable=True), _failing_outcome(repairable=False)]), \
-             patch.object(service, "compute_embedding") as mock_compute, \
+             patch.object(service, "compute_embedding", return_value=EMBEDDING) as mock_compute, \
+             patch.object(service, "find_similar_pieces", new=AsyncMock(return_value=[])), \
              patch.object(service, "_finalize_piece",
-                           new=AsyncMock(return_value=_finalized_row(status="held"))):
+                           new=AsyncMock(return_value=_finalized_row(status="held"))) as mock_finalize:
             await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())
 
-        mock_compute.assert_not_called()
+        assert mock_compute.call_count == 2  # once per attempt
+        assert mock_finalize.call_args.kwargs["content_embedding"] is None
 
-    async def test_embedding_call_failure_soft_fails_no_similarity_query(self):
+    async def test_embedding_call_failure_soft_fails_no_similarity_query_at_all(self):
         """compute_embedding()'s own soft-fail contract (returns None) means find_similar_pieces()
-        must never even be called — same "no signal, don't query" precedent this build follows
-        throughout."""
+        must never even be called — neither the cross-tenant nor the within-tenant path."""
         with patch.object(service, "write_content", return_value=("final piece text", 0.02, {}, None)), \
              patch.object(service, "run_quality_gates", return_value=_passing_outcome()), \
              patch.object(service, "compute_embedding", return_value=None), \
@@ -100,14 +117,72 @@ class TestEmbeddingOnlyRunsForApproved:
 
 
 @pytest.mark.asyncio
+class TestCannibalizationMatchReachesGates:
+    """AA-484 — a real cross-tenant match >= threshold must reach run_quality_gates() as
+    `cannibalization_match`, correctly shaped, so gate_cannibalization() can turn it into a real
+    blocking gate failure."""
+
+    async def test_cross_tenant_match_above_threshold_passed_to_gates(self):
+        cross_match = SimilarPiece(piece_id=str(uuid.uuid4()), tenant_id=str(uuid.uuid4()),
+                                    atom_id="atom_other_tenant", similarity=0.95)
+
+        async def fake_find(*args, **kwargs):
+            return [cross_match] if kwargs.get("cross_tenant") else []
+
+        with patch.object(service, "write_content", return_value=("final piece text", 0.02, {}, None)), \
+             patch.object(service, "run_quality_gates", return_value=_passing_outcome()) as mock_gates, \
+             patch.object(service, "compute_embedding", return_value=EMBEDDING), \
+             patch.object(service, "find_similar_pieces", side_effect=fake_find), \
+             patch.object(service, "_finalize_piece", new=AsyncMock(return_value=_finalized_row())):
+            await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())
+
+        match = mock_gates.call_args.kwargs["cannibalization_match"]
+        assert match["piece_id"] == cross_match.piece_id
+        assert match["tenant_id"] == cross_match.tenant_id
+        assert match["similarity"] == cross_match.similarity
+        assert "writer_missing_brand_rules" in match
+
+    async def test_cross_tenant_match_below_threshold_not_passed(self):
+        cross_match = SimilarPiece(piece_id=str(uuid.uuid4()), tenant_id=str(uuid.uuid4()),
+                                    atom_id="atom_other_tenant", similarity=0.5)
+
+        async def fake_find(*args, **kwargs):
+            return [cross_match] if kwargs.get("cross_tenant") else []
+
+        with patch.object(service, "write_content", return_value=("final piece text", 0.02, {}, None)), \
+             patch.object(service, "run_quality_gates", return_value=_passing_outcome()) as mock_gates, \
+             patch.object(service, "compute_embedding", return_value=EMBEDDING), \
+             patch.object(service, "find_similar_pieces", side_effect=fake_find), \
+             patch.object(service, "_finalize_piece", new=AsyncMock(return_value=_finalized_row())):
+            await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())
+
+        assert mock_gates.call_args.kwargs["cannibalization_match"] is None
+
+    async def test_cross_tenant_query_excludes_the_writing_tenants_own_pieces(self):
+        with patch.object(service, "write_content", return_value=("final piece text", 0.02, {}, None)), \
+             patch.object(service, "run_quality_gates", return_value=_passing_outcome()), \
+             patch.object(service, "compute_embedding", return_value=EMBEDDING), \
+             patch.object(service, "find_similar_pieces", new=AsyncMock(return_value=[])) as mock_find, \
+             patch.object(service, "_finalize_piece", new=AsyncMock(return_value=_finalized_row())):
+            await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())
+
+        cross_call = next(c for c in mock_find.call_args_list if c.kwargs.get("cross_tenant"))
+        assert cross_call.kwargs["exclude_tenant_id"] == TENANT_ID
+
+
+@pytest.mark.asyncio
 class TestWithinTenantReuseFlag:
     async def test_match_on_a_different_atom_above_threshold_becomes_a_flag(self):
         match = SimilarPiece(piece_id=str(uuid.uuid4()), tenant_id=str(TENANT_ID),
                               atom_id="atom_OTHER", similarity=0.97)
+
+        async def fake_find(*args, **kwargs):
+            return [] if kwargs.get("cross_tenant") else [match]
+
         with patch.object(service, "write_content", return_value=("final piece text", 0.02, {}, None)), \
              patch.object(service, "run_quality_gates", return_value=_passing_outcome()), \
              patch.object(service, "compute_embedding", return_value=EMBEDDING), \
-             patch.object(service, "find_similar_pieces", new=AsyncMock(return_value=[match])), \
+             patch.object(service, "find_similar_pieces", side_effect=fake_find), \
              patch.object(service, "_finalize_piece", new=AsyncMock(return_value=_finalized_row())) as mock_finalize:
             await service.run_write_background(REQUEST_ID, PIECE_ID, _context(atom_id="atom_abc123"), pool=MagicMock())
 
@@ -122,10 +197,14 @@ class TestWithinTenantReuseFlag:
         specifically about a DIFFERENT atom converging on the same content."""
         match = SimilarPiece(piece_id=str(uuid.uuid4()), tenant_id=str(TENANT_ID),
                               atom_id="atom_abc123", similarity=0.99)
+
+        async def fake_find(*args, **kwargs):
+            return [] if kwargs.get("cross_tenant") else [match]
+
         with patch.object(service, "write_content", return_value=("final piece text", 0.02, {}, None)), \
              patch.object(service, "run_quality_gates", return_value=_passing_outcome()), \
              patch.object(service, "compute_embedding", return_value=EMBEDDING), \
-             patch.object(service, "find_similar_pieces", new=AsyncMock(return_value=[match])), \
+             patch.object(service, "find_similar_pieces", side_effect=fake_find), \
              patch.object(service, "_finalize_piece", new=AsyncMock(return_value=_finalized_row())) as mock_finalize:
             await service.run_write_background(REQUEST_ID, PIECE_ID, _context(atom_id="atom_abc123"), pool=MagicMock())
 
@@ -134,10 +213,14 @@ class TestWithinTenantReuseFlag:
     async def test_match_below_threshold_is_not_flagged(self):
         match = SimilarPiece(piece_id=str(uuid.uuid4()), tenant_id=str(TENANT_ID),
                               atom_id="atom_OTHER", similarity=0.5)
+
+        async def fake_find(*args, **kwargs):
+            return [] if kwargs.get("cross_tenant") else [match]
+
         with patch.object(service, "write_content", return_value=("final piece text", 0.02, {}, None)), \
              patch.object(service, "run_quality_gates", return_value=_passing_outcome()), \
              patch.object(service, "compute_embedding", return_value=EMBEDDING), \
-             patch.object(service, "find_similar_pieces", new=AsyncMock(return_value=[match])), \
+             patch.object(service, "find_similar_pieces", side_effect=fake_find), \
              patch.object(service, "_finalize_piece", new=AsyncMock(return_value=_finalized_row())) as mock_finalize:
             await service.run_write_background(REQUEST_ID, PIECE_ID, _context(atom_id="atom_abc123"), pool=MagicMock())
 

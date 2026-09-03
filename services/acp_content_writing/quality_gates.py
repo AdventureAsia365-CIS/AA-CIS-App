@@ -263,6 +263,50 @@ def gate_banned_patterns(content_text: str, atom_text: str) -> GateResultLite:
     return _result("F2_banned_patterns", violations)
 
 
+# ---------------------------------------------------------------- F10 (cross-tenant cannibalization, AA-484)
+
+def gate_cannibalization(match: Optional[dict]) -> GateResultLite:
+    """AA-484 (traced to AA-332's original design, Nghiệp-confirmed Q6=B, 25/07/2026, cited in
+    this issue's own Linear comment): a piece that reads too similar to one already published by
+    a DIFFERENT tenant risks 2 tenants' readers noticing duplicate marketing copy for
+    (realistically) the same shared-pool tour. BLOCKING + repairable — "chặn + yêu cầu đổi góc"
+    (block + require a different angle), matching the confirmed design's own words, not a softer
+    flag like AA-499's within-tenant `within_tenant_reuse` signal.
+
+    Deliberately a PURE function taking an already-computed `match` (or `None`) — this module has
+    no DB access anywhere else and that stays true here too (`run_quality_gates()`'s own
+    docstring: every other gate is synchronous/no-I/O). The caller (`service.py`, which already
+    has pool access) does the embedding + `find_similar_pieces(cross_tenant=True)` lookup BEFORE
+    calling `run_quality_gates()`, filters to >= the confirmed 0.92 threshold, and passes `None`
+    when there's no match (or the embedding call itself soft-failed) — a missing/failed embedding
+    must never itself cause a hold, same soft-fail contract every other embedding consumer in
+    this codebase follows.
+
+    `match` shape (a plain dict, not `services.acp_shared.piece_similarity.SimilarPiece` — kept
+    dependency-light, this module doesn't import anything DB-adjacent): `{"piece_id": str,
+    "tenant_id": str, "similarity": float, "writer_missing_brand_rules": bool}`. The held/
+    violation text names the colliding piece (not the tenant's real display name — this module
+    has no brand/tenant lookup either) so a human reviewer has a real lead to follow, without
+    this gate itself doing a second query. `writer_missing_brand_rules` (AA-484's own issue text,
+    citing AA-425's real finding) surfaces the highest-risk root cause as a diagnostic hint, not
+    a second gate — a tenant with no active brand rules is exactly the group this issue names as
+    most likely to drift into generic, convergence-prone copy."""
+    if not match:
+        return _result("F10_cannibalization_cross_tenant", [])
+    hint = (
+        " This tenant has no active brand rules configured — generic, unbranded copy is more "
+        "likely to converge with other tenants' content; setting up brand rules may reduce "
+        "this going forward." if match.get("writer_missing_brand_rules") else ""
+    )
+    violations = [
+        f"content is {match['similarity']:.2f} cosine-similar to a piece already published by "
+        f"a different tenant (piece_id={match['piece_id']}) — above the confirmed 0.92 "
+        f"cannibalization threshold. Two tenants publishing near-identical copy risks readers "
+        f"noticing duplicate marketing content.{hint}"
+    ]
+    return _result("F10_cannibalization_cross_tenant", violations, repairable=True)
+
+
 # ---------------------------------------------------------------- promises an option (new, AA-514)
 
 def gate_promises_an_option(
@@ -676,6 +720,7 @@ def run_quality_gates(
     route_segments: Optional[list[tuple[str, str]]] = None,
     seo_title: Optional[str] = None, meta_description: Optional[str] = None,
     slug: Optional[str] = None, keyword: Optional[str] = None,
+    cannibalization_match: Optional[dict] = None,
 ) -> QualityCheckOutcome:
     """Runs the T10 gate stack for ONE attempt. CTA-presence runs first and short-circuits every
     other gate on failure (same "don't pay for a judge call on content that was always going to
@@ -717,6 +762,9 @@ def run_quality_gates(
         cta_result,
         gate_grounding(content_text, atom_text),
         gate_banned_patterns(content_text, atom_text),
+        # AA-484 — every channel, not blog-only (cannibalization risk isn't channel-specific);
+        # placed right after F2 (another content-safety-class gate), before the DET/judge gates.
+        gate_cannibalization(cannibalization_match),
         gate_promises_an_option(content_text, atom_text, route_segments),
         gate_extreme_length(length_check_text),
     ]
@@ -749,7 +797,7 @@ def run_quality_gates(
 __all__ = [
     "GateResultLite", "QualityCheckOutcome", "TAG_RE", "ATOM_DENSITY_WORDS",
     "strip_citation_tags", "deep_strip_citation_tags", "gate_cta_present", "gate_grounding",
-    "gate_banned_patterns", "gate_promises_an_option", "gate_extreme_length", "gate_seo_surface",
-    "gate_atom_density", "gate_structural_variance", "gate_faq_dedup", "gate_framework",
-    "gate_brand_voice", "run_quality_gates",
+    "gate_banned_patterns", "gate_cannibalization", "gate_promises_an_option", "gate_extreme_length",
+    "gate_seo_surface", "gate_atom_density", "gate_structural_variance", "gate_faq_dedup",
+    "gate_framework", "gate_brand_voice", "run_quality_gates",
 ]
