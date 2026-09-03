@@ -196,6 +196,13 @@ async def start_write(
     # stays the plain joined text either way — deliberately NOT the labeled prompt text, see
     # _fetch_route_segments()'s own docstring for why.
     route_segments: Optional[list[tuple[str, str]]] = None
+    # AA-519 Việc 4 — req already carries subject_hub_name (angle_gate_service.fetch_request()'s
+    # own LEFT JOIN acp_shared.subject -> acp_contract.route) and route_segment_ids (AA-511 Gap
+    # A) — this was the real gap: both were resolved here and then dropped, never written onto
+    # content_piece. Set once, immutable across the write/rewrite retry loop below (same as
+    # channel/angle_gate_option_id) — NOT recomputed at _finalize_piece() time.
+    route_hub_name = req.get("subject_hub_name")
+    route_segment_count = len(req["route_segment_ids"]) if req.get("route_segment_ids") else None
     if req.get("route_segment_ids"):
         route_segments = await _fetch_route_segments(tenant_id, req["trip_id"], req["route_segment_ids"], pool)
         atom_text = "\n\n".join(text for _, text in route_segments)
@@ -233,7 +240,8 @@ async def start_write(
     # even start (see the guard above), so req["channel"] is always real here.
     piece = await _insert_placeholder_piece(
         pool, tenant_id=tenant_id, request_id=request_id, angle_gate_option_id=option_id,
-        channel=req["channel"],
+        channel=req["channel"], route_hub_name=route_hub_name,
+        route_segment_count=route_segment_count,
     )
 
     # AA-514 — the SEO keyword gate_seo_surface() checks title/meta against, reused from T8's OWN
@@ -258,6 +266,7 @@ async def start_write(
 
 async def _insert_placeholder_piece(
     pool, *, tenant_id: UUID, request_id: UUID, angle_gate_option_id=None, channel=None,
+    route_hub_name: Optional[str] = None, route_segment_count: Optional[int] = None,
 ) -> dict:
     # AA-497 (migration 125) — attempt_number=1 is still correct as the INITIAL value for every
     # new write session (T9's own internal retry loop, run_write_background(), overwrites it via
@@ -269,12 +278,14 @@ async def _insert_placeholder_piece(
             """
             INSERT INTO acp_shared.content_piece
                 (tenant_id, angle_gate_request_id, angle_gate_option_id, channel, attempt_number,
-                 content_text, status)
-            VALUES ($1, $2, $3, $4, 1, '', 'processing')
+                 content_text, status, route_hub_name, route_segment_count)
+            VALUES ($1, $2, $3, $4, 1, '', 'processing', $5, $6)
             RETURNING piece_id, tenant_id, angle_gate_request_id, attempt_number, content_text,
-                      status, held_reason, gate_ledger, repair_log, created_at
+                      status, held_reason, gate_ledger, repair_log, created_at,
+                      route_hub_name, route_segment_count
             """,
             tenant_id, request_id, angle_gate_option_id, channel,
+            route_hub_name, route_segment_count,
         )
     return _row_to_dict(row)
 
@@ -310,6 +321,10 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
         content_text: str = ""
         gate_ledger: list[dict] = []
         repair_log: list[dict] = []
+        # AA-519 Việc 5 — non-blocking gate failures (ADR 0023 flag-not-block; currently only
+        # promises_an_option), from whichever attempt actually shipped. Same "final attempt wins"
+        # convention content_text/gate_ledger/seo_meta already follow.
+        flags: list[dict] = []
         status = "held"
         held_reason = "unreachable"  # overwritten every branch below; kept non-None for mypy/clarity
         # AA-514 — the LATEST attempt's own seo_meta is what gets persisted, same "final attempt
@@ -345,6 +360,7 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
                 slug=seo_meta.get("slug"),
             )
             gate_ledger = outcome["gate_ledger"]
+            flags = outcome["flags"]
 
             if outcome["passed"]:
                 status, held_reason = "approved", None
@@ -376,13 +392,14 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
         content_text = strip_citation_tags(content_text)
         gate_ledger = deep_strip_citation_tags(gate_ledger)
         repair_log = deep_strip_citation_tags(repair_log)
+        flags = deep_strip_citation_tags(flags)
         if held_reason:
             held_reason = strip_citation_tags(held_reason)
 
         await _finalize_piece(
             pool, piece_id=piece_id, attempt_number=attempt,
             content_text=content_text, status=status, held_reason=held_reason,
-            gate_ledger=gate_ledger, repair_log=repair_log,
+            gate_ledger=gate_ledger, repair_log=repair_log, flags=flags,
             seo_title=seo_meta.get("seo_title"), meta_description=seo_meta.get("meta_description"),
             slug=seo_meta.get("slug"),
         )
@@ -399,7 +416,7 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
             await _finalize_piece(
                 pool, piece_id=piece_id, attempt_number=attempt, content_text="",
                 status="failed", held_reason=f"{type(exc).__name__}: {exc}",
-                gate_ledger=[], repair_log=[],
+                gate_ledger=[], repair_log=[], flags=[],
             )
         except Exception:
             logger.error(
@@ -411,6 +428,7 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
 async def _finalize_piece(
     pool, *, piece_id: UUID, attempt_number: int, content_text: str,
     status: str, held_reason: Optional[str], gate_ledger: list[dict], repair_log: list[dict],
+    flags: list[dict],
     seo_title: Optional[str] = None, meta_description: Optional[str] = None,
     slug: Optional[str] = None,
 ) -> dict:
@@ -418,20 +436,24 @@ async def _finalize_piece(
     # "failed" finalize call above never has a real seo_meta to pass, and every non-blog piece
     # is None either way) — same "NULL means never populated/not applicable" convention every
     # other blog-only column in this schema already uses (migration 136's own header comment).
+    # AA-519 Việc 5 — flags (ADR 0023 non-blocking gate results) persisted the same way, NOT
+    # route_hub_name/route_segment_count (Việc 4) — those are set once at INSERT and never
+    # change across a write session, so they're deliberately absent from this UPDATE.
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             UPDATE acp_shared.content_piece
             SET attempt_number = $2, content_text = $3, status = $4, held_reason = $5,
                 gate_ledger = $6::jsonb, repair_log = $7::jsonb,
-                seo_title = $8, meta_description = $9, slug = $10
+                seo_title = $8, meta_description = $9, slug = $10, flags = $11::jsonb
             WHERE piece_id = $1
             RETURNING piece_id, tenant_id, angle_gate_request_id, attempt_number, content_text,
                       status, held_reason, gate_ledger, repair_log, created_at,
-                      seo_title, meta_description, slug
+                      seo_title, meta_description, slug, route_hub_name, route_segment_count, flags
             """,
             piece_id, attempt_number, content_text, status, held_reason,
             json.dumps(gate_ledger), json.dumps(repair_log), seo_title, meta_description, slug,
+            json.dumps(flags),
         )
     return _row_to_dict(row)
 
@@ -456,6 +478,19 @@ def _row_to_dict(row) -> dict:
         "seo_title": row["seo_title"] if "seo_title" in row.keys() else None,
         "meta_description": row["meta_description"] if "meta_description" in row.keys() else None,
         "slug": row["slug"] if "slug" in row.keys() else None,
+        # AA-519 Việc 4 — set once at INSERT, immutable across the write session (unlike flags
+        # below, which only exists after the first write+gate-check attempt).
+        "route_hub_name": row["route_hub_name"] if "route_hub_name" in row.keys() else None,
+        "route_segment_count": (
+            row["route_segment_count"] if "route_segment_count" in row.keys() else None
+        ),
+        # AA-519 Việc 5 — absent from _insert_placeholder_piece()'s RETURNING (nothing to report
+        # before T10 has run once), same "missing key means never populated yet" convention
+        # seo_title/etc. above already use.
+        "flags": (
+            (json.loads(row["flags"]) if isinstance(row["flags"], str) else row["flags"]) or []
+            if "flags" in row.keys() and row["flags"] is not None else []
+        ),
     }
 
 
@@ -465,7 +500,8 @@ async def fetch_piece(tenant_id: UUID, piece_id: UUID, pool) -> dict:
             """
             SELECT piece_id, tenant_id, angle_gate_request_id, attempt_number, content_text,
                    status, held_reason, gate_ledger, repair_log, created_at,
-                   seo_title, meta_description, slug
+                   seo_title, meta_description, slug,
+                   route_hub_name, route_segment_count, flags
             FROM acp_shared.content_piece
             WHERE piece_id = $1 AND tenant_id = $2
             """,
@@ -486,7 +522,8 @@ _READY_STATE_MAP = {
 }
 
 _LATEST_PIECE_FOR_REQUEST_QUERY = """
-    SELECT piece_id, status, content_text, channel, angle_gate_option_id, created_at
+    SELECT piece_id, status, content_text, channel, angle_gate_option_id, created_at,
+           route_hub_name, route_segment_count, flags
     FROM acp_shared.content_piece
     WHERE angle_gate_request_id = $1 AND tenant_id = $2
     ORDER BY created_at DESC
@@ -496,6 +533,11 @@ _LATEST_PIECE_FOR_REQUEST_QUERY = """
 # recommendation was to strip these at the SQL layer, not just the API response layer, so a
 # future field added to fetch_review()'s dict can never accidentally leak them by copying
 # fetch_piece()'s SELECT list.
+#
+# AA-519 Việc 4/5 — route_hub_name/route_segment_count/flags ARE selected here, deliberately: all
+# 3 are tenant-safe by construction (route metadata is just a label, flags only ever holds
+# non-blocking "note for a human" gate results, never the full technical ledger) — this doesn't
+# reopen the STEP0 §4 boundary above, it's a different, narrower field.
 
 _ATOM_CONTEXT_QUERY = """
     SELECT text, activity_type, emotional_hook, season_note
@@ -573,11 +615,23 @@ async def fetch_review(tenant_id: UUID, request_id: UUID, pool) -> dict:
     # 'failed'/'processing' rows have content_text = '' by construction, never a partial draft.
     content_text = piece_row["content_text"] if piece_row["status"] in ("approved", "held") else None
 
+    # AA-519 Việc 5 — same no-jsonb-codec gap as dfs_paa_snapshot/route_segment_ids elsewhere in
+    # this codebase (asyncpg has no jsonb codec registered on this app's connections).
+    piece_flags = piece_row["flags"]
+    if isinstance(piece_flags, str):
+        piece_flags = json.loads(piece_flags)
+
     return {
         "request_id": req["request_id"],
         "channel": channel,
         "ready_state": ready_state,
         "content_text": content_text,
+        # AA-519 Việc 4 — NULL/None for a Segment pick or pre-Slate request, same convention as
+        # every other optional field in this response.
+        "route_hub_name": piece_row["route_hub_name"],
+        "route_segment_count": piece_row["route_segment_count"],
+        # AA-519 Việc 5 — [] (never None) so the frontend can check .length without a null guard.
+        "flags": piece_flags or [],
         "goal": (
             {"key": req["goal"], "label": goal_obj["name"] if goal_obj else req["goal"]}
             if req["goal"] else None
@@ -607,7 +661,7 @@ _TENANT_REVIEWS_QUERY = """
     SELECT * FROM (
         SELECT DISTINCT ON (cp.angle_gate_request_id)
             cp.piece_id, cp.angle_gate_request_id, cp.status, cp.content_text,
-            cp.created_at,
+            cp.created_at, cp.route_hub_name, cp.route_segment_count, cp.flags,
             COALESCE(cp.channel, agr.channel) AS channel, agr.goal, agr.cta,
             agr.trip_id, agr.dfs_paa_snapshot,
             COALESCE(ago.name, ago_chosen.name) AS angle_name,
@@ -668,12 +722,21 @@ async def fetch_review_list(tenant_id: UUID, pool) -> list[dict]:
         if isinstance(snapshot, str):
             snapshot = json.loads(snapshot)
 
+        # AA-519 Việc 5 — same no-jsonb-codec gap as snapshot above.
+        row_flags = r["flags"]
+        if isinstance(row_flags, str):
+            row_flags = json.loads(row_flags)
+
         items.append({
             "request_id": str(r["angle_gate_request_id"]),
             "piece_id": str(r["piece_id"]),
             "channel": r["channel"],
             "ready_state": ready_state,
             "content_text": content_text,
+            # AA-519 Việc 4/5 — same fields/conventions as fetch_review() above.
+            "route_hub_name": r["route_hub_name"],
+            "route_segment_count": r["route_segment_count"],
+            "flags": row_flags or [],
             "goal": (
                 {"key": r["goal"], "label": goal_obj["name"] if goal_obj else r["goal"]}
                 if r["goal"] else None

@@ -84,12 +84,13 @@ def _context(**over):
 
 def _passing_outcome():
     ledger = [{"gate": "F6_cta_present", "passed": True, "violations": [], "repairable": True}]
-    return {"passed": True, "gate_ledger": ledger, "first_failure": None}
+    return {"passed": True, "gate_ledger": ledger, "first_failure": None, "flags": []}
 
 
 def _failing_outcome(gate="F2_banned_patterns", repairable=True):
     failure = {"gate": gate, "passed": False, "violations": [f"{gate} violation"], "repairable": repairable}
-    return {"passed": False, "gate_ledger": [failure], "first_failure": failure}
+    # AA-519 Việc 5 — no test in this file exercises a non-blocking failure, so `flags` stays [].
+    return {"passed": False, "gate_ledger": [failure], "first_failure": failure, "flags": []}
 
 
 @pytest.mark.asyncio
@@ -540,6 +541,8 @@ def _review_piece_row(**over):
         "piece_id": PIECE_ID, "status": "approved", "content_text": "final piece text",
         "channel": "facebook", "angle_gate_option_id": OPTION_ID,
         "created_at": datetime.now(timezone.utc),
+        # AA-519 Việc 4/5 — now selected by _LATEST_PIECE_FOR_REQUEST_QUERY.
+        "route_hub_name": None, "route_segment_count": None, "flags": None,
     }
     base.update(over)
     return base
@@ -688,6 +691,8 @@ def _review_list_row(**over):
         "angle_formula_fit": "AIDA", "angle_best_final_style": "warm",
         "atom_text": "Cross the bamboo bridge", "atom_activity_type": "adventure",
         "atom_emotional_hook": "awe", "atom_season_note": "dry season best",
+        # AA-519 Việc 4/5 — now selected by _TENANT_REVIEWS_QUERY.
+        "route_hub_name": None, "route_segment_count": None, "flags": None,
     }
     base.update(over)
     return base

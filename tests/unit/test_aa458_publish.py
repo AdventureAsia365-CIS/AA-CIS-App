@@ -56,6 +56,8 @@ async def test_list_pending_returns_rows_scoped_to_tenant():
         "piece_id": str(PIECE_ID), "content_text": "## Section\nSome real content here.",
         "created_at": datetime(2026, 8, 25, tzinfo=timezone.utc),
         "channel": "blog", "angle_name": "A Real Angle",
+        # AA-519 Việc 4 — now selected by list_pending()'s own query.
+        "route_hub_name": None, "route_segment_count": None,
     }]
     pool, conn = _sequential_pool(fetch_return=rows)
     conn.fetch = AsyncMock(return_value=rows)
@@ -89,6 +91,7 @@ async def test_list_pending_untitled_fallback():
     rows = [{
         "piece_id": str(PIECE_ID), "content_text": "text", "created_at": None,
         "channel": "blog", "angle_name": None,
+        "route_hub_name": None, "route_segment_count": None,
     }]
     pool, conn = _sequential_pool()
     conn.fetch = AsyncMock(return_value=rows)

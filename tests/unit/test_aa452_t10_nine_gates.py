@@ -246,7 +246,9 @@ class TestWriteAndCheckStripsTagsBeforeOutput:
             {"gate": "F1_grounding", "passed": True,
              "violations": ["sentence quotes [R:atom_abc123] here, but passed"], "repairable": True},
         ]
-        passing_outcome = {"passed": True, "gate_ledger": tagged_violation_ledger, "first_failure": None}
+        passing_outcome = {
+            "passed": True, "gate_ledger": tagged_violation_ledger, "first_failure": None, "flags": [],
+        }
 
         with patch.object(service, "write_content", return_value=(TAGGED_BLOG_CONTENT, 0.02, {})), \
              patch.object(service, "run_quality_gates", return_value=passing_outcome), \
@@ -272,7 +274,9 @@ class TestWriteAndCheckStripsTagsBeforeOutput:
              "repairable": True},
         ]
         held_first_failure = failing_ledger[1]
-        failing_outcome = {"passed": False, "gate_ledger": failing_ledger, "first_failure": held_first_failure}
+        failing_outcome = {
+            "passed": False, "gate_ledger": failing_ledger, "first_failure": held_first_failure, "flags": [],
+        }
 
         with patch.object(service, "write_content", return_value=(TAGGED_BLOG_CONTENT, 0.02, {})), \
              patch.object(service, "rewrite_with_feedback", return_value=(TAGGED_BLOG_CONTENT, 0.02, {})), \
@@ -293,6 +297,7 @@ class TestWriteAndCheckStripsTagsBeforeOutput:
             "passed": True,
             "gate_ledger": [{"gate": "F6_cta_present", "passed": True, "violations": [], "repairable": True}],
             "first_failure": None,
+            "flags": [],
         }
 
         with patch.object(service, "write_content", return_value=("Plain facebook post.", 0.02, {})) as mock_write, \

@@ -179,3 +179,58 @@ class TestRunQualityGates:
         assert outcome["passed"] is False
         assert outcome["first_failure"]["gate"] == "F2_banned_patterns"
         assert outcome["first_failure"]["repairable"] is True
+
+
+class TestRunQualityGatesFlagNotBlock:
+    """AA-519 Việc 5 — ADR 0023/0026 (Ms. Thư repo): a Piece whose ONLY violation is
+    promises_an_option ships (`passed=True`, gate never becomes `first_failure`, held out
+    separately in `flags`) rather than being held. The other 8 gates are completely unaffected —
+    a real DET failure among them still holds/repairs exactly as before this change."""
+
+    def _judge_pass(self):
+        rubric = qg.get_framework_rubric("promotion")
+        f8_data = {"items": [{"criterion": c, "score": "1", "evidence": "q"} for c in rubric]}
+        f9_data = {"status": "pass", "brand_fit": "1", "cta_clear": "1", "human_read": "1",
+                   "failure_codes": [], "flagged_phrases": [], "notes": ""}
+        return [_judge_raw(**f8_data), _judge_raw(**f9_data)]
+
+    def test_only_promises_an_option_violation_still_passes_and_is_flagged(self):
+        atom_text = "The temple visit is optional, at your own expense, weather permitting."
+        content = "You will visit the temple at dawn."  # states the offered moment as definite
+        with patch.object(qg, "invoke_judge", side_effect=self._judge_pass()):
+            outcome = qg.run_quality_gates(
+                content_text=content, atom_text=atom_text, cta="Book now", goal_key="promotion",
+                brand_rubric_text="rubric", channel="facebook",
+            )
+        assert outcome["passed"] is True  # ships -- ADR 0023, "every Piece ships"
+        assert outcome["first_failure"] is None  # never selected -- blocking=False
+        assert len(outcome["flags"]) == 1
+        assert outcome["flags"][0]["gate"] == "promises_an_option"
+        assert outcome["flags"][0]["passed"] is False
+        # the gate's own violation is still in gate_ledger too (nothing silently dropped)
+        ledger_entry = next(g for g in outcome["gate_ledger"] if g["gate"] == "promises_an_option")
+        assert ledger_entry["passed"] is False
+        assert ledger_entry["blocking"] is False
+
+    def test_other_8_gates_keep_blocking_unaffected_by_this_change(self):
+        """Regression guard — a real DET failure (F2, blocking=True by _result()'s own default)
+        still becomes first_failure and holds, exactly as before AA-519."""
+        with patch.object(qg, "invoke_judge", side_effect=self._judge_pass()):
+            outcome = qg.run_quality_gates(
+                content_text="This breathtaking view awaits you.", atom_text="a view",
+                cta="Book now", goal_key="promotion", brand_rubric_text="rubric", channel="facebook",
+            )
+        assert outcome["passed"] is False
+        assert outcome["first_failure"]["gate"] == "F2_banned_patterns"
+        assert outcome["first_failure"]["blocking"] is True
+        assert outcome["flags"] == []
+
+    def test_every_gate_result_now_carries_blocking_true_by_default(self):
+        with patch.object(qg, "invoke_judge", side_effect=self._judge_pass()):
+            outcome = qg.run_quality_gates(
+                content_text="A clean, specific piece about the trail.", atom_text="the trail",
+                cta="Book now", goal_key="promotion", brand_rubric_text="rubric", channel="facebook",
+            )
+        for g in outcome["gate_ledger"]:
+            expected = False if g["gate"] == "promises_an_option" else True
+            assert g["blocking"] is expected, f"{g['gate']} blocking={g['blocking']}, expected {expected}"

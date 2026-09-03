@@ -13,6 +13,7 @@ class TestGatePromisesAnOption:
         result = qg.gate_promises_an_option(content, atom_text)
         assert result["passed"] is False
         assert result["repairable"] is False  # ADR 0023 — never auto-fixed
+        assert result["blocking"] is False  # AA-519 — flag-not-block, ADR 0023/0026
 
     def test_offered_atom_properly_hedged_passes(self):
         atom_text = "The temple visit is optional, at your own expense, weather permitting."

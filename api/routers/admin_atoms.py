@@ -129,6 +129,23 @@ _LIST_FROM = """
     -- already gives an atom with no segment.
     LEFT JOIN acp_contract.atom_segment_member asm ON asm.atom_id = ta.atom_id
     LEFT JOIN acp_contract.atom_segment asg ON asg.segment_id = asm.segment_id
+    -- AA-519 Việc 2 — atom_ranking is Segment-grain (migration 130, AA-515), not per-atom: a
+    -- lone/ungrouped atom (asm.segment_id NULL) simply never matches, ar.total_rank comes back
+    -- NULL, same "nothing to show" convention canonical_place/canonical_action already use for
+    -- an ungrouped atom.
+    LEFT JOIN acp_contract.atom_ranking ar
+        ON ar.tour_id = ta.tour_id AND ar.segment_id = asm.segment_id
+    -- Route/Hub link — a Segment is "part of a Route" when some Route's ordered_segment_ids
+    -- (migration 131, AA-510) contains it. LATERAL + LIMIT 1: a Segment could in principle
+    -- appear in more than one Route (re-detection across tours); this page only ever needs ONE
+    -- name to display, not an exhaustive list — same "best-effort single representative" choice
+    -- services/acp_content_writing/service.py::_fetch_route_segments() already makes elsewhere.
+    LEFT JOIN LATERAL (
+        SELECT r.route_id, r.hub_name
+        FROM acp_contract.route r
+        WHERE r.tour_id = ta.tour_id AND r.ordered_segment_ids @> jsonb_build_array(asm.segment_id)
+        LIMIT 1
+    ) rte ON asm.segment_id IS NOT NULL
     WHERE NOT ta.is_empty_marker
 """
 
@@ -139,7 +156,8 @@ _LIST_SELECT_COLS = """
            ta.created_at, ta.updated_at,
            (ta.updated_at = ta.created_at) AS unreviewed,
            tc.atom_count AS tour_atom_count,
-           asm.segment_id, asg.canonical_place, asg.canonical_action
+           asm.segment_id, asg.canonical_place, asg.canonical_action,
+           ar.total_rank AS segment_score, rte.route_id, rte.hub_name AS route_hub_name
 """
 
 
