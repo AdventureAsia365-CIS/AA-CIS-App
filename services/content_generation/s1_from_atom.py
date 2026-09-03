@@ -498,6 +498,14 @@ async def generate_s1_from_atom(
     last_draft: dict = {}
     for attempt in range(MAX_RETRIES + 1):
         user_prompt = build_user_prompt(tour, atoms, feedback=feedback)
+        # AA-318: same fix as graph.py's generate_node() (S1-old) — log the full prompt text
+        # actually sent to the LLM, not just a length/nothing at all (this module never logged
+        # the prompt at all before this). Confirmed safe: system_prompt/user_prompt are built
+        # from static grounding rules + persona text + curated atom text (tenant-visible tour
+        # content elsewhere in the product) — no secret/credential/env var involved.
+        logger.info("llm_prompt_built", tour_id=tour_id, attempt=attempt,
+                    prompt_version=prompt_version, system_prompt_text=system_prompt,
+                    user_prompt_text=user_prompt)
         draft = generate_draft(system_prompt, user_prompt, model_tier=model_tier, max_tokens=max_tokens)
         last_draft = draft
         try:

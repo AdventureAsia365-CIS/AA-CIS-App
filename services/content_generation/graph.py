@@ -336,8 +336,20 @@ def generate_node(state: ContentState) -> ContentState:
 
     is_branded = bool(brand_sp)
     prompt_len = len(system)
+    # AA-318: log the FULL prompt text sent to the LLM this call, not just its length — the
+    # original gap (verifying AA-314's Highlights-leak fix) needed to read the actual user
+    # prompt content (tour data, including Highlights) in CloudWatch and found nothing to read;
+    # this log line used to measure only `len(system)` (the system prompt) and never touched
+    # `prompt` (the user prompt) at all, length or content. Confirmed safe to log in full:
+    # neither `system` nor `prompt` is ever built from any secret/credential/env var (grepped
+    # prompts.py + this file) — both are pure static instructions + brand rules + tour/SEO data,
+    # all of which is either public tour content or the tenant's own brand brief (already
+    # visible to that tenant elsewhere in the product). `prompt_version` (AA-289) is included
+    # alongside so a specific logged prompt can be tied back to `generated_content.metadata.
+    # prompt_version` / the Rewrite History UI without a separate correlation step.
     logger.info("llm_prompt_built", prompt_len=prompt_len, is_branded=is_branded,
-                retry=state.get("retry_count", 0))
+                retry=state.get("retry_count", 0), prompt_version=prompt_version,
+                system_prompt_text=system, user_prompt_text=prompt)
     if not is_branded:
         logger.warning("unbranded_generation", tour_name=state.get("tour", {}).get("name", ""))
 

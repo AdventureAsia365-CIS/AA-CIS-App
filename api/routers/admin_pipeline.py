@@ -2852,13 +2852,22 @@ async def list_tour_versions(
 
 @router.get("/tours/{tour_id}/history")
 async def get_tour_history(tour_id: str, request: Request, x_admin_secret: str = Header(None)):
+    """AA-318 bug fix, found while wiring prompt-version observability into the Rewrite History
+    UI: this query selected `gc.prompt_version` as a bare column — that column has never
+    existed on `silver_aa_internal.generated_content` (grepped every migration; only
+    `_build_generated_metadata()`'s JSONB `metadata.prompt_version` — see admin_pipeline.py's
+    own docstring there — and the unrelated `acp_contract.s1_from_atom_runs.prompt_version`,
+    migration 088, exist). Every call to this endpoint (TourDetailPanelV2.tsx's "Rewrite
+    History" tab) would have raised `UndefinedColumnError` — real, live-broken, not a
+    theoretical gap."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT
                 gc.id::text, gc.version_num, gc.created_at, gc.status::text,
-                gc.model_editorial, gc.brand_rules_version, gc.prompt_version,
+                gc.model_editorial, gc.brand_rules_version,
+                gc.metadata->>'prompt_version' AS prompt_version,
                 gc.tenant_id,
                 qs.score_overall, qs.score_brand, qs.score_seo, qs.score_structure,
                 (gc.metadata->>'llm_cost_usd')::numeric AS cost_usd,

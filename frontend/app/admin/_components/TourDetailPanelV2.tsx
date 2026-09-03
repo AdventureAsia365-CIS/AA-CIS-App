@@ -735,7 +735,7 @@ export function TourDetailPanelV2({ tourId, tourName, rewriteCount = 0, onClose 
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                   <thead>
                     <tr style={{ background: A.line2 }}>
-                      {["Version", "Model", "Brand v", "Overall", "Brand", "SEO", "Cost", "Date", ""].map(h => (
+                      {["Version", "Model", "Prompt", "Brand v", "Overall", "Brand", "SEO", "Cost", "Date", ""].map(h => (
                         <th key={h} style={{
                           padding: "8px 12px", textAlign: "left" as const,
                           fontSize: 11, fontWeight: 600, color: A.muted,
@@ -763,6 +763,18 @@ export function TourDetailPanelV2({ tourId, tourName, rewriteCount = 0, onClose 
                             </span>
                           </td>
                           <td style={{ padding: "8px 12px", fontFamily: mono, fontSize: 11, color: A.muted }}>{modelShort(h.model_editorial)}</td>
+                          {/* AA-318: prompt_version was already typed on HistoryRow but never
+                              rendered — the exact "no way to observe/compare prompt over time"
+                              gap this issue is about. Short hash (sha256[:8], AA-289) as a
+                              mono pill; a version's own change vs. the row above/below it is
+                              the actual regression signal an admin scans this column for. */}
+                          <td style={{ padding: "8px 12px" }}>
+                            {h.prompt_version ? (
+                              <span style={{ fontFamily: mono, fontSize: 10.5, padding: "1px 6px", borderRadius: 8, background: A.line2, color: A.ink2 }} title={`prompt_version ${h.prompt_version}`}>
+                                {h.prompt_version}
+                              </span>
+                            ) : <span style={{ color: A.muted2 }}>—</span>}
+                          </td>
                           <td style={{ padding: "8px 12px", fontSize: 11, color: A.muted2 }}>
                             {h.brand_rules_version != null ? <span style={{ padding: "1px 6px", borderRadius: 8, background: A.goldTint, color: A.gold, fontWeight: 600, fontSize: 10 }}>{h.brand_name ? `${h.brand_name} · v${h.brand_rules_version}` : `v${h.brand_rules_version}`}</span> : "—"}
                           </td>
