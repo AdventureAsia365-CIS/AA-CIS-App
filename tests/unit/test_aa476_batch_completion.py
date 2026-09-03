@@ -7,6 +7,13 @@ all (reject_review() only touched review_queue/generated_content), so it stayed 
 forever and the batch's status never left 'ingesting' — even once every other tour in the
 batch was long done.
 
+AA-483 changed sync_batch_completion()'s status-flip mechanism (see that function's own
+docstring) — the flip is now a single atomic `UPDATE ... WHERE NOT EXISTS(...) RETURNING 1`
+instead of a separate SELECT COUNT(*) + conditional UPDATE, and the function now returns
+(pending_count, just_completed) instead of just pending_count. This file's FakeConn/assertions
+were updated to match that shape; test_aa483_batch_completion_race.py covers the new
+atomicity/no-double-fire behavior specifically.
+
 These tests drive the real functions (no re-implemented copies), with a minimal fake conn.
 """
 import pytest
@@ -20,19 +27,26 @@ TOUR_ID = "55555555-5555-5555-5555-555555555555"
 
 class FakeConn:
     """Fakes just enough of asyncpg's Connection for sync_batch_completion/mark_tour_rejected:
-    execute() for the tours_passed UPDATE, fetchval() for the pending count, execute() for the
-    status flip, fetchrow() for mark_tour_rejected's UPDATE ... RETURNING batch_id."""
+    execute() for the tours_passed UPDATE, fetchval() for BOTH the pending-count SELECT and the
+    atomic status-flip UPDATE...RETURNING (distinguished by SQL content — a real connection
+    would just run whichever statement text it's given), fetchrow() for mark_tour_rejected's
+    UPDATE ... RETURNING batch_id."""
 
     def __init__(self, pending_count: int, rejected_row_batch_id=BATCH_ID):
         self.pending_count = pending_count
         self.rejected_row_batch_id = rejected_row_batch_id
         self.executed: list[str] = []
+        self.fetchval_calls: list[str] = []
 
     async def execute(self, sql, *args):
         self.executed.append(sql)
         return "UPDATE 1"
 
     async def fetchval(self, sql, *args):
+        self.fetchval_calls.append(sql)
+        if "UPDATE shared.pipeline_runs" in sql and "RETURNING 1" in sql:
+            # Simulates the atomic flip: matches only when nothing is left pending.
+            return 1 if self.pending_count == 0 else None
         return self.pending_count
 
     async def fetchrow(self, sql, *args):
@@ -43,20 +57,20 @@ class FakeConn:
 
 @pytest.mark.asyncio
 async def test_sync_batch_completion_stays_ingesting_while_tours_pending():
-    """>0 non-terminal tours remain → status flip UPDATE never issued."""
+    """>0 non-terminal tours remain → status flip UPDATE never matches a row."""
     conn = FakeConn(pending_count=2)
-    pending = await sync_batch_completion(conn, BATCH_ID)
+    pending, just_completed = await sync_batch_completion(conn, BATCH_ID)
     assert pending == 2
-    assert not any("SET status = 'completed'" in sql for sql in conn.executed)
+    assert just_completed is False
 
 
 @pytest.mark.asyncio
 async def test_sync_batch_completion_flips_to_completed_when_zero_pending():
     """All tours terminal (published + hitl_rejected/failed mix) → status flip fires."""
     conn = FakeConn(pending_count=0)
-    pending = await sync_batch_completion(conn, BATCH_ID)
+    pending, just_completed = await sync_batch_completion(conn, BATCH_ID)
     assert pending == 0
-    assert any("SET status = 'completed'" in sql for sql in conn.executed)
+    assert just_completed is True
 
 
 @pytest.mark.asyncio
@@ -64,17 +78,20 @@ async def test_sync_batch_completion_pending_query_excludes_terminal_non_publish
     """The pending count query must treat hitl_rejected/failed as resolved, not just
     published — this is the actual AA-476 fix, not just a status-flip mechanism check."""
     conn = FakeConn(pending_count=0)
-    captured_sql = {}
+    captured_sql = []
 
     async def fetchval(sql, *args):
-        captured_sql["sql"] = sql
+        captured_sql.append(sql)
+        if "UPDATE shared.pipeline_runs" in sql and "RETURNING 1" in sql:
+            return 1
         return 0
 
     conn.fetchval = fetchval
     await sync_batch_completion(conn, BATCH_ID)
-    assert "hitl_rejected" in captured_sql["sql"]
-    assert "failed" in captured_sql["sql"]
-    assert "published" in captured_sql["sql"]
+    pending_count_sql = next(s for s in captured_sql if "SELECT COUNT" in s)
+    assert "hitl_rejected" in pending_count_sql
+    assert "failed" in pending_count_sql
+    assert "published" in pending_count_sql
 
 
 @pytest.mark.asyncio
@@ -84,8 +101,11 @@ async def test_mark_tour_rejected_sets_terminal_status_and_syncs_batch():
     conn = FakeConn(pending_count=0, rejected_row_batch_id=BATCH_ID)
     await mark_tour_rejected(conn, TOUR_ID)
 
-    update_calls = [c for c in conn.executed if "SET status = 'completed'" in c]
-    assert len(update_calls) == 1
+    # sync_batch_completion() ran (its tours_passed UPDATE is the one execute() call in this
+    # path) and its atomic flip fetchval() matched a row (pending_count=0 here).
+    assert any("tours_passed" in c for c in conn.executed)
+    flip_calls = [s for s in conn.fetchval_calls if "RETURNING 1" in s]
+    assert len(flip_calls) == 1
 
 
 @pytest.mark.asyncio
