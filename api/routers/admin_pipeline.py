@@ -21,6 +21,9 @@ from typing import Optional, List
 from api.routers.admin import verify_admin_secret
 from api.routers.auth import verify_jwt
 from api.routers.v1_pipeline import _rewrite_tour
+from shared.validators.prompt_sanitize import (
+    sanitize_text, sanitize_list, MAX_LONG_FIELD_LEN, MAX_SHORT_FIELD_LEN, MAX_SYSTEM_PROMPT_LEN,
+)
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/admin", tags=["admin-pipeline"])
@@ -3996,6 +3999,15 @@ async def update_brand_identity(
     tenant_id: str = Depends(_resolve_brand_tenant_id),
 ):
     import json as _json
+    # AA-487: this is a MORE direct prompt-injection surface than the DOCX Lambda
+    # (services/acp_brand_brief_parser/) — BrandTab.tsx lets a tenant type system_prompt/
+    # style_guide straight into a textarea and POST here, with no parsing step at all in
+    # between. Sanitize the same way (shared.validators.prompt_sanitize, same module the Lambda
+    # fix uses) before it lands in the column every future LLM call for this tenant replays.
+    system_prompt = sanitize_text(body.system_prompt, MAX_SYSTEM_PROMPT_LEN)
+    style_guide = sanitize_text(body.style_guide, MAX_LONG_FIELD_LEN)
+    forbidden_words = sanitize_list(body.forbidden_words or [], MAX_SHORT_FIELD_LEN, max_items=20)
+
     pool = request.app.state.pool
     async with pool.acquire() as conn:
         current = await conn.fetchval("""
@@ -4015,8 +4027,8 @@ async def update_brand_identity(
                 (tenant_id, brand_name, system_prompt, style_guide, forbidden_words, version,
                  is_active, updated_at)
             VALUES ($1, 'default', $2, $3, $4::jsonb, $5, true, NOW())
-        """, tenant_id, body.system_prompt, body.style_guide,
-            _json.dumps(body.forbidden_words or []), current + 1)
+        """, tenant_id, system_prompt, style_guide,
+            _json.dumps(forbidden_words), current + 1)
     return {"status": "updated", "version": current + 1}
 
 
