@@ -10,6 +10,19 @@
 // entirely, no secret required. Both real admins (nghiep, admin) already have
 // JWT accounts in shared.admin_users — the fallback served no one. On infra
 // failure we now return a real error instead of silently granting access.
+//
+// AA-435 (security fix, same family as AA-427's tenant-login fix): this used
+// to also return the raw JWT in the JSON response body ("stored client-side
+// too") so login/page.tsx could duplicate it into a plain, non-httpOnly
+// `cis_api_token` cookie for a few legacy pages that read it via
+// document.cookie and attach it as an Authorization header themselves. That
+// duplicate cookie was pure exposure — the httpOnly `cis_admin_token` cookie
+// set below already IS the real session (middleware.ts, requireAdmin() in
+// lib/auth-server.ts never read cis_api_token at all), so any XSS on an
+// admin page could read the token wholesale via document.cookie or the
+// fetch() response. Fixed by dropping `token` from this response entirely —
+// see docs/implementation-notes/AA-435.md for the call-site audit that
+// confirmed no live admin flow actually needs the JSON-body token anymore.
 import { NextRequest, NextResponse } from "next/server";
 
 const API_URL = process.env.API_URL ?? "https://api-cis.lumiguides.it.com";
@@ -54,16 +67,18 @@ export async function POST(req: NextRequest) {
     }
 
     const data = await res.json();
+    // AA-435: no `token` field here anymore — see file header. role/name/
+    // admin_id are not secrets (used only for UI display + redirect), the
+    // JWT itself now lives ONLY in the httpOnly cookie below.
     const response = NextResponse.json({
-      token: data.token, // JWT — stored client-side too for API calls that need it directly
       role: data.role,   // 'admin' | 'reviewer'
       name: data.username,
       admin_id: data.admin_id,
     });
     // Server-readable cookie for middleware verification (see middleware.ts).
-    // httpOnly so client JS can't read/tamper with it; the JSON body above
-    // still carries the token for any client code that needs to attach it
-    // to direct API calls.
+    // httpOnly so client JS can't read/tamper with it — the sole session
+    // credential now, nothing duplicates it into the JSON body or another
+    // cookie.
     response.cookies.set("cis_admin_token", data.token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",

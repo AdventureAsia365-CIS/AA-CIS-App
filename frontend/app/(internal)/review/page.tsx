@@ -9,12 +9,9 @@ import InternalSidebar from "../_components/InternalSidebar";
 import { A, serif, mono, sans, Card, SLabel, Btn, LoadingScreen, TopBar } from "../_components/internalUi";
 
 // ─── Types + helpers ──────────────────────────────────────────────────────────
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
-function getToken() {
-  if (typeof document === "undefined") return null;
-  const m = document.cookie.match(/cis_api_token=([^;]+)/);
-  return m ? decodeURIComponent(m[1]) : null;
-}
+// AA-435: used to read cis_api_token + call ${API_URL} directly with a Bearer
+// header — now goes through /api/tenant/[...path] (httpOnly cis_admin_token,
+// server-side), so no client-readable token is needed here at all.
 
 function mapApiToReview(r: any) {
   return {
@@ -202,24 +199,20 @@ export default function ReviewPage() {
     setIsAdmin(role === "admin");
     if (name) setUserName(decodeURIComponent(name));
 
-    const token = getToken();
-    if (!token) { setLoading(false); return; }
-    fetch(`${API_URL}/v1/pipeline/review-queue`, { headers: { Authorization: `Bearer ${token}` } })
+    fetch(`/api/tenant/v1/pipeline/review-queue`)
       .then(r => r.json())
       .then(d => { setItems((d.data || []).map(mapApiToReview)); setLoading(false); })
       .catch(() => setLoading(false));
   }, []);
 
   async function onApprove(id: string) {
-    const token = getToken();
-    await fetch(`${API_URL}/v1/pipeline/review-queue/${id}/approve`, { method: "POST", headers: { Authorization: `Bearer ${token}` } });
+    await fetch(`/api/tenant/v1/pipeline/review-queue/${id}/approve`, { method: "POST" });
     setApproved(a => a + 1);
     setItems(p => p.filter(i => i.id !== id));
   }
 
   async function onReject(id: string) {
-    const token = getToken();
-    await fetch(`${API_URL}/v1/pipeline/review-queue/${id}/reject`, { method: "POST", headers: { Authorization: `Bearer ${token}` } });
+    await fetch(`/api/tenant/v1/pipeline/review-queue/${id}/reject`, { method: "POST" });
     setRejected(r => r + 1);
     setItems(p => p.filter(i => i.id !== id));
   }

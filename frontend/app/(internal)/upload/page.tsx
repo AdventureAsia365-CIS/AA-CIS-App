@@ -10,14 +10,10 @@ import {
 import InternalSidebar from "../_components/InternalSidebar";
 import { A, serif, mono, sans, Card, SLabel, Btn, LoadingScreen, TopBar, TH, TD } from "../_components/internalUi";
 
-// ─── Config (unchanged) ───────────────────────────────────────────────────────
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
-
-function getToken(): string | null {
-  if (typeof document === "undefined") return null;
-  const m = document.cookie.match(/cis_api_token=([^;]+)/);
-  return m ? decodeURIComponent(m[1]) : null;
-}
+// AA-435: getToken()/API_URL removed — both were dead already (every fetch
+// below goes through /api/tenant or /api/admin proxies, which authenticate
+// server-side via the httpOnly cis_admin_token cookie, not a client-read
+// token), and cis_api_token itself no longer gets set for admin sessions.
 
 const SEO_MODES = [
   { value: "dataforseo",      label: "DataForSEO",      desc: "Live keyword fetch (default)" },
@@ -179,7 +175,6 @@ export default function UploadPage() {
   const canRun      = readyCount > 0 && !isRunning;
 
   const fetchSources = useCallback(async () => {
-    const token = getToken(); if (!token) return;
     setLoadingSrc(true);
     try {
       const r = await fetch("/api/tenant/v1/pipeline/sources?limit=20");
@@ -203,7 +198,7 @@ export default function UploadPage() {
   const updateFile = (i: number, patch: Partial<FileEntry>) =>
     setFiles(prev => prev.map((f, j) => j === i ? { ...f, ...patch } : f));
 
-  const uploadOne = async (entry: FileEntry, index: number, token: string) => {
+  const uploadOne = async (entry: FileEntry, index: number) => {
     updateFile(index, { status: "uploading", activeStep: 0, progress: 10 });
     const urlRes = await fetch("/api/admin/upload-url", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -241,11 +236,10 @@ export default function UploadPage() {
 
   const runPipeline = async () => {
     if (readyCount === 0 || isRunning) return;
-    const token = getToken(); if (!token) return;
     setIsRunning(true);
     try {
       await Promise.all(files.map((e, i) =>
-        e.status === "ready" ? uploadOne(e, i, token).catch(err => updateFile(i, { status: "error", errorMsg: err.message })) : Promise.resolve()
+        e.status === "ready" ? uploadOne(e, i).catch(err => updateFile(i, { status: "error", errorMsg: err.message })) : Promise.resolve()
       ));
       await fetchSources();
     } finally { setIsRunning(false); }
