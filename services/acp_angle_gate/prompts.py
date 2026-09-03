@@ -13,6 +13,7 @@ from __future__ import annotations
 from services.acp_angle_gate.brand_audience import BrandAudience
 from services.acp_angle_gate.goals import Goal
 from services.acp_shared.dfs_relevance import SearchDemandSignal
+from services.acp_shared.piece_history import PriorPiece
 
 # AA-469 Việc 4 (flow-order fix, this session) — channel moved OUT of angle generation entirely.
 # Confirmed with Nghiệp: the real order is atom+DFS/PAA+brand -> Goal -> 3 angles -> pick 1 ->
@@ -60,6 +61,12 @@ claim about this specific trip; do not answer it as though it were a verified fa
 content seed. If it doesn't naturally fit the content seed, ignore it rather than forcing an \
 angle around it.
 
+If a PRIOR PIECES block is given below, it lists real content already written for this exact \
+content seed on a previous occasion (angle used, channel, and a short summary). Your 3 new \
+angles must be genuinely different from every angle listed there — do not regenerate a close \
+variant of one already used. This is about avoiding repetition, not about matching or referencing \
+their style.
+
 Return ONLY valid JSON, no markdown fences, no commentary, in exactly this shape:
 {
   "angles": [
@@ -81,6 +88,7 @@ def build_user_prompt(
     *, content_seed: str, goal: Goal, brand_audience: BrandAudience,
     destination: str | None, trip_name: str | None,
     search_demand: SearchDemandSignal | None = None,
+    piece_history: list[PriorPiece] | None = None,
 ) -> str:
     segment = brand_audience.get("customer_segment") or "(not specified for this tenant)"
     mindset = brand_audience.get("customer_mindset") or "(not specified for this tenant)"
@@ -118,6 +126,17 @@ def build_user_prompt(
             lines.append("Travelers also ask: " + "; ".join(search_demand.people_also_ask))
         if search_demand.related_keywords:
             lines.append("Related search terms: " + ", ".join(search_demand.related_keywords[:8]))
+        parts.append("\n".join(lines))
+    # AA-498 (Decision 4) — omitted entirely when empty, same "no signal -> no prompt noise"
+    # rule search_demand's own block above follows.
+    if piece_history:
+        lines = ["PRIOR PIECES WRITTEN FOR THIS EXACT CONTENT (real history — find a genuinely "
+                  "different angle than every one listed here):"]
+        for p in piece_history:
+            lines.append(
+                f"- [{p.channel or 'channel unknown'}] "
+                f"Angle used: {p.angle_name or '(unknown)'} — {p.summary}"
+            )
         parts.append("\n".join(lines))
     return "\n\n".join(parts)
 

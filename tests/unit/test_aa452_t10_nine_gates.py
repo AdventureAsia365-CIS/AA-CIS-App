@@ -250,7 +250,7 @@ class TestWriteAndCheckStripsTagsBeforeOutput:
             "passed": True, "gate_ledger": tagged_violation_ledger, "first_failure": None, "flags": [],
         }
 
-        with patch.object(service, "write_content", return_value=(TAGGED_BLOG_CONTENT, 0.02, {})), \
+        with patch.object(service, "write_content", return_value=(TAGGED_BLOG_CONTENT, 0.02, {}, None)), \
              patch.object(service, "run_quality_gates", return_value=passing_outcome), \
              patch.object(service, "_finalize_piece", new=AsyncMock(side_effect=_capturing_finalize(finalized))):
             await service.run_write_background(REQUEST_ID, uuid.uuid4(), _context(), pool=MagicMock())
@@ -278,8 +278,8 @@ class TestWriteAndCheckStripsTagsBeforeOutput:
             "passed": False, "gate_ledger": failing_ledger, "first_failure": held_first_failure, "flags": [],
         }
 
-        with patch.object(service, "write_content", return_value=(TAGGED_BLOG_CONTENT, 0.02, {})), \
-             patch.object(service, "rewrite_with_feedback", return_value=(TAGGED_BLOG_CONTENT, 0.02, {})), \
+        with patch.object(service, "write_content", return_value=(TAGGED_BLOG_CONTENT, 0.02, {}, None)), \
+             patch.object(service, "rewrite_with_feedback", return_value=(TAGGED_BLOG_CONTENT, 0.02, {}, None)), \
              patch.object(service, "run_quality_gates", return_value=failing_outcome), \
              patch.object(service, "_finalize_piece", new=AsyncMock(side_effect=_capturing_finalize(finalized))):
             await service.run_write_background(REQUEST_ID, uuid.uuid4(), _context(), pool=MagicMock())
@@ -300,7 +300,7 @@ class TestWriteAndCheckStripsTagsBeforeOutput:
             "flags": [],
         }
 
-        with patch.object(service, "write_content", return_value=("Plain facebook post.", 0.02, {})) as mock_write, \
+        with patch.object(service, "write_content", return_value=("Plain facebook post.", 0.02, {}, None)) as mock_write, \
              patch.object(service, "run_quality_gates", return_value=passing_outcome) as mock_gates, \
              patch.object(service, "_finalize_piece", new=AsyncMock(side_effect=_capturing_finalize(finalized))):
             await service.run_write_background(REQUEST_ID, uuid.uuid4(), _context(channel="facebook"), pool=MagicMock())

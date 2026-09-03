@@ -325,6 +325,10 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
         # promises_an_option), from whichever attempt actually shipped. Same "final attempt wins"
         # convention content_text/gate_ledger/seo_meta already follow.
         flags: list[dict] = []
+        # AA-498 (Decision 4) — same "final attempt wins" convention as seo_meta/content_text:
+        # whichever attempt actually gets persisted is the one whose summary is kept. `None` is
+        # a normal, soft-fail outcome (model didn't produce one) — never blocks persistence.
+        summary: str | None = None
         status = "held"
         held_reason = "unreachable"  # overwritten every branch below; kept non-None for mypy/clarity
         # AA-514 — the LATEST attempt's own seo_meta is what gets persisted, same "final attempt
@@ -334,7 +338,7 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
             if attempt == 1:
-                content_text, cost, seo_meta = await asyncio.to_thread(
+                content_text, cost, seo_meta, summary = await asyncio.to_thread(
                     write_content, content_seed=atom_text, goal=goal, channel_style=channel_style,
                     brand_audience=brand_audience, angle=chosen, cta=cta,
                     destination=destination, trip_name=trip_name, atom_id=atom_id,
@@ -342,7 +346,7 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
                     tenant_id=tenant_id, angle_gate_request_id=str(request_id),
                 )
             else:
-                content_text, cost, seo_meta = await asyncio.to_thread(
+                content_text, cost, seo_meta, summary = await asyncio.to_thread(
                     rewrite_with_feedback, content_seed=atom_text, goal=goal, channel_style=channel_style,
                     brand_audience=brand_audience, angle=chosen, cta=cta,
                     revision_feedback=repair_log[-1]["violations"],
@@ -401,7 +405,7 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
             content_text=content_text, status=status, held_reason=held_reason,
             gate_ledger=gate_ledger, repair_log=repair_log, flags=flags,
             seo_title=seo_meta.get("seo_title"), meta_description=seo_meta.get("meta_description"),
-            slug=seo_meta.get("slug"),
+            slug=seo_meta.get("slug"), content_summary=summary,
         )
         logger.info(
             "t9_write_and_check_done", request_id=str(request_id), status=status,
@@ -430,7 +434,7 @@ async def _finalize_piece(
     status: str, held_reason: Optional[str], gate_ledger: list[dict], repair_log: list[dict],
     flags: list[dict],
     seo_title: Optional[str] = None, meta_description: Optional[str] = None,
-    slug: Optional[str] = None,
+    slug: Optional[str] = None, content_summary: Optional[str] = None,
 ) -> dict:
     # AA-514 — seo_title/meta_description/slug default None (the exception handler's own
     # "failed" finalize call above never has a real seo_meta to pass, and every non-blog piece
@@ -439,13 +443,16 @@ async def _finalize_piece(
     # AA-519 Việc 5 — flags (ADR 0023 non-blocking gate results) persisted the same way, NOT
     # route_hub_name/route_segment_count (Việc 4) — those are set once at INSERT and never
     # change across a write session, so they're deliberately absent from this UPDATE.
+    # AA-498 (Decision 4) — content_summary defaults None the same way: the exception handler's
+    # "failed" call has no real summary, and a soft-fail (model didn't produce one) is None too.
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             UPDATE acp_shared.content_piece
             SET attempt_number = $2, content_text = $3, status = $4, held_reason = $5,
                 gate_ledger = $6::jsonb, repair_log = $7::jsonb,
-                seo_title = $8, meta_description = $9, slug = $10, flags = $11::jsonb
+                seo_title = $8, meta_description = $9, slug = $10, flags = $11::jsonb,
+                content_summary = $12
             WHERE piece_id = $1
             RETURNING piece_id, tenant_id, angle_gate_request_id, attempt_number, content_text,
                       status, held_reason, gate_ledger, repair_log, created_at,
@@ -453,7 +460,7 @@ async def _finalize_piece(
             """,
             piece_id, attempt_number, content_text, status, held_reason,
             json.dumps(gate_ledger), json.dumps(repair_log), seo_title, meta_description, slug,
-            json.dumps(flags),
+            json.dumps(flags), content_summary,
         )
     return _row_to_dict(row)
 
