@@ -16,11 +16,26 @@ logger = structlog.get_logger()
 _TERMINAL_TOUR_STATUSES = ("published", "hitl_rejected", "failed")
 
 
-async def sync_batch_completion(conn, batch_id, silver: str = "silver_aa_internal") -> int:
+async def sync_batch_completion(conn, batch_id, silver: str = "silver_aa_internal") -> tuple[int, bool]:
     """Recompute tours_passed + flip pipeline_runs.status to 'completed' once every tour in
-    the batch has reached a terminal outcome. Returns the remaining non-terminal tour count.
+    the batch has reached a terminal outcome. Returns (pending_count, just_completed).
     Shared by process_export() (tour → published) and mark_tour_rejected() (tour → rejected) —
-    this is the ONE place pipeline_runs.status ever advances, deliberately not duplicated."""
+    this is the ONE place pipeline_runs.status ever advances, deliberately not duplicated.
+
+    AA-483: the status flip used to be a separate SELECT COUNT(*) (this function) followed by a
+    conditional UPDATE gated on that count in Python — two round-trips with a gap between them,
+    no lock. Now a SINGLE atomic UPDATE ... WHERE NOT EXISTS(...) does the check-and-flip in one
+    statement: Postgres evaluates the WHERE clause (including the NOT EXISTS subquery) and
+    performs the UPDATE under one MVCC snapshot with the target row locked, so two concurrent
+    callers for the same batch can no longer both read "still pending" moments before the other
+    commits the tour that would have made it complete — whichever call's UPDATE actually runs
+    second re-evaluates WHERE against the first one's already-committed result and correctly
+    no-ops. `just_completed` (True only for whichever single call's UPDATE actually matched a
+    row) is now the sole trigger for process_export()'s one-time ACP-S1 manifest/EventBridge
+    fanout — using the old `pending == 0` read for that decision had the identical race (two
+    concurrent calls could each independently observe pending == 0 and both fire the fanout);
+    `pending` itself is kept only as an informational/logging count, no longer a completion
+    signal for any caller."""
     await conn.execute("""
         UPDATE shared.pipeline_runs
         SET tours_passed = (
@@ -36,15 +51,24 @@ async def sync_batch_completion(conn, batch_id, silver: str = "silver_aa_interna
           AND pipeline_status NOT IN {_TERMINAL_TOUR_STATUSES}
     """, batch_id)
 
-    if pending == 0:
-        await conn.execute("""
-            UPDATE shared.pipeline_runs
-            SET status = 'completed', completed_at = NOW()
-            WHERE batch_id = $1::uuid AND status = 'ingesting'
-        """, batch_id)
+    flipped = await conn.fetchval(f"""
+        UPDATE shared.pipeline_runs
+        SET status = 'completed', completed_at = NOW()
+        WHERE batch_id = $1::uuid
+          AND status = 'ingesting'
+          AND NOT EXISTS (
+              SELECT 1 FROM {silver}.raw_tours
+              WHERE batch_id = $1::uuid
+                AND pipeline_status NOT IN {_TERMINAL_TOUR_STATUSES}
+          )
+        RETURNING 1
+    """, batch_id)
+    just_completed = flipped is not None
+
+    if just_completed:
         logger.info("batch_completed", batch_id=str(batch_id))
 
-    return pending
+    return pending, just_completed
 
 
 async def mark_tour_rejected(conn, tour_id: str) -> None:
@@ -127,9 +151,12 @@ async def process_export(version_id: str) -> dict:
 
         # 4. Update tours_passed to exact published count (always, not just at end)
         if batch_id:
-            pending = await sync_batch_completion(conn, batch_id, silver)
+            _pending, just_completed = await sync_batch_completion(conn, batch_id, silver)
 
-            if pending == 0:
+            # AA-483: just_completed (the atomic UPDATE's own result), not a separately-read
+            # pending count — see sync_batch_completion()'s docstring for why the old
+            # `pending == 0` check here could double-fire this fanout under real concurrency.
+            if just_completed:
                 # ACP-S1: manifest.json + EventBridge on batch completion
                 try:
                     from services.acp.handler import upload_manifest, publish_s1_completed
