@@ -193,10 +193,20 @@ class GateResultLite(TypedDict):
     passed: bool
     violations: list[str]
     repairable: bool
+    blocking: bool
 
 
-def _result(gate: str, violations: list[str], repairable: bool = True) -> GateResultLite:
-    return {"gate": gate, "passed": not violations, "violations": violations, "repairable": repairable}
+def _result(
+    gate: str, violations: list[str], repairable: bool = True, blocking: bool = True,
+) -> GateResultLite:
+    # AA-519 Việc 5 — `blocking` defaults True so every pre-existing call site (F1/F2/F3/F4/F6/
+    # F7/F8/F9/F4-seo-surface) is byte-identical in behavior without touching them; only
+    # gate_promises_an_option() below passes blocking=False. See run_quality_gates()'s own
+    # docstring for how this changes first_failure/passed without touching the other 8 gates.
+    return {
+        "gate": gate, "passed": not violations, "violations": violations,
+        "repairable": repairable, "blocking": blocking,
+    }
 
 
 # ---------------------------------------------------------------- CTA gate (F6-DET-half)
@@ -258,13 +268,20 @@ def gate_banned_patterns(content_text: str, atom_text: str) -> GateResultLite:
 def gate_promises_an_option(
     content_text: str, atom_text: str, route_segments: Optional[list[tuple[str, str]]] = None,
 ) -> GateResultLite:
-    """AA-514 — ADR 0023 (flag-not-block, Ms. Thư repo) + ADR 0026 ("an offered moment is ranked
-    and never promised"): a sentence citing an OFFERED (optional/at-a-price) moment must hedge it
-    ("there is time to visit...", "you may choose to...") rather than state it as something the
-    reader will definitely do ("visit the..."). `never repairable` — this is a judgement call
-    about what the sentence claims, same class of gap gate_grounding()/F1 already leaves to a
-    human rather than asking a model to insert a hedge (which the origin's own docstring warns
-    "will hedge the whole paragraph into mush").
+    """AA-514/AA-519 — ADR 0023 (flag-not-block, Ms. Thư repo) + ADR 0026 ("an offered moment is
+    ranked and never promised"): a sentence citing an OFFERED (optional/at-a-price) moment must
+    hedge it ("there is time to visit...", "you may choose to...") rather than state it as
+    something the reader will definitely do ("visit the..."). `never repairable` — this is a
+    judgement call about what the sentence claims, same class of gap gate_grounding()/F1 already
+    leaves to a human rather than asking a model to insert a hedge (which the origin's own
+    docstring warns "will hedge the whole paragraph into mush").
+
+    AA-519 Việc 5 — `blocking=False`: AA-514 shipped this as `repairable=False`, which T10's loop
+    (service.py) reads as an immediate HOLD — a block. ADR 0023 read verbatim (and ADR 0026's own
+    closing line, "a Piece built on an offered moment will usually carry a flag on its first
+    draft, and that is the normal case under ADR 0023 rather than a failure") says this must ship
+    flagged, not held. `repairable` stays False (still never sent to the writer — same "the
+    world, not the shape" reasoning) — only `blocking` changes.
 
     Applies to EVERY channel (origin's own `channels=None`), not just blog — but the DETECTION
     shape differs by whether real per-sentence citation tags exist (AA-513, blog Route pick
@@ -312,7 +329,7 @@ def gate_promises_an_option(
                 f"content seed is offered rather than included, and this states it as done: "
                 f"'{strip_citation_tags(sent.strip())[:120]}'"
             )
-    return _result("promises_an_option", violations, repairable=False)
+    return _result("promises_an_option", violations, repairable=False, blocking=False)
 
 
 def _is_offered(text: str) -> bool:
@@ -650,6 +667,7 @@ class QualityCheckOutcome(TypedDict):
     passed: bool
     gate_ledger: list[GateResultLite]
     first_failure: Optional[GateResultLite]
+    flags: list[GateResultLite]
 
 
 def run_quality_gates(
@@ -664,8 +682,11 @@ def run_quality_gates(
     be rejected" reasoning N7's own output_rules pre-check uses) — every other gate always runs
     regardless of an earlier gate's outcome, same as N7's run_gates() (a repair fixing one gate
     must never ship while silently regressing another the caller never re-checked).
-    `first_failure` is the first FAILED gate in this fixed order, used by service.py to pick
-    which violations to feed the attempt-2 rewrite.
+    `first_failure` is the first FAILED, BLOCKING gate in this fixed order (AA-519 Việc 5 —
+    was just "first failed gate" before `blocking` existed), used by service.py to pick which
+    violations to feed the attempt-2 rewrite / decide a hold. A failed non-blocking gate is never
+    `first_failure` and never holds/repairs a piece — it's collected into the returned `flags`
+    list instead, still visible in `gate_ledger` either way.
 
     AA-452: `channel` is now required (every real caller — service.py — always has it; existing
     tests updated to pass one explicitly rather than given a default, same "explicit over
@@ -689,7 +710,7 @@ def run_quality_gates(
     cta_result = gate_cta_present(cta)
     ledger = [cta_result]
     if not cta_result["passed"]:
-        return {"passed": False, "gate_ledger": ledger, "first_failure": cta_result}
+        return {"passed": False, "gate_ledger": ledger, "first_failure": cta_result, "flags": []}
 
     length_check_text = strip_citation_tags(content_text)
     gate_ledger = [
@@ -710,11 +731,18 @@ def run_quality_gates(
         gate_framework(content_text, goal_key),
         gate_brand_voice(content_text, cta or "", brand_rubric_text),
     ]
-    first_failure = next((g for g in gate_ledger if not g["passed"]), None)
+    # AA-519 Việc 5 — first_failure (drives service.py's hold/repair decision) only ever
+    # considers a BLOCKING gate now; a failed non-blocking gate (currently only
+    # promises_an_option) never holds/repairs a piece, but its result is still in gate_ledger AND
+    # collected into `flags` below so it isn't silently dropped — it ships WITH the piece as a
+    # note, per ADR 0023/0026.
+    first_failure = next((g for g in gate_ledger if not g["passed"] and g["blocking"]), None)
+    flags = [g for g in gate_ledger if not g["passed"] and not g["blocking"]]
     return {
         "passed": first_failure is None,
         "gate_ledger": gate_ledger,
         "first_failure": first_failure,
+        "flags": flags,
     }
 
 

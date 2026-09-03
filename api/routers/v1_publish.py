@@ -114,7 +114,8 @@ async def list_pending(request: Request, tenant=Depends(get_tenant)):
         rows = await conn.fetch(
             """
             SELECT cp.piece_id::text, cp.content_text, cp.created_at,
-                   COALESCE(cp.channel, agr.channel) AS channel, ago.name AS angle_name
+                   COALESCE(cp.channel, agr.channel) AS channel, ago.name AS angle_name,
+                   cp.route_hub_name, cp.route_segment_count
             FROM acp_shared.content_piece cp
             JOIN acp_shared.angle_gate_request agr ON agr.request_id = cp.angle_gate_request_id
             LEFT JOIN acp_shared.angle_gate_option ago
@@ -140,6 +141,10 @@ async def list_pending(request: Request, tenant=Depends(get_tenant)):
                 "content_preview": r["content_text"][:280],
                 "channel": r["channel"],
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                # AA-519 Việc 4 — NULL/None for every non-Route piece (Segment pick or pre-Slate
+                # atom-picker request), same convention as T10's fetch_review()/fetch_review_list().
+                "route_hub_name": r["route_hub_name"],
+                "route_segment_count": r["route_segment_count"],
             }
             for r in rows
         ],

@@ -54,7 +54,7 @@ def _slow_sync_write(*args, **kwargs) -> tuple[str, float, dict]:
 
 
 def _fast_passing_gates(*args, **kwargs):
-    return {"passed": True, "gate_ledger": [], "first_failure": None}
+    return {"passed": True, "gate_ledger": [], "first_failure": None, "flags": []}
 
 
 async def _fake_health_check() -> dict:
