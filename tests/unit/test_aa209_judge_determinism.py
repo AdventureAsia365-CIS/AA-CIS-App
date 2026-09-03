@@ -23,7 +23,7 @@ def _make_client() -> LLMClient:
          patch("shared.llm_client.client.openai.OpenAI"):
         client = LLMClient()
     fake_create_resp = MagicMock()
-    fake_create_resp.choices = [MagicMock(message=MagicMock(content='{"ok": true}'))]
+    fake_create_resp.choices = [MagicMock(message=MagicMock(content='{"ok": true}'), finish_reason="stop")]
     fake_create_resp.usage = MagicMock(prompt_tokens=100, completion_tokens=20)
     client._openai = MagicMock()
     client._openai.chat.completions.create.return_value = fake_create_resp
@@ -51,6 +51,7 @@ def test_call_openai_forwards_temperature_and_seed_when_present():
     assert kwargs["max_tokens"] == request.max_tokens
     assert isinstance(resp, LLMResponse)
     assert resp.provider == "openai"
+    assert resp.stop_reason == "stop"  # AA-493 — _make_client()'s fake response finish_reason
 
 
 def test_call_openai_omits_temperature_and_seed_when_absent():

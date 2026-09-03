@@ -131,6 +131,7 @@ def answer_faq(
                                 result.usage.get("output_tokens", 0)),
             tenant_id=None,
             quality_signal={"items_parsed": len(parsed), "items_requested": len(batch)},
+            stop_reason=result.stop_reason,
         )
         if len(parsed) != len(batch):
             raise FAQAnswerFailed(

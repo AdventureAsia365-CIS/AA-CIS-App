@@ -111,7 +111,7 @@ def invoke_judge(
     rather than shared, so no future refactor can accidentally merge the
     writer and judge call paths into one function that some caller then
     reuses for both roles. Returns {text, model_used, provider, input_tokens,
-    output_tokens}.
+    output_tokens, stop_reason}  (stop_reason added AA-493).
 
     `model`: explicit override for AA-351's comparison script ("nova_pro" |
     "gpt56" | "gpt41"). None (the default — every gates.py call site) falls
@@ -151,14 +151,21 @@ def invoke_judge(
     payload = json.loads(resp["body"].read())
     text = payload["output"]["message"]["content"][0]["text"]
     usage = payload.get("usage", {})
+    # AA-493: Bedrock Converse API (this is invoke_model + a "message"/"output" wrapper shape,
+    # NOT the Converse API proper, but Nova models return their own top-level `stopReason`
+    # either way — same camelCase key the real Converse API uses) confirmed against this live
+    # response shape while building this fix.
+    stop_reason = payload.get("stopReason")
     logger.info("judge_llm_success", model=NOVA_PRO_MODEL_ID, provider="bedrock-acc2",
-                in_tokens=usage.get("inputTokens", 0), out_tokens=usage.get("outputTokens", 0))
+                in_tokens=usage.get("inputTokens", 0), out_tokens=usage.get("outputTokens", 0),
+                stop_reason=stop_reason)
     return {
         "text": text,
         "model_used": NOVA_PRO_MODEL_ID,
         "provider": "bedrock-acc2",
         "input_tokens": usage.get("inputTokens", 0),
         "output_tokens": usage.get("outputTokens", 0),
+        "stop_reason": stop_reason,
     }
 
 
@@ -182,15 +189,20 @@ def invoke_judge_gpt56(system_prompt: str, user_prompt: str, max_tokens: int = 2
     )
     text = resp["output"]["message"]["content"][0]["text"]
     usage = resp.get("usage", {})
+    # AA-493: the real Converse API's top-level `stopReason` field (documented, unlike Nova's
+    # invoke_model shape above which happens to match it).
+    stop_reason = resp.get("stopReason")
     logger.info("judge_llm_success", model=GPT56_SOL_INFERENCE_PROFILE,
                 provider="bedrock-satellite-acc3",
-                in_tokens=usage.get("inputTokens", 0), out_tokens=usage.get("outputTokens", 0))
+                in_tokens=usage.get("inputTokens", 0), out_tokens=usage.get("outputTokens", 0),
+                stop_reason=stop_reason)
     return {
         "text": text,
         "model_used": GPT56_SOL_INFERENCE_PROFILE,
         "provider": "bedrock-satellite-acc3",
         "input_tokens": usage.get("inputTokens", 0),
         "output_tokens": usage.get("outputTokens", 0),
+        "stop_reason": stop_reason,
     }
 
 
@@ -220,14 +232,16 @@ def invoke_judge_gpt41(system_prompt: str, user_prompt: str, max_tokens: int = 2
     usage = resp.usage
     in_tok = usage.prompt_tokens if usage else 0
     out_tok = usage.completion_tokens if usage else 0
+    stop_reason = resp.choices[0].finish_reason  # AA-493: OpenAI's field name for the same concept
     logger.info("judge_llm_success", model=GPT41_MODEL, provider="openai",
-                in_tokens=in_tok, out_tokens=out_tok)
+                in_tokens=in_tok, out_tokens=out_tok, stop_reason=stop_reason)
     return {
         "text": text,
         "model_used": GPT41_MODEL,
         "provider": "openai",
         "input_tokens": in_tok,
         "output_tokens": out_tok,
+        "stop_reason": stop_reason,
     }
 
 

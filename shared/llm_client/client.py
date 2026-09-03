@@ -188,6 +188,7 @@ class LLMClient:
         # message_start, output_tokens (cumulative) in message_delta.
         content_parts = []
         in_tok = out_tok = cache_read = cache_write = 0
+        stop_reason = None
         for event in response["body"]:
             chunk = json.loads(event["chunk"]["bytes"])
             ctype = chunk.get("type")
@@ -202,13 +203,17 @@ class LLMClient:
                     content_parts.append(d.get("text", ""))
             elif ctype == "message_delta":
                 out_tok = chunk.get("usage", {}).get("output_tokens", out_tok)
+                # AA-493: stop_reason ("end_turn" | "max_tokens" | "stop_sequence" | ...) arrives
+                # on this same event's `delta`, alongside the cumulative output_tokens above —
+                # confirmed against the real streaming schema while building this fix (STEP0).
+                stop_reason = chunk.get("delta", {}).get("stop_reason", stop_reason)
         content = "".join(content_parts)
         cost    = self._calc_cost(model, in_tok, out_tok)
 
         logger.info("llm_success", provider="bedrock", model=model,
                     in_tokens=in_tok, out_tokens=out_tok,
                     cache_read=cache_read, cache_write=cache_write,
-                    cost_usd=cost)
+                    cost_usd=cost, stop_reason=stop_reason)
 
         return LLMResponse(
             content=content, model_used=model, provider="bedrock",
@@ -216,6 +221,7 @@ class LLMClient:
             # AA-288: cache_read/cache_write were parsed above and logged, but discarded before
             # this fix — the caller had no way to know a cache hit/write happened at all.
             cache_read_tokens=cache_read, cache_write_tokens=cache_write,
+            stop_reason=stop_reason,
         )
 
     def _call_bedrock_satellite(self, request: LLMRequest, model: str, account: str = "acc1") -> LLMResponse:
@@ -247,7 +253,7 @@ class LLMClient:
 
         logger.info("llm_success", provider="bedrock-satellite", model=result.model_used,
                     in_tokens=in_tok, out_tokens=out_tok, cost_usd=cost,
-                    latency_ms=result.latency_ms)
+                    latency_ms=result.latency_ms, stop_reason=result.stop_reason)
 
         return LLMResponse(
             content=result.text,
@@ -257,6 +263,7 @@ class LLMClient:
             output_tokens=out_tok,
             cost_usd=cost,
             fallback_used=False,  # set lại đúng ở generate() tuỳ ngữ cảnh gọi
+            stop_reason=result.stop_reason,
         )
 
     def _call_openai(self, request: LLMRequest, model: str) -> LLMResponse:
@@ -281,13 +288,19 @@ class LLMClient:
         in_tok  = resp.usage.prompt_tokens
         out_tok = resp.usage.completion_tokens
         cost    = self._calc_cost(model, in_tok, out_tok)
+        # AA-493: OpenAI's field is "finish_reason" ("stop" | "length" | "content_filter" | ...)
+        # — different name from Anthropic's "stop_reason", same purpose. Stored under the same
+        # LLMResponse.stop_reason field so callers/the DB log don't need a provider branch.
+        finish_reason = resp.choices[0].finish_reason
 
         logger.info("llm_success", provider="openai", model=model,
-                    in_tokens=in_tok, out_tokens=out_tok, cost_usd=cost)
+                    in_tokens=in_tok, out_tokens=out_tok, cost_usd=cost,
+                    stop_reason=finish_reason)
 
         return LLMResponse(
             content=content, model_used=model, provider="openai",
             input_tokens=in_tok, output_tokens=out_tok, cost_usd=cost,
+            stop_reason=finish_reason,
         )
 
     def _calc_cost(self, model: str, in_tok: int, out_tok: int) -> float:

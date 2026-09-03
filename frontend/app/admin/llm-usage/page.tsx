@@ -21,6 +21,9 @@ interface Branch {
   ok_rate: number | null;
   avg_atoms_extracted: number | null;
   avg_output_len_chars: number | null;
+  // AA-493: calls in this branch that stopped at the token limit (stop_reason="max_tokens")
+  // rather than finishing normally — 0 for branches with no such call, never negative.
+  truncated_count: number;
   last_call_at: string | null;
 }
 
@@ -64,6 +67,13 @@ function StageLeaf({ b }: { b: Branch }) {
       <span style={{ fontSize: 12, color: A.muted, minWidth: 70 }}>{b.call_count} calls</span>
       <span style={{ fontSize: 12, color: A.ink2, minWidth: 90, fontFamily: mono }}>{fmtUsd(b.total_cost_usd)}</span>
       <span style={{ fontSize: 12, minWidth: 140 }}><QualityCell b={b} /></span>
+      {/* AA-493: a real, computed count — never shown for 0, so a branch with no truncated
+          call carries no visual noise. */}
+      {b.truncated_count > 0 && (
+        <Badge color="amber">
+          {b.truncated_count} bị cắt (max_tokens)
+        </Badge>
+      )}
       <span style={{ fontSize: 11, color: A.muted2, marginLeft: "auto" }}>
         {b.last_call_at ? new Date(b.last_call_at).toLocaleString() : "—"}
       </span>
@@ -161,6 +171,8 @@ export default function LlmUsagePage() {
   const totalCalls = (branches ?? []).reduce((s, b) => s + b.call_count, 0);
   const eligible = (branches ?? []).reduce((s, b) => s + b.ok_eligible_count, 0);
   const ok = (branches ?? []).reduce((s, b) => s + b.ok_count, 0);
+  // AA-493 — real count of calls that stopped at the token limit, across every branch.
+  const truncated = (branches ?? []).reduce((s, b) => s + b.truncated_count, 0);
 
   return (
     <div style={{ display: "flex", minHeight: "100vh", background: A.bg, fontFamily: sans }}>
@@ -206,13 +218,18 @@ export default function LlmUsagePage() {
 
         {!loading && !error && branches && branches.length > 0 && (
           <>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14, marginBottom: 20 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 14, marginBottom: 20 }}>
               <StatCard label="Tổng chi phí" value={fmtUsd(totalCost)} sub={`${days} ngày qua`} />
               <StatCard label="Tổng lượt gọi" value={String(totalCalls)} />
               <StatCard label="Tenant" value={String(byTenant.size)} />
               <StatCard label="Tỷ lệ pass (gate/judge)"
                         value={eligible > 0 ? `${Math.round((ok / eligible) * 100)}%` : "—"}
                         sub={eligible > 0 ? `${ok}/${eligible} lượt có tín hiệu pass/fail` : "chưa có stage nào đo được"} />
+              {/* AA-493 — stop_reason="max_tokens" tách được khỏi lượt hoàn tất bình thường,
+                  lần đầu tiên đo được thật (trước đây field này bị vứt đi im lặng). */}
+              <StatCard label="Bị cắt (max_tokens)"
+                        value={String(truncated)}
+                        sub={totalCalls > 0 ? `${Math.round((truncated / totalCalls) * 100)}% tổng lượt gọi` : undefined} />
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               {[...byTenant.entries()].map(([label, bs]) => (

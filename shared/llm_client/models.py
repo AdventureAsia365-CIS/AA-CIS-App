@@ -43,3 +43,10 @@ class LLMResponse(BaseModel):
     # so they keep the 0 default rather than a caller having to know which provider ran.
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    # AA-493: why generation stopped — Anthropic's `stop_reason` ("end_turn" | "max_tokens" |
+    # "stop_sequence" | ...) for both _call_bedrock (native) and _call_bedrock_satellite
+    # (acc1/acc3), OpenAI's `finish_reason` ("stop" | "length" | ...) for _call_openai. None only
+    # when a provider genuinely omits the field (never observed, but not assumed). This is the
+    # only way to tell "LLM finished writing" apart from "LLM got cut off at max_tokens" — see
+    # AA-493/AA-341 for the truncation-vs-compression ambiguity this closes.
+    stop_reason: Optional[str] = None

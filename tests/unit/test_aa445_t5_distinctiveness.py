@@ -35,12 +35,15 @@ def _fake_conn(latest_source_hash=None):
 
 
 class _FakeLLMResult:
-    def __init__(self, text, model_used="sonnet-4-6", usage=None):
+    def __init__(self, text, model_used="sonnet-4-6", usage=None, stop_reason="end_turn"):
         self.text = text
         # AA-518/AA-505 — record_call_with_pool() (the new whole-tour persist-log call) reads
         # both of these; a real BedrockInvokeResult always has them.
         self.model_used = model_used
         self.usage = usage or {"input_tokens": 100, "output_tokens": 50}
+        # AA-493 — record_call_with_pool() now also reads .stop_reason; a real BedrockInvokeResult
+        # always has it (defaults to None there, but this fake defaults to a realistic value).
+        self.stop_reason = stop_reason
 
 
 @pytest.mark.asyncio

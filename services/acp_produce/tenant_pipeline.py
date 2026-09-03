@@ -410,6 +410,7 @@ async def _atomize_whole_tour_legacy(
                             llm_result.usage.get("output_tokens", 0)),
         tenant_id=tenant_id,
         quality_signal={"atoms_extracted": inserted, "is_empty_marker": inserted == 0},
+        stop_reason=llm_result.stop_reason,
     )
     return {"status": "success", "atom_count": inserted}
 
@@ -571,6 +572,7 @@ async def _atomize_per_day(
             tenant_id=tenant_id,
             quality_signal={"atoms_extracted": len(new_atom_ids), "day_number": day_num,
                              "is_empty_marker": not atoms},
+            stop_reason=llm_result.stop_reason,
         )
 
     result = {

@@ -107,6 +107,7 @@ def _process_itineraries(generated: dict, tour: dict, client: LLMClient) -> dict
                         "landed_in_clamp": ITINERARY_CLAMP_MIN <= record["ratio_after_nudge"] <= ITINERARY_CLAMP_MAX,
                         "ratio_after_nudge": record["ratio_after_nudge"],
                     },
+                    stop_reason=getattr(resp, "stop_reason", None),
                 )
                 logger.info("itinerary_day_nudged", day=day_num, ratio_before=record["ratio"],
                             ratio_after=record["ratio_after_nudge"])
@@ -388,6 +389,7 @@ def generate_node(state: ContentState) -> ContentState:
                     tokens_in=getattr(resp, "input_tokens", None), tokens_out=getattr(resp, "output_tokens", None),
                     cost_usd=resp.cost_usd, tenant_id=None,
                     quality_signal={"json_parsed": False, "fallback_used": resp.fallback_used},
+                    stop_reason=getattr(resp, "stop_reason", None),
                 )
                 return {**state, "generated": {}, "is_branded": is_branded,
                         "cost_usd": state.get("cost_usd", 0) + resp.cost_usd,
@@ -419,6 +421,7 @@ def generate_node(state: ContentState) -> ContentState:
             tokens_in=getattr(resp, "input_tokens", None), tokens_out=getattr(resp, "output_tokens", None),
             cost_usd=resp.cost_usd, tenant_id=None,
             quality_signal={"json_parsed": True, "fallback_used": resp.fallback_used},
+            stop_reason=getattr(resp, "stop_reason", None),
         )
         return {
             **state,

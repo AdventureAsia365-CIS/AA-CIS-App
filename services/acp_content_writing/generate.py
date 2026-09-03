@@ -166,6 +166,7 @@ def _record_t9_write_call(resp, channel: str, *, attempt: int, tenant_id, angle_
         cost_usd=resp.cost_usd,
         tenant_id=tenant_id, angle_gate_request_id=angle_gate_request_id,
         quality_signal={"channel": channel, "attempt": attempt, "output_len_chars": len(resp.content)},
+        stop_reason=getattr(resp, "stop_reason", None),
     )
 
 

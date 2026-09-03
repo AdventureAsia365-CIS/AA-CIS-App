@@ -128,6 +128,11 @@ _TREE_SQL = """
         ) AS ok_eligible_count,
         AVG((l.quality_signal->>'atoms_extracted')::numeric) AS avg_atoms_extracted,
         AVG((l.quality_signal->>'output_len_chars')::numeric) AS avg_output_len_chars,
+        -- AA-493: how many of this branch's calls were cut off at the token limit rather than
+        -- finishing normally — the whole point of persisting stop_reason. NULL stop_reason
+        -- (any row written before migration 141, or a call site not yet threaded through) is
+        -- correctly excluded here, not counted as truncated.
+        COUNT(*) FILTER (WHERE l.stop_reason = 'max_tokens') AS truncated_count,
         MAX(l.created_at) AS last_call_at
     FROM shared.llm_call_log l
     LEFT JOIN shared.tenants t ON t.tenant_id = l.tenant_id
@@ -181,7 +186,7 @@ async def get_llm_usage_calls(
     sql = f"""
         SELECT id::text, tenant_id::text, stage, role, model, tokens_in, tokens_out,
                cost_usd::float, quality_signal, content_piece_id::text, angle_gate_request_id::text,
-               created_at
+               stop_reason, created_at
         FROM shared.llm_call_log
         {where}
         ORDER BY created_at DESC

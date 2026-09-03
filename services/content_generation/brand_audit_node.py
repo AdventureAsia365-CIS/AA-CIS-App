@@ -267,16 +267,18 @@ Return JSON only per schema."""
         in_tok = resp.usage.prompt_tokens if resp.usage else 0
         out_tok = resp.usage.completion_tokens if resp.usage else 0
         cost = round((in_tok * 0.002 + out_tok * 0.008) / 1000, 6)
+        stop_reason = resp.choices[0].finish_reason  # AA-493
 
         logger.info("brand_audit_done",
                     status=result["status"],
                     codes=result["failure_codes"],
-                    in_tokens=in_tok, out_tokens=out_tok, cost_usd=cost)
+                    in_tokens=in_tok, out_tokens=out_tok, cost_usd=cost, stop_reason=stop_reason)
 
         record_call_sync(
             stage="s1_brand_audit", role="judge", model=_stage_cfg.model_id,
             tokens_in=in_tok, tokens_out=out_tok, cost_usd=cost, tenant_id=None,
             quality_signal={"status": result["status"], "failure_code_count": len(all_codes)},
+            stop_reason=stop_reason,
         )
         return {
             **state,

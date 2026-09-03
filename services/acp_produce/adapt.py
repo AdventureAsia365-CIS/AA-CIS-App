@@ -244,6 +244,7 @@ def _invoke_channel_with_retry(
                                 result.usage.get("output_tokens", 0)),
             tenant_id=None,
             quality_signal={"channel": channel, "required_markers_present": markers_ok},
+            stop_reason=result.stop_reason,
         )
         if not markers_ok:
             last_err = AdaptChannelFailed(

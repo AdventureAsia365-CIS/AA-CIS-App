@@ -57,6 +57,29 @@ def test_streaming_uses_response_stream_not_blocking_invoke():
     assert not client._bedrock.invoke_model.called
 
 
+def test_streaming_captures_stop_reason_end_turn():
+    """AA-493: stop_reason arrives on the message_delta event, alongside output_tokens —
+    a normal completion (end_turn) must be captured, not silently discarded."""
+    client = _client_with_stream(_fake_stream())
+    resp = client._call_bedrock(_req(), model="m")
+    assert resp.stop_reason == "end_turn"
+
+
+def test_streaming_captures_stop_reason_max_tokens():
+    """AA-493: the whole point of this fix — a response cut off at max_tokens must be
+    distinguishable from one that finished normally."""
+    events = [
+        _event({"type": "message_start", "message": {"usage": {"input_tokens": 500}}}),
+        _event({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "truncated..."}}),
+        _event({"type": "message_delta", "delta": {"stop_reason": "max_tokens"}, "usage": {"output_tokens": 4096}}),
+        _event({"type": "message_stop"}),
+    ]
+    client = _client_with_stream(events)
+    resp = client._call_bedrock(_req(), model="m")
+    assert resp.stop_reason == "max_tokens"
+    assert resp.output_tokens == 4096
+
+
 def test_streaming_empty_delta_yields_empty_content_not_crash():
     events = [
         _event({"type": "message_start", "message": {"usage": {"input_tokens": 10}}}),
