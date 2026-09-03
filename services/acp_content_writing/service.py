@@ -260,6 +260,12 @@ async def start_write(
         "brand_rubric_text": brand_rubric_text, "channel": req["channel"],
         "atom_id": req["atom_id"], "route_segments": route_segments, "keyword": keyword,
         "tenant_id": str(tenant_id),  # AA-505 — attribution for llm_call_log
+        # AA-485 — route_hub_name/route_segment_count weren't previously carried in `context`
+        # (only used inline, at the placeholder INSERT above) because nothing needed them again
+        # afterward. The buffer-retry path (run_write_background()'s own trailing step) inserts
+        # a SECOND placeholder piece for the same request and needs the same values — added here
+        # rather than re-fetched, since `context` already has everything else that piece needs.
+        "route_hub_name": route_hub_name, "route_segment_count": route_segment_count,
     }
     return {"piece": piece, "context": context}
 
@@ -411,6 +417,16 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
             "t9_write_and_check_done", request_id=str(request_id), status=status,
             attempts=attempt, cost_usd=total_cost,
         )
+
+        # AA-485 (Q5=C origin, AA-331 — "buffer chạy lại slot HELD", transferred from dead N6/
+        # slot_runner.py to T9/T10's real content_piece.status='held'). Fires as a trailing step
+        # of the SAME background task (no new scheduler/cron infra needed — run_write_background()
+        # is already fire-and-forget from the router's own perspective, AA-466), never re-entrant
+        # (see _buffer_retry_held_piece()'s own eligibility guard for why this can't loop).
+        if status == "held":
+            await _maybe_buffer_retry_held_piece(
+                request_id=request_id, held_piece_id=piece_id, repair_log=repair_log, context=context, pool=pool,
+            )
     except Exception as exc:
         logger.error(
             "t9_write_background_failed", request_id=str(request_id), piece_id=str(piece_id),
@@ -427,6 +443,123 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
                 "t9_write_background_failed_status_write_also_failed",
                 request_id=str(request_id), piece_id=str(piece_id),
             )
+
+
+async def _maybe_buffer_retry_held_piece(
+    *, request_id: UUID, held_piece_id: UUID, repair_log: list[dict], context: dict, pool,
+) -> None:
+    """AA-485 — decides whether to fire the buffer retry, then does it. Two eligibility rules,
+    both from Q5=C's own confirmed design (AA-331), mapped from slot-level to piece-level:
+
+    1. **Repairable-cause holds only.** A NON-repairable hold (e.g. F6_cta_present's missing-CTA
+       case, `repairable=False`) has an external root cause a rewrite can't fix — the same
+       condition would just cause an immediate second hold, wasting a real LLM call for nothing.
+       `repair_log[-1]["repairable"]` is exactly the flag `run_quality_gates()` already computed
+       for this — reused, not re-derived.
+    2. **Exactly N=1 buffer retry per request** (Q5=C: "không lặp vô hạn... số N cần quyết khi
+       build" — chose N=1). Enforced by checking whether ANY OTHER `content_piece` row already
+       exists for this `request_id` — the buffer retry's own new piece becomes that other row,
+       so a SECOND hold naturally fails this check and stops, no counter/recursion needed.
+
+    `promises_an_option`-class flag-not-block gates never need excluding here (AA-520's own
+    audit note on this issue) — they never produce `first_failure`/never cause `held` in the
+    first place, so `repair_log` (built only from real BLOCKING failures) never contains one."""
+    if not repair_log or not repair_log[-1]["repairable"]:
+        logger.info(
+            "t9_buffer_retry_skipped_non_repairable", request_id=str(request_id),
+            held_piece_id=str(held_piece_id),
+        )
+        return
+    async with pool.acquire() as conn:
+        other_piece = await conn.fetchrow(
+            "SELECT piece_id FROM acp_shared.content_piece "
+            "WHERE angle_gate_request_id = $1 AND piece_id != $2 LIMIT 1",
+            request_id, held_piece_id,
+        )
+    if other_piece is not None:
+        logger.info(
+            "t9_buffer_retry_skipped_already_retried", request_id=str(request_id),
+            held_piece_id=str(held_piece_id),
+        )
+        return
+
+    chosen = context["chosen"]
+    new_piece = await _insert_placeholder_piece(
+        pool, tenant_id=UUID(context["tenant_id"]), request_id=request_id,
+        angle_gate_option_id=chosen.get("option_id"), channel=context["channel"],
+        route_hub_name=context.get("route_hub_name"), route_segment_count=context.get("route_segment_count"),
+    )
+    new_piece_id = UUID(new_piece["piece_id"])
+    original_violations = repair_log[-1]["violations"]
+    logger.info(
+        "t9_buffer_retry_triggered", request_id=str(request_id), held_piece_id=str(held_piece_id),
+        new_piece_id=str(new_piece_id),
+    )
+    await _run_buffer_retry_attempt(
+        request_id=request_id, piece_id=new_piece_id, context=context,
+        original_violations=original_violations, pool=pool,
+    )
+
+
+async def _run_buffer_retry_attempt(
+    *, request_id: UUID, piece_id: UUID, context: dict, original_violations: list[str], pool,
+) -> None:
+    """The buffer retry's own write: exactly ONE real attempt, via `rewrite_with_feedback()`
+    seeded with the ORIGINAL hold's own violations — Q5=C's own confirmed design says the retry
+    must "giữ nguyên lý do treo" (keep/know the original hold reason), not a blind fresh roll on
+    `write_content()`. A genuinely separate, smaller loop from `run_write_background()`'s own
+    (deliberately NOT extracted/shared — this codebase's own stated preference elsewhere,
+    quality_gates.py's module docstring, is readable/debuggable-in-isolation over DRY for gate-
+    adjacent logic) — no in-flow MAX_ATTEMPTS=2 retry of ITS OWN; if this one attempt still
+    holds, the piece stays held for good (Q5=C: "không lặp vô hạn"). Any uncaught exception here
+    is caught by `run_write_background()`'s own `except Exception` — deliberately NOT wrapped in
+    a second try/except, so a real bug here surfaces the same `status='failed'` way as every
+    other T9 failure, not swallowed silently."""
+    atom_text, goal, channel_style = context["atom_text"], context["goal"], context["channel_style"]
+    brand_audience, chosen, cta = context["brand_audience"], context["chosen"], context["cta"]
+    destination, trip_name = context["destination"], context["trip_name"]
+    brand_rubric_text, channel, atom_id = context["brand_rubric_text"], context["channel"], context["atom_id"]
+    route_segments = context.get("route_segments")
+    keyword = context.get("keyword")
+    tenant_id = context.get("tenant_id")
+
+    content_text, cost, seo_meta, summary = await asyncio.to_thread(
+        rewrite_with_feedback, content_seed=atom_text, goal=goal, channel_style=channel_style,
+        brand_audience=brand_audience, angle=chosen, cta=cta,
+        revision_feedback=original_violations,
+        destination=destination, trip_name=trip_name, atom_id=atom_id,
+        route_segments=route_segments, keyword=keyword,
+        tenant_id=tenant_id, angle_gate_request_id=str(request_id),
+    )
+    outcome = await asyncio.to_thread(
+        run_quality_gates, content_text=content_text, atom_text=atom_text, cta=cta,
+        goal_key=goal["key"], brand_rubric_text=brand_rubric_text, channel=channel,
+        route_segments=route_segments, keyword=keyword,
+        seo_title=seo_meta.get("seo_title"), meta_description=seo_meta.get("meta_description"),
+        slug=seo_meta.get("slug"),
+    )
+    if outcome["passed"]:
+        status, held_reason = "approved", None
+    else:
+        status, held_reason = "held", _held_reason_from(outcome["first_failure"])
+
+    content_text = strip_citation_tags(content_text)
+    gate_ledger = deep_strip_citation_tags(outcome["gate_ledger"])
+    flags = deep_strip_citation_tags(outcome["flags"])
+    if held_reason:
+        held_reason = strip_citation_tags(held_reason)
+
+    await _finalize_piece(
+        pool, piece_id=piece_id, attempt_number=1,
+        content_text=content_text, status=status, held_reason=held_reason,
+        gate_ledger=gate_ledger, repair_log=[], flags=flags,
+        seo_title=seo_meta.get("seo_title"), meta_description=seo_meta.get("meta_description"),
+        slug=seo_meta.get("slug"), content_summary=summary,
+    )
+    logger.info(
+        "t9_buffer_retry_done", request_id=str(request_id), piece_id=str(piece_id),
+        status=status, cost_usd=cost,
+    )
 
 
 async def _finalize_piece(
