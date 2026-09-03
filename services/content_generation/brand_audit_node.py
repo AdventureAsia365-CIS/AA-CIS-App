@@ -6,6 +6,8 @@ import re
 import structlog
 from openai import OpenAI
 
+from shared.llm_client.role_config import get_stage_config_sync
+from shared.llm_client.call_log import record_call_sync
 from .brand_standards import AA_BRAND_IDENTITY_PROMPT, AA_COWORK_STRUCTURE_PROMPT
 
 logger = structlog.get_logger()
@@ -236,8 +238,12 @@ Return JSON only per schema."""
             }
 
         client = OpenAI(api_key=openai_key)
+        # AA-518: model comes from the "s1_brand_audit" stage config now, not a bare "gpt-4.1"
+        # literal — SAFE_DEFAULTS keeps gpt-4.1 as the fallback if the config read fails, so this
+        # is a zero-behavior-change swap until an admin actually touches the UI.
+        _stage_cfg = get_stage_config_sync("s1_brand_audit")
         resp = client.chat.completions.create(
-            model="gpt-4.1",
+            model=_stage_cfg.model_id,
             temperature=0.1,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -267,6 +273,11 @@ Return JSON only per schema."""
                     codes=result["failure_codes"],
                     in_tokens=in_tok, out_tokens=out_tok, cost_usd=cost)
 
+        record_call_sync(
+            stage="s1_brand_audit", role="judge", model=_stage_cfg.model_id,
+            tokens_in=in_tok, tokens_out=out_tok, cost_usd=cost, tenant_id=None,
+            quality_signal={"status": result["status"], "failure_code_count": len(all_codes)},
+        )
         return {
             **state,
             "brand_audit_status": result["status"],

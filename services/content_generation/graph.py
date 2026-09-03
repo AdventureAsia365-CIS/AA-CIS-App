@@ -8,6 +8,7 @@ from langgraph.graph import StateGraph, END
 
 from shared.llm_client.client import LLMClient
 from shared.llm_client.models import LLMRequest
+from shared.llm_client.call_log import record_call_sync
 from .prompts import SYSTEM_PROMPT, build_rewrite_prompt, parse_source_day_word_counts
 from .brand_audit_node import brand_audit_node
 from .flag_fix_node import flag_fix_node
@@ -96,6 +97,17 @@ def _process_itineraries(generated: dict, tour: dict, client: LLMClient) -> dict
                 record["nudged"] = True
                 record["actual_words_after_nudge"] = actual_words_after
                 record["ratio_after_nudge"] = round(actual_words_after / source_words, 3)
+                # AA-505 — quality_signal = did the nudge actually land inside clamp? Real,
+                # computed right here, not a fabricated placeholder.
+                record_call_sync(
+                    stage="s1_itinerary_nudge", role="writer", model=resp.model_used,
+                    tokens_in=getattr(resp, "input_tokens", None), tokens_out=getattr(resp, "output_tokens", None),
+                    cost_usd=resp.cost_usd, tenant_id=None,
+                    quality_signal={
+                        "landed_in_clamp": ITINERARY_CLAMP_MIN <= record["ratio_after_nudge"] <= ITINERARY_CLAMP_MAX,
+                        "ratio_after_nudge": record["ratio_after_nudge"],
+                    },
+                )
                 logger.info("itinerary_day_nudged", day=day_num, ratio_before=record["ratio"],
                             ratio_after=record["ratio_after_nudge"])
         day_ratios.append(record)
@@ -332,7 +344,13 @@ def generate_node(state: ContentState) -> ContentState:
     request = LLMRequest(
         system_prompt=system,
         user_prompt=prompt,
-        model_tier=state.get("model_tier", "haiku"),
+        # AA-518: no more hardcoded "haiku" fallback here — state.get("model_tier") is None
+        # whenever the caller (admin_pipeline.py/v1_pipeline.py's own request field) didn't
+        # explicitly choose a tier, in which case LLMClient.generate() now falls back to the
+        # admin's "s1_generate" stage config instead. An explicit tier (including AA-237's
+        # opt-in sonnet re-run) still overrides, unchanged.
+        model_tier=state.get("model_tier"),
+        stage="s1_generate",
     )
 
     resp = None
@@ -365,6 +383,12 @@ def generate_node(state: ContentState) -> ContentState:
                                model_used=resp.model_used if resp else None,
                                fallback_used=resp.fallback_used if resp else None,
                                retry_count=state.get("retry_count"))
+                record_call_sync(
+                    stage="s1_generate", role="writer", model=resp.model_used,
+                    tokens_in=getattr(resp, "input_tokens", None), tokens_out=getattr(resp, "output_tokens", None),
+                    cost_usd=resp.cost_usd, tenant_id=None,
+                    quality_signal={"json_parsed": False, "fallback_used": resp.fallback_used},
+                )
                 return {**state, "generated": {}, "is_branded": is_branded,
                         "cost_usd": state.get("cost_usd", 0) + resp.cost_usd,
                         "prompt_version": prompt_version,
@@ -385,6 +409,17 @@ def generate_node(state: ContentState) -> ContentState:
         # AA-353: clamp/nudge the structured itineraries array against its own per-day source
         # length target, then serialize back to the plain string every downstream node expects.
         _itin_result = _process_itineraries(generated, state.get("tour", {}), client)
+        # AA-505 — tenant_id=None here always: ContentState never carries tenant_id (AA-434's own
+        # finding, still true — a T2 tenant rewrite and an A1 admin rewrite run the identical
+        # graph and are indistinguishable in llm_call_log today). Threading tenant_id through the
+        # whole LangGraph state is a real, natural follow-up but bigger than this task's scope —
+        # flagged in docs/implementation-notes/AA-518.md, not silently swept under this comment.
+        record_call_sync(
+            stage="s1_generate", role="writer", model=resp.model_used,
+            tokens_in=getattr(resp, "input_tokens", None), tokens_out=getattr(resp, "output_tokens", None),
+            cost_usd=resp.cost_usd, tenant_id=None,
+            quality_signal={"json_parsed": True, "fallback_used": resp.fallback_used},
+        )
         return {
             **state,
             "generated":  generated,

@@ -254,6 +254,7 @@ async def set_goal_and_generate(tenant_id: UUID, request_id: UUID, goal_key: str
         content_seed=atom["text"], goal=goal,
         brand_audience=brand_audience, destination=destination, trip_name=trip_name,
         search_demand=search_demand,
+        tenant_id=tenant_id, request_id=request_id, pool=pool,  # AA-505
     )
 
     # AA-512 — measurable ranking (ADR 0004), replacing the LLM's own opinion, ONLY when channel

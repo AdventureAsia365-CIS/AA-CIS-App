@@ -10,7 +10,18 @@ class LLMRequest(BaseModel):
     # model_tier controls which Bedrock model to start from:
     #   "haiku"  → skip T1, go directly to T2 (Haiku) — fast/cheap
     #   "sonnet" → try T1 (Sonnet) first, fall back to T2 then T3
-    model_tier:    str = "haiku"
+    #   "gpt-4.1"→ OpenAI direct, no Bedrock fallback
+    # AA-518 (02/09/2026): default changed "haiku" -> None. Every real caller in this codebase
+    # already set this explicitly (grep-confirmed before the change — see docs/implementation-
+    # notes/AA-518.md "s1_generate stage" note), so the old "haiku" default was already dead
+    # weight for every existing call site; None now means "no per-request override — read the
+    # admin's stage config instead" (generate()'s own new `stage` param), an explicit tier still
+    # wins over config exactly like AA-237's opt-in haiku->sonnet auto-upgrade always has.
+    model_tier:    Optional[str] = None
+    # AA-518 — which shared.llm_role_config row generate() should fall back to when model_tier
+    # is unset. None (every pre-AA-518 caller) keeps the old DEFAULT_MODEL_TIER env-var fallback,
+    # unchanged.
+    stage:         Optional[str] = None
     # AA-209: optional sampling seed. Forwarded to OpenAI only when explicitly set, so the judge
     # can run reproducibly while content calls that omit it keep provider-default behavior.
     seed:          Optional[int] = None

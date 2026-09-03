@@ -61,7 +61,9 @@ on-brand."""
     request = LLMRequest(
         system_prompt=_ITINERARY_NUDGE_SYSTEM_PROMPT,
         user_prompt=user_prompt,
-        model_tier="haiku",
+        # AA-518: was a hardcoded "haiku" literal — now admin-configurable via the
+        # "s1_itinerary_nudge" stage (seeded to haiku, matching this exact prior value).
+        stage="s1_itinerary_nudge",
     )
     resp = client.generate(request)
     raw = resp.content.strip()

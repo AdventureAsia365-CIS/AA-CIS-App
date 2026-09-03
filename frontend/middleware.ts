@@ -63,6 +63,10 @@ const PROTECTED_ROUTES: { prefix: string; roles: string[] }[] = [
   // existed). Confirmed live with a real admin session before this fix: 307 → /login even though
   // /admin/dashboard worked fine in the same session.
   { prefix: "/admin/a4-oversight", roles: ["admin"] },
+  // AA-505 — LLM cost/quality monitoring (Tenant->Model->Stage). Admin-only, same tier as
+  // a4-oversight/tenants above — this shows real per-call spend + Việc C's model choice is
+  // reached via /admin/settings (already admin+reviewer+content, unchanged).
+  { prefix: "/admin/llm-usage", roles: ["admin"] },
   // Internal staff pages (was INTERNAL_PATHS) — admin/reviewer get real JWT
   // verification; content is the known-limitation carve-out described above.
   { prefix: "/admin/dashboard", roles: ["admin", "reviewer", "content"] },

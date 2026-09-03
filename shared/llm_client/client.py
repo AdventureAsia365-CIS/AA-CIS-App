@@ -6,26 +6,24 @@ import openai
 import structlog
 from .models import LLMRequest, LLMResponse
 from .prompt_cache import build_cached_system_prompt, build_cached_messages
+from .pricing import BEDROCK_SONNET, BEDROCK_HAIKU, COST_TABLE, calc_cost
+from .role_config import get_stage_config_sync
 
 logger = structlog.get_logger()
 
 BEDROCK_REGION = os.environ.get("BEDROCK_REGION", "us-west-1")
 
-# Default model tier — override via ECS env var DEFAULT_MODEL_TIER
+# Default model tier — override via ECS env var DEFAULT_MODEL_TIER. Only reached when a call
+# passes neither an explicit request.model_tier NOR a request.stage (AA-518) — every real call
+# site in this codebase now passes at least one of those two, so this is belt-and-suspenders for
+# an unforeseen caller, not the live default path anymore.
 # Options: "haiku" (cheapest) | "sonnet" (premium) | "gpt-4.1" (OpenAI)
 DEFAULT_MODEL_TIER = os.environ.get("DEFAULT_MODEL_TIER", "haiku")
 
-# Bedrock model IDs
-# T2 Haiku: cross-region inference profile — ACTIVE (verified working)
-# T1 Sonnet: cross-region inference profile — needs AWS Marketplace subscription (AA-50)
-BEDROCK_SONNET = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
-BEDROCK_HAIKU  = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-
-COST_TABLE = {
-    BEDROCK_SONNET: {"in": 0.003,   "out": 0.015},
-    BEDROCK_HAIKU:  {"in": 0.00025, "out": 0.00125},
-    "gpt-4.1":      {"in": 0.002,   "out": 0.008},
-}
+# BEDROCK_SONNET/BEDROCK_HAIKU/COST_TABLE relocated to pricing.py (AA-518/AA-505) so Mechanism-B
+# call sites (invoke_claude() direct, e.g. T5 atomize, N7 E2-E5) can price a call without
+# importing this whole client — re-exported here unchanged so nothing importing them FROM this
+# module breaks.
 
 class LLMClient:
     """
@@ -55,7 +53,17 @@ class LLMClient:
         )
 
     def generate(self, request: LLMRequest) -> LLMResponse:
-        tier = request.model_tier or DEFAULT_MODEL_TIER  # "haiku" | "sonnet" | "gpt-4.1"
+        # AA-518 — request.stage (when set) resolves the admin's per-stage config; an explicit
+        # request.model_tier still wins over it (AA-237's opt-in haiku->sonnet auto-upgrade, and
+        # any other real per-request override), same relationship model_tier already had with
+        # the DEFAULT_MODEL_TIER env var before this task.
+        stage_cfg = get_stage_config_sync(request.stage) if request.stage else None
+        tier = request.model_tier or (stage_cfg.model_id if stage_cfg else DEFAULT_MODEL_TIER)
+        # Which satellite account is tried FIRST when acc2-native fails — 'acc3' unless the
+        # stage's admin config explicitly says 'acc1' (e.g. a real acc3 outage). Unknown/no-stage
+        # calls keep the pre-AA-518 hardcoded acc3-first order exactly.
+        primary_acct = stage_cfg.account_route if (stage_cfg and stage_cfg.account_route) else "acc3"
+        fallback_acct = "acc1" if primary_acct == "acc3" else "acc3"
 
         # Direct GPT-4.1 — no Bedrock fallback (explicit choice)
         if tier == "gpt-4.1":
@@ -77,27 +85,27 @@ class LLMClient:
                 else:
                     logger.warning("t1_failed_trying_t2", model=BEDROCK_SONNET, error=str(e))
 
-            # T1.5a: Claude Sonnet qua satellite acc3 — AA-397, satellite chính
+            # T1.5a: Claude Sonnet qua satellite PRIMARY account (acc3 unless stage config says acc1)
             try:
-                resp = self._call_bedrock_satellite(request, model=BEDROCK_SONNET, account="acc3")
+                resp = self._call_bedrock_satellite(request, model=BEDROCK_SONNET, account=primary_acct)
                 resp.fallback_used = False    # KHÔNG phải fallback — vẫn đúng Sonnet, đúng ý định
-                resp.satellite_account = "acc3"
-                logger.info("t1_5a_satellite_used", model=BEDROCK_SONNET, account="acc3", reason="acc2 T1 failed")
+                resp.satellite_account = primary_acct
+                logger.info("t1_5a_satellite_used", model=BEDROCK_SONNET, account=primary_acct, reason="acc2 T1 failed")
                 return resp
             except Exception as e:
                 logger.warning("t1_5a_satellite_failed_trying_t1_5b", model=BEDROCK_SONNET,
-                               account="acc3", error=str(e))
+                               account=primary_acct, error=str(e))
 
-            # T1.5b: Claude Sonnet qua satellite acc1 — AA-296, nay là fallback dưới acc3
+            # T1.5b: Claude Sonnet qua satellite FALLBACK account
             try:
-                resp = self._call_bedrock_satellite(request, model=BEDROCK_SONNET, account="acc1")
+                resp = self._call_bedrock_satellite(request, model=BEDROCK_SONNET, account=fallback_acct)
                 resp.fallback_used = False
-                resp.satellite_account = "acc1"
+                resp.satellite_account = fallback_acct
                 logger.info("t1_5b_satellite_used", model=BEDROCK_SONNET,
-                           account="acc1", reason="acc2 T1 + acc3 T1.5a failed")
+                           account=fallback_acct, reason="acc2 T1 + T1.5a failed")
                 return resp
             except Exception as e:
-                logger.warning("t1_5b_satellite_failed_trying_t2", model=BEDROCK_SONNET, account="acc1", error=str(e))
+                logger.warning("t1_5b_satellite_failed_trying_t2", model=BEDROCK_SONNET, account=fallback_acct, error=str(e))
 
         # T2: Claude Haiku — fast / default tier, or Sonnet fallback
         try:
@@ -107,27 +115,27 @@ class LLMClient:
         except Exception as e:
             logger.warning("t2_failed_trying_t2_5a", model=BEDROCK_HAIKU, error=str(e))
 
-        # T2.5a: Claude Haiku qua satellite acc3 — AA-397, satellite chính
+        # T2.5a: Claude Haiku qua satellite PRIMARY account
         try:
-            resp = self._call_bedrock_satellite(request, model=BEDROCK_HAIKU, account="acc3")
+            resp = self._call_bedrock_satellite(request, model=BEDROCK_HAIKU, account=primary_acct)
             # giữ đúng logic gốc T2: chỉ coi là fallback nếu ý định ban đầu là sonnet
             resp.fallback_used = tier == "sonnet"
-            resp.satellite_account = "acc3"
-            logger.info("t2_5a_satellite_used", model=BEDROCK_HAIKU, account="acc3", reason="acc2 T2 failed")
+            resp.satellite_account = primary_acct
+            logger.info("t2_5a_satellite_used", model=BEDROCK_HAIKU, account=primary_acct, reason="acc2 T2 failed")
             return resp
         except Exception as e:
-            logger.warning("t2_5a_satellite_failed_trying_t2_5b", model=BEDROCK_HAIKU, account="acc3", error=str(e))
+            logger.warning("t2_5a_satellite_failed_trying_t2_5b", model=BEDROCK_HAIKU, account=primary_acct, error=str(e))
 
-        # T2.5b: Claude Haiku qua satellite acc1 — AA-296, nay là fallback dưới acc3
+        # T2.5b: Claude Haiku qua satellite FALLBACK account
         try:
-            resp = self._call_bedrock_satellite(request, model=BEDROCK_HAIKU, account="acc1")
+            resp = self._call_bedrock_satellite(request, model=BEDROCK_HAIKU, account=fallback_acct)
             resp.fallback_used = tier == "sonnet"
-            resp.satellite_account = "acc1"
+            resp.satellite_account = fallback_acct
             logger.info("t2_5b_satellite_used", model=BEDROCK_HAIKU,
-                       account="acc1", reason="acc2 T2 + acc3 T2.5a failed")
+                       account=fallback_acct, reason="acc2 T2 + T2.5a failed")
             return resp
         except Exception as e:
-            logger.warning("t2_5b_satellite_failed_trying_t3", model=BEDROCK_HAIKU, account="acc1", error=str(e))
+            logger.warning("t2_5b_satellite_failed_trying_t3", model=BEDROCK_HAIKU, account=fallback_acct, error=str(e))
 
         # T3: GPT-4.1 — last resort for all tiers
         try:

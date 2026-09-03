@@ -30,6 +30,7 @@ from services.acp_angle_gate.prompts import SYSTEM_PROMPT, build_user_prompt
 from services.acp_shared.dfs_relevance import SearchDemandSignal
 from shared.llm_client.client import LLMClient
 from shared.llm_client.models import LLMRequest
+from shared.llm_client.call_log import record_call, record_call_with_pool
 
 logger = structlog.get_logger()
 
@@ -90,6 +91,8 @@ async def generate_angles(
     *, content_seed: str, goal: Goal, brand_audience: BrandAudience,
     destination: str | None = None, trip_name: str | None = None,
     search_demand: SearchDemandSignal | None = None,
+    tenant_id=None, request_id=None, pool=None,  # AA-505 — attribution for llm_call_log, optional
+    # (defaults None) so existing tests that call this without them are unaffected.
 ) -> tuple[list[dict], int, str, float]:
     """Returns (angles, recommended_index, recommendation_reason, cost_usd). `angles` is a list
     of exactly 3 dicts with the 4 required fields — service.py persists these directly into
@@ -107,7 +110,7 @@ async def generate_angles(
     )
     client = LLMClient()
     request = LLMRequest(
-        system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt, model_tier="sonnet", max_tokens=2048,
+        system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt, stage="t8_angle_gen", max_tokens=2048,
     )
     resp = await asyncio.to_thread(client.generate, request)
     parsed = _parse_response(resp.content)
@@ -116,6 +119,27 @@ async def generate_angles(
         "angle_gate_angles_generated", goal=goal["key"],
         model_used=resp.model_used, cost_usd=resp.cost_usd, recommended_index=recommended_index,
     )
+    avg_answers = (sum(len(a["answers"]) for a in angles) / len(angles)) if angles else 0
+    quality_signal = {
+        "angles_generated": len(angles), "recommended_index": recommended_index,
+        "avg_paa_answers_per_angle": round(avg_answers, 2),
+    }
+    if pool is not None:
+        await record_call_with_pool(
+            pool, stage="t8_angle_gen", role="writer", model=resp.model_used,
+            tokens_in=getattr(resp, "input_tokens", None), tokens_out=getattr(resp, "output_tokens", None), cost_usd=resp.cost_usd,
+            tenant_id=str(tenant_id) if tenant_id else None,
+            angle_gate_request_id=str(request_id) if request_id else None,
+            quality_signal=quality_signal,
+        )
+    else:
+        await record_call(
+            stage="t8_angle_gen", role="writer", model=resp.model_used,
+            tokens_in=getattr(resp, "input_tokens", None), tokens_out=getattr(resp, "output_tokens", None), cost_usd=resp.cost_usd,
+            tenant_id=str(tenant_id) if tenant_id else None,
+            angle_gate_request_id=str(request_id) if request_id else None,
+            quality_signal=quality_signal,
+        )
     return angles, recommended_index, reason, resp.cost_usd
 
 

@@ -59,6 +59,9 @@ from services.acp_shared.atom_extraction import (
 from services.acp_shared.grounding import find_novel_numeric_claims
 from services.content_generation.itinerary_utils import parse_canonical_itinerary_days
 from shared.llm_client.bedrock_satellite import invoke_claude
+from shared.llm_client.role_config import get_stage_config
+from shared.llm_client.call_log import record_call_with_pool
+from shared.llm_client.pricing import calc_cost
 
 logger = structlog.get_logger()
 
@@ -333,9 +336,16 @@ async def _atomize_whole_tour_legacy(
         return {"status": "skipped", "atom_count": 0}
 
     prompt = _build_user_prompt(row)
+    # AA-518 — "t5_atomize" stage config (seeded sonnet/acc3). account="acc3" is now EXPLICIT
+    # (was previously omitted here, silently defaulting to invoke_claude()'s own 'acc1' default —
+    # unintentional drift every sibling Mechanism-B call site didn't have, flagged in AA-518.md
+    # round 2 STEP0; fixed here rather than in a separate follow-up since this task already
+    # touches this exact call site to wire config + persist-log).
+    _t5_cfg = await get_stage_config("t5_atomize")
     try:
         llm_result = await asyncio.to_thread(
-            invoke_claude, prompt, model=_T5_MODEL_TIER, max_tokens=4096, system=_SYSTEM_PROMPT,
+            invoke_claude, prompt, model=_t5_cfg.model_id, max_tokens=4096, system=_SYSTEM_PROMPT,
+            account=_t5_cfg.account_route or "acc3",
         )
     except Exception as e:
         logger.error("t5_atomize_llm_failed", tour_id=tour_id, tenant_id=tenant_id,
@@ -390,6 +400,17 @@ async def _atomize_whole_tour_legacy(
                 False, False, True, 1.0, source_hash)
 
     logger.info("t5_atomize_done", tour_id=tour_id, tenant_id=tenant_id, atom_count=inserted)
+    # AA-505 — real, computed quality_signal: how many atoms this exact call actually produced
+    # vs. a zero-atom marker (a real, meaningful proxy for a stage with no judge — see decision 1,
+    # docs/implementation-notes/AA-518.md).
+    await record_call_with_pool(
+        pool, stage="t5_atomize", role="writer", model=llm_result.model_used,
+        tokens_in=llm_result.usage.get("input_tokens"), tokens_out=llm_result.usage.get("output_tokens"),
+        cost_usd=calc_cost(_t5_cfg.model_id, llm_result.usage.get("input_tokens", 0),
+                            llm_result.usage.get("output_tokens", 0)),
+        tenant_id=tenant_id,
+        quality_signal={"atoms_extracted": inserted, "is_empty_marker": inserted == 0},
+    )
     return {"status": "success", "atom_count": inserted}
 
 
@@ -441,6 +462,9 @@ async def _atomize_per_day(
     from services.acp_shared.competitor_index import build_competitor_index, score_distinctiveness
     competitor_idx = await build_competitor_index(tenant_id, country, pool)
 
+    # AA-518 — same "t5_atomize" stage config + explicit account="acc3" fix as the legacy path
+    # above (resolved once, reused across every day — cache-hit cost, not a per-day DB round trip).
+    _t5_cfg = await get_stage_config("t5_atomize")
     inserted = 0
     days_read = 0
     days_failed = []
@@ -448,7 +472,8 @@ async def _atomize_per_day(
         prompt = _build_day_user_prompt(row, day_num, day["title"], day["body"])
         try:
             llm_result = await asyncio.to_thread(
-                invoke_claude, prompt, model=_T5_MODEL_TIER, max_tokens=4096, system=_SYSTEM_PROMPT,
+                invoke_claude, prompt, model=_t5_cfg.model_id, max_tokens=4096, system=_SYSTEM_PROMPT,
+                account=_t5_cfg.account_route or "acc3",
             )
         except Exception as e:
             logger.error("t5_atomize_day_llm_failed", tour_id=tour_id, version_id=version_id,
@@ -536,6 +561,17 @@ async def _atomize_per_day(
                     fingerprint_hash = excluded.fingerprint_hash, atomized_at = now()
             """, version_id, day_num, fp)
         days_read += 1
+        # AA-505 — per-day atom count, real and immediate (same reasoning as the legacy path).
+        await record_call_with_pool(
+            pool, stage="t5_atomize", role="writer", model=llm_result.model_used,
+            tokens_in=llm_result.usage.get("input_tokens"),
+            tokens_out=llm_result.usage.get("output_tokens"),
+            cost_usd=calc_cost(_t5_cfg.model_id, llm_result.usage.get("input_tokens", 0),
+                                llm_result.usage.get("output_tokens", 0)),
+            tenant_id=tenant_id,
+            quality_signal={"atoms_extracted": len(new_atom_ids), "day_number": day_num,
+                             "is_empty_marker": not atoms},
+        )
 
     result = {
         "status": "failed" if days_failed else "success",

@@ -50,6 +50,9 @@ from services.acp_produce.atom_usage import atom_ids_cited
 from services.acp_produce.models import Piece
 from services.content_generation.brand_standards import AA_BRAND_IDENTITY_PROMPT
 from shared.llm_client.bedrock_satellite import BedrockInvokeResult, BedrockUnavailable, invoke_claude
+from shared.llm_client.role_config import get_stage_config_sync
+from shared.llm_client.call_log import record_call_sync
+from shared.llm_client.pricing import calc_cost
 
 logger = structlog.get_logger()
 
@@ -215,12 +218,15 @@ def _invoke_channel_with_retry(
     system = _build_adapt_system_prompt_base(brand_rubric_text) + _CHANNEL_INSTRUCTIONS[channel]
     prompt = _build_prompt(blog_body, cited_atom_text, channel)
     required_markers = _CHANNEL_REQUIRED_MARKERS[channel]
+    # AA-518 — "n7_adapt" stage config (seeded sonnet/acc3, matching the prior hardcoded literals).
+    cfg = get_stage_config_sync("n7_adapt")
 
     last_err: Exception | None = None
     for attempt in range(1, _MAX_INVOKE_ATTEMPTS + 1):
         try:
             result: BedrockInvokeResult = invoke_claude(
-                prompt, model="sonnet", max_tokens=_MAX_TOKENS, system=system, account="acc3"
+                prompt, model=cfg.model_id, max_tokens=_MAX_TOKENS, system=system,
+                account=cfg.account_route or "acc3",
             )
         except BedrockUnavailable as e:
             last_err = e
@@ -230,7 +236,16 @@ def _invoke_channel_with_retry(
                 time.sleep(_RETRY_BACKOFF_SECONDS * attempt)
             continue
 
-        if not all(marker in result.text for marker in required_markers):
+        markers_ok = all(marker in result.text for marker in required_markers)
+        record_call_sync(
+            stage="n7_adapt", role="writer", model=result.model_used,
+            tokens_in=result.usage.get("input_tokens"), tokens_out=result.usage.get("output_tokens"),
+            cost_usd=calc_cost(cfg.model_id, result.usage.get("input_tokens", 0),
+                                result.usage.get("output_tokens", 0)),
+            tenant_id=None,
+            quality_signal={"channel": channel, "required_markers_present": markers_ok},
+        )
+        if not markers_ok:
             last_err = AdaptChannelFailed(
                 f"response missing required marker(s) {required_markers} for channel={channel}"
             )

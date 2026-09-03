@@ -2,7 +2,7 @@
 // app/admin/settings/page.tsx — AA-158 Admin Settings (4 tabs)
 
 import { useState, useEffect, useCallback } from "react";
-import { Settings, ChevronDown, ChevronUp, X, Plus, Save } from "lucide-react";
+import { Settings, ChevronDown, ChevronUp, X, Plus, Save, AlertTriangle } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
 import {
   A, serif, sans, mono,
@@ -374,6 +374,225 @@ function SeoConfigTab({ seo: initialSeo }: { seo: SettingsData["seo_config"] }) 
   );
 }
 
+// ─── LLM Models Tab (AA-518 Việc C) ────────────────────────────────────────────
+
+interface ModelOption { model_id: string; label: string; available: boolean; reason?: string }
+interface AccountOption { value: string; label: string }
+interface StageConfigRow {
+  stage: string; role: string; provider: string; model_id: string;
+  account_route: string | null; updated_at: string | null; updated_by: string;
+  options: ModelOption[]; account_route_options: AccountOption[];
+}
+
+// Human label + display grouping — a pure presentation layer over the 16 stage rows the API
+// returns; the API itself is the source of truth for which stages/values actually exist.
+const STAGE_GROUPS: { key: string; label: string; stages: string[] }[] = [
+  { key: "s1", label: "S1 rewrite pipeline (dùng chung cho A1 admin & T2 tenant — cùng 1 code, xem docs/implementation-notes/AA-518.md)",
+    stages: ["s1_generate", "s1_judge", "s1_brand_audit", "s1_flag_fix", "s1_itinerary_nudge", "s1_atom_writer"] },
+  { key: "t5", label: "T5 — Atomize", stages: ["t5_atomize"] },
+  { key: "t8", label: "T8 — Angle generation", stages: ["t8_angle_gen"] },
+  { key: "t9", label: "T9 — Content write + T10 quality judge", stages: ["t9_write", "t10_judge"] },
+  { key: "n7", label: "N7 — Production pipeline (blog/social)",
+    stages: ["n7_draft", "n7_adapt", "n7_faq", "n7_repair", "n7_gap_research", "n7_judge"] },
+];
+const STAGE_LABELS: Record<string, string> = {
+  s1_generate: "Content generate", s1_judge: "Brand-fit judge",
+  s1_brand_audit: "Brand audit", s1_flag_fix: "Flag-fix repair",
+  s1_itinerary_nudge: "Itinerary day nudge", s1_atom_writer: "Atom-based writer",
+  t5_atomize: "Atomize tour", t8_angle_gen: "Angle generation",
+  t9_write: "Content write", t10_judge: "Quality judge (F8+F9)",
+  n7_draft: "Draft (E2)", n7_adapt: "Channel adapt (E3)", n7_faq: "FAQ answer (E4)",
+  n7_repair: "Repair (E5)", n7_gap_research: "Competitor gap research", n7_judge: "Framework/brand judge",
+};
+const ROLE_COLOR: Record<string, "gray" | "gold" | "green"> = { writer: "gold", judge: "green", validate: "gray" };
+
+function ModelRow({ row, onSaved }: { row: StageConfigRow; onSaved: (r: StageConfigRow) => void }) {
+  const [modelId, setModelId] = useState(row.model_id);
+  const [accountRoute, setAccountRoute] = useState(row.account_route ?? "");
+  const [confirming, setConfirming] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [savedFlash, setSavedFlash] = useState(false);
+  const [error, setError] = useState("");
+
+  const dirty = modelId !== row.model_id || accountRoute !== (row.account_route ?? "");
+  const modelLabel = (id: string) => row.options.find(o => o.model_id === id)?.label ?? id;
+  const acctLabel = (v: string) => row.account_route_options.find(o => o.value === v)?.label ?? v;
+
+  async function confirmSave() {
+    setConfirming(false);
+    setSaving(true);
+    setError("");
+    try {
+      const res = await fetch(`/api/admin/llm-config/${row.stage}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model_id: modelId, account_route: accountRoute || null }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        setError(d.detail ?? "Lưu thất bại");
+        setModelId(row.model_id);
+        setAccountRoute(row.account_route ?? "");
+        return;
+      }
+      const updated = await res.json();
+      onSaved(updated);
+      setSavedFlash(true);
+      setTimeout(() => setSavedFlash(false), 3000);
+    } catch {
+      setError("Lỗi mạng — không đổi model");
+      setModelId(row.model_id);
+      setAccountRoute(row.account_route ?? "");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 10, padding: "10px 4px",
+      borderBottom: `1px solid ${A.line2}`, flexWrap: "wrap",
+    }}>
+      <div style={{ minWidth: 200 }}>
+        <div style={{ fontFamily: mono, fontSize: 12, color: A.ink, fontWeight: 600 }}>{row.stage}</div>
+        <div style={{ fontSize: 11.5, color: A.muted2 }}>{STAGE_LABELS[row.stage] ?? row.stage}</div>
+      </div>
+      <Badge color={ROLE_COLOR[row.role] ?? "gray"}>{row.role}</Badge>
+
+      <select
+        value={modelId}
+        onChange={e => setModelId(e.target.value)}
+        disabled={saving}
+        style={{
+          padding: "6px 10px", borderRadius: 7, border: `1px solid ${A.line}`,
+          fontSize: 12.5, fontFamily: sans, color: A.body, background: A.card, minWidth: 190,
+        }}
+      >
+        {row.options.map(o => (
+          <option key={o.model_id} value={o.model_id} disabled={!o.available}>
+            {o.label}{!o.available ? " — chưa dùng được" : ""}
+          </option>
+        ))}
+      </select>
+      {(() => {
+        const opt = row.options.find(o => o.model_id === modelId);
+        return !opt?.available && opt?.reason ? (
+          <span title={opt.reason} style={{ display: "inline-flex", color: A.amber }}>
+            <AlertTriangle size={13} />
+          </span>
+        ) : null;
+      })()}
+
+      {row.account_route_options.length > 0 && (
+        <select
+          value={accountRoute}
+          onChange={e => setAccountRoute(e.target.value)}
+          disabled={saving}
+          style={{
+            padding: "6px 10px", borderRadius: 7, border: `1px solid ${A.line}`,
+            fontSize: 12.5, fontFamily: sans, color: A.body, background: A.card, minWidth: 150,
+          }}
+        >
+          {row.account_route_options.map(o => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+      )}
+
+      <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+        {savedFlash && <span style={{ fontSize: 11.5, color: A.green, fontWeight: 600 }}>Đã lưu ✓</span>}
+        {error && <span style={{ fontSize: 11.5, color: A.red }}>{error}</span>}
+        <span style={{ fontSize: 10.5, color: A.muted2 }}>
+          {row.updated_at ? new Date(row.updated_at).toLocaleString() : "—"} · {row.updated_by}
+        </span>
+        <Btn variant="secondary" size="sm" disabled={!dirty || saving} onClick={() => setConfirming(true)}>
+          {saving ? <Spinner size={12} /> : <Save size={12} />}
+          {saving ? "Đang lưu…" : "Lưu"}
+        </Btn>
+      </div>
+
+      {confirming && (
+        <div style={{
+          position: "fixed", inset: 0, background: "rgba(31,41,51,0.45)",
+          display: "grid", placeItems: "center", zIndex: 50,
+        }}>
+          <Card style={{ maxWidth: 440, width: "90%" }}>
+            <div style={{ fontFamily: serif, fontSize: 16, color: A.ink, marginBottom: 8 }}>
+              Đổi model cho <span style={{ fontFamily: mono }}>{row.stage}</span>?
+            </div>
+            <p style={{ fontSize: 12.5, color: A.muted, marginBottom: 12 }}>
+              Đổi model ảnh hưởng TOÀN HỆ THỐNG (mọi lượt gọi LLM ở stage này, không chỉ của bạn) —
+              có hiệu lực ngay lần gọi tiếp theo, không cần deploy lại.
+            </p>
+            <div style={{
+              background: A.line2, borderRadius: 8, padding: "10px 12px",
+              fontSize: 12.5, fontFamily: mono, color: A.ink2, marginBottom: 16,
+            }}>
+              {modelLabel(row.model_id)}{row.account_route ? ` (${acctLabel(row.account_route)})` : ""}
+              {" → "}
+              {modelLabel(modelId)}{accountRoute ? ` (${acctLabel(accountRoute)})` : ""}
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <Btn variant="secondary" size="sm" onClick={() => setConfirming(false)}>Huỷ</Btn>
+              <Btn variant="primary" size="sm" onClick={confirmSave}>Xác nhận đổi</Btn>
+            </div>
+          </Card>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ModelsTab() {
+  const [rows, setRows] = useState<StageConfigRow[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const load = useCallback(() => {
+    setLoading(true);
+    fetch("/api/admin/llm-config")
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(d => { setRows(d.stages); setError(""); })
+      .catch(() => setError("Không tải được cấu hình model"))
+      .finally(() => setLoading(false));
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  function onRowSaved(updated: StageConfigRow) {
+    setRows(prev => prev ? prev.map(r => r.stage === updated.stage ? { ...r, ...updated } : r) : prev);
+  }
+
+  if (loading) return <LoadingScreen msg="Đang tải cấu hình model…" />;
+  if (error || !rows) {
+    return (
+      <Card style={{ textAlign: "center", padding: 40 }}>
+        <div style={{ color: A.red, marginBottom: 12 }}>{error || "No data"}</div>
+        <Btn variant="secondary" onClick={load}>Retry</Btn>
+      </Card>
+    );
+  }
+
+  const byStage = Object.fromEntries(rows.map(r => [r.stage, r]));
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <p style={{ fontSize: 12, color: A.muted2, margin: 0 }}>
+        Chỉ admin (aa_internal) đổi được model ở đây — tenant không có quyền. Model bị chặn (vd.
+        GPT-5.6) vẫn hiện trong danh sách kèm lý do, không ẩn hoàn toàn, để biết roadmap.
+      </p>
+      {STAGE_GROUPS.map(group => (
+        <Card key={group.key}>
+          <SLabel>{group.label}</SLabel>
+          <div>
+            {group.stages.map(stage => byStage[stage] && (
+              <ModelRow key={stage} row={byStage[stage]} onSaved={onRowSaved} />
+            ))}
+          </div>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
 // ─── Tenant Info Tab ──────────────────────────────────────────────────────────
 
 function TenantInfoTab({
@@ -465,6 +684,7 @@ const TABS = [
   { key: "pipeline",  label: "Pipeline Gates" },
   { key: "brand",     label: "Brand Rules" },
   { key: "seo",       label: "SEO Config" },
+  { key: "models",    label: "LLM Models" },
   { key: "tenant",    label: "Tenant Info" },
 ];
 
@@ -533,6 +753,7 @@ export default function SettingsPage() {
             {tab === "seo" && (
               <SeoConfigTab seo={data.seo_config} />
             )}
+            {tab === "models" && <ModelsTab />}
             {tab === "tenant" && (
               <TenantInfoTab tenant={data.tenant} plan={data.plan} />
             )}

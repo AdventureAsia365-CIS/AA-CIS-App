@@ -11,6 +11,7 @@ from shared.secrets import get_database_url
 
 from shared.llm_client.client import LLMClient
 from shared.llm_client.models import LLMRequest
+from shared.llm_client.call_log import record_call_sync
 from .seo_meta_utils import (best_meta_candidate, meta_in_band, SEO_META_FORBIDDEN, SEO_META_MIN, SEO_META_MAX)
 from .prompts import parse_source_day_word_counts
 from .itinerary_utils import (
@@ -117,7 +118,7 @@ def _rerepair_meta(post: str, tour: dict, content: dict, model_tier: str, intent
             + "- Return JSON: {\"seo_meta\": \"...\"}"
         )
         resp = LLMClient().generate(LLMRequest(
-            system_prompt=FIX_SYSTEM, user_prompt=prompt, model_tier=model_tier,
+            system_prompt=FIX_SYSTEM, user_prompt=prompt, model_tier=model_tier, stage="s1_flag_fix",
         ))
         raw = resp.content.strip()
         fence = chr(96) * 3
@@ -127,8 +128,15 @@ def _rerepair_meta(post: str, tour: dict, content: dict, model_tier: str, intent
                 raw = raw[4:]
             raw = raw.strip()
         candidate = (json.loads(raw).get("seo_meta") or "").strip()
+        landed = _in_band(candidate, forbidden)
         logger.info("meta_rerepair_done", before_len=len(cur), after_len=len(candidate))
-        return candidate if _in_band(candidate, forbidden) else post
+        record_call_sync(
+            stage="s1_flag_fix", role="writer", model=resp.model_used,
+            tokens_in=getattr(resp, "input_tokens", None), tokens_out=getattr(resp, "output_tokens", None),
+            cost_usd=resp.cost_usd, tenant_id=None,
+            quality_signal={"meta_landed_in_band": landed, "candidate_len": len(candidate)},
+        )
+        return candidate if landed else post
     except Exception as e:
         logger.warning("meta_rerepair_failed_graceful", error=str(e))
         return post
@@ -183,7 +191,14 @@ def _repair_still_compressed_days(state: dict, itinerary_text: str):
         )
         extra_cost += resp.cost_usd
         new_ratio = len(new_body.split()) / target_words
-        if ITINERARY_CLAMP_MIN <= new_ratio <= ITINERARY_CLAMP_MAX:
+        in_clamp = ITINERARY_CLAMP_MIN <= new_ratio <= ITINERARY_CLAMP_MAX
+        record_call_sync(
+            stage="s1_itinerary_nudge", role="writer", model=resp.model_used,
+            tokens_in=getattr(resp, "input_tokens", None), tokens_out=getattr(resp, "output_tokens", None),
+            cost_usd=resp.cost_usd, tenant_id=None,
+            quality_signal={"landed_in_clamp": in_clamp, "ratio_after_nudge": round(new_ratio, 3)},
+        )
+        if in_clamp:
             days[day_num] = {"title": new_title, "body": new_body}
             applied = True
             logger.info("itinerary_day_repaired", day=day_num, new_ratio=round(new_ratio, 3))
@@ -297,7 +312,12 @@ Keep all other fields unchanged."""
         request = LLMRequest(
             system_prompt=FIX_SYSTEM,
             user_prompt=user_prompt,
-            model_tier=state.get("model_tier", "haiku"),
+            # AA-518: was state.get("model_tier","haiku") — the "haiku" literal masked the
+            # "s1_flag_fix" stage config the same way graph.py's generate_node did (see that
+            # file's own AA-518 comment). No explicit tier here (this is always a repair pass,
+            # never AA-237's auto-upgrade target), so config now drives it directly.
+            model_tier=state.get("model_tier"),
+            stage="s1_flag_fix",
         )
         resp = llm_client.generate(request)
 
@@ -308,6 +328,12 @@ Keep all other fields unchanged."""
                 raw = raw[4:]
             raw = raw.strip()
         fixed_fields = json.loads(raw)
+        record_call_sync(
+            stage="s1_flag_fix", role="writer", model=resp.model_used,
+            tokens_in=getattr(resp, "input_tokens", None), tokens_out=getattr(resp, "output_tokens", None),
+            cost_usd=resp.cost_usd, tenant_id=None,
+            quality_signal={"fields_fixed": len(fix_keys), "fields_requested": sorted(fix_keys)},
+        )
 
         new_generated = dict(current_content)
         for k, v in fixed_fields.items():
@@ -337,7 +363,7 @@ Keep all other fields unchanged."""
                 elif _rel:
                     _clue = _rel[0] if isinstance(_rel[0], str) else str(_rel[0])
                 _guarded = _rerepair_meta(
-                    _post_meta, tour, new_generated, state.get("model_tier", "haiku"),
+                    _post_meta, tour, new_generated, state.get("model_tier"),
                     intent_clue=_clue, forbidden=_meta_forbidden,
                 )
             # AA-226: if STILL out of band after clue-guided re-repair, do NOT accept an

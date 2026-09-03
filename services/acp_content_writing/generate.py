@@ -31,6 +31,7 @@ from services.acp_angle_gate.goals import Goal
 from services.acp_content_writing.prompts import SYSTEM_PROMPT, build_user_prompt
 from shared.llm_client.client import LLMClient
 from shared.llm_client.models import LLMRequest
+from shared.llm_client.call_log import record_call_sync
 
 # Same ceiling class as T8's angle-gen call (max_tokens=2048 for 3 short structured angles) and
 # the project-wide "max_tokens=4096, not 2000" JSON-truncation rule — sized generously for the
@@ -91,6 +92,7 @@ def write_content(
     brand_audience: BrandAudience, angle: dict, cta: str,
     destination: str | None = None, trip_name: str | None = None, atom_id: str | None = None,
     route_segments: list[tuple[str, str]] | None = None, keyword: str | None = None,
+    tenant_id: str | None = None, angle_gate_request_id: str | None = None,  # AA-505, optional
 ) -> tuple[str, float, dict]:
     """Attempt 1 — SKILL_v2.md workflow step 9, fresh write. Returns (content_text, cost_usd,
     seo_meta) — `seo_meta` is `{"seo_title": None, "meta_description": None, "slug": None}` for
@@ -116,12 +118,28 @@ def write_content(
     )
     client = LLMClient()
     request = LLMRequest(system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt,
-                          model_tier="sonnet", max_tokens=_MAX_TOKENS)
+                          stage="t9_write", max_tokens=_MAX_TOKENS)
     resp = client.generate(request)
+    _record_t9_write_call(resp, channel_style["channel"], attempt=1,
+                           tenant_id=tenant_id, angle_gate_request_id=angle_gate_request_id)
     if channel_style["channel"] == "blog":
         body, seo_meta = _parse_blog_envelope(resp.content)
         return body, resp.cost_usd, seo_meta
     return _strip_fences(resp.content), resp.cost_usd, {"seo_title": None, "meta_description": None, "slug": None}
+
+
+def _record_t9_write_call(resp, channel: str, *, attempt: int, tenant_id, angle_gate_request_id) -> None:
+    """AA-505 — shared by write_content()/rewrite_with_feedback(). Lightweight, real, immediate
+    heuristic (output length is non-trivial) — the MEANINGFUL quality signal for this piece
+    (whether it actually passed T10) is logged separately by quality_gates.py's own "t10_judge"
+    rows, right after run_quality_gates() runs on this exact output — deliberately not deferred
+    here."""
+    record_call_sync(
+        stage="t9_write", role="writer", model=resp.model_used,
+        tokens_in=getattr(resp, "input_tokens", None), tokens_out=getattr(resp, "output_tokens", None), cost_usd=resp.cost_usd,
+        tenant_id=tenant_id, angle_gate_request_id=angle_gate_request_id,
+        quality_signal={"channel": channel, "attempt": attempt, "output_len_chars": len(resp.content)},
+    )
 
 
 def rewrite_with_feedback(
@@ -129,6 +147,7 @@ def rewrite_with_feedback(
     brand_audience: BrandAudience, angle: dict, cta: str, revision_feedback: list[str],
     destination: str | None = None, trip_name: str | None = None, atom_id: str | None = None,
     route_segments: list[tuple[str, str]] | None = None, keyword: str | None = None,
+    tenant_id: str | None = None, angle_gate_request_id: str | None = None,  # AA-505, optional
 ) -> tuple[str, float, dict]:
     """Attempt 2 (the only retry — Phase 1's confirmed cap of 2 total attempts) — the SAME
     write call, with `revision_feedback` (the specific gate/violation strings T10 failed on,
@@ -146,8 +165,10 @@ def rewrite_with_feedback(
     )
     client = LLMClient()
     request = LLMRequest(system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt,
-                          model_tier="sonnet", max_tokens=_MAX_TOKENS)
+                          stage="t9_write", max_tokens=_MAX_TOKENS)
     resp = client.generate(request)
+    _record_t9_write_call(resp, channel_style["channel"], attempt=2,
+                           tenant_id=tenant_id, angle_gate_request_id=angle_gate_request_id)
     if channel_style["channel"] == "blog":
         body, seo_meta = _parse_blog_envelope(resp.content)
         return body, resp.cost_usd, seo_meta

@@ -161,7 +161,9 @@ def test_generate_node_nudges_day_outside_clamp_exactly_once():
     assert instance.generate.call_count == 2, "exactly one main call + one nudge call"
     nudge_request = instance.generate.call_args_list[1].args[0]
     assert "TARGET LENGTH" in nudge_request.user_prompt
-    assert nudge_request.model_tier == "haiku"
+    # AA-518: model comes from the "s1_itinerary_nudge" stage config now (seeded to haiku,
+    # matching this test's prior literal exactly).
+    assert nudge_request.stage == "s1_itinerary_nudge"
 
     ratios = {r["day"]: r for r in result["itinerary_day_ratios"]}
     assert ratios[2]["nudged"] is True

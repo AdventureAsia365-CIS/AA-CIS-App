@@ -111,7 +111,9 @@ class TestGenerateAngles:
         assert "seek depth" in request.user_prompt
         assert GOAL["marketing_term"] in request.user_prompt
         assert "Ha Giang Loop" in request.user_prompt
-        assert request.model_tier == "sonnet"
+        # AA-518: model comes from the "t8_angle_gen" stage config now (seeded to sonnet,
+        # matching this test's prior literal exactly).
+        assert request.stage == "t8_angle_gen"
 
     async def test_no_channel_block_in_prompt(self):
         """AA-469 Việc 4 (flow-order fix) — confirms the removal, not just that no error is

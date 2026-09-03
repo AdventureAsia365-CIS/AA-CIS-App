@@ -46,6 +46,9 @@ from services.acp_produce.generation import _batch_sections
 from services.acp_produce.models import Brief, FAQCandidate, FAQItem, Piece
 from services.content_generation.brand_standards import AA_BRAND_IDENTITY_PROMPT
 from shared.llm_client.bedrock_satellite import BedrockInvokeResult, BedrockUnavailable, invoke_claude
+from shared.llm_client.role_config import get_stage_config_sync
+from shared.llm_client.call_log import record_call_sync
+from shared.llm_client.pricing import calc_cost
 
 logger = structlog.get_logger()
 
@@ -120,6 +123,15 @@ def answer_faq(
                      questions=[c.question for c in batch], latency_ms=result.latency_ms, usage=result.usage)
 
         parsed = _parse_batch_response(result.text, batch)
+        _cfg = get_stage_config_sync("n7_faq")
+        record_call_sync(
+            stage="n7_faq", role="writer", model=result.model_used,
+            tokens_in=result.usage.get("input_tokens"), tokens_out=result.usage.get("output_tokens"),
+            cost_usd=calc_cost(_cfg.model_id, result.usage.get("input_tokens", 0),
+                                result.usage.get("output_tokens", 0)),
+            tenant_id=None,
+            quality_signal={"items_parsed": len(parsed), "items_requested": len(batch)},
+        )
         if len(parsed) != len(batch):
             raise FAQAnswerFailed(
                 f"Sonnet response for FAQ batch {[c.question for c in batch]} did not contain "
@@ -138,11 +150,14 @@ def _build_batch_prompt(batch: list[FAQCandidate], atom_text_by_id: dict[str, st
 
 
 def _invoke_sonnet_with_retry(prompt: str, max_tokens: int, system: str) -> BedrockInvokeResult:
+    # AA-518 — "n7_faq" stage config (seeded sonnet/acc3, matching the prior hardcoded literals).
+    cfg = get_stage_config_sync("n7_faq")
     last_err: Optional[BedrockUnavailable] = None
     for attempt in range(1, _MAX_INVOKE_ATTEMPTS + 1):
         try:
             return invoke_claude(
-                prompt, model="sonnet", max_tokens=max_tokens, system=system, account="acc3"
+                prompt, model=cfg.model_id, max_tokens=max_tokens, system=system,
+                account=cfg.account_route or "acc3",
             )
         except BedrockUnavailable as e:
             last_err = e

@@ -61,8 +61,13 @@ def _fake_conn(existing_fingerprints=None):
 
 
 class _FakeLLMResult:
-    def __init__(self, text):
+    def __init__(self, text, model_used="sonnet-4-6", usage=None):
         self.text = text
+        # AA-518/AA-505 — record_call_with_pool() (the new per-day/per-tour persist-log call)
+        # reads both of these; a real BedrockInvokeResult always has them (see its dataclass in
+        # shared/llm_client/bedrock_satellite.py), this fake just needed to catch up.
+        self.model_used = model_used
+        self.usage = usage or {"input_tokens": 100, "output_tokens": 50}
 
 
 def _day1_atoms_json(place="Old Quarter", action="walk"):

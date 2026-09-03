@@ -256,22 +256,43 @@ def generate_draft(system_prompt: str, user_prompt: str, model_tier: str = DEFAU
 
 
 def _call_claude_satellite(system_prompt: str, user_prompt: str, max_tokens: int) -> dict:
-    """AA-392 default writer — acc3 Claude Sonnet via the AA-296/397 Bedrock
-    satellite (acc1 fallback), the same `invoke_claude()` call N7's own writer
-    uses (services/acp_produce/generation.py). Real billed money post
-    Activate-credits-rejection (ADR-2026-032) — accepted cost, same as N7's own
-    AA-334 sign-off (06/08/2026) to move off Palmyra."""
+    """AA-392 default writer — Claude Sonnet via the AA-296/397 Bedrock satellite, the same
+    `invoke_claude()` call N7's own writer uses (services/acp_produce/generation.py). Real
+    billed money post Activate-credits-rejection (ADR-2026-032) — accepted cost, same as N7's
+    own AA-334 sign-off (06/08/2026) to move off Palmyra.
+
+    AA-518 (02/09/2026) — model/account now come from the "s1_atom_writer" stage config (seeded
+    to sonnet/acc3, matching the prior hardcoded literals exactly). Also fixes a stale docstring
+    this same STEP0 flagged: this function previously described itself as having an "acc1
+    fallback" — it never did (one call, one account, no except-and-retry-on-acc1 anywhere in
+    this function); that fallback only exists in Mechanism A (LLMClient.generate()), not here."""
     from shared.llm_client.bedrock_satellite import invoke_claude, BedrockUnavailable
+    from shared.llm_client.role_config import get_stage_config_sync
+    from shared.llm_client.call_log import record_call_sync
+    from shared.llm_client.pricing import calc_cost
+
+    cfg = get_stage_config_sync("s1_atom_writer")
     try:
-        result = invoke_claude(user_prompt, model="sonnet", max_tokens=max_tokens, system=system_prompt, account="acc3")
+        result = invoke_claude(
+            user_prompt, model=cfg.model_id, max_tokens=max_tokens, system=system_prompt,
+            account=cfg.account_route or "acc3",
+        )
     except BedrockUnavailable as e:
         raise RuntimeError(f"Claude satellite failed: {e}") from e
+    in_tok = result.usage.get("input_tokens", 0)
+    out_tok = result.usage.get("output_tokens", 0)
+    record_call_sync(
+        stage="s1_atom_writer", role="writer", model=f"satellite-{result.model_used}",
+        tokens_in=in_tok, tokens_out=out_tok, cost_usd=calc_cost(cfg.model_id, in_tok, out_tok),
+        tenant_id=None,  # AA-518 — same ContentState-has-no-tenant_id gap as s1_generate, flagged there
+        quality_signal={"output_len_chars": len(result.text)},
+    )
     return {
         "text": result.text,
         "model_used": f"satellite-{result.model_used}",
         "provider": "bedrock-satellite",
-        "input_tokens": result.usage.get("input_tokens", 0),
-        "output_tokens": result.usage.get("output_tokens", 0),
+        "input_tokens": in_tok,
+        "output_tokens": out_tok,
     }
 
 

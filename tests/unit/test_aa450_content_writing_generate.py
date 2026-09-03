@@ -64,7 +64,10 @@ class TestWriteContent:
         assert ANGLE["name"] in request.user_prompt
         assert CHANNEL_STYLE["display_name"] in request.user_prompt
         assert "Ha Giang Loop" in request.user_prompt
-        assert request.model_tier == "sonnet"
+        # AA-518: model comes from the "t9_write" stage config now (seeded to sonnet, matching
+        # this test's prior literal exactly) — model_tier itself is no longer set explicitly
+        # here, that's the whole point of making it admin-configurable.
+        assert request.stage == "t9_write"
 
     def test_no_revision_feedback_on_first_attempt(self):
         client = _client_returning("piece")

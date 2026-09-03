@@ -251,6 +251,7 @@ async def start_write(
         "destination": destination, "trip_name": trip_name,
         "brand_rubric_text": brand_rubric_text, "channel": req["channel"],
         "atom_id": req["atom_id"], "route_segments": route_segments, "keyword": keyword,
+        "tenant_id": str(tenant_id),  # AA-505 — attribution for llm_call_log
     }
     return {"piece": piece, "context": context}
 
@@ -299,6 +300,9 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
     route_segments = context.get("route_segments")
     # AA-514 — same dict.get() backward-compatibility as route_segments above.
     keyword = context.get("keyword")
+    # AA-505 — same dict.get() backward-compatibility (None for any pre-AA-505 test that builds
+    # a context dict by hand without this key).
+    tenant_id = context.get("tenant_id")
 
     attempt = 1  # bound before the try block so the except handler always has a real value
     try:
@@ -320,6 +324,7 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
                     brand_audience=brand_audience, angle=chosen, cta=cta,
                     destination=destination, trip_name=trip_name, atom_id=atom_id,
                     route_segments=route_segments, keyword=keyword,
+                    tenant_id=tenant_id, angle_gate_request_id=str(request_id),
                 )
             else:
                 content_text, cost, seo_meta = await asyncio.to_thread(
@@ -328,6 +333,7 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
                     revision_feedback=repair_log[-1]["violations"],
                     destination=destination, trip_name=trip_name, atom_id=atom_id,
                     route_segments=route_segments, keyword=keyword,
+                    tenant_id=tenant_id, angle_gate_request_id=str(request_id),
                 )
             total_cost += cost
 
