@@ -449,7 +449,7 @@ function ModelRow({ row, onSaved }: { row: StageConfigRow; onSaved: (r: StageCon
   }
 
   return (
-    <div style={{
+    <div data-testid={`llm-model-row-${row.stage}`} style={{
       display: "flex", alignItems: "center", gap: 10, padding: "10px 4px",
       borderBottom: `1px solid ${A.line2}`, flexWrap: "wrap",
     }}>
@@ -460,6 +460,7 @@ function ModelRow({ row, onSaved }: { row: StageConfigRow; onSaved: (r: StageCon
       <Badge color={ROLE_COLOR[row.role] ?? "gray"}>{row.role}</Badge>
 
       <select
+        data-testid={`llm-model-select-${row.stage}`}
         value={modelId}
         onChange={e => setModelId(e.target.value)}
         disabled={saving}
