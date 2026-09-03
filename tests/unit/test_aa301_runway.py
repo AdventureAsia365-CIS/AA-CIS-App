@@ -2,20 +2,22 @@
 (MOFU band) fixes, duration parser, recompute trigger, trip_url no-op.
 
 Pure Python — no DB, no LLM. compute_runway_map() is unit-tested directly
-with in-memory Trip fixtures; fetch_trips()/runway_map() (the DB wrapper)
-get one dedicated test with a mocked asyncpg pool, mirroring the
-pool.acquire() mocking pattern in test_aa299_atom_insert.py.
+with in-memory Trip fixtures.
+
+AA-516 (03/09/2026): TestFetchTripsDbWrapper (the DB-wrapper tests for `fetch_trips()`/
+`runway_map()`) was removed along with those functions — deleted as dead N4-N6 admin-triggered
+code (Slate/AA-511 replaced it, T7 reads trips via tenant_pool.py instead). Every other class
+here still covers compute_runway_map() and its pure helpers, all untouched and still live.
 """
 import uuid
 from collections import Counter
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from services.acp_planning.models import RunwayMap, Trip, compute_trips_hash, needs_recompute
 from services.acp_planning.runway import (
     _family_detected, _offset_for, _offsets_for_destination, _stage_for_dist,
-    compute_runway_map, dead_trip_url_alarms, fetch_trips, parse_duration_days, parse_period,
+    compute_runway_map, dead_trip_url_alarms, parse_duration_days, parse_period,
 )
 
 TENANT = uuid.UUID("00000000-0000-0000-0000-000000000001")
@@ -229,85 +231,3 @@ class TestNoLlmCost:
         src = open(mod.__file__).read()
         for banned in ("boto3", "bedrock", "anthropic", "invoke_model", "invoke_claude"):
             assert banned not in src.lower(), f"N4 must be $0 LLM — found '{banned}' in runway.py"
-
-
-class TestFetchTripsDbWrapper:
-    @pytest.mark.asyncio
-    async def test_query_reads_tenant_tour_versions_not_v_trip_registry(self):
-        """AA-500 (2026-09-01) — supersedes the AA-323 round 6 Phần B TEMP behavior this test
-        used to assert (every tenant reading the unfiltered `v_trip_registry` platform catalog).
-        `fetch_trips()` now reads the tenant's own T1->T5 pipeline output
-        (`gold_aa_internal.tenant_tour_versions` joined through to `raw_tours`/`published_tours`)
-        — the same source `tenant_pool.fetch_tenant_trips()` (AA-448) already uses for T7.
-        `v_trip_registry` (`raw_tours.tenant_id`, always aa_internal — confirmed live, AA-500
-        STEP0) is the wrong source for per-tenant planning; it stays correct only for T1
-        pool-browsing (`v1_tours.py`), untouched by this change."""
-        conn = AsyncMock()
-        conn.fetch.return_value = [{
-            "id": uuid.uuid4(), "name": "DB Trip", "destination": "Testland",
-            "period": "Mar-May", "duration_raw": "5 days", "itinerary_source": "text",
-            "lifecycle_stage": "active", "trip_url": None, "url_alive": None,
-        }]
-        ctx = AsyncMock()
-        ctx.__aenter__ = AsyncMock(return_value=conn)
-        ctx.__aexit__ = AsyncMock(return_value=False)
-        pool = MagicMock()
-        pool.acquire = MagicMock(return_value=ctx)
-
-        trips = await fetch_trips(TENANT, pool)
-
-        assert len(trips) == 1
-        assert trips[0].name == "DB Trip"
-        called_query, called_tenant_id, called_owner_scope = conn.fetch.call_args[0]
-        assert called_tenant_id == TENANT
-        assert called_owner_scope == str(TENANT)
-        assert "gold_aa_internal.tenant_tour_versions" in called_query
-        assert "WHERE ttv.tenant_id = $1" in called_query
-        assert "FROM acp_contract.v_trip_registry" not in called_query
-
-    @pytest.mark.asyncio
-    async def test_query_requires_at_least_one_real_atom(self):
-        """AA-500 follow-up (same day, "Cách B", Nghiep decision) — `fetch_trips()` additionally
-        requires >=1 real `tour_atoms` row (`owner_scope = tenant_id`, not deleted, not an empty
-        marker) via `EXISTS`, on top of `tenant_tour_versions` membership. Slate (T7, AA-511)
-        shows/recommends by ATOM, not by tour — a rewritten-but-not-yet-atomized tour has no
-        atoms for Slate to use, so it would be pure noise if `fetch_trips()` still returned it.
-        Deliberately diverges from `tenant_pool.fetch_tenant_trips()`/`v1_marketplace.py`'s
-        atom-optional queries — see the function's own docstring for why that's correct."""
-        conn = AsyncMock()
-        conn.fetch.return_value = []
-        ctx = AsyncMock()
-        ctx.__aenter__ = AsyncMock(return_value=conn)
-        ctx.__aexit__ = AsyncMock(return_value=False)
-        pool = MagicMock()
-        pool.acquire = MagicMock(return_value=ctx)
-
-        await fetch_trips(TENANT, pool)
-
-        called_query, called_tenant_id, called_owner_scope = conn.fetch.call_args[0]
-        assert called_tenant_id == TENANT
-        assert called_owner_scope == str(TENANT)
-        assert "EXISTS" in called_query
-        assert "acp_contract.tour_atoms" in called_query
-        assert "ta.owner_scope = $2" in called_query
-        assert "NOT ta.deleted" in called_query
-        assert "NOT ta.is_empty_marker" in called_query
-
-    @pytest.mark.asyncio
-    async def test_no_qualifying_rows_returns_empty_not_error(self):
-        """AA-500 decision (Nghiep-confirmed): a tenant with zero rewritten+atomized trips —
-        including aa_internal itself today, which has never run its own master catalog through
-        the T1->T5 tenant-rewrite flow — gets an empty trip list, not an error. Fixing this for
-        aa_internal is an operational action (rewrite+atomize a tour via the portal), not a code
-        branch."""
-        conn = AsyncMock()
-        conn.fetch.return_value = []
-        ctx = AsyncMock()
-        ctx.__aenter__ = AsyncMock(return_value=conn)
-        ctx.__aexit__ = AsyncMock(return_value=False)
-        pool = MagicMock()
-        pool.acquire = MagicMock(return_value=ctx)
-
-        trips = await fetch_trips(TENANT, pool)
-
-        assert trips == []
