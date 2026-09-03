@@ -38,12 +38,21 @@ from services.acp_angle_gate.goals import get_goal
 from services.acp_content_writing.generate import rewrite_with_feedback, write_content
 from services.acp_content_writing.quality_gates import (deep_strip_citation_tags, run_quality_gates,
                                                           strip_citation_tags)
+from services.acp_shared.content_embedding import compute_embedding, embedding_to_pgvector_literal
+from services.acp_shared.piece_similarity import find_similar_pieces
 from services.acp_planning.tenant_pool import fetch_tenant_trips
 from services.acp_produce.brand import fetch_brand_rubric_text
 
 logger = structlog.get_logger()
 
 MAX_ATTEMPTS = 2  # Phase 1 §2c/§3 — confirmed cap, not N7's 3-8 range
+
+# AA-499 (Decision 5) — same 0.92 threshold Nghiệp already confirmed (Q6=B, 25/07/2026, AA-332
+# origin, cited in AA-484's Linear comment) for the CROSS-tenant blocking gate. Reused verbatim
+# for this within-tenant, non-blocking flag rather than picking a second number with no basis —
+# a shared threshold for the same underlying question ("is this near-duplicate content?") is a
+# more defensible default than inventing a separate one for the softer, flag-only case.
+_WITHIN_TENANT_REUSE_THRESHOLD = 0.92
 
 
 class ContentWritingError(Exception):
@@ -400,12 +409,45 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
         if held_reason:
             held_reason = strip_citation_tags(held_reason)
 
+        # AA-499 (Decision 5) — embedding + within-tenant reuse flag, 'approved' only (a held
+        # piece never ships, nothing useful to compare it against or index it for). Runs AFTER
+        # the gate loop concludes, never affects gate pass/fail — a pure metadata annotation on
+        # an already-decided outcome, not a new gate (quality_gates.py's run_quality_gates() is a
+        # synchronous, pool-free function; giving it DB+Bedrock access for one soft signal would
+        # be a bigger structural change than this issue's own scope). Soft-fail throughout: an
+        # embedding call failure, or a similarity query with nothing to compare against, both
+        # just leave `embedding`/this flag absent — never blocks persistence.
+        embedding: list[float] | None = None
+        # tenant_id is always real in production (start_write() always sets it, AA-505) — the
+        # `and tenant_id` guard only matters for a hand-built test context dict that omits it;
+        # never silently skips a real write's embedding.
+        if status == "approved" and tenant_id:
+            embedding = await asyncio.to_thread(compute_embedding, content_text)
+            if embedding is not None:
+                similar = await find_similar_pieces(
+                    embedding, pool, tenant_id=UUID(tenant_id), exclude_piece_id=piece_id, limit=1,
+                )
+                # Only the SAME tenant, a DIFFERENT atom — Decision 4's own history block
+                # already covers "avoid repeating an angle for the SAME atom"; this is the
+                # complementary case: two different atoms converging on near-identical content.
+                match = next((s for s in similar if s.atom_id != atom_id), None)
+                if match and match.similarity >= _WITHIN_TENANT_REUSE_THRESHOLD:
+                    flags.append({
+                        "gate": "within_tenant_reuse", "blocking": False,
+                        "similarity": round(match.similarity, 4), "similar_piece_id": match.piece_id,
+                        "violations": [
+                            f"This piece reads very similar (cosine similarity "
+                            f"{match.similarity:.2f}) to a piece already written for a "
+                            f"different atom on this account."
+                        ],
+                    })
+
         await _finalize_piece(
             pool, piece_id=piece_id, attempt_number=attempt,
             content_text=content_text, status=status, held_reason=held_reason,
             gate_ledger=gate_ledger, repair_log=repair_log, flags=flags,
             seo_title=seo_meta.get("seo_title"), meta_description=seo_meta.get("meta_description"),
-            slug=seo_meta.get("slug"), content_summary=summary,
+            slug=seo_meta.get("slug"), content_summary=summary, content_embedding=embedding,
         )
         logger.info(
             "t9_write_and_check_done", request_id=str(request_id), status=status,
@@ -435,6 +477,7 @@ async def _finalize_piece(
     flags: list[dict],
     seo_title: Optional[str] = None, meta_description: Optional[str] = None,
     slug: Optional[str] = None, content_summary: Optional[str] = None,
+    content_embedding: Optional[list[float]] = None,
 ) -> dict:
     # AA-514 — seo_title/meta_description/slug default None (the exception handler's own
     # "failed" finalize call above never has a real seo_meta to pass, and every non-blog piece
@@ -445,6 +488,12 @@ async def _finalize_piece(
     # change across a write session, so they're deliberately absent from this UPDATE.
     # AA-498 (Decision 4) — content_summary defaults None the same way: the exception handler's
     # "failed" call has no real summary, and a soft-fail (model didn't produce one) is None too.
+    # AA-499 (Decision 5) — content_embedding, same None-default convention: only ever real for
+    # a status='approved' piece (run_write_background()'s own gate), None otherwise. asyncpg has
+    # no built-in `vector` codec (confirmed — this is the first code anywhere to write to a
+    # pgvector column in this repo), so the value is pre-formatted as pgvector's own text literal
+    # ('[0.1,0.2,...]') by embedding_to_pgvector_literal() and cast explicitly in SQL.
+    embedding_literal = embedding_to_pgvector_literal(content_embedding) if content_embedding else None
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -452,7 +501,7 @@ async def _finalize_piece(
             SET attempt_number = $2, content_text = $3, status = $4, held_reason = $5,
                 gate_ledger = $6::jsonb, repair_log = $7::jsonb,
                 seo_title = $8, meta_description = $9, slug = $10, flags = $11::jsonb,
-                content_summary = $12
+                content_summary = $12, content_embedding = $13::vector
             WHERE piece_id = $1
             RETURNING piece_id, tenant_id, angle_gate_request_id, attempt_number, content_text,
                       status, held_reason, gate_ledger, repair_log, created_at,
@@ -460,7 +509,7 @@ async def _finalize_piece(
             """,
             piece_id, attempt_number, content_text, status, held_reason,
             json.dumps(gate_ledger), json.dumps(repair_log), seo_title, meta_description, slug,
-            json.dumps(flags), content_summary,
+            json.dumps(flags), content_summary, embedding_literal,
         )
     return _row_to_dict(row)
 
