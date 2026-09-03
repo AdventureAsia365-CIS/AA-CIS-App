@@ -50,11 +50,14 @@ class SeoEnvelopeError(Exception):
     already sets for T8's own JSON contract), not a shape to guess at."""
 
 
-def _parse_blog_envelope(raw: str) -> tuple[str, dict]:
-    """Returns (body, seo_meta) — seo_meta = {"seo_title", "meta_description", "slug"}, each
-    `None` if the key was missing or not a string (a real parse gap, not "legitimately empty" —
-    quality_gates.py::gate_seo_surface() reports a missing field as its own violation either
-    way, so no information is lost by not distinguishing the two here)."""
+def _parse_blog_envelope(raw: str) -> tuple[str, dict, str | None]:
+    """Returns (body, seo_meta, summary) — seo_meta = {"seo_title", "meta_description", "slug"},
+    each `None` if the key was missing or not a string (a real parse gap, not "legitimately
+    empty" — quality_gates.py::gate_seo_surface() reports a missing field as its own violation
+    either way, so no information is lost by not distinguishing the two here). `summary` (AA-498
+    Decision 4) is the SAME soft-fail treatment — a missing/non-string "summary" key is `None`,
+    never a reason to raise SeoEnvelopeError; the piece itself must not fail over a missing
+    summary."""
     text = _strip_fences(raw)
     try:
         data = json.loads(text)
@@ -66,7 +69,27 @@ def _parse_blog_envelope(raw: str) -> tuple[str, dict]:
         key: data.get(key) if isinstance(data.get(key), str) else None
         for key in ("seo_title", "meta_description", "slug")
     }
-    return data["body"], seo_meta
+    summary = data.get("summary")
+    summary = summary.strip() if isinstance(summary, str) and summary.strip() else None
+    return data["body"], seo_meta, summary
+
+
+_SUMMARY_MARKER = "===SUMMARY==="
+
+
+def _extract_summary(text: str) -> tuple[str, str | None]:
+    """AA-498 (Decision 4) — the 7 non-blog channels return plain text with a trailing
+    `===SUMMARY===` marker line (see prompts.py::_SUMMARY_INSTRUCTIONS). Splits it out and
+    returns (content_without_marker, summary_or_None). Soft-fail: a response with no marker at
+    all (model didn't follow the instruction) returns the text unchanged and `None` — never
+    raises, the same "missing summary is not a write failure" contract _parse_blog_envelope()
+    follows for the blog channel."""
+    if _SUMMARY_MARKER not in text:
+        return text, None
+    content, _, tail = text.partition(_SUMMARY_MARKER)
+    content = content.rstrip()
+    summary = tail.strip() or None
+    return content, summary
 
 
 def _strip_fences(raw: str) -> str:
@@ -93,12 +116,14 @@ def write_content(
     destination: str | None = None, trip_name: str | None = None, atom_id: str | None = None,
     route_segments: list[tuple[str, str]] | None = None, keyword: str | None = None,
     tenant_id: str | None = None, angle_gate_request_id: str | None = None,  # AA-505, optional
-) -> tuple[str, float, dict]:
+) -> tuple[str, float, dict, str | None]:
     """Attempt 1 — SKILL_v2.md workflow step 9, fresh write. Returns (content_text, cost_usd,
-    seo_meta) — `seo_meta` is `{"seo_title": None, "meta_description": None, "slug": None}` for
-    every non-blog channel (the writer's output contract for those 7 is UNCHANGED, still plain
-    text — see build_user_prompt()'s own docstring); for blog, the response is a JSON envelope
-    (AA-514) parsed by `_parse_blog_envelope()`.
+    seo_meta, summary) — `seo_meta` is `{"seo_title": None, "meta_description": None, "slug":
+    None}` for every non-blog channel (the writer's output contract for those 7 is UNCHANGED,
+    still plain text — see build_user_prompt()'s own docstring); for blog, the response is a
+    JSON envelope (AA-514) parsed by `_parse_blog_envelope()`. `summary` (AA-498 Decision 4) is
+    a 1-2 sentence internal-only summary from the SAME call (near-zero marginal cost, migration
+    124's own header) — `None` if the model didn't produce one, never a write failure either way.
 
     `atom_id` (AA-452, defaults to `None` so every pre-AA-452 caller/test is unaffected): passed
     straight through to `build_user_prompt()` — only consumed there, and only for `channel=='blog'`
@@ -123,9 +148,10 @@ def write_content(
     _record_t9_write_call(resp, channel_style["channel"], attempt=1,
                            tenant_id=tenant_id, angle_gate_request_id=angle_gate_request_id)
     if channel_style["channel"] == "blog":
-        body, seo_meta = _parse_blog_envelope(resp.content)
-        return body, resp.cost_usd, seo_meta
-    return _strip_fences(resp.content), resp.cost_usd, {"seo_title": None, "meta_description": None, "slug": None}
+        body, seo_meta, summary = _parse_blog_envelope(resp.content)
+        return body, resp.cost_usd, seo_meta, summary
+    content, summary = _extract_summary(_strip_fences(resp.content))
+    return content, resp.cost_usd, {"seo_title": None, "meta_description": None, "slug": None}, summary
 
 
 def _record_t9_write_call(resp, channel: str, *, attempt: int, tenant_id, angle_gate_request_id) -> None:
@@ -149,14 +175,14 @@ def rewrite_with_feedback(
     destination: str | None = None, trip_name: str | None = None, atom_id: str | None = None,
     route_segments: list[tuple[str, str]] | None = None, keyword: str | None = None,
     tenant_id: str | None = None, angle_gate_request_id: str | None = None,  # AA-505, optional
-) -> tuple[str, float, dict]:
+) -> tuple[str, float, dict, str | None]:
     """Attempt 2 (the only retry — Phase 1's confirmed cap of 2 total attempts) — the SAME
     write call, with `revision_feedback` (the specific gate/violation strings T10 failed on,
     Phase 1 §2a's confirmed "specific, not generic" feedback shape) appended to the prompt. A
     fresh full write from the same brief, not a diff/patch — same "return the full corrected
     text, never a partial section" contract N7's own repair.py documents, kept here because it's
     the right contract, not because it's ported code (this module imports nothing from
-    services.acp_produce.repair). Returns (content_text, cost_usd, seo_meta) — see
+    services.acp_produce.repair). Returns (content_text, cost_usd, seo_meta, summary) — see
     write_content()'s own docstring for the shape."""
     user_prompt = build_user_prompt(
         content_seed=content_seed, goal=goal, channel_style=channel_style,
@@ -171,9 +197,10 @@ def rewrite_with_feedback(
     _record_t9_write_call(resp, channel_style["channel"], attempt=2,
                            tenant_id=tenant_id, angle_gate_request_id=angle_gate_request_id)
     if channel_style["channel"] == "blog":
-        body, seo_meta = _parse_blog_envelope(resp.content)
-        return body, resp.cost_usd, seo_meta
-    return _strip_fences(resp.content), resp.cost_usd, {"seo_title": None, "meta_description": None, "slug": None}
+        body, seo_meta, summary = _parse_blog_envelope(resp.content)
+        return body, resp.cost_usd, seo_meta, summary
+    content, summary = _extract_summary(_strip_fences(resp.content))
+    return content, resp.cost_usd, {"seo_title": None, "meta_description": None, "slug": None}, summary
 
 
 __all__ = ["SeoEnvelopeError", "write_content", "rewrite_with_feedback"]

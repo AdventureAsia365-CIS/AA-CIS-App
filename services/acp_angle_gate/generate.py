@@ -28,6 +28,7 @@ from services.acp_angle_gate.brand_audience import BrandAudience
 from services.acp_angle_gate.goals import Goal
 from services.acp_angle_gate.prompts import SYSTEM_PROMPT, build_user_prompt
 from services.acp_shared.dfs_relevance import SearchDemandSignal
+from services.acp_shared.piece_history import PriorPiece
 from shared.llm_client.client import LLMClient
 from shared.llm_client.models import LLMRequest
 from shared.llm_client.call_log import record_call, record_call_with_pool
@@ -91,6 +92,8 @@ async def generate_angles(
     *, content_seed: str, goal: Goal, brand_audience: BrandAudience,
     destination: str | None = None, trip_name: str | None = None,
     search_demand: SearchDemandSignal | None = None,
+    piece_history: list[PriorPiece] | None = None,  # AA-498, optional (defaults None/empty so
+    # existing tests/callers that don't pass it are unaffected)
     tenant_id=None, request_id=None, pool=None,  # AA-505 — attribution for llm_call_log, optional
     # (defaults None) so existing tests that call this without them are unaffected.
 ) -> tuple[list[dict], int, str, float]:
@@ -102,11 +105,15 @@ async def generate_angles(
     AA-469 Việc 4 (flow-order fix) — no `channel` param anymore. Channel is now chosen AFTER an
     angle, not before angle generation — see this module's prompts.py sibling for why dropping
     it here doesn't lose any real channel-fit (T9's write prompt re-applies the full channel
-    style block at write time regardless)."""
+    style block at write time regardless).
+
+    `piece_history` (AA-498, Decision 4) — real prior pieces already written for this exact
+    atom, so the LLM can avoid repeating an angle. Empty/None omits the prompt block entirely,
+    same "no signal -> no prompt noise" precedent `search_demand` already set."""
     user_prompt = build_user_prompt(
         content_seed=content_seed, goal=goal,
         brand_audience=brand_audience, destination=destination, trip_name=trip_name,
-        search_demand=search_demand,
+        search_demand=search_demand, piece_history=piece_history,
     )
     client = LLMClient()
     request = LLMRequest(

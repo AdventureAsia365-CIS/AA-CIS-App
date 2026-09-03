@@ -38,7 +38,7 @@ def _client_returning(content: str):
 class TestBlogJsonEnvelope:
     def test_valid_envelope_parsed_into_body_and_seo_meta(self):
         with patch.object(gen_mod, "LLMClient", return_value=_client_returning(json.dumps(_VALID_ENVELOPE))):
-            content, cost, seo_meta = write_content(
+            content, cost, seo_meta, _summary = write_content(
                 content_seed="seed", goal=GOAL, channel_style=BLOG_CHANNEL_STYLE,
                 brand_audience=BRAND_AUDIENCE, angle=ANGLE, cta="Book now", atom_id="atom_abc123",
             )
@@ -53,7 +53,7 @@ class TestBlogJsonEnvelope:
     def test_markdown_fenced_json_still_parses(self):
         fenced = "```json\n" + json.dumps(_VALID_ENVELOPE) + "\n```"
         with patch.object(gen_mod, "LLMClient", return_value=_client_returning(fenced)):
-            content, _cost, seo_meta = write_content(
+            content, _cost, seo_meta, _summary = write_content(
                 content_seed="seed", goal=GOAL, channel_style=BLOG_CHANNEL_STYLE,
                 brand_audience=BRAND_AUDIENCE, angle=ANGLE, cta="Book now",
             )
@@ -63,7 +63,7 @@ class TestBlogJsonEnvelope:
     def test_malformed_json_salvaged_via_repair(self):
         broken = json.dumps(_VALID_ENVELOPE).rstrip("}") + ",}"  # trailing comma
         with patch.object(gen_mod, "LLMClient", return_value=_client_returning(broken)):
-            content, _cost, seo_meta = write_content(
+            content, _cost, seo_meta, _summary = write_content(
                 content_seed="seed", goal=GOAL, channel_style=BLOG_CHANNEL_STYLE,
                 brand_audience=BRAND_AUDIENCE, angle=ANGLE, cta="Book now",
             )
@@ -81,7 +81,7 @@ class TestBlogJsonEnvelope:
     def test_missing_seo_fields_become_none_not_a_crash(self):
         partial = {"body": "just the body text"}  # no seo_title/meta_description/slug at all
         with patch.object(gen_mod, "LLMClient", return_value=_client_returning(json.dumps(partial))):
-            content, _cost, seo_meta = write_content(
+            content, _cost, seo_meta, _summary = write_content(
                 content_seed="seed", goal=GOAL, channel_style=BLOG_CHANNEL_STYLE,
                 brand_audience=BRAND_AUDIENCE, angle=ANGLE, cta="Book now",
             )
@@ -100,7 +100,7 @@ class TestBlogJsonEnvelope:
     def test_non_blog_channel_never_gets_json_envelope_instructions(self):
         client = _client_returning("Plain text post.")
         with patch.object(gen_mod, "LLMClient", return_value=client):
-            content, _cost, seo_meta = write_content(
+            content, _cost, seo_meta, _summary = write_content(
                 content_seed="seed", goal=GOAL, channel_style=get_channel_style("facebook"),
                 brand_audience=BRAND_AUDIENCE, angle=ANGLE, cta="Book now",
             )

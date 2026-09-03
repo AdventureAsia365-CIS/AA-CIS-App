@@ -296,7 +296,7 @@ class TestRunWriteBackground:
     the INSERT side."""
 
     async def test_happy_path_first_attempt_approved(self):
-        with patch.object(service, "write_content", return_value=("final piece text", 0.02, {})) as mock_write, \
+        with patch.object(service, "write_content", return_value=("final piece text", 0.02, {}, None)) as mock_write, \
              patch.object(service, "rewrite_with_feedback") as mock_rewrite, \
              patch.object(service, "run_quality_gates", return_value=_passing_outcome()), \
              patch.object(service, "_finalize_piece", new=AsyncMock(return_value=_finalized_row())) as mock_finalize:
@@ -313,7 +313,7 @@ class TestRunWriteBackground:
         run_quality_gates() (so gate_seo_surface() has something to check) and _finalize_piece()
         (so it actually gets persisted), not be silently dropped."""
         seo_meta = {"seo_title": "A Title", "meta_description": "d" * 130 + ".", "slug": "a-slug"}
-        with patch.object(service, "write_content", return_value=("final piece text", 0.02, seo_meta)), \
+        with patch.object(service, "write_content", return_value=("final piece text", 0.02, seo_meta, None)), \
              patch.object(service, "run_quality_gates", return_value=_passing_outcome()) as mock_gates, \
              patch.object(service, "_finalize_piece", new=AsyncMock(return_value=_finalized_row())) as mock_finalize:
             await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())
@@ -326,7 +326,7 @@ class TestRunWriteBackground:
         assert mock_finalize.call_args.kwargs["slug"] == "a-slug"
 
     async def test_keyword_passed_through_to_write_content_and_gates(self):
-        with patch.object(service, "write_content", return_value=("final piece text", 0.02, {})) as mock_write, \
+        with patch.object(service, "write_content", return_value=("final piece text", 0.02, {}, None)) as mock_write, \
              patch.object(service, "run_quality_gates", return_value=_passing_outcome()) as mock_gates, \
              patch.object(service, "_finalize_piece", new=AsyncMock(return_value=_finalized_row())):
             await service.run_write_background(
@@ -338,7 +338,7 @@ class TestRunWriteBackground:
 
     async def test_missing_keyword_key_defaults_to_none(self):
         assert "keyword" not in _context()  # sanity: base fixture omits the key
-        with patch.object(service, "write_content", return_value=("final piece text", 0.02, {})) as mock_write, \
+        with patch.object(service, "write_content", return_value=("final piece text", 0.02, {}, None)) as mock_write, \
              patch.object(service, "run_quality_gates", return_value=_passing_outcome()), \
              patch.object(service, "_finalize_piece", new=AsyncMock(return_value=_finalized_row())):
             await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())
@@ -349,7 +349,7 @@ class TestRunWriteBackground:
         """AA-513 — context["route_segments"] (when present) must reach write_content(), not be
         silently dropped between start_write() and the actual LLM call."""
         segments = [("atom_seg1", "text1"), ("atom_seg2", "text2")]
-        with patch.object(service, "write_content", return_value=("final piece text", 0.02, {})) as mock_write, \
+        with patch.object(service, "write_content", return_value=("final piece text", 0.02, {}, None)) as mock_write, \
              patch.object(service, "run_quality_gates", return_value=_passing_outcome()), \
              patch.object(service, "_finalize_piece", new=AsyncMock(return_value=_finalized_row())):
             await service.run_write_background(
@@ -363,7 +363,7 @@ class TestRunWriteBackground:
         caller/test — the base `_context()` fixture itself has no such key) must not crash —
         dict.get(), not context["route_segments"]."""
         assert "route_segments" not in _context()  # sanity: base fixture really omits the key
-        with patch.object(service, "write_content", return_value=("final piece text", 0.02, {})) as mock_write, \
+        with patch.object(service, "write_content", return_value=("final piece text", 0.02, {}, None)) as mock_write, \
              patch.object(service, "run_quality_gates", return_value=_passing_outcome()), \
              patch.object(service, "_finalize_piece", new=AsyncMock(return_value=_finalized_row())):
             await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())
@@ -371,8 +371,8 @@ class TestRunWriteBackground:
         assert mock_write.call_args.kwargs["route_segments"] is None
 
     async def test_retry_once_then_approved(self):
-        with patch.object(service, "write_content", return_value=("draft 1", 0.02, {})) as mock_write, \
-             patch.object(service, "rewrite_with_feedback", return_value=("draft 2", 0.02, {})) as mock_rewrite, \
+        with patch.object(service, "write_content", return_value=("draft 1", 0.02, {}, None)) as mock_write, \
+             patch.object(service, "rewrite_with_feedback", return_value=("draft 2", 0.02, {}, None)) as mock_rewrite, \
              patch.object(service, "run_quality_gates",
                            side_effect=[_failing_outcome(), _passing_outcome()]), \
              patch.object(service, "_finalize_piece",
@@ -386,8 +386,8 @@ class TestRunWriteBackground:
         assert mock_fin.call_args.kwargs["attempt_number"] == 2
 
     async def test_retry_exhausted_still_failing_holds_at_max_two_attempts(self):
-        with patch.object(service, "write_content", return_value=("draft 1", 0.02, {})), \
-             patch.object(service, "rewrite_with_feedback", return_value=("draft 2", 0.02, {})) as mock_rewrite, \
+        with patch.object(service, "write_content", return_value=("draft 1", 0.02, {}, None)), \
+             patch.object(service, "rewrite_with_feedback", return_value=("draft 2", 0.02, {}, None)) as mock_rewrite, \
              patch.object(service, "run_quality_gates",
                            side_effect=[_failing_outcome(), _failing_outcome()]), \
              patch.object(service, "_finalize_piece",
@@ -399,7 +399,7 @@ class TestRunWriteBackground:
         assert mock_fin.call_args.kwargs["held_reason"] == "F2_banned_patterns: F2_banned_patterns violation"
 
     async def test_non_repairable_failure_holds_immediately_no_rewrite(self):
-        with patch.object(service, "write_content", return_value=("draft 1", 0.02, {})) as mock_write, \
+        with patch.object(service, "write_content", return_value=("draft 1", 0.02, {}, None)) as mock_write, \
              patch.object(service, "rewrite_with_feedback") as mock_rewrite, \
              patch.object(service, "run_quality_gates",
                            return_value=_failing_outcome(gate="F6_cta_present", repairable=False)), \
@@ -426,7 +426,7 @@ class TestRunWriteBackground:
         assert mock_fin.call_args.kwargs["content_text"] == ""
 
     async def test_exception_during_gate_check_marks_failed_not_held(self):
-        with patch.object(service, "write_content", return_value=("draft 1", 0.02, {})), \
+        with patch.object(service, "write_content", return_value=("draft 1", 0.02, {}, None)), \
              patch.object(service, "run_quality_gates", side_effect=ValueError("gate crashed")), \
              patch.object(service, "_finalize_piece",
                            new=AsyncMock(return_value=_finalized_row(status="failed"))) as mock_fin:

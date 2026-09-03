@@ -30,6 +30,7 @@ from services.acp_planning.runway import compute_runway_map
 from services.acp_planning.tenant_config import TenantNotFoundError, fetch_tenant_planning_config
 from services.acp_planning.tenant_pool import fetch_tenant_atoms_by_trip, fetch_tenant_trips
 from services.acp_shared.dfs_relevance import fetch_search_demand_signal
+from services.acp_shared.piece_history import fetch_piece_history
 
 logger = structlog.get_logger()
 
@@ -250,10 +251,18 @@ async def set_goal_and_generate(tenant_id: UUID, request_id: UUID, goal_key: str
     if req["trip_id"]:
         search_demand = await fetch_search_demand_signal(req["trip_id"], pool)
 
+    # AA-498 (Decision 4) — real prior pieces for this exact atom (this tenant), so a rewrite
+    # doesn't converge on the same angle again. Empty for the common case today (first time this
+    # atom is being written, or no prior piece produced a summary yet) — see fetch_piece_history's
+    # own docstring for why that's not an error.
+    piece_history = await fetch_piece_history(
+        tenant_id, req["atom_id"], pool, exclude_request_id=request_id,
+    )
+
     angles, recommended_index, reason, cost_usd = await generate_angles(
         content_seed=atom["text"], goal=goal,
         brand_audience=brand_audience, destination=destination, trip_name=trip_name,
-        search_demand=search_demand,
+        search_demand=search_demand, piece_history=piece_history,
         tenant_id=tenant_id, request_id=request_id, pool=pool,  # AA-505
     )
 
