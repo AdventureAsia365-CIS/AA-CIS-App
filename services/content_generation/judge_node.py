@@ -14,6 +14,7 @@ import structlog
 
 from shared.llm_client.client import LLMClient
 from shared.llm_client.models import LLMRequest
+from shared.llm_client.call_log import record_call_sync
 
 logger = structlog.get_logger()
 
@@ -110,7 +111,14 @@ def judge_node(state: dict) -> dict:
         request = LLMRequest(
             system_prompt=JUDGE_SYSTEM,
             user_prompt=_build_judge_prompt(state),
+            # AA-518: "s1_judge" stage config is seeded to gpt-4.1 today, matching this prior
+            # hardcoded literal — kept as an explicit model_tier too (not just stage) since this
+            # judge must NEVER silently drift onto a Bedrock tier if the stage config is ever
+            # misconfigured (ADR-2026-014/027: judge must stay a different vendor than the
+            # writer). stage= is passed for logging/attribution even though it isn't consulted
+            # here (model_tier already pins the tier).
             model_tier="gpt-4.1",
+            stage="s1_judge",
             temperature=_JUDGE_TEMPERATURE,
             seed=_JUDGE_SEED,
         )
@@ -150,6 +158,16 @@ def judge_node(state: dict) -> dict:
                     mission_present=mission_present, judge_score=judge_score,
                     validate_score=validate_score, new_score=new_score)
 
+        record_call_sync(
+            stage="s1_judge", role="judge", model=resp.model_used,
+            tokens_in=getattr(resp, "input_tokens", None), tokens_out=getattr(resp, "output_tokens", None),
+            cost_usd=resp.cost_usd, tenant_id=None,
+            quality_signal={
+                "judge_score": judge_score, "brand_fit_score": brand_fit,
+                "cross_brand_distinct": distinct, "mission_present": mission_present,
+                "passed": new_score >= _MIN_QUALITY,
+            },
+        )
         return {
             **state,
             "quality_score": new_score,

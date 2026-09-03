@@ -54,6 +54,7 @@ import structlog
 from services.acp_content_writing.framework_rubrics import get_framework_rubric
 from services.acp_produce.judge_client import invoke_judge, parse_judge_json
 from services.acp_shared.grounding import find_novel_numeric_claims
+from shared.llm_client.call_log import record_call_sync
 
 logger = structlog.get_logger()
 
@@ -392,6 +393,28 @@ def gate_seo_surface(
     return _result("F4_seo_surface", violations)
 
 
+# ---------------------------------------------------------------- AA-505 judge call logging
+
+def _log_t10_judge_call(raw: dict, *, gate: str, passed: bool, extra: dict) -> None:
+    """Shared by gate_framework()/gate_brand_voice() below. tenant_id=None — both gate functions
+    are deliberately channel/context-agnostic (this file's own module docstring), so no piece/
+    tenant identity is threaded down into them; the same piece's t9_write row (service.py) DOES
+    carry tenant_id/angle_gate_request_id and is joinable by created_at proximity if ever needed.
+    cost_usd uses pricing.calc_cost() — accurate for the real production judge (gpt-4.1, in
+    COST_TABLE); an approximation (Sonnet-tier fallback rate) for a manual nova_pro/gpt56
+    override, which is not the shipped default — acceptable for an observability log, not used
+    for billing."""
+    from shared.llm_client.pricing import calc_cost
+    model = raw.get("model_used", "unknown")
+    in_tok, out_tok = raw.get("input_tokens", 0), raw.get("output_tokens", 0)
+    record_call_sync(
+        stage="t10_judge", role="judge", model=model,
+        tokens_in=in_tok, tokens_out=out_tok, cost_usd=calc_cost(model, in_tok, out_tok),
+        tenant_id=None,
+        quality_signal={"gate": gate, "passed": passed, **extra},
+    )
+
+
 # ---------------------------------------------------------------- F8-adjusted (framework judge)
 
 def gate_framework(content_text: str, goal_key: str) -> GateResultLite:
@@ -432,6 +455,13 @@ def gate_framework(content_text: str, goal_key: str) -> GateResultLite:
             violations.append(f"framework criterion '{criterion}' scored 1 with no evidence quote — treated as fail")
     if not items:
         violations.append("judge returned no rubric items — treated as fail, not a silent pass")
+    # AA-505 — real judge outcome (item-level pass ratio), not a placeholder. tenant_id=None: this
+    # function is deliberately channel/context-agnostic (module docstring) so no piece/tenant
+    # identity is threaded in here — the SAME piece's t9_write row (which does carry tenant_id/
+    # angle_gate_request_id) is joinable by created_at proximity if that's ever needed.
+    _log_t10_judge_call(raw, gate="F8_framework", passed=not violations,
+                         extra={"items_total": len(items),
+                                "items_passed": sum(1 for i in items if str(i.get("score")) == "1")})
     return _result("F8_framework", violations)
 
 
@@ -482,6 +512,8 @@ def gate_brand_voice(content_text: str, cta: str, brand_rubric_text: str) -> Gat
         if phrases:
             reason += " — exact flagged phrase(s): " + "; ".join(f'"{p}"' for p in phrases)
         violations = [f"audit {status}: {reason}"]
+    _log_t10_judge_call(raw, gate="F9_brand_voice", passed=passed,
+                         extra={"status": status, "failure_codes": failure_codes})
     return _result("F9_brand_voice", violations)
 
 

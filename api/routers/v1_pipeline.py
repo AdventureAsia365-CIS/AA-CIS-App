@@ -83,7 +83,7 @@ async def _rewrite_tour(
     tour: dict, idx: int, total: int,
     brand_rules: dict = None,
     seo: dict = None,
-    model_tier: str = "haiku",
+    model_tier: Optional[str] = None,  # AA-518 — see admin_pipeline.py's RewriteRequest comment
     is_tenant_rewrite: bool = False,
     subtitle_focus: str = "standard",
     seo_mode: str = "dataforseo",
@@ -299,7 +299,7 @@ class TourRunRequest(BaseModel):
     validation_feedback: list = []
     seo_mode: str = "dataforseo"
     rewrite_language: str = "en-US"
-    model_tier: str = "haiku"
+    model_tier: Optional[str] = None  # AA-518 — dead-stub class (see comment above), kept consistent
     subtitle_focus: str = "standard"
 
 

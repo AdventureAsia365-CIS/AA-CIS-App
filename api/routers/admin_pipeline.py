@@ -249,7 +249,10 @@ class TourRunRequest(BaseModel):
     validation_feedback: list = []
     seo_mode: str = "standard"
     rewrite_language: str = "en-US"
-    model_tier: str = "haiku"
+    # AA-518: was "haiku" — None now means "no explicit per-request choice, defer to the admin's
+    # s1_generate stage config" (LLMClient.generate()'s own new fallback chain). An explicit
+    # value (including AA-237's "sonnet" auto-upgrade re-run below) still wins, unchanged.
+    model_tier: Optional[str] = None
     subtitle_focus: str = "standard"
     brand_rules_version: Optional[int] = None
     brand_name: Optional[str] = None
@@ -273,7 +276,7 @@ class IngestS3Request(BaseModel):
     s3_key: str
     bucket: str = ""
     seo_mode: str = "dataforseo"
-    model_tier: str = "haiku"
+    model_tier: Optional[str] = None  # AA-518 — see RewriteRequest's own comment above
     subtitle_focus: str = "standard"
     dry_run: bool = False
     tenant_id: str = "00000000-0000-0000-0000-000000000001"

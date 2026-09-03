@@ -3,7 +3,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Eye } from "lucide-react";
+import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Eye, Gauge } from "lucide-react";
 import { A, serif, sans, SIDEBAR_WIDTH } from "./adminUi";
 
 interface Notif {
@@ -209,6 +209,11 @@ export default function AdminSidebar() {
             <NavItem active={active("/admin/a4-oversight")} accent={A.red}
               icon={<Eye size={15} />} label="Cross-Tenant Oversight"
               onClick={() => router.push("/admin/a4-oversight")} />
+            {/* AA-505 — real per-call LLM cost/quality, Tenant->Model->Stage. Admin-only, same
+                tier as Cross-Tenant Oversight above (middleware.ts). */}
+            <NavItem active={active("/admin/llm-usage")} accent={A.red}
+              icon={<Gauge size={15} />} label="LLM Usage"
+              onClick={() => router.push("/admin/llm-usage")} />
           </NavGroup>
         )}
 

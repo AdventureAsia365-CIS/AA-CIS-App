@@ -527,6 +527,22 @@ _JUDGE_SYSTEM_PROMPT = (
 )
 
 
+def _log_n7_judge_call(raw: dict, *, gate: str, passed: bool, extra: dict) -> None:
+    """AA-505 — shared by this file's 3 invoke_judge() call sites (F8, F9 blog, F9 social).
+    tenant_id=None — same reasoning as quality_gates.py's own _log_t10_judge_call(): these gate
+    functions take only piece_body/rubric text, no tenant/piece identity, by design."""
+    from shared.llm_client.pricing import calc_cost
+    from shared.llm_client.call_log import record_call_sync
+    model = raw.get("model_used", "unknown")
+    in_tok, out_tok = raw.get("input_tokens", 0), raw.get("output_tokens", 0)
+    record_call_sync(
+        stage="n7_judge", role="judge", model=model,
+        tokens_in=in_tok, tokens_out=out_tok, cost_usd=calc_cost(model, in_tok, out_tok),
+        tenant_id=None,
+        quality_signal={"gate": gate, "passed": passed, **extra},
+    )
+
+
 def gate_framework(piece_body: str, framework: str) -> GateResult:
     """F8 framework judge — LLM, Nova Pro, cross-weight from the writer per
     ADR-2026-014/ADR-2026-027/L3, PLUS one deterministic sub-check (AA-396
@@ -571,6 +587,9 @@ def gate_framework(piece_body: str, framework: str) -> GateResult:
             violations.append(f"framework criterion '{criterion}' scored 1 with no evidence quote — treated as fail")
     if not items:
         violations.append("judge returned no rubric items — treated as fail, not a silent pass")
+    _log_n7_judge_call(raw, gate="F8_framework", passed=not violations,
+                        extra={"items_total": len(items),
+                               "items_passed": sum(1 for i in items if str(i.get("score")) == "1")})
     return GateResult(gate="F8_framework", passed=not violations, violations=violations)
 
 
@@ -710,6 +729,8 @@ def gate_brand_seo_audit(piece_body: str, brand_rubric_text: str) -> tuple[GateR
     if not passed:
         reason = _format_audit_reason(failure_codes, audit.get("notes"), flagged_phrases)
         violations = [f"audit {status}: {reason}"]
+    _log_n7_judge_call(raw, gate="F9_brand_seo_audit", passed=passed,
+                        extra={"status": status, "failure_codes": failure_codes})
     return GateResult(gate="F9_brand_seo_audit", passed=passed, violations=violations), audit
 
 
@@ -831,6 +852,8 @@ def gate_brand_seo_audit_social(
     if not passed:
         reason = _format_audit_reason(failure_codes, audit.get("notes"), flagged_phrases)
         violations = [f"audit {status}: {reason}"]
+    _log_n7_judge_call(raw, gate="F9_brand_seo_audit_social", passed=passed,
+                        extra={"status": status, "failure_codes": failure_codes, "channel": channel})
     return GateResult(gate="F9_brand_seo_audit_social", passed=passed, violations=violations), audit
 
 

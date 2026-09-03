@@ -62,6 +62,9 @@ from services.acp_produce.atom_usage import ATOM_CITE_RE
 from services.acp_produce.gates import DEFAULT_FRAMEWORK_RUBRIC, FRAMEWORK_RUBRICS, GENERIC_AI_WORDING_ANCHOR
 from services.content_generation.brand_standards import AA_BRAND_IDENTITY_PROMPT
 from shared.llm_client.bedrock_satellite import BedrockUnavailable, invoke_claude
+from shared.llm_client.role_config import get_stage_config_sync
+from shared.llm_client.call_log import record_call_sync
+from shared.llm_client.pricing import calc_cost
 
 logger = structlog.get_logger()
 
@@ -447,11 +450,14 @@ def repair_piece(body_tagged: str, violations: list[str], *, invariants: Optiona
     prompt = _build_prompt(body_tagged, violations, invariants)
     brand_rubric_text = invariants.brand_rubric_text if invariants is not None else AA_BRAND_IDENTITY_PROMPT
     system_prompt = _build_repair_system_prompt(brand_rubric_text)
+    # AA-518 — "n7_repair" stage config (seeded sonnet/acc3, matching the prior hardcoded literals).
+    cfg = get_stage_config_sync("n7_repair")
     last_err: BedrockUnavailable | None = None
     for attempt in range(1, _MAX_INVOKE_ATTEMPTS + 1):
         try:
             result = invoke_claude(
-                prompt, model="sonnet", max_tokens=_MAX_TOKENS, system=system_prompt, account="acc3"
+                prompt, model=cfg.model_id, max_tokens=_MAX_TOKENS, system=system_prompt,
+                account=cfg.account_route or "acc3",
             )
         except BedrockUnavailable as e:
             last_err = e
@@ -462,7 +468,16 @@ def repair_piece(body_tagged: str, violations: list[str], *, invariants: Optiona
             continue
 
         repaired = result.text.strip()
-        if _looks_like_leaked_reasoning(repaired):
+        leaked = _looks_like_leaked_reasoning(repaired)
+        record_call_sync(
+            stage="n7_repair", role="writer", model=result.model_used,
+            tokens_in=result.usage.get("input_tokens"), tokens_out=result.usage.get("output_tokens"),
+            cost_usd=calc_cost(cfg.model_id, result.usage.get("input_tokens", 0),
+                                result.usage.get("output_tokens", 0)),
+            tenant_id=None,
+            quality_signal={"leaked_reasoning_rejected": leaked, "violations_targeted": len(violations)},
+        )
+        if leaked:
             logger.warning("e5_repair_leaked_reasoning_rejected", violations=violations,
                             prefix=repaired[:200])
             raise RepairFailed(

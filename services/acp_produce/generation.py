@@ -61,6 +61,9 @@ import structlog
 from services.acp_produce.models import Brief, OutlineSection
 from services.content_generation.brand_standards import AA_BRAND_IDENTITY_PROMPT
 from shared.llm_client.bedrock_satellite import BedrockInvokeResult, BedrockUnavailable, invoke_claude
+from shared.llm_client.role_config import get_stage_config_sync
+from shared.llm_client.call_log import record_call_sync
+from shared.llm_client.pricing import calc_cost
 
 logger = structlog.get_logger()
 
@@ -304,6 +307,19 @@ def generate_draft(
         )
 
         parsed = _parse_batch_response(result.text, batch)
+        # AA-505 — cost priced off the REQUESTED tier ("sonnet"/"haiku", matches pricing.py's
+        # short-key table), not result.model_used ("sonnet-4-6" — a real audit label but not a
+        # pricing key calc_cost() recognizes, which would silently mis-price a Haiku call at
+        # Sonnet's fallback rate).
+        _cfg = get_stage_config_sync("n7_draft")
+        record_call_sync(
+            stage="n7_draft", role="writer", model=result.model_used,
+            tokens_in=result.usage.get("input_tokens"), tokens_out=result.usage.get("output_tokens"),
+            cost_usd=calc_cost(_cfg.model_id, result.usage.get("input_tokens", 0),
+                                result.usage.get("output_tokens", 0)),
+            tenant_id=None,  # N7's own writer functions don't have tenant_id in scope (module-level)
+            quality_signal={"sections_parsed": len(parsed), "sections_requested": len(batch)},
+        )
         if len(parsed) != len(batch):
             raise DraftGenerationFailed(
                 f"Sonnet response for batch {[s.title for s in batch]} did not contain "
@@ -431,11 +447,14 @@ def _build_batch_prompt(
 
 
 def _invoke_sonnet_with_retry(prompt: str, max_tokens: int, system: str) -> BedrockInvokeResult:
+    # AA-518 — "n7_draft" stage config (seeded sonnet/acc3, matching the prior hardcoded literals).
+    cfg = get_stage_config_sync("n7_draft")
     last_err: Optional[BedrockUnavailable] = None
     for attempt in range(1, _MAX_INVOKE_ATTEMPTS + 1):
         try:
             return invoke_claude(
-                prompt, model="sonnet", max_tokens=max_tokens, system=system, account="acc3"
+                prompt, model=cfg.model_id, max_tokens=max_tokens, system=system,
+                account=cfg.account_route or "acc3",
             )
         except BedrockUnavailable as e:
             last_err = e

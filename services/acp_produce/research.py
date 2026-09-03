@@ -41,6 +41,9 @@ from services.acp_produce.dataforseo import LOCATION_CODES, fetch_serp_profile, 
 from services.acp_produce.models import Brief, FAQCandidate, KeywordRecord, SERPProfile
 from services.seo_intelligence.dataforseo_client import DataForSEOClient
 from shared.llm_client.bedrock_satellite import BedrockUnavailable, invoke_claude
+from shared.llm_client.role_config import get_stage_config_sync
+from shared.llm_client.call_log import record_call_sync
+from shared.llm_client.pricing import calc_cost
 from shared.secrets import get_dataforseo_creds
 
 logger = structlog.get_logger()
@@ -189,9 +192,27 @@ def build_gap_statement(top_pages: list[dict], atoms: list[dict], keyword: str) 
         "In 2-3 sentences, state what the competitor pages cover that our atoms do not. "
         "If our atoms already cover everything relevant, say so plainly."
     )
+    # AA-518 — "n7_gap_research" stage config (seeded haiku/acc3, matching the prior hardcoded
+    # literals). role="validate" (schema's own 3rd role) — this is a small demand-comparison
+    # utility call, not tenant-facing content and not a judge/gate, matching the build prompt's
+    # own "chỗ validate/judge, không chỉ writer" instruction.
+    cfg = get_stage_config_sync("n7_gap_research")
     try:
-        result = invoke_claude(prompt, model="haiku", max_tokens=300, system=_GAP_SYSTEM_PROMPT, account="acc3")
-        return result.text.strip() or None
+        result = invoke_claude(
+            prompt, model=cfg.model_id, max_tokens=300, system=_GAP_SYSTEM_PROMPT,
+            account=cfg.account_route or "acc3",
+        )
+        statement = result.text.strip() or None
+        record_call_sync(
+            stage="n7_gap_research", role="validate", model=result.model_used,
+            tokens_in=result.usage.get("input_tokens"), tokens_out=result.usage.get("output_tokens"),
+            cost_usd=calc_cost(cfg.model_id, result.usage.get("input_tokens", 0),
+                                result.usage.get("output_tokens", 0)),
+            tenant_id=None,
+            quality_signal={"produced_statement": statement is not None,
+                             "statement_len_chars": len(statement) if statement else 0},
+        )
+        return statement
     except BedrockUnavailable as e:
         logger.warning("build_gap_statement_bedrock_unavailable", keyword=keyword, error=str(e))
         return None
