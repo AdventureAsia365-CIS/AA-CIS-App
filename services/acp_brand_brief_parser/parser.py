@@ -4,6 +4,7 @@ from pathlib import Path
 from docx import Document
 
 from models import ParsedBrief, VoiceExamples
+from sanitize import sanitize_parsed_brief
 
 _SECTION_PREFIXES = (
     "brand type:",
@@ -199,7 +200,7 @@ def parse_docx(path: str | Path) -> ParsedBrief:
     snw_text = "\n".join(should_not_write_lines)
     forbidden_words = _extract_forbidden_words(snw_text)
 
-    return ParsedBrief(
+    parsed = ParsedBrief(
         brand_name=brand_name,
         brand_type=brand_type,
         core_idea=core_idea,
@@ -216,3 +217,6 @@ def parse_docx(path: str | Path) -> ParsedBrief:
         forbidden_words=forbidden_words,
         confidence=round(sections_found / _EXPECTED_SECTIONS, 2),
     )
+    # AA-487: strip prompt-injection shapes + tighten length caps on every tenant-authored
+    # field before this ever reaches build_system_prompt() / gets persisted as system_prompt.
+    return sanitize_parsed_brief(parsed)
