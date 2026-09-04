@@ -3583,6 +3583,136 @@ async def get_spot_workers(request: Request, x_admin_secret: str = Header(None))
                 "spot_pct": 0, "saving_per_hr": 0, "tasks": [], "error": str(e)}
 
 
+# ── GET /admin/infra/status ───────────────────────────────────────────────────
+# AA-257 — live infra state (ECS/RDS/NAT/Redis), cached 60s in Redis to avoid
+# re-hitting 5 describe-type AWS APIs on every page load/tab.
+#
+# STEP0 finding: aa-cis-dev-ecs-task-role (the role this endpoint runs under)
+# does NOT currently have ecs:Describe*/ecs:ListTasks, rds:DescribeDBInstances,
+# ec2:DescribeInstances, elasticache:DescribeCacheClusters, or ecr:DescribeImages
+# — confirmed via a real call to the pre-existing GET /admin/metrics/spot-workers
+# above, which has been silently returning AccessDeniedException in prod this
+# whole time (degrades to zeros, per its own try/except). Same gap here.
+# Per-check try/except below mirrors that same graceful-degradation shape —
+# each section reports {"error": "..."} on AccessDenied rather than 500ing the
+# whole endpoint, so this ships real and useful the moment the IAM grant lands
+# (a Terraform PR, opened not auto-merged — see AA-257 Linear comment) instead
+# of waiting on it. Also fixed a stale hardcoded value from the issue text: the
+# NAT instance ID it names (i-04ebd090e97184f45) no longer exists — the real
+# current one (i-05363515303ef7c21, tag Name=aa-cis-dev-nat-instance) is the
+# default here, override-able via NAT_INSTANCE_ID like the other resource IDs.
+_INFRA_STATUS_CACHE_KEY = "admin:infra_status:v1"
+_INFRA_STATUS_CACHE_TTL_S = 60
+
+
+@router.get("/infra/status")
+async def get_infra_status(request: Request, x_admin_secret: str = Header(None)):
+    verify_admin_secret(x_admin_secret)
+
+    redis = request.app.state.redis
+    try:
+        cached = await redis.get(_INFRA_STATUS_CACHE_KEY)
+        if cached:
+            data = json.loads(cached)
+            data["cache_hit"] = True
+            return data
+    except Exception as e:
+        logger.warning("infra_status_redis_read_error", error=str(e))
+
+    region        = os.environ.get("AWS_REGION", "us-west-1")
+    cluster       = os.environ.get("ECS_CLUSTER", "aa-cis-dev-cluster")
+    service       = os.environ.get("ECS_SERVICE", "aa-cis-dev-api")
+    ecr_repo      = os.environ.get("ECR_REPO", "aa-cis-dev-api")
+    db_id         = os.environ.get("RDS_INSTANCE_ID", "aa-cis-dev-db")
+    nat_id        = os.environ.get("NAT_INSTANCE_ID", "i-05363515303ef7c21")
+    redis_id      = os.environ.get("REDIS_CLUSTER_ID", "aa-cis-dev-redis")
+
+    result = {
+        "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "cache_hit":  False,
+    }
+
+    # ── ECS (service state + running-task digest vs ECR :latest) ──
+    try:
+        ecs = _boto3.client("ecs", region_name=region)
+        svc = ecs.describe_services(cluster=cluster, services=[service])["services"][0]
+        ecs_info = {
+            "status":        svc["status"],
+            "desired_count": svc["desiredCount"],
+            "running_count": svc["runningCount"],
+            "pending_count": svc["pendingCount"],
+        }
+        task_arns = ecs.list_tasks(cluster=cluster, serviceName=service,
+                                    desiredStatus="RUNNING").get("taskArns", [])
+        running_digest = None
+        if task_arns:
+            tasks = ecs.describe_tasks(cluster=cluster, tasks=task_arns).get("tasks", [])
+            if tasks and tasks[0].get("containers"):
+                running_digest = tasks[0]["containers"][0].get("imageDigest")
+        ecs_info["running_digest"] = running_digest
+
+        try:
+            ecr = _boto3.client("ecr", region_name=region)
+            latest = ecr.describe_images(
+                repositoryName=ecr_repo, imageIds=[{"imageTag": "latest"}]
+            )["imageDetails"][0]
+            ecs_info["latest_digest"] = latest["imageDigest"]
+            ecs_info["digest_matches_latest"] = (
+                running_digest == latest["imageDigest"] if running_digest else None
+            )
+        except Exception as e:
+            ecs_info["ecr_error"] = str(e)
+
+        result["ecs"] = ecs_info
+    except Exception as e:
+        result["ecs"] = {"error": str(e)}
+
+    # ── RDS ──
+    try:
+        rds = _boto3.client("rds", region_name=region)
+        db = rds.describe_db_instances(DBInstanceIdentifier=db_id)["DBInstances"][0]
+        result["rds"] = {
+            "status":         db["DBInstanceStatus"],
+            "engine":         db["Engine"],
+            "instance_class": db["DBInstanceClass"],
+        }
+    except Exception as e:
+        result["rds"] = {"error": str(e)}
+
+    # ── NAT instance ──
+    try:
+        ec2 = _boto3.client("ec2", region_name=region)
+        inst = ec2.describe_instances(InstanceIds=[nat_id])["Reservations"][0]["Instances"][0]
+        result["nat"] = {"instance_id": nat_id, "state": inst["State"]["Name"]}
+    except Exception as e:
+        result["nat"] = {"instance_id": nat_id, "error": str(e)}
+
+    # ── ElastiCache Redis ──
+    try:
+        ec = _boto3.client("elasticache", region_name=region)
+        cache = ec.describe_cache_clusters(CacheClusterId=redis_id)["CacheClusters"][0]
+        result["redis"] = {"status": cache["CacheClusterStatus"], "node_type": cache["CacheNodeType"]}
+    except Exception as e:
+        result["redis"] = {"error": str(e)}
+
+    # AA-257: "AWS đang chạy — nhớ tắt cuối session" badge — true whenever ECS
+    # has a nonzero desired count or RDS is available, regardless of which
+    # describe calls succeeded (defaults to True/unknown-but-assume-running on
+    # error, since a false "all stopped" reading is the worse mistake here).
+    ecs_desired = result.get("ecs", {}).get("desired_count")
+    rds_status  = result.get("rds", {}).get("status")
+    result["running_reminder"] = (
+        ecs_desired is None or ecs_desired > 0 or rds_status is None or rds_status == "available"
+    )
+
+    try:
+        await redis.set(_INFRA_STATUS_CACHE_KEY, json.dumps(result), ex=_INFRA_STATUS_CACHE_TTL_S)
+    except Exception as e:
+        logger.warning("infra_status_redis_write_error", error=str(e))
+
+    return result
+
+
 # ── /admin/brands — multi-brand CRUD ─────────────────────────────────────────
 
 
