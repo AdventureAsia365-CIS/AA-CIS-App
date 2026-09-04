@@ -5,6 +5,18 @@ Ported from aamc/planning.py's allocate_month()/D5 (aa-marketing-v2 research
 build). Output: a calendar grid, each cell already filled with atom_ids +
 framework + funnel_stage + CTA. Pure Python, $0 LLM.
 
+AA-516 (03/09/2026): `allocate_month()`, `allocate_month_from_db()`, and
+`allocate_and_persist_week()` — the async DB-wiring wrappers the historical fix notes below
+refer to — were deleted. Slate (T7, AA-511) replaced the admin-triggered N4-N6 quarter-plan flow
+they backed; `services/acp_produce/slot_runner.py` (N7, live) already documented deliberately
+never calling this layer. `compute_slot_grid()` (the pure core every fix below actually lives
+in) is untouched — still the live, tested entry point `services/acp_angle_gate/service.py` (T8/
+T9) calls directly, alongside the still-live persistence layer (`create_weekly_produce_run()`/
+`persist_slot_grid()`/`fetch_due_slots()`/`mark_slot_status()`, all kept). The historical notes
+below describe bugs found IN `allocate_month()`'s calling convention at the time — kept for
+context (`_deterministic_slot_id()`/`make_slot()`'s own fixes still apply unchanged inside
+`compute_slot_grid()`), not because that function still exists.
+
 Fixes applied during the port (see docs/implementation-notes/AA-301.md):
   B7 — cooldown was only applied post-publish (a.cooldown_until), so multiple
        slots for the same trip+channel within one month picked the SAME top-N
@@ -277,51 +289,6 @@ def compute_slot_grid(
     return grid
 
 
-async def allocate_month(
-    tenant_id: UUID, year: int, month: int, channels: list[str],
-    capacity_posts_per_week: int, quarter_plan: QuarterPlan, runway: RunwayMap,
-    primary_market: str, pool,
-) -> SlotGrid:
-    """Async DB-wiring wrapper. `channels`/`capacity_posts_per_week`/
-    `primary_market` are caller-supplied — same tenant-config gap noted in
-    runway.py/quarter.py."""
-    from .quarter import fetch_atoms_by_trip
-    from .runway import fetch_trips
-    trips = await fetch_trips(tenant_id, pool)
-    trips_by_id = {t.id: t for t in trips}
-    atoms_by_trip = await fetch_atoms_by_trip(tenant_id, pool)
-    return compute_slot_grid(
-        tenant_id, year, month, channels, capacity_posts_per_week,
-        quarter_plan, runway, trips_by_id, atoms_by_trip, primary_market,
-    )
-
-
-async def allocate_month_from_db(
-    tenant_id: UUID, year: int, month: int, channels: list[str],
-    capacity_posts_per_week: int, runway: RunwayMap, primary_market: str, pool,
-) -> SlotGrid:
-    """AA-320 Gate B persist — DB-backed wrapper around allocate_month().
-    allocate_month() itself is left untouched (its existing signature/body)
-    so admin_atoms.py's preview-slotgrid endpoint, which calls it directly
-    with its own in-memory-approved plan, keeps working unchanged. This
-    wrapper fetches the Gate-B-approved QuarterPlan from
-    acp_shared.quarter_plan_version instead of taking one as a caller-
-    supplied param, and raises QuarterPlanNotApprovedError up front (same
-    error type compute_slot_grid already raises) if none is approved yet."""
-    from .quarter import fetch_approved_quarter_plan
-    quarter = (month - 1) // 3 + 1
-    quarter_plan = await fetch_approved_quarter_plan(tenant_id, year, quarter, pool)
-    if quarter_plan is None:
-        # AA-448 Gate B Option A — see compute_slot_grid()'s own comment above, same reasoning.
-        raise QuarterPlanNotApprovedError(
-            f"No finalized quarter plan for tenant={tenant_id} year={year} quarter={quarter} — "
-            "Gate B: no quarter plan has been finalized yet — allocation refused.")
-    return await allocate_month(
-        tenant_id, year, month, channels, capacity_posts_per_week,
-        quarter_plan, runway, primary_market, pool,
-    )
-
-
 def _row_to_slot(payload) -> Slot:
     data = json.loads(payload) if isinstance(payload, str) else payload
     return Slot(**data)
@@ -432,29 +399,8 @@ async def mark_slot_status(pool, slot_id: str, status: str, reason: Optional[str
         )
 
 
-async def allocate_and_persist_week(
-    tenant_id: UUID, year: int, month: int, week: int, channels: list[str],
-    capacity_posts_per_week: int, quarter_plan: QuarterPlan, runway: RunwayMap,
-    primary_market: str, pool,
-) -> tuple[str, list[Slot]]:
-    """AA-377 + AA-378 combined flow: create/reuse this week's acp_v2_runs row -> run the
-    existing, unmodified allocate_month() for `month` -> persist only this week's slice
-    (`Slot.week == week`) into acp_v2_slots -> return (run_id, due_slots). This is the
-    function a future weekly trigger (explicitly NOT built in this issue — no router, no
-    cron/EventBridge, see AA-377.md) would call. allocate_month() itself is untouched — still
-    computes the whole month's grid; this is the new layer on top that persists one week's
-    slice of it under a stable run_id."""
-    run_id = await create_weekly_produce_run(pool, str(tenant_id), year, month, week)
-    slot_grid = await allocate_month(
-        tenant_id, year, month, channels, capacity_posts_per_week, quarter_plan, runway,
-        primary_market, pool,
-    )
-    slots = await persist_slot_grid(pool, run_id, str(tenant_id), week, slot_grid)
-    return run_id, slots
-
-
 __all__ = [
-    "compute_slot_grid", "allocate_month", "allocate_month_from_db",
+    "compute_slot_grid",
     "create_weekly_produce_run", "persist_slot_grid", "fetch_due_slots",
-    "mark_slot_status", "allocate_and_persist_week",
+    "mark_slot_status",
 ]

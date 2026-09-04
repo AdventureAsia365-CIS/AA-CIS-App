@@ -2,9 +2,19 @@
 
 Two groups of tests:
 - TestDeterministicSlotId / TestMakeSlotDeterminism: pure Python, no DB — proves the AA-377 bug
-  (slot_id changing on every allocate_month() call) is actually fixed.
+  (slot_id changing on every compute_slot_grid() call) is actually fixed.
 - Everything else: mocked-pool tests against an in-memory mirror of acp_v2_runs/acp_v2_slots,
   same convention as test_aa320_quarter_plan_persist.py's FakeDB/FakeConn/FakePool.
+
+AA-516 (03/09/2026): TestAllocateAndPersistWeek (the only class here that exercised
+`allocate_and_persist_week()`) was removed along with that function — deleted as dead N4-N6
+admin-triggered code (Slate/AA-511 replaced it). Every other class in this file still covers
+live, load-bearing code: `create_weekly_produce_run()`/`persist_slot_grid()`/`fetch_due_slots()`/
+`mark_slot_status()` are the real persistence layer `services/acp_angle_gate/service.py` (T8/T9)
+calls directly today — deleting the WHOLE file (as a first literal reading of the AA-516 issue
+text might suggest) would have silently dropped real test coverage for code that stayed alive.
+Kept the original filename — it still accurately names what's left (AA-377's deterministic
+slot_id + AA-378's persistence layer), just minus the one now-deleted convenience wrapper.
 """
 import json
 import uuid
@@ -14,7 +24,6 @@ import pytest
 
 from services.acp_planning.allocator import (
     _deterministic_slot_id,
-    allocate_and_persist_week,
     compute_slot_grid,
     create_weekly_produce_run,
     fetch_due_slots,
@@ -378,38 +387,3 @@ class TestMarkSlotStatus:
         await mark_slot_status(pool, "s1", "skipped", reason="no demand evidence")
         assert db.slots["s1"]["status"] == "skipped"
         assert db.slots["s1"]["skipped_reason"] == "no demand evidence"
-
-
-class TestAllocateAndPersistWeek:
-    @pytest.mark.asyncio
-    async def test_combined_flow_returns_run_id_and_persisted_slots(self, pool, db, monkeypatch):
-        """allocate_month() itself hits fetch_trips/fetch_atoms_by_trip (real DB calls) — not
-        under test here (already covered by test_aa301_allocator.py /
-        test_aa301_quarter.py); patched out so this test exercises only the new
-        create-run -> allocate -> persist wiring."""
-        import services.acp_planning.allocator as allocator_mod
-
-        t = _trip()
-        plan = _approved_plan(TENANT, [t.id], {"Ha Giang": 1.0})
-        runway = _full_runway()
-
-        async def _fake_allocate_month(*a, **kw):
-            return compute_slot_grid(TENANT, 2026, 2, ["blog"], 4, plan, runway,
-                                     {t.id: t}, {t.id: _atoms(t.id, 12)}, "US")
-
-        monkeypatch.setattr(allocator_mod, "allocate_month", _fake_allocate_month)
-
-        run_id, slots = await allocate_and_persist_week(
-            TENANT, 2026, 2, 1, ["blog"], 4, plan, runway, "US", pool,
-        )
-
-        assert run_id == str(db.runs[(str(TENANT), 2026, 2, 1)])
-        assert all(s.week == 1 for s in slots)
-        assert set(db.slots.keys()) == {s.slot_id for s in slots}
-
-        # calling it again for the same week must reuse the same run_id, not fork a new one
-        run_id_2, _ = await allocate_and_persist_week(
-            TENANT, 2026, 2, 1, ["blog"], 4, plan, runway, "US", pool,
-        )
-        assert run_id_2 == run_id
-        assert len(db.runs) == 1

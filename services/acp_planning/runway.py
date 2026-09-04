@@ -3,8 +3,14 @@ services.acp_planning.runway — N4 Runway Map (1x/year + invalidation).
 
 Ported from aamc/planning.py's runway_map()/D1 (aa-marketing-v2 research
 build). Content peaks in the BOOKING window, not the travel season. Pure
-Python, $0 LLM — see compute_runway_map() for the fully testable core; the
-async runway_map() wrapper only fetches rows and delegates to it.
+Python, $0 LLM — see compute_runway_map() for the fully testable core.
+
+AA-516 (03/09/2026): the async `fetch_trips()`/`runway_map()` DB-wiring wrappers this docstring
+used to describe were deleted — Slate (T7, AA-511) fully replaced the admin-triggered N4-N6
+quarter-plan flow they backed; nothing live calls them anymore (services/acp_produce/
+slot_runner.py's own docstring already documented deliberately never calling this layer). T7/T8
+now read trips through `tenant_pool.py` (AA-448) and call `compute_runway_map()` directly.
+`compute_runway_map()` itself is untouched — still the live, tested, pure core.
 
 Fixes applied during the port (see docs/implementation-notes/AA-301.md):
   B9  — family detection scanned trip.summary (aamc.Trip), which does not
@@ -185,30 +191,12 @@ def compute_runway_map(tenant_id: UUID, year: int, trips: list[Trip], markets: l
     )
 
 
-_TRIP_ROW_QUERY = """
-    WITH latest_versions AS (
-        SELECT DISTINCT ON (ttv.published_tour_id) ttv.published_tour_id
-        FROM gold_aa_internal.tenant_tour_versions ttv
-        WHERE ttv.tenant_id = $1::uuid
-        ORDER BY ttv.published_tour_id, ttv.version_number DESC
-    )
-    SELECT
-        rt.tour_id AS id, pt.aa_name AS name, rt.country AS destination,
-        rt.period AS period, rt.duration AS duration_raw, rt.src_itineraries AS itinerary_source,
-        rt.lifecycle_stage AS lifecycle_stage, ttp.url AS trip_url, ttp.url_alive AS url_alive
-    FROM latest_versions lv
-    JOIN gold_aa_internal.published_tours pt ON pt.id = lv.published_tour_id
-    JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
-    LEFT JOIN acp_deliver.tenant_tour_pages ttp ON ttp.tour_id = rt.tour_id
-    WHERE EXISTS (
-        SELECT 1 FROM acp_contract.tour_atoms ta
-        WHERE ta.tour_id = rt.tour_id AND ta.owner_scope = $2
-          AND NOT ta.deleted AND NOT ta.is_empty_marker
-    )
-"""
-
-
 def _row_to_trip(row) -> Trip:
+    """AA-516: kept — `fetch_trips()` (the only caller inside THIS module) was deleted as dead
+    N4-N6 code, but `tenant_pool.py::fetch_tenant_trips()` (AA-448, T7's live, real trip-fetch
+    path) imports this exact helper directly (`from .runway import _row_to_trip`) to build Trip
+    objects from its own, different query's rows. A near-miss found via a full-repo import
+    grep before finalizing this cleanup — do not delete without re-checking tenant_pool.py."""
     return Trip(
         id=row["id"], name=row["name"], destination=row["destination"],
         period=row["period"], duration_raw=row["duration_raw"],
@@ -216,52 +204,6 @@ def _row_to_trip(row) -> Trip:
         lifecycle_stage=row["lifecycle_stage"] or "active",
         trip_url=row["trip_url"], url_alive=row["url_alive"],
     )
-
-
-async def fetch_trips(tenant_id: UUID, pool) -> list[Trip]:
-    # AA-500 (2026-09-01, replaces the AA-323-round-6/AA-309 TEMP note below): reads the
-    # tenant's own T1->T5 pipeline output — `gold_aa_internal.tenant_tour_versions` (T4,
-    # "tour đã chọn/rewrite") joined to the trip's underlying raw_tours/published_tours row —
-    # NOT `acp_contract.v_trip_registry` (that view's `tenant_id` column is backed by
-    # `raw_tours.tenant_id`, which is only ever aa_internal; it is the right source for T1
-    # "browse the pool", never for T7 Slate/N4-N6 per-tenant planning).
-    #
-    # AA-500 follow-up (same day, "Cách B" — Nghiep decision): additionally requires >=1 real
-    # `tour_atoms` row (`owner_scope = tenant_id`, not deleted, not an empty marker — same
-    # existence filter `tenant_pool._TENANT_ATOM_QUERY`/`v1_marketplace._MARKETPLACE_QUERY`'s
-    # atom aggregate already use) via `EXISTS`, NOT just tenant_tour_versions membership. Reason
-    # (Nghiep): Slate (T7, AA-511) shows/recommends by ATOM (through Segment/Route), not by
-    # tour — a rewritten-but-not-yet-atomized tour has no atoms for Slate to use, so surfacing it
-    # here is pure noise (tenant clicks in, sees nothing). Filtered at the source, not pushed
-    # down into Slate. This is a DELIBERATE DIVERGENCE from `tenant_pool.fetch_tenant_trips()`
-    # (AA-448, T7's own parallel query) and `v1_marketplace._MARKETPLACE_QUERY` (AA-444), both of
-    # which still LEFT JOIN/COALESCE a 0-atom tour in rather than excluding it (that was the
-    # right call for THEIR purposes — a rewritten-but-empty tour is a real "still needs
-    # atomizing" gap signal for a tenant's own Marketplace/T7 view — but wrong for N4-N6's
-    # atom-driven Slate). Do not "fix" this divergence by copying one query's filter onto the
-    # other without re-checking which caller actually needs which semantics.
-    #
-    # A tenant with zero qualifying (rewritten AND atomized) trips gets an empty list here,
-    # INCLUDING aa_internal itself today — see docs/implementation-notes/AA-500.md for the full
-    # decision history. Every other caller (`quarter.plan_quarter()`, `allocator.allocate_month()`)
-    # must treat an empty trip list as a valid, non-error outcome (verified: both already do).
-    #
-    # Previous (AA-323 round 6 Phần B, 2026-08-13) TEMP behavior — read the FULL unfiltered
-    # `v_trip_registry` for every tenant, "REVISIT WHEN N1 SHIPS" — is superseded by this
-    # change; that revisit is this one.
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(_TRIP_ROW_QUERY, tenant_id, str(tenant_id))
-    return [_row_to_trip(r) for r in rows]
-
-
-async def runway_map(tenant_id: UUID, year: int, markets: list[str], pool) -> RunwayMap:
-    """Async DB-wiring wrapper. `markets` is caller-supplied — there is no
-    tenant market-config table in this schema yet (checked: no
-    decisions/tenant_brand_rules field for it); inventing one silently would
-    be scope beyond this issue, so it stays an explicit required parameter
-    pending a follow-up ticket."""
-    trips = await fetch_trips(tenant_id, pool)
-    return compute_runway_map(tenant_id, year, trips, markets)
 
 
 def recompute_trigger_note(previous_hash: Optional[str], current_trips: list[Trip]) -> Optional[str]:
@@ -277,5 +219,5 @@ def recompute_trigger_note(previous_hash: Optional[str], current_trips: list[Tri
 
 __all__ = [
     "parse_duration_days", "parse_period", "dead_trip_url_alarms",
-    "compute_runway_map", "fetch_trips", "runway_map", "recompute_trigger_note",
+    "compute_runway_map", "recompute_trigger_note",
 ]
