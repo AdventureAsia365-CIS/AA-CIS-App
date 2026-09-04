@@ -87,9 +87,18 @@ export default function AdminSidebar() {
 
   const isAdmin = role === "admin";
 
-  function logout() {
-    ["cis_role", "cis_user", "cis_api_token"]
-      .forEach(k => (document.cookie = `${k}=; path=/; max-age=0`));
+  async function logout() {
+    // AA-521: cis_admin_token is httpOnly (AA-232) — client JS can't clear
+    // it, so the old document.cookie loop left the real session alive until
+    // its natural 24h expiry. Clear server-side via /api/auth/admin-logout
+    // (mirrors AA-427's /api/auth/tenant-logout), same request-then-redirect
+    // shape as the tenant portal's Sidebar.tsx logout().
+    try {
+      await fetch("/api/auth/admin-logout", { method: "POST" });
+    } catch {
+      // ignore — redirect below either way; middleware re-verifies the JWT
+      // on the next request regardless of whether the clear succeeded.
+    }
     router.push("/login");
   }
 
