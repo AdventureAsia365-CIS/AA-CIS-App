@@ -342,6 +342,79 @@ async def get_quota(request: Request, tenant=Depends(get_tenant)):
     }
 
 
+# ── AA-496: GET /v1/billing — tenant-scoped self-service billing view ─────────
+# STEP0 found: `/portal/*`'s layout.tsx + DashboardTab.tsx both `fetch("/api/admin/billing")`
+# unconditionally on every page load. That proxy (`/api/admin/[...path]/route.ts`) calls
+# `requireAdmin()` first — a real, independent admin-JWT check — before ever attaching
+# X-Admin-Secret. A tenant portal session is never an admin session, so this 401s at the
+# Next.js proxy layer on literally every real tenant, on every page, always — confirmed by
+# reading both call sites and the backend `GET /admin/billing` (admin_pipeline.py): it takes
+# an arbitrary `?tenant_id=` query param with NO scoping to "the caller's own tenant" (by
+# design — it's an admin looking-glass over ANY tenant, defaulting to aa_internal), so it
+# could never safely be exposed to a tenant session even with a header change alone.
+# This is possibility #1 from the issue text ("gọi sai chỗ"), not a missing-feature gap:
+# `/v1/quota` (AA-489, just above) already proves the tenant-scoped-via-JWT pattern this
+# needed. Real fix: a tenant-scoped sibling endpoint, JWT-derived tenant_id (never trusts a
+# query param), reusing the exact same v_tenant_monthly_usage view + shape the admin view
+# already returns (so BillingTab.tsx/DashboardTab.tsx need zero shape changes) — frontend
+# repointed from /api/admin/billing to /api/tenant/v1/billing (see those 2 files' own diffs).
+@quota_router.get("/billing")
+async def get_my_billing(request: Request, tenant=Depends(get_tenant)):
+    tenant_id = tenant["sub"]
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT
+                v.tenant_name, v.plan_tier, v.billing_month,
+                v.tours_quota_monthly, v.api_calls_quota_monthly,
+                v.price_usd_monthly,
+                v.tours_rewritten, v.api_calls_used,
+                v.quota_tours_pct, v.quota_calls_pct,
+                v.tours_overage, v.overage_usd, v.llm_cost_usd,
+                v.overage_rate_usd_per_tour
+            FROM shared.v_tenant_monthly_usage v
+            WHERE v.tenant_id = $1::uuid
+        """, tenant_id)
+
+        activity = await conn.fetch("""
+            SELECT ttv.id, ttv.created_at, ttv.status, ttv.edit_source,
+                   pt.aa_name, rt.country
+            FROM gold_aa_internal.tenant_tour_versions ttv
+            JOIN gold_aa_internal.published_tours pt ON pt.id = ttv.published_tour_id
+            LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
+            WHERE ttv.tenant_id = $1::uuid
+            ORDER BY ttv.created_at DESC LIMIT 5
+        """, tenant_id)
+
+    if not row:
+        return {
+            "plan_tier": "starter", "tours_quota_monthly": 50,
+            "api_calls_quota_monthly": 5000, "price_usd_monthly": 299.0,
+            "tours_rewritten": 0, "api_calls_used": 0,
+            "quota_tours_pct": 0.0, "quota_calls_pct": 0.0,
+            "tours_overage": 0, "overage_usd": 0.0,
+            "llm_cost_usd": 0.0, "overage_rate_usd_per_tour": 4.0,
+            "activity": [],
+        }
+
+    return {
+        **{k: (float(v) if hasattr(v, '__float__') and not isinstance(v, int) else v)
+           for k, v in dict(row).items() if k != "billing_month"},
+        "billing_month": str(row["billing_month"])[:7] if row["billing_month"] else None,
+        "activity": [
+            {
+                "id": str(a["id"]),
+                "created_at": a["created_at"].isoformat(),
+                "status": a["status"],
+                "edit_source": a["edit_source"],
+                "tour_name": a["aa_name"],
+                "country": a["country"],
+            }
+            for a in activity
+        ],
+    }
+
+
 # ── P3-S4: Trigger Rewrite ────────────────────────────────────────────────────
 
 
