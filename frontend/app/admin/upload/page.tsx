@@ -61,7 +61,7 @@ interface TourPreview {
 interface BlockedTour {
   src_name: string;
   country: string | null;
-  reason: "duplicate_tour" | "missing_fields";
+  reason: "duplicate_tour" | "missing_fields" | "duplicate_in_file"; // AA-490
   missing_fields?: string[];
   message: string;
 }
@@ -1432,14 +1432,24 @@ function TourContentTab() {
                               <td style={{ ...TD, fontWeight: 600 }}>{t.src_name}</td>
                               <td style={TD}>{t.country || "—"}</td>
                               <td style={TD}>
-                                <Badge color={t.reason === "duplicate_tour" ? "blue" : "amber"}>
-                                  {t.reason === "duplicate_tour" ? "Duplicate" : "Missing Fields"}
+                                {/* AA-490: duplicate_in_file (two rows in THIS upload sharing
+                                    name+provider, mirrors the real Commit-time drop from
+                                    AA-488 Gap 1) is now distinguished from duplicate_tour
+                                    (already in the DB catalog) — was silently absent from
+                                    preview before this fix. */}
+                                <Badge color={
+                                  t.reason === "duplicate_tour"    ? "blue"  :
+                                  t.reason === "duplicate_in_file" ? "amber" : "amber"
+                                }>
+                                  {t.reason === "duplicate_tour"    ? "Duplicate" :
+                                   t.reason === "duplicate_in_file" ? "Duplicate in File" :
+                                                                       "Missing Fields"}
                                 </Badge>
                               </td>
                               <td style={{ ...TD, fontSize: 12, color: A.muted }}>
                                 {t.reason === "missing_fields"
                                   ? (t.missing_fields ?? []).join(", ")
-                                  : "Already in catalog"}
+                                  : t.message || "Already in catalog"}
                               </td>
                             </tr>
                           ))}
