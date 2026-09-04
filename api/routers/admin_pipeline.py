@@ -1535,12 +1535,22 @@ async def get_upload_history(request: Request, x_admin_secret: str = Header(None
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
     async with pool.acquire() as conn:
+        # AA-344: LEFT JOIN shared.pipeline_runs on batch_id to surface the real
+        # landed/dropped counts (migration 091, AA-343 Part C) alongside row_count (the
+        # PARSED count only — the number that misleadingly read "30" while only 16 rows
+        # actually landed, AA-343 P1.3). LEFT JOIN (not JOIN): any source ingested before
+        # migration 091, or whose batch_id has no matching pipeline_runs row, must still
+        # show up in Upload History with rows_landed/rows_dropped simply NULL — degrade
+        # gracefully, per the issue's own proposal, not drop the row.
         sources = await conn.fetch("""
-            SELECT id::text, filename, file_size_kb, row_count, parsed_at,
-                   parse_errors, batch_id::text
-            FROM silver_aa_internal.raw_sources
-            WHERE tenant_id = '00000000-0000-0000-0000-000000000001'::uuid
-            ORDER BY parsed_at DESC LIMIT 20
+            SELECT rs.id::text, rs.filename, rs.file_size_kb, rs.row_count, rs.parsed_at,
+                   rs.parse_errors, rs.batch_id::text,
+                   pr.ingest_details->>'rows_landed'  AS rows_landed,
+                   pr.ingest_details->>'rows_dropped' AS rows_dropped
+            FROM silver_aa_internal.raw_sources rs
+            LEFT JOIN shared.pipeline_runs pr ON pr.batch_id = rs.batch_id
+            WHERE rs.tenant_id = '00000000-0000-0000-0000-000000000001'::uuid
+            ORDER BY rs.parsed_at DESC LIMIT 20
         """)
     return {
         "sources": [
@@ -1549,6 +1559,8 @@ async def get_upload_history(request: Request, x_admin_secret: str = Header(None
                 "filename":          s["filename"],
                 "file_size_kb":      float(s["file_size_kb"]) if s["file_size_kb"] else None,
                 "row_count":         s["row_count"],
+                "rows_landed":       int(s["rows_landed"]) if s["rows_landed"] is not None else None,
+                "rows_dropped":      int(s["rows_dropped"]) if s["rows_dropped"] is not None else None,
                 "parsed_at":         str(s["parsed_at"]) if s["parsed_at"] else None,
                 "parse_error_count": _count_parse_errors(s["parse_errors"]),
                 "batch_id":          s["batch_id"],
