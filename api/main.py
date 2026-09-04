@@ -28,6 +28,8 @@ from api.routers.v1_pipeline import router as v1_pipeline_router
 from api.routers.v1_competitors import router as v1_competitors_router
 from api.routers.v1_publish import router as v1_publish_router
 from api.routers.v1_integrations import router as v1_integrations_router
+from api.routers.v1_trip_page import router as v1_trip_page_router  # AA-482
+from api.routers.v1_trip_page import admin_router as admin_trip_page_router  # AA-482
 from api.routers.v1_s0 import router as v1_s0_router
 from api.routers.v1_s1_from_atom import router as v1_s1_from_atom_router
 from api.routers.v1_rules import router as v1_rules_router
@@ -122,6 +124,8 @@ app.include_router(v1_pipeline_router)
 app.include_router(v1_competitors_router)
 app.include_router(v1_publish_router)  # AA-455 bước 1 — tenant self-unpublish (publish_log)
 app.include_router(v1_integrations_router)  # AA-457 [T11 PR1] — tenant WordPress credentials
+app.include_router(v1_trip_page_router)  # AA-482 — GET /v1/trip/{tour_id}, public page data
+app.include_router(admin_trip_page_router)  # AA-482 — /admin/trip-pages/{publish,recheck}
 app.include_router(v1_s0_router)
 app.include_router(v1_s1_from_atom_router)
 app.include_router(v1_rules_router)
