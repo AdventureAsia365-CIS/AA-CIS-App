@@ -41,6 +41,7 @@ flagged rather than blocking indefinitely):
     here, flagged in the implementation notes).
 """
 import datetime as _dt
+import json
 
 import structlog
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -53,6 +54,22 @@ router = APIRouter(prefix="/v1/trip", tags=["Trip Page (public)"])
 admin_router = APIRouter(prefix="/admin/trip-pages", tags=["Trip Page (admin)"])
 
 _AA_INTERNAL_TENANT_ID = "00000000-0000-0000-0000-000000000001"
+
+
+def _jsonb(val):
+    """asyncpg does not auto-decode jsonb columns by default in this pool's config -- same
+    local helper idiom admin_pipeline.py/admin_settings.py already use for aa_highlights.
+    Live-verify (04/09/2026) caught this for real: without it, /v1/trip/{id} returned
+    highlights as a JSON-encoded STRING, not a real array -- the frontend's
+    `trip.highlights.map(...)` would have thrown at runtime on every real page."""
+    if val is None:
+        return None
+    if isinstance(val, str):
+        try:
+            return json.loads(val)
+        except (TypeError, ValueError):
+            return val
+    return val
 
 
 async def _fetch_page_data(conn, tour_id: str):
@@ -110,7 +127,7 @@ async def get_trip_page(tour_id: str, request: Request):
         "subtitle":      row["aa_subtitle"],
         "summary":       row["aa_summary"],
         "itineraries":   row["aa_itineraries"],
-        "highlights":    row["aa_highlights"] or [],
+        "highlights":    _jsonb(row["aa_highlights"]) or [],
         "seo_title":     row["seo_title"],
         "seo_meta":      row["seo_meta"],
     }

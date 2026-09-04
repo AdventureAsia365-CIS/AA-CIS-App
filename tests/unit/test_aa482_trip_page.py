@@ -38,7 +38,12 @@ _TOUR_ROW = {
     "aa_name": "Bhutan: West to Central", "aa_subtitle": "Dzongs & Valleys",
     "aa_summary": "A private journey through Bhutan.",
     "aa_itineraries": "Day 1 — Arrival...",
-    "aa_highlights": ["Taktshang Monastery", "Dochu La Pass", "Punakha Dzong"],
+    # AA-482 live-verify (04/09/2026): real asyncpg rows return jsonb columns as a raw JSON
+    # STRING in this pool's config, not an auto-decoded Python list -- confirmed against the
+    # real deployed endpoint (a real tour's highlights came back double-JSON-encoded before
+    # the _jsonb() fix). Mocking it as a real list here would NOT have caught that bug -- mock
+    # the real shape.
+    "aa_highlights": '["Taktshang Monastery", "Dochu La Pass", "Punakha Dzong"]',
     "seo_title": "Bhutan Journey", "seo_meta": "A private 12-day journey through Bhutan.",
 }
 
@@ -51,7 +56,9 @@ class TestAA482TripPage:
         result = await v1_trip_page.get_trip_page(_TOUR_ROW["tour_id"], request)
 
         assert result["name"] == "Bhutan: West to Central"
-        assert result["highlights"] == _TOUR_ROW["aa_highlights"]
+        # real array, decoded from the raw jsonb string -- not a string, not still-encoded
+        assert result["highlights"] == ["Taktshang Monastery", "Dochu La Pass", "Punakha Dzong"]
+        assert isinstance(result["highlights"], list)
         assert result["seo_meta"] == _TOUR_ROW["seo_meta"]
         assert result["summary"] == _TOUR_ROW["aa_summary"]
         # url_alive=true update was issued
