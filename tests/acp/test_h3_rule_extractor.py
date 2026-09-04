@@ -30,7 +30,16 @@ def _make_pool(rule_id=_RULE_ID):
 
 def _haiku_response(should_extract=True, confidence=0.90, pattern="trip of a lifetime",
                     rule_type="block"):
-    return {
+    """AA-491 STEP0: _call_haiku()'s real signature is `tuple[dict, int, int]` (see
+    services/acp_shared/h3_rule_extractor.py -- `extracted, in_tok, out_tok = _call_haiku(...)`).
+    This helper used to return a bare dict, so every `return_value=_haiku_response(...)` mock
+    handed extract_and_save_rule() a 6-key dict where it expected a 3-tuple -- unpacking a dict
+    yields its keys, so `a, b, c = <6-key dict>` raised "too many values to unpack (expected
+    3)" every time, silently caught by extract_and_save_rule()'s own `except Exception` and
+    logged as h3_haiku_failed -- never a LANGFUSE_PUBLIC_KEY or DB-fixture gap (the initial
+    suspicion in AA-491), a real pre-existing mock/signature mismatch. Now returns the same
+    3-tuple shape the real function does."""
+    extracted = {
         "should_extract": should_extract,
         "confidence": confidence,
         "rule_type": rule_type,
@@ -38,6 +47,7 @@ def _haiku_response(should_extract=True, confidence=0.90, pattern="trip of a lif
         "description": "Banned generic phrase — voice violation",
         "reasoning": "Clear, unambiguous brand violation pattern",
     }
+    return extracted, 120, 40
 
 
 @pytest.mark.asyncio

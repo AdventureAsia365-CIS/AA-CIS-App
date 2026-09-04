@@ -93,7 +93,7 @@ jobs:
             --cov=shared \
             --cov-report=term-missing \
             --cov-fail-under=30
-          pytest tests/acp/ --ignore=tests/acp/test_h3_rule_extractor.py --ignore=tests/acp/test_run_health.py -v \
+          pytest tests/acp/ -v \
             --tb=short
 
   test-integration:

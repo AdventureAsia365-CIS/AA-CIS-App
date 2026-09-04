@@ -1146,12 +1146,31 @@ async def ingest_s3(
                 )
                 duplicate_names = {r["n"] for r in dup_rows}
 
+            # AA-490 (follow-up AA-488 Gap 1): the real Commit path (process_file() ->
+            # services/ingestion/handler.py) already drops in-file duplicates (two rows in the
+            # SAME uploaded file sharing normalize_group_key(src_name, provider), neither yet
+            # in the DB) via a seen_keys set -- correct behavior, but this preview branch never
+            # ran that check, so the preview showed BOTH rows as "ready" and the admin only
+            # discovered the drop after clicking Commit, with no explanation at preview time.
+            # Mirrors handler.py's exact check order (in-file dedup BEFORE the DB-existence
+            # check) so preview and commit report the identical outcome for the identical file.
+            from services.ingestion.handler import normalize_group_key as _normalize_group_key
+
             ready_tours = []
             blocked_tours = []
+            seen_keys: set = set()
             for r in records[:req.max_tours]:
                 src_name = r.get("src_name") or "(no name)"
                 missing = [f for f in ["src_name", "country", "duration", "price_raw"] if not r.get(f)]
-                if src_name.lower().strip() in duplicate_names:
+                nname, nprov = _normalize_group_key(src_name, r.get("provider"))
+                if (nname, nprov) in seen_keys:
+                    blocked_tours.append({
+                        "src_name": src_name, "country": r.get("country"),
+                        "reason": "duplicate_in_file",
+                        "message": "Another row earlier in this file has the same name + "
+                                   "provider — this row will be skipped on Commit.",
+                    })
+                elif src_name.lower().strip() in duplicate_names:
                     blocked_tours.append({
                         "src_name": src_name, "country": r.get("country"),
                         "reason": "duplicate_tour", "message": "This tour already exists in the system.",
@@ -1163,6 +1182,7 @@ async def ingest_s3(
                         "message": f"Missing fields: {', '.join(missing)}",
                     })
                 else:
+                    seen_keys.add((nname, nprov))
                     ready_tours.append({
                         "tour_id":         str(_uuid.uuid4()),
                         "src_name":        src_name,
