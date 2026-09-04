@@ -119,6 +119,12 @@ interface UploadHistoryItem {
   filename: string;
   file_size_kb: number | null;
   row_count: number | null;
+  // AA-344: from shared.pipeline_runs.ingest_details (migration 091, AA-343 Part C) via a
+  // LEFT JOIN on batch_id — null for any source ingested before migration 091 (degrades
+  // gracefully, no backfill). row_count above is the PARSED count only; rows_landed is what
+  // actually made it into raw_tours (rows_dropped = parsed - landed).
+  rows_landed: number | null;
+  rows_dropped: number | null;
   parsed_at: string | null;
   parse_error_count: number;
   batch_id: string | null;
@@ -620,7 +626,7 @@ function UploadHistorySection({ history, loading, onRefresh }: {
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead>
                 <tr>
-                  {["File Name", "File Size", "Tours Parsed", "Parse Errors", "Uploaded At", "Batch ID"].map((h, i) => (
+                  {["File Name", "File Size", "Parsed / Landed", "Dropped", "Parse Errors", "Uploaded At", "Batch ID"].map((h, i) => (
                     <th key={h} style={{ ...TH, textAlign: i > 0 ? "right" : "left" }}>{h}</th>
                   ))}
                 </tr>
@@ -635,7 +641,21 @@ function UploadHistorySection({ history, loading, onRefresh }: {
                     <td style={{ ...TD, textAlign: "right", color: A.muted }}>
                       {h.file_size_kb ? `${h.file_size_kb.toFixed(0)} KB` : "—"}
                     </td>
-                    <td style={{ ...TD, textAlign: "right" }}>{h.row_count ?? "—"}</td>
+                    <td style={{ ...TD, textAlign: "right" }}>
+                      {/* AA-344: row_count is PARSED only — rows_landed (from
+                          pipeline_runs.ingest_details) is what actually landed in raw_tours.
+                          null rows_landed = pre-migration-091 source, show parsed count alone. */}
+                      {h.rows_landed !== null
+                        ? `${h.row_count ?? "—"} / ${h.rows_landed}`
+                        : (h.row_count ?? "—")}
+                    </td>
+                    <td style={{ ...TD, textAlign: "right" }}>
+                      {h.rows_dropped !== null && h.rows_dropped > 0
+                        ? <Badge color="red">{h.rows_dropped} dropped</Badge>
+                        : <span style={{ color: A.muted2, fontSize: 12 }}>
+                            {h.rows_dropped === 0 ? "0" : "—"}
+                          </span>}
+                    </td>
                     <td style={{ ...TD, textAlign: "right" }}>
                       {h.parse_error_count > 0
                         ? <Badge color="red">{h.parse_error_count} errors</Badge>
