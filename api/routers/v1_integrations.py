@@ -297,4 +297,180 @@ async def test_wordpress(request: Request, tenant=Depends(get_tenant)):
     return result
 
 
+# ── AA-462 — Facebook (T11's first non-blog channel) ────────────────────────────────────────
+# Mirrors the WordPress save/status/test shape above exactly (same table, same secret-never-
+# touches-Postgres principle, same AA-460 don't-trust-bare-200 lesson) — the generalization
+# migration 117 already anticipated ("this table is meant to hold more than just WordPress
+# later"), so no new migration needed. secret_key uses a distinct acp/social/{tenant_id} prefix
+# (not acp/cms/{tenant_id}) — a Page Access Token isn't a CMS credential, and a tenant
+# connecting both WordPress and Facebook needs two independent secrets, not one shared blob.
+
+
+class SaveFacebookRequest(BaseModel):
+    page_id: str
+    page_access_token: str
+
+
+def _fb_row_to_status(row) -> dict:
+    config = row["config"]
+    if isinstance(config, str):
+        config = json.loads(config)
+    return {
+        "connected": True,
+        "page_id": config.get("page_id"),
+        "connected_at": row["connected_at"].isoformat() if row["connected_at"] else None,
+        "last_verified_at": row["last_verified_at"].isoformat() if row["last_verified_at"] else None,
+        "last_verify_error": row["last_verify_error"],
+    }
+
+
+@router.get("/facebook")
+async def get_facebook_status(request: Request, tenant=Depends(get_tenant)):
+    pool = request.app.state.pool
+    tenant_id = tenant["sub"]
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT config, connected_at, last_verified_at, last_verify_error "
+            "FROM shared.tenant_integrations WHERE tenant_id = $1::uuid AND integration_type = 'facebook'",
+            tenant_id,
+        )
+    if not row:
+        return {"connected": False, "page_id": None, "connected_at": None,
+                "last_verified_at": None, "last_verify_error": None}
+    return _fb_row_to_status(row)
+
+
+@router.post("/facebook")
+async def save_facebook(body: SaveFacebookRequest, request: Request, tenant=Depends(get_tenant)):
+    """Save/update Facebook Page credentials. The Page Access Token never touches Postgres —
+    written to Secrets Manager at acp/social/{tenant_id}; the DB row only ever holds the
+    non-secret page_id + the secret's KEY NAME. connected_at set only on first connect."""
+    if not body.page_id.strip() or not body.page_access_token.strip():
+        raise HTTPException(status_code=422, detail="page_id and page_access_token are required")
+
+    pool = request.app.state.pool
+    tenant_id = tenant["sub"]
+    secret_key = f"acp/social/{tenant_id}"
+
+    try:
+        _put_secret(secret_key, {
+            "page_id": body.page_id.strip(), "page_access_token": body.page_access_token.strip(),
+        })
+    except ClientError as exc:
+        logger.error("integration_secret_write_failed", tenant_id=tenant_id, error=str(exc))
+        raise HTTPException(status_code=502, detail="Could not save credentials — try again")
+
+    config = json.dumps({"page_id": body.page_id.strip()})
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO shared.tenant_integrations
+                (tenant_id, integration_type, config, secret_key, connected_at)
+            VALUES ($1::uuid, 'facebook', $2::jsonb, $3, now())
+            ON CONFLICT (tenant_id, integration_type) DO UPDATE SET
+                config = EXCLUDED.config,
+                secret_key = EXCLUDED.secret_key,
+                updated_at = now()
+            RETURNING config, connected_at, last_verified_at, last_verify_error
+            """,
+            tenant_id, config, secret_key,
+        )
+
+    logger.info("facebook_integration_saved", tenant_id=tenant_id, page_id=body.page_id)
+    return _fb_row_to_status(row)
+
+
+def _classify_facebook_test_failure(status, body: Optional[dict]) -> str:
+    if isinstance(body, dict) and "error" in body:
+        err = body["error"]
+        code = err.get("code")
+        if code in (190,):  # OAuthException — expired/invalid token
+            return "Invalid or expired Page Access Token"
+        if code in (100,):  # Unsupported get request — usually a bad page_id
+            return "Facebook Page not found — check the Page ID"
+        return f"Facebook returned an error: {err.get('message', 'unknown')}"
+    if status is not None:
+        return f"Facebook returned an unexpected response (HTTP {status})"
+    return "Could not connect to the Facebook Graph API"
+
+
+@router.post("/facebook/test")
+async def test_facebook(request: Request, tenant=Depends(get_tenant)):
+    """Real connection test — GET /{page_id}?fields=id,name&access_token=... (the standard Graph
+    API token/page smoke-test, same idea as WordPress's own /users/me check). Success ->
+    last_verified_at bumped; failure -> last_verify_error set, last_verified_at unchanged."""
+    pool = request.app.state.pool
+    tenant_id = tenant["sub"]
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT config, secret_key FROM shared.tenant_integrations "
+            "WHERE tenant_id = $1::uuid AND integration_type = 'facebook'",
+            tenant_id,
+        )
+    if not row or not row["secret_key"]:
+        raise HTTPException(status_code=404, detail="Facebook is not connected yet")
+
+    try:
+        creds = _get_secret(row["secret_key"])
+    except ClientError as exc:
+        logger.error("integration_secret_read_failed", tenant_id=tenant_id,
+                     secret_key=row["secret_key"], error=str(exc))
+        raise HTTPException(status_code=502, detail="Could not read saved credentials — try reconnecting")
+
+    status_code: Optional[int] = None
+    parsed_body: Optional[dict] = None
+    try:
+        params = {"fields": "id,name", "access_token": creds["page_access_token"]}
+        async with aiohttp.ClientSession(timeout=_TEST_TIMEOUT) as session:
+            async with session.get(
+                f"https://graph.facebook.com/{creds['page_id']}", params=params
+            ) as resp:
+                status_code = resp.status
+                content_type = resp.headers.get("content-type", "")
+                body_text = await resp.text()
+                if content_type.startswith("application/json"):
+                    try:
+                        parsed_body = json.loads(body_text)
+                    except (json.JSONDecodeError, ValueError):
+                        parsed_body = None
+    except Exception:  # noqa: BLE001 — classified below (status_code stays None -> generic message)
+        pass
+
+    success = (
+        status_code == 200 and isinstance(parsed_body, dict)
+        and "id" in parsed_body and "error" not in parsed_body
+    )
+    message = None if success else _classify_facebook_test_failure(status_code, parsed_body)
+
+    async with pool.acquire() as conn:
+        if success:
+            updated = await conn.fetchrow(
+                """
+                UPDATE shared.tenant_integrations
+                SET last_verified_at = now(), last_verify_error = NULL, updated_at = now()
+                WHERE tenant_id = $1::uuid AND integration_type = 'facebook'
+                RETURNING config, connected_at, last_verified_at, last_verify_error
+                """,
+                tenant_id,
+            )
+        else:
+            updated = await conn.fetchrow(
+                """
+                UPDATE shared.tenant_integrations
+                SET last_verify_error = $2, updated_at = now()
+                WHERE tenant_id = $1::uuid AND integration_type = 'facebook'
+                RETURNING config, connected_at, last_verified_at, last_verify_error
+                """,
+                tenant_id, message,
+            )
+
+    logger.info("facebook_test_connection", tenant_id=tenant_id, success=success, status_code=status_code)
+
+    result = _fb_row_to_status(updated)
+    result["success"] = success
+    return result
+
+
 __all__ = ["router"]

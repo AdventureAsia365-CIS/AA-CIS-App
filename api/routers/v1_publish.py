@@ -23,6 +23,15 @@ wordpress.py) now does its own content-type/JSON/shape validation before returni
 this router never trusts a bare 200/201 status either, it just relies on create_post() to have
 already raised if the response wasn't real WordPress, and records 'failed' + the real error
 message rather than a fabricated 'published' row.
+
+AA-462 — adds `facebook` (STEP0: of the 6 non-blog channels named in that issue, facebook has
+the most real content_piece data today — 3 approved pieces vs 0 everywhere else, real DB
+query). `_publish_to_channel()` dispatches on `channel`; the WordPress branch is the exact
+pre-AA-462 logic unchanged, the Facebook branch mirrors its shape 1:1 (own integration lookup,
+own adapter, same AA-460-lesson validation inside FacebookAdapter.create_post()). The other 5
+channels (tiktok/instagram/linkedin/email/ads) remain unbuilt — 404 with a clear "not yet
+supported" message rather than a generic "not found", so a future caller hitting one doesn't
+read it as a content/ownership problem.
 """
 from __future__ import annotations
 
@@ -35,6 +44,8 @@ from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from api.routers.v1_tours import get_tenant
+from services.acp_publish.base import SocialPost
+from services.acp_publish.facebook import FacebookAdapter
 from services.acp_s4_blog.cms.base import BlogContent
 from services.acp_s4_blog.cms.wordpress import WordPressAdapter
 
@@ -42,7 +53,9 @@ logger = structlog.get_logger()
 router = APIRouter(prefix="/v1/publish-log", tags=["publish-log"])
 
 _SM_REGION = "us-west-1"
-_BLOG_CHANNEL = "blog"  # T11 scope is blog-only (AA-456/AA-458) — 7 other channels deferred
+# T11 scope: blog (AA-456/458) + facebook (AA-462). 5 channels remain unbuilt — see this
+# file's own header for why facebook was picked first (real STEP0 data, not a guess).
+_SUPPORTED_CHANNELS = ("blog", "facebook")
 
 
 def _get_secret(secret_key: str) -> dict:
@@ -126,11 +139,11 @@ async def list_pending(request: Request, tenant=Depends(get_tenant)):
                 ON pl.piece_id = cp.piece_id AND pl.status = 'published'
             WHERE cp.tenant_id = $1::uuid
               AND cp.status = 'approved'
-              AND COALESCE(cp.channel, agr.channel) = $2
+              AND COALESCE(cp.channel, agr.channel) = ANY($2::text[])
               AND pl.publish_id IS NULL
             ORDER BY cp.created_at DESC
             """,
-            tenant_id, _BLOG_CHANNEL,
+            tenant_id, list(_SUPPORTED_CHANNELS),
         )
 
     return {
@@ -150,6 +163,37 @@ async def list_pending(request: Request, tenant=Depends(get_tenant)):
         ],
         "total": len(rows),
     }
+
+
+def _connect_action_verb(channel: str) -> str:
+    """A 422 "connect X to publish" message is only useful with a real display name filled in
+    — 'wordpress' -> 'WordPress' (matches the original AA-458 copy exactly, "Connect WordPress
+    to publish"), 'facebook' -> 'Facebook'. Falls back to str.title() for any future channel."""
+    return {"blog": "WordPress", "facebook": "Facebook"}.get(channel, channel.title())
+
+
+async def _call_adapter(channel: str, creds: dict, piece) -> tuple:
+    """Returns (external_id, external_url) on success, raises on any failure — one branch per
+    supported channel, each building its own adapter from that channel's own creds shape and
+    relying on the adapter's own AA-460-lesson validation (never trusts a bare success status
+    itself). Unknown channels never reach here — publish() already 404s before calling this."""
+    if channel == "blog":
+        title = piece["angle_name"] or "Untitled"
+        content = BlogContent(
+            title=title, content_html=piece["content_text"], slug="",
+            seo_title=title, seo_meta="", status="publish",
+        )
+        adapter = WordPressAdapter(
+            wp_url=creds["wp_url"], username=creds["username"], app_password=creds["app_password"],
+        )
+        result = await adapter.create_post(content)
+    else:  # channel == "facebook" — the only 2 branches _SUPPORTED_CHANNELS allows through
+        post = SocialPost(message=piece["content_text"])
+        adapter = FacebookAdapter(
+            page_id=creds["page_id"], page_access_token=creds["page_access_token"],
+        )
+        result = await adapter.create_post(post)
+    return str(result.post_id), result.post_url
 
 
 @router.post("/{piece_id}/publish")
@@ -186,44 +230,36 @@ async def publish(piece_id: UUID, request: Request, tenant=Depends(get_tenant)):
             piece_id, tenant_id,
         )
 
-    if not piece or piece["status"] != "approved" or piece["channel"] != _BLOG_CHANNEL:
+    if not piece or piece["status"] != "approved":
         raise HTTPException(status_code=404, detail="Content piece not found or not approved")
+    channel = piece["channel"]
+    if channel not in _SUPPORTED_CHANNELS:
+        raise HTTPException(status_code=404, detail=f"Publishing to '{channel}' is not yet supported")
 
     async with pool.acquire() as conn:
         integ = await conn.fetchrow(
             "SELECT secret_key FROM shared.tenant_integrations "
-            "WHERE tenant_id = $1::uuid AND integration_type = 'wordpress'",
-            tenant_id,
+            "WHERE tenant_id = $1::uuid AND integration_type = $2",
+            tenant_id, channel,
         )
 
     if not integ or not integ["secret_key"]:
-        raise HTTPException(status_code=422, detail="Connect WordPress to publish")
+        raise HTTPException(status_code=422, detail=f"Connect {_connect_action_verb(channel)} to publish")
 
     try:
         creds = _get_secret(integ["secret_key"])
     except ClientError as exc:
-        logger.error("publish_secret_read_failed", tenant_id=tenant_id,
+        logger.error("publish_secret_read_failed", tenant_id=tenant_id, channel=channel,
                      secret_key=integ["secret_key"], error=str(exc))
         raise HTTPException(status_code=502, detail="Could not read saved credentials — try reconnecting")
 
-    title = piece["angle_name"] or "Untitled"
-    content = BlogContent(
-        title=title, content_html=piece["content_text"], slug="",
-        seo_title=title, seo_meta="", status="publish",
-    )
-    adapter = WordPressAdapter(
-        wp_url=creds["wp_url"], username=creds["username"], app_password=creds["app_password"],
-    )
-
     try:
-        result = await adapter.create_post(content)
+        external_id, external_url = await _call_adapter(channel, creds, piece)
         success = True
-        external_id = str(result.post_id)
-        external_url = result.post_url
         error_msg = None
-    except Exception as exc:  # noqa: BLE001 — create_post() already validated the response shape
-        # (AA-460 lesson, applied in the adapter itself); anything reaching here is a real
-        # failure (network error, non-2xx, or a non-WordPress response) with a clear message.
+    except Exception as exc:  # noqa: BLE001 — the adapter already validated the response shape
+        # (AA-460 lesson); anything reaching here is a real failure (network error, non-2xx, or
+        # an unexpected response) with a clear message, not a fabricated success.
         success = False
         external_id = None
         external_url = None
@@ -259,10 +295,10 @@ async def publish(piece_id: UUID, request: Request, tenant=Depends(get_tenant)):
                         CASE WHEN $4 = 'published' THEN now() ELSE NULL END, $7)
                 RETURNING publish_id::text, status, external_id, external_url, published_at, last_error
                 """,
-                piece_id, tenant_id, _BLOG_CHANNEL, new_status, external_id, external_url, error_msg,
+                piece_id, tenant_id, channel, new_status, external_id, external_url, error_msg,
             )
 
-    logger.info("wordpress_publish", tenant_id=tenant_id, piece_id=str(piece_id),
+    logger.info("channel_publish", tenant_id=tenant_id, piece_id=str(piece_id), channel=channel,
                 success=success, external_id=external_id, error=error_msg)
 
     return {
