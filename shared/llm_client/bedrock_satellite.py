@@ -255,7 +255,22 @@ def invoke_claude(
             "messages": [{"role": "user", "content": prompt}],
         }
         if system:
-            body_dict["system"] = system  # field riêng, đúng chuẩn Anthropic Messages API
+            # AA-324: was a plain string -- Anthropic's Bedrock InvokeModel body (this
+            # exact "anthropic_version": "bedrock-2023-05-31" shape, NOT the Converse API)
+            # supports the identical prompt-caching contract as the direct Anthropic API:
+            # `system` as a list of content blocks, each optionally carrying
+            # `cache_control: {"type": "ephemeral"}` -- confirmed via AWS's own Bedrock
+            # prompt-caching docs, this is NOT a Bedrock/cross-account platform limitation
+            # (the issue's own original title hypothesis). A plain string `system` is valid
+            # Anthropic Messages API shape too, but Bedrock silently never caches it -- no
+            # error, exactly the "code looks right, cache_read/write stay 0" symptom AA-324
+            # found. Reuses build_cached_system_prompt() -- the SAME L1-cache helper
+            # _call_bedrock() (acc2-native T1 path) already uses -- so satellite (T1.5/T2.5,
+            # the path essentially all real Sonnet/Haiku calls fall through to today, acc2
+            # native being blocked for channel-program accounts, AA-291/AA-329) gets the
+            # identical cache contract instead of silently never caching.
+            from .prompt_cache import build_cached_system_prompt
+            body_dict["system"] = build_cached_system_prompt(system)
         body = json.dumps(body_dict)
         resp = bedrock_rt.invoke_model(
             modelId=inference_profile,

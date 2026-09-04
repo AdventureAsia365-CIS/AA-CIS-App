@@ -249,11 +249,19 @@ class LLMClient:
 
         in_tok = result.usage.get("input_tokens", 0)
         out_tok = result.usage.get("output_tokens", 0)
+        # AA-324: previously never read here at all -- cache_read_tokens/cache_write_tokens
+        # always defaulted to 0 on every satellite LLMResponse regardless of what Bedrock
+        # actually returned in usage, independently of whether the request-side caching
+        # (invoke_claude()'s system= wiring, fixed same task) was even working. Mirrors
+        # _call_bedrock()'s (acc2-native T1) own extraction above exactly.
+        cache_read  = result.usage.get("cache_read_input_tokens", 0) or 0
+        cache_write = result.usage.get("cache_creation_input_tokens", 0) or 0
         cost = self._calc_cost(model, in_tok, out_tok)
 
         logger.info("llm_success", provider="bedrock-satellite", model=result.model_used,
-                    in_tokens=in_tok, out_tokens=out_tok, cost_usd=cost,
-                    latency_ms=result.latency_ms, stop_reason=result.stop_reason)
+                    in_tokens=in_tok, out_tokens=out_tok,
+                    cache_read=cache_read, cache_write=cache_write,
+                    cost_usd=cost, latency_ms=result.latency_ms, stop_reason=result.stop_reason)
 
         return LLMResponse(
             content=result.text,
@@ -263,6 +271,8 @@ class LLMClient:
             output_tokens=out_tok,
             cost_usd=cost,
             fallback_used=False,  # set lại đúng ở generate() tuỳ ngữ cảnh gọi
+            cache_read_tokens=cache_read,
+            cache_write_tokens=cache_write,
             stop_reason=result.stop_reason,
         )
 
