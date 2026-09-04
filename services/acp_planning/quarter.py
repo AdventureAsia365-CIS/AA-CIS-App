@@ -15,7 +15,7 @@ Fixes applied during the port (see docs/implementation-notes/AA-301.md):
        redistributes the freed share proportionally to non-thin trips.
 
 Gate B (Ms. Thu must approve the quarter plan, REQUIRED, NEVER auto) is
-QuarterPlan.approved — allocate_month() (N6) refuses to run against an
+QuarterPlan.approved — compute_slot_grid() (N6, allocator.py) refuses to run against an
 unapproved plan (QuarterPlanNotApprovedError). No acp_shared.acp_hitl_requests
 row is created for this — that table is FK'd to acp_shared.acp_runs(run_id),
 an ACP-B2B "pipeline run" concept N4-N6 don't have (they're periodic
@@ -308,7 +308,14 @@ async def fetch_atoms_by_trip(tenant_id: UUID, pool) -> dict[UUID, list[AtomReco
     owner_scope = the rewriting tenant's own id, so filtering by the tour's original
     owner made those atoms invisible to N5/N6 quarter planning. Same fix shape as
     `tenant_pool.fetch_tenant_atoms_by_trip()` (AA-448, T7's own parallel function that
-    routed around this same bug for its slot-grid endpoint instead of fixing it here)."""
+    routed around this same bug for its slot-grid endpoint instead of fixing it here).
+
+    AA-516 note: its only 2 real callers (`plan_quarter()` here, `allocator.allocate_month()`)
+    were both deleted as dead N4-N6 admin-triggered-quarter-plan code — this function is now
+    ALSO unreferenced outside its own unit test (test_aa301_quarter.py). Not deleted:
+    out of the exact scope Nghiệp confirmed for this cleanup (only fetch_trips/runway_map/
+    plan_quarter/allocate_month/allocate_month_from_db/allocate_and_persist_week were named).
+    Flagged as a real follow-up candidate, not removed speculatively."""
     async with pool.acquire() as conn:
         rows = await conn.fetch(_ATOM_ROW_QUERY, str(tenant_id))
     by_trip: dict[UUID, list[AtomRecord]] = {}
@@ -316,25 +323,6 @@ async def fetch_atoms_by_trip(tenant_id: UUID, pool) -> dict[UUID, list[AtomReco
         atom = _row_to_atom(r)
         by_trip.setdefault(atom.trip_id, []).append(atom)
     return by_trip
-
-
-async def plan_quarter(
-    tenant_id: UUID, year: int, quarter: int, markets: list[str],
-    capacity_posts_per_week: int, specials: list[str], runway: RunwayMap, pool,
-    excludes: Optional[set[UUID]] = None,
-) -> QuarterPlan:
-    """Async DB-wiring wrapper. `markets`/`capacity_posts_per_week`/`specials`
-    are caller-supplied — tenant-config table for markets/channels added
-    AA-323 (see services/acp_planning/tenant_config.py); capacity still lives
-    on shared.tenants.posts_per_week (AA-384). `excludes` — AA-323 Gap 1,
-    manual N5 removal, see compute_quarter_plan()."""
-    from .runway import fetch_trips
-    trips = await fetch_trips(tenant_id, pool)
-    atoms_by_trip = await fetch_atoms_by_trip(tenant_id, pool)
-    return compute_quarter_plan(
-        tenant_id, year, quarter, trips, markets, capacity_posts_per_week,
-        specials, runway, atoms_by_trip, excludes,
-    )
 
 
 def approve_quarter_plan(plan: QuarterPlan, approved_by: str) -> QuarterPlan:
@@ -587,7 +575,7 @@ async def fetch_quarter_plan_version_history(
 
 
 __all__ = [
-    "compute_quarter_plan", "fetch_atoms_by_trip", "plan_quarter",
+    "compute_quarter_plan", "fetch_atoms_by_trip",
     "approve_quarter_plan", "save_quarter_plan_version",
     "approve_quarter_plan_version", "fetch_approved_quarter_plan",
     "fetch_current_version_no", "fetch_quarter_plan_version",

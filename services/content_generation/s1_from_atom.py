@@ -286,6 +286,7 @@ def _call_claude_satellite(system_prompt: str, user_prompt: str, max_tokens: int
         tokens_in=in_tok, tokens_out=out_tok, cost_usd=calc_cost(cfg.model_id, in_tok, out_tok),
         tenant_id=None,  # AA-518 — same ContentState-has-no-tenant_id gap as s1_generate, flagged there
         quality_signal={"output_len_chars": len(result.text)},
+        stop_reason=result.stop_reason,
     )
     return {
         "text": result.text,

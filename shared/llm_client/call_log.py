@@ -26,8 +26,8 @@ logger = structlog.get_logger()
 _INSERT_SQL = """
     INSERT INTO shared.llm_call_log
         (tenant_id, stage, role, model, tokens_in, tokens_out, cost_usd, quality_signal,
-         content_piece_id, angle_gate_request_id)
-    VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::uuid, $10::uuid)
+         content_piece_id, angle_gate_request_id, stop_reason)
+    VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::uuid, $10::uuid, $11)
 """
 
 
@@ -35,18 +35,23 @@ async def record_call(
     *, stage: str, role: str, model: str, tokens_in: Optional[int], tokens_out: Optional[int],
     cost_usd: Optional[float], quality_signal: dict, tenant_id: Optional[str] = None,
     content_piece_id: Optional[str] = None, angle_gate_request_id: Optional[str] = None,
+    stop_reason: Optional[str] = None,
 ) -> None:
     """Opens its own short-lived connection — the call sites this is used from (S1 graph nodes,
     N7 E2-E5, judge_client.py, T5 atomize) are scattered across sync and async code with no
     single shared asyncpg.Pool threaded down to them (T9/T5's own async orchestrators DO have a
     pool in scope — those call sites pass it to `record_call_with_pool()` instead, see below, to
-    avoid paying for a whole new connection when an open one is already sitting right there)."""
+    avoid paying for a whole new connection when an open one is already sitting right there).
+
+    `stop_reason` (AA-493): "end_turn"/"max_tokens"/"stop_sequence" (Anthropic) or
+    "stop"/"length"/... (OpenAI's `finish_reason`, same slot) — None for any caller that hasn't
+    been threaded through yet, so this stays backward compatible field-by-field."""
     try:
         conn = await asyncpg.connect(get_database_url(), ssl="require")
         try:
             await conn.execute(
                 _INSERT_SQL, tenant_id, stage, role, model, tokens_in, tokens_out, cost_usd,
-                json.dumps(quality_signal), content_piece_id, angle_gate_request_id,
+                json.dumps(quality_signal), content_piece_id, angle_gate_request_id, stop_reason,
             )
         finally:
             await conn.close()
@@ -58,6 +63,7 @@ async def record_call_with_pool(
     pool, *, stage: str, role: str, model: str, tokens_in: Optional[int], tokens_out: Optional[int],
     cost_usd: Optional[float], quality_signal: dict, tenant_id: Optional[str] = None,
     content_piece_id: Optional[str] = None, angle_gate_request_id: Optional[str] = None,
+    stop_reason: Optional[str] = None,
 ) -> None:
     """Same as record_call() but reuses an already-open asyncpg.Pool (T5/T9's async orchestrators
     both have one in scope) instead of opening a fresh connection per call."""
@@ -65,7 +71,7 @@ async def record_call_with_pool(
         async with pool.acquire() as conn:
             await conn.execute(
                 _INSERT_SQL, tenant_id, stage, role, model, tokens_in, tokens_out, cost_usd,
-                json.dumps(quality_signal), content_piece_id, angle_gate_request_id,
+                json.dumps(quality_signal), content_piece_id, angle_gate_request_id, stop_reason,
             )
     except Exception as e:
         logger.warning("llm_call_log_write_failed", stage=stage, role=role, error=str(e))

@@ -167,6 +167,7 @@ def judge_node(state: dict) -> dict:
                 "cross_brand_distinct": distinct, "mission_present": mission_present,
                 "passed": new_score >= _MIN_QUALITY,
             },
+            stop_reason=getattr(resp, "stop_reason", None),
         )
         return {
             **state,

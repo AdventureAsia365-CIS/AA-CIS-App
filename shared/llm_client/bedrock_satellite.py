@@ -158,6 +158,10 @@ class BedrockInvokeResult:
     model_used: str          # "sonnet-4-6" | "haiku-4-5"
     latency_ms: float
     usage: dict
+    # AA-493: Anthropic's stop_reason ("end_turn" | "max_tokens" | "stop_sequence" | ...) from
+    # the non-streaming invoke_model() response payload — a top-level field on that JSON, unlike
+    # client.py's streaming _call_bedrock (there it arrives on the message_delta event).
+    stop_reason: Optional[str] = None
 
 
 def _get_satellite_session(account: str = "acc1") -> boto3.Session:
@@ -269,6 +273,7 @@ def invoke_claude(
             model_used=model_label,
             latency_ms=round(latency_ms, 1),
             usage=usage,
+            stop_reason=payload.get("stop_reason"),
         )
     except BedrockUnavailable:
         raise  # đã đúng loại exception, propagate thẳng

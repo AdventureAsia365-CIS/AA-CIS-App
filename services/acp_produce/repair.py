@@ -476,6 +476,7 @@ def repair_piece(body_tagged: str, violations: list[str], *, invariants: Optiona
                                 result.usage.get("output_tokens", 0)),
             tenant_id=None,
             quality_signal={"leaked_reasoning_rejected": leaked, "violations_targeted": len(violations)},
+            stop_reason=result.stop_reason,
         )
         if leaked:
             logger.warning("e5_repair_leaked_reasoning_rejected", violations=violations,
