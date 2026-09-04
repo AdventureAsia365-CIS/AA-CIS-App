@@ -473,6 +473,7 @@ def _log_t10_judge_call(raw: dict, *, gate: str, passed: bool, extra: dict) -> N
         tokens_in=in_tok, tokens_out=out_tok, cost_usd=calc_cost(model, in_tok, out_tok),
         tenant_id=None,
         quality_signal={"gate": gate, "passed": passed, **extra},
+        stop_reason=raw.get("stop_reason"),
     )
 
 

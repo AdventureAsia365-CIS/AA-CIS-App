@@ -139,6 +139,7 @@ async def generate_angles(
             tenant_id=str(tenant_id) if tenant_id else None,
             angle_gate_request_id=str(request_id) if request_id else None,
             quality_signal=quality_signal,
+            stop_reason=getattr(resp, "stop_reason", None),
         )
     else:
         await record_call(
@@ -148,6 +149,7 @@ async def generate_angles(
             tenant_id=str(tenant_id) if tenant_id else None,
             angle_gate_request_id=str(request_id) if request_id else None,
             quality_signal=quality_signal,
+            stop_reason=getattr(resp, "stop_reason", None),
         )
     return angles, recommended_index, reason, resp.cost_usd
 

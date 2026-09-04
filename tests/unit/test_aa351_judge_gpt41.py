@@ -37,9 +37,9 @@ def _nova_response(text: str):
     return {"body": body}
 
 
-def _openai_response(text: str, in_tok: int = 18, out_tok: int = 9):
+def _openai_response(text: str, in_tok: int = 18, out_tok: int = 9, finish_reason: str = "stop"):
     resp = MagicMock()
-    resp.choices = [MagicMock(message=MagicMock(content=text))]
+    resp.choices = [MagicMock(message=MagicMock(content=text), finish_reason=finish_reason)]
     resp.usage = MagicMock(prompt_tokens=in_tok, completion_tokens=out_tok)
     return resp
 
@@ -129,6 +129,42 @@ def test_invoke_judge_gpt41_parses_usage_and_text():
     assert result["text"] == '{"status": "flagged"}'
     assert result["input_tokens"] == 42
     assert result["output_tokens"] == 17
+
+
+def test_invoke_judge_gpt41_captures_finish_reason():
+    """AA-493: OpenAI's finish_reason ("length" here — the truncation case) must survive into
+    invoke_judge()'s returned dict under the shared "stop_reason" key."""
+    fake_openai_client = MagicMock()
+    fake_openai_client.chat.completions.create.return_value = _openai_response(
+        '{"status": "flagged"}', finish_reason="length",
+    )
+    with patch("openai.OpenAI", return_value=fake_openai_client):
+        result = invoke_judge_gpt41("system", "user")
+    assert result["stop_reason"] == "length"
+
+
+def test_invoke_judge_nova_pro_captures_stop_reason(monkeypatch):
+    """AA-493: Nova Pro's (invoke_model, not Converse proper) response also carries a top-level
+    stopReason -- must be captured under the same "stop_reason" key."""
+    monkeypatch.delenv("JUDGE_MODEL", raising=False)
+    fake_client = MagicMock()
+    fake_client.invoke_model.return_value = _nova_response('{"ok": true}')
+    with patch("services.acp_produce.judge_client.boto3.client", return_value=fake_client):
+        result = invoke_judge("system", "user", model="nova_pro")
+    assert result["stop_reason"] == "end_turn"  # matches _nova_response()'s fixed payload
+
+
+def test_invoke_judge_gpt56_captures_stop_reason():
+    """AA-493: the Converse API's real stopReason field, for the gpt56 (AA-351) backend."""
+    fake_client = MagicMock()
+    fake_client.converse.return_value = {
+        "output": {"message": {"role": "assistant", "content": [{"text": '{"ok": true}'}]}},
+        "usage": {"inputTokens": 15, "outputTokens": 8},
+        "stopReason": "max_tokens",
+    }
+    with patch("shared.llm_client.bedrock_satellite.get_satellite_client", return_value=fake_client):
+        result = invoke_judge("system", "user", model="gpt56")
+    assert result["stop_reason"] == "max_tokens"
 
 
 def test_judge_client_still_never_imports_generation_or_writer_modules():
