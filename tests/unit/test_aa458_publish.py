@@ -69,9 +69,10 @@ async def test_list_pending_returns_rows_scoped_to_tenant():
     assert result["data"][0]["piece_id"] == str(PIECE_ID)
     assert result["data"][0]["title"] == "A Real Angle"
     # scoped by the caller's own tenant_id, never a client-controlled param
-    sql, tenant_id_param, channel_param = conn.fetch.call_args[0]
+    sql, tenant_id_param, channels_param = conn.fetch.call_args[0]
     assert tenant_id_param == TENANT["sub"]
-    assert channel_param == "blog"
+    # AA-462 — list_pending() now covers every supported channel (blog + facebook), not just blog
+    assert set(channels_param) == {"blog", "facebook"}
     assert "status = 'approved'" in sql
     assert "pl.publish_id IS NULL" in sql
     # AA-497 — angle_name joins via the denormalized FK first (mutable chosen=true is only a
@@ -124,10 +125,11 @@ async def test_publish_404_when_piece_not_approved():
 
 
 @pytest.mark.asyncio
-async def test_publish_404_when_channel_not_blog():
-    """T11 scope is blog-only — a facebook/tiktok/etc piece must not be publishable here."""
+async def test_publish_404_when_channel_unsupported():
+    """AA-462 added facebook (see test_aa462_publish_facebook.py) — blog and facebook are both
+    publishable now; the other 5 (tiktok/instagram/linkedin/email/ads) still aren't."""
     piece = {"piece_id": str(PIECE_ID), "content_text": "x", "status": "approved",
-              "channel": "facebook", "angle_name": "A"}
+              "channel": "tiktok", "angle_name": "A"}
     pool, _ = _sequential_pool(piece)
     req = _make_request(pool)
     with pytest.raises(HTTPException) as exc_info:
