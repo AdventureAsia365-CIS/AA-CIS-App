@@ -4,9 +4,14 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 from pydantic import BaseModel as _BM
 from api.routers.auth import verify_jwt
+from api.routers.admin import PLAN_LIMITS
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/v1/tours", tags=["B2B Tours"])
+# AA-489 — separate router, plain /v1 prefix (not /v1/tours): the pre-AA-428 dead frontend
+# code and this issue's own text both call this `GET /v1/quota`, not `/v1/tours/quota`. Same
+# split-router-per-file pattern v1_planning.py already uses for its own slate_router.
+quota_router = APIRouter(prefix="/v1", tags=["Quota"])
 security = HTTPBearer()
 
 # AA-425: strong refs to the fire-and-forget rewrite (T2 + T3 + T5) background task —
@@ -252,6 +257,91 @@ async def browse_pool(
     }
 
 
+# ── AA-489: rewrite quota (shared helpers + GET /v1/quota) ────────────────────
+# STEP0 found nothing enforces a tenant's monthly rewrite count: PLAN_LIMITS.tours_per_month
+# (admin.py) was defined but only ever displayed, never checked; raw_tours.rewrite_count
+# (migration 033) is dead, 0 callers; rate_limit_middleware throttles requests/minute across
+# ALL /v1/*, not a monthly count. Deliberately NOT reusing acp_quota_ledger — that's ACPv1
+# S2/S3/S4 quota, dead since 13/07/2026. New table: shared.tenant_rewrite_usage (migration
+# 142), one row per (tenant_id, year_month).
+#
+# Business decisions (conservative defaults, per this chain's own build prompt — not
+# separately confirmed live by Nghiệp, flagged for review, not treated as silently final):
+#   * Limit = PLAN_LIMITS[plan_tier].tours_per_month as-is, no new number invented.
+#   * Reset = calendar month, not rolling 30d.
+#   * Hard-block (429) over quota — matches this issue's stated purpose, LLM cost control.
+
+
+def _current_year_month_and_reset() -> tuple:
+    """(year_month 'YYYY-MM' string, first-of-next-month date) in UTC."""
+    import datetime as _dt_quota
+    now_utc = _dt_quota.datetime.now(_dt_quota.timezone.utc)
+    next_month = (now_utc.replace(day=1) + _dt_quota.timedelta(days=32)).replace(day=1)
+    return now_utc.strftime("%Y-%m"), next_month
+
+
+async def _get_tenant_plan_limit(conn, tenant_id: str) -> tuple:
+    """(plan_tier str, tours_per_month int) — read live from shared.tenants, not the JWT's
+    own plan_tier claim (same rationale AA-432 established for rate_limit_rpm/is_active: a
+    plan change shouldn't take up to 24h, the JWT's TTL, to take effect)."""
+    plan = await conn.fetchval(
+        "SELECT plan_tier FROM shared.tenants WHERE tenant_id = $1::uuid", tenant_id
+    )
+    limit = PLAN_LIMITS.get(str(plan), PLAN_LIMITS["starter"])["tours_per_month"]
+    return str(plan), limit
+
+
+async def _check_and_consume_rewrite_quota(conn, tenant_id: str) -> None:
+    """Atomically increments this month's rewrite count and raises 429 if it now exceeds the
+    tenant's plan limit. Increment-then-check (same order rate_limit_middleware's
+    redis.incr()-then-compare already uses) — a request that pushes the count past the limit
+    still counts, consistent with "quota consumed by requesting"."""
+    _, limit = await _get_tenant_plan_limit(conn, tenant_id)
+    year_month, next_month = _current_year_month_and_reset()
+    used = await conn.fetchval("""
+        INSERT INTO shared.tenant_rewrite_usage (tenant_id, year_month, rewrite_count)
+        VALUES ($1::uuid, $2, 1)
+        ON CONFLICT (tenant_id, year_month)
+        DO UPDATE SET rewrite_count = shared.tenant_rewrite_usage.rewrite_count + 1,
+                      updated_at = NOW()
+        RETURNING rewrite_count
+    """, tenant_id, year_month)
+    if used > limit:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Monthly rewrite quota exceeded ({used - 1}/{limit} used this month, "
+                   f"resets {next_month.strftime('%Y-%m-%d')})",
+        )
+
+
+# Real replacement for the endpoint CatalogTab.tsx used to call before AA-428 deleted that
+# dead code (STEP0 there found this route never existed). Read-only — does NOT increment
+# shared.tenant_rewrite_usage (only _check_and_consume_rewrite_quota, called from
+# trigger_rewrite() below, does that, on an actual attempt). `rewrites_remaining` kept as the
+# field name the old removed UI already expected, so a future UI rebuild (the issue's own "nếu
+# muốn") can reuse this shape as-is.
+@quota_router.get("/quota")
+async def get_quota(request: Request, tenant=Depends(get_tenant)):
+    tenant_id = tenant["sub"]
+    pool = request.app.state.pool
+    year_month, next_month = _current_year_month_and_reset()
+
+    async with pool.acquire() as conn:
+        plan, limit = await _get_tenant_plan_limit(conn, tenant_id)
+        used = await conn.fetchval("""
+            SELECT rewrite_count FROM shared.tenant_rewrite_usage
+            WHERE tenant_id = $1::uuid AND year_month = $2
+        """, tenant_id, year_month) or 0
+
+    return {
+        "plan_tier":           plan,
+        "tours_per_month":     limit,
+        "rewrites_used":       used,
+        "rewrites_remaining":  max(limit - used, 0),
+        "resets_at":           next_month.strftime("%Y-%m-%d"),
+    }
+
+
 # ── P3-S4: Trigger Rewrite ────────────────────────────────────────────────────
 
 
@@ -275,6 +365,12 @@ async def trigger_rewrite(
     pool = request.app.state.pool
 
     async with pool.acquire() as conn:
+        # AA-489 — real monthly rewrite quota, enforced here for the first time. See the
+        # helper's own docstring/comment block above (_check_and_consume_rewrite_quota) for
+        # the full rationale; raises 429 before any tour lookup or LLM work if this request
+        # would push the tenant over their plan's tours_per_month for the current month.
+        await _check_and_consume_rewrite_quota(conn, tenant_id)
+
         # Check published tour exists
         pt = await conn.fetchrow("""
             SELECT pt.id, pt.tour_id, pt.aa_name, pt.aa_subtitle,
