@@ -18,8 +18,18 @@ export default function InternalSidebar({ isAdmin = false, userName = "Content" 
   const router   = useRouter();
   const pathname = usePathname();
 
-  function logout() {
-    ["cis_role","cis_user","cis_api_token"].forEach(k => (document.cookie = `${k}=; path=/; max-age=0`));
+  async function logout() {
+    // AA-521: same fix as AdminSidebar.tsx — cis_admin_token is httpOnly
+    // (AA-232) and reviewer sessions here carry it too (same /auth/admin-
+    // login JWT flow as admin), so the old document.cookie-only clear left
+    // the real session alive until its natural 24h expiry. Clear
+    // server-side via /api/auth/admin-logout.
+    try {
+      await fetch("/api/auth/admin-logout", { method: "POST" });
+    } catch {
+      // ignore — redirect below either way; middleware re-verifies the JWT
+      // on the next request regardless of whether the clear succeeded.
+    }
     router.push("/login");
   }
 
