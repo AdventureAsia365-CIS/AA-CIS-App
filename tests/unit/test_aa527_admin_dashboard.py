@@ -109,7 +109,8 @@ class TestListRoutes:
         conn.fetch.return_value = [
             {"route_id": "r1", "tenant_id": uuid.uuid4(), "tenant_name": "WanderLux",
              "hub_id": None, "hub_name": "Cultural Triangle", "ordered_segment_ids": '["seg1", "seg2"]',
-             "first_day": 1, "last_day": 3, "score": 5, "created_at": "2026-09-01T00:00:00"},
+             "first_day": 1, "last_day": 3, "score": 5, "created_at": "2026-09-01T00:00:00",
+             "version": 1, "superseded_at": None},
         ]
         pool = _make_pool(conn)
         request = _make_request(pool)
@@ -120,6 +121,29 @@ class TestListRoutes:
         # ordered_segment_ids comes back as a raw JSON string (no jsonb codec, same gap
         # admin_atoms.py's media handling already found) — _safe() must parse it.
         assert result["data"][0]["ordered_segment_ids"] == ["seg1", "seg2"]
+
+    @pytest.mark.asyncio
+    async def test_does_not_filter_superseded_rows_this_is_the_audit_view(self):
+        """AA-532 — every OTHER reader of acp_contract.route filters `superseded_at IS NULL`;
+        this admin audit panel deliberately does not, since showing version history is the point."""
+        conn = AsyncMock()
+        conn.fetch.return_value = [
+            {"route_id": "r1", "tenant_id": uuid.uuid4(), "tenant_name": "WanderLux",
+             "hub_id": None, "hub_name": "Cultural Triangle", "ordered_segment_ids": '["seg1"]',
+             "first_day": 1, "last_day": 3, "score": 5, "created_at": "2026-09-01T00:00:00",
+             "version": 1, "superseded_at": "2026-09-02T00:00:00"},
+            {"route_id": "r1:v2", "tenant_id": uuid.uuid4(), "tenant_name": "WanderLux",
+             "hub_id": None, "hub_name": "Cultural Triangle", "ordered_segment_ids": '["seg1", "seg2"]',
+             "first_day": 1, "last_day": 3, "score": 4, "created_at": "2026-09-02T00:00:00",
+             "version": 2, "superseded_at": None},
+        ]
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await admin_dashboard.list_routes(request, tour_id=str(uuid.uuid4()), x_admin_secret=_TEST_SECRET)
+        assert result["total"] == 2
+        query, *_params = conn.fetch.call_args[0]
+        assert "superseded_at" not in query.split("WHERE")[1].split("ORDER BY")[0]
 
 
 class TestListSlate:

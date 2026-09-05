@@ -557,6 +557,7 @@ function ScoreSection({ tourId }: { tourId: string | null }) {
 interface RouteRow {
   route_id: string; tenant_name: string | null; hub_name: string;
   ordered_segment_ids: string[]; first_day: number; last_day: number; score: number; created_at: string;
+  version: number; superseded_at: string | null; // AA-532 — versioning, never delete-and-reinsert
 }
 
 function RouteHubSection({ tourId }: { tourId: string | null }) {
@@ -575,6 +576,12 @@ function RouteHubSection({ tourId }: { tourId: string | null }) {
         <EmptyState title="No Routes yet" body="acp_contract.route has no rows for this tour — Route detection (route_detection.py) hasn't run, or found no consecutive-day span of ranked Segments." />
       ) : (
         <AuditTable rows={data.data} rowKey={r => r.route_id} columns={[
+          // AA-532 — status/version: this panel shows the full version history on purpose
+          // (route rows are versioned/superseded, never deleted), unlike every other reader of
+          // this table which only ever sees the current one.
+          { key: "status", label: "Status", render: r => r.superseded_at
+            ? <Badge color="gray">superseded v{r.version}</Badge>
+            : <Badge color="green">current{r.version > 1 ? ` v${r.version}` : ""}</Badge> },
           { key: "hub", label: "Hub name", render: r => r.hub_name },
           { key: "tenant", label: "Tenant", render: r => r.tenant_name ?? "—" },
           { key: "days", label: "Days", render: r => `${r.first_day}–${r.last_day}` },

@@ -143,7 +143,10 @@ _LIST_FROM = """
     LEFT JOIN LATERAL (
         SELECT r.route_id, r.hub_name
         FROM acp_contract.route r
-        WHERE r.tour_id = ta.tour_id AND r.ordered_segment_ids @> jsonb_build_array(asm.segment_id)
+        -- AA-532: only the CURRENT version — a superseded route (never deleted) must not still
+        -- read as "part of Route X" here once re-detection has moved that Segment on.
+        WHERE r.tour_id = ta.tour_id AND r.superseded_at IS NULL
+          AND r.ordered_segment_ids @> jsonb_build_array(asm.segment_id)
         LIMIT 1
     ) rte ON asm.segment_id IS NOT NULL
     -- AA-527 (bổ sung, "Bổ sung yêu cầu kiểm tra" comment, point 3) — real usage count: how many

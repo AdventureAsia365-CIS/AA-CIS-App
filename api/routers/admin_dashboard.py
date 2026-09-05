@@ -91,7 +91,10 @@ async def list_segments(
             LEFT JOIN LATERAL (
                 SELECT r.route_id, r.hub_name
                 FROM acp_contract.route r
-                WHERE r.tour_id = ta.tour_id
+                -- AA-532: current version only, same reasoning as admin_atoms.py's identical
+                -- LATERAL join — a superseded route (never deleted) must not read as "part of
+                -- Route X" once re-detection has moved this Segment on.
+                WHERE r.tour_id = ta.tour_id AND r.superseded_at IS NULL
                   AND r.ordered_segment_ids @> jsonb_build_array(asm.segment_id)
                 LIMIT 1
             ) rte ON true
@@ -157,7 +160,14 @@ async def list_routes(
     here — AA-525 Phần 12 mục 8 confirmed there is no admin view yet of "which Routes got grouped
     into the same Hub and why" (acp_contract.hub itself has 0 rows in current live data — Route
     detection isn't wiring hub_id yet); flagged explicitly rather than silently showing an
-    always-empty Hub column."""
+    always-empty Hub column.
+
+    AA-532: deliberately does NOT filter `superseded_at IS NULL` the way every other reader of
+    this table now does (v1_route_hub.py, slate.py, admin_atoms.py) — this IS the audit view, the
+    one place seeing a Route's version history (current AND superseded) is the actual point, not
+    a bug. `version`/`superseded_at` are exposed so the panel can show that history rather than
+    just the current snapshot; current rows sort first (`superseded_at IS NULL` ordered before
+    any timestamp), then best score."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
 
@@ -165,11 +175,12 @@ async def list_routes(
         rows = await conn.fetch(
             """
             SELECT r.route_id, r.tenant_id, t.name AS tenant_name, r.hub_id, r.hub_name,
-                   r.ordered_segment_ids, r.first_day, r.last_day, r.score, r.created_at
+                   r.ordered_segment_ids, r.first_day, r.last_day, r.score, r.created_at,
+                   r.version, r.superseded_at
             FROM acp_contract.route r
             LEFT JOIN shared.tenants t ON t.tenant_id = r.tenant_id
             WHERE r.tour_id = $1::uuid
-            ORDER BY r.score ASC
+            ORDER BY (r.superseded_at IS NOT NULL), r.score ASC
             """,
             tour_id,
         )
