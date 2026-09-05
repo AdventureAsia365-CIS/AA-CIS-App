@@ -143,7 +143,11 @@ _LIST_FROM = """
     LEFT JOIN LATERAL (
         SELECT r.route_id, r.hub_name
         FROM acp_contract.route r
-        WHERE r.tour_id = ta.tour_id AND r.ordered_segment_ids @> jsonb_build_array(asm.segment_id)
+        -- AA-532: current version only — a superseded route (versioning replaced the old
+        -- DELETE+INSERT-whole rebuild, never deleted) must not still read as "part of Route X"
+        -- once re-detection has moved this Segment on.
+        WHERE r.tour_id = ta.tour_id AND r.superseded_at IS NULL
+          AND r.ordered_segment_ids @> jsonb_build_array(asm.segment_id)
         LIMIT 1
     ) rte ON asm.segment_id IS NOT NULL
     WHERE NOT ta.is_empty_marker

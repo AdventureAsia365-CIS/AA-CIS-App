@@ -189,7 +189,10 @@ async def _fetch_route_candidates(tenant_id: UUID, pool) -> list[Candidate]:
                   )
                   AND ar2.excluded_reason IS NULL
             ) ar ON true
-            WHERE r.tenant_id = $1::uuid
+            -- AA-532: only the CURRENT version of a Route identity is a real candidate — a
+            -- superseded row stays in the table (never deleted, so a Subject already pointing at
+            -- it keeps resolving) but must not keep getting freshly proposed here forever.
+            WHERE r.tenant_id = $1::uuid AND r.superseded_at IS NULL
             GROUP BY r.route_id, r.score, r.hub_name, r.hub_id
         """, tenant_id)
     return [
@@ -222,7 +225,7 @@ async def _fetch_segment_hub_map(tenant_id: UUID, pool) -> dict[str, str]:
             SELECT r.route_id, r.hub_id, r.hub_name,
                    jsonb_array_elements_text(r.ordered_segment_ids) AS segment_id
             FROM acp_contract.route r
-            WHERE r.tenant_id = $1::uuid
+            WHERE r.tenant_id = $1::uuid AND r.superseded_at IS NULL  -- AA-532
         """, tenant_id)
 
     counts: dict[str, dict[str, int]] = {}
@@ -371,13 +374,16 @@ async def fetch_slate(tenant_id: UUID, pool) -> dict:
     """Everything currently on the Slate, grouped by Channel, strongest (lowest score) first.
 
     Presentation fields (`place`/`action`/`hub_name`) are joined live rather than duplicated on
-    the `subject` row, since `acp_contract.route` is rebuilt whole (DELETE+INSERT) every T5/T7
-    ranking run — a `subject` whose Route was just rebuilt away shows with `place`/`hub_name`
-    NULL rather than crashing (LEFT JOIN); this is expected for a `proposed` row (the next
-    `propose_slate()` call cleans it up) and disclosed as stale-but-harmless for a `picked` one
-    (matches `acp_contract.route_pick`'s own ADR-0024 "outlives the thing it came from" pattern
-    one layer up — this build does not yet snapshot a picked Subject the same way, see the
-    build prompt's own scope: pick only needs to flip `state` and create the `angle_gate_request`).
+    the `subject` row (LEFT JOIN — a Subject's `place`/`hub_name` can still come back NULL if its
+    Segment itself was deleted, though its Route no longer can be, see below). Before AA-532,
+    `acp_contract.route` was rebuilt whole (DELETE+INSERT) every T5/T7 ranking run, so a `subject`
+    whose Route had just been rebuilt away routinely hit this NULL path — expected for a
+    `proposed` row (the next `propose_slate()` call cleans it up), disclosed as stale-but-harmless
+    for a `picked` one. AA-532 replaced that with versioning (supersede, never delete) — a
+    `subject.route_id` now always resolves to a real row (current or superseded), so this LEFT
+    JOIN degrading to NULL for a Route-based Subject should no longer actually happen in
+    practice; kept as a LEFT JOIN regardless, since it's still needed for the Segment-based half
+    (`atom_segment` rows genuinely can be deleted) and costs nothing extra.
     """
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
