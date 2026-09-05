@@ -1,9 +1,13 @@
 """AA-449 — api/routers/v1_angle_gate.py. Same convention test_aa448_v1_planning.py uses:
 `tenant=` dependency bypassed (endpoint functions called directly, not through FastAPI's
 Depends() machinery), service.py itself patched (already unit-tested separately in
-test_aa449_angle_gate_service.py) — this file checks HTTP status-code mapping."""
+test_aa449_angle_gate_service.py) — this file checks HTTP status-code mapping.
+
+AA-522 — TestCreateRequest and TestSetChannel removed: `POST /requests` (atom-only creation) and
+`POST /requests/{id}/channel` were deleted along with Luồng B's FE (the only real caller of
+either). See api/routers/v1_angle_gate.py's own module docstring for the full rationale."""
 import uuid
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -28,36 +32,6 @@ class TestListGoals:
         result = await v1_angle_gate.list_goals()
         assert len(result["goals"]) == 8
         assert result["goals"][0]["key"] == "promotion"
-
-
-class TestCreateRequest:
-    """AA-469 Việc 4 (flow-order fix) — CreateRequestBody dropped channel/year/month entirely
-    (moved to SetChannelBody, see TestSetChannel below)."""
-
-    @pytest.mark.asyncio
-    async def test_success(self):
-        body = v1_angle_gate.CreateRequestBody(atom_id="atom_1")
-        with patch.object(
-            v1_angle_gate.service, "create_request",
-            new=AsyncMock(return_value={
-                "request_id": REQUEST_ID, "atom_id": "atom_1", "trip_id": None,
-                "channel": None, "cta": None, "status": "pending_goal",
-            }),
-        ):
-            result = await v1_angle_gate.create_request(body, _make_request(), tenant={"sub": TENANT_ID})
-        assert result["status"] == "pending_goal"
-        assert result["channel"] is None
-
-    @pytest.mark.asyncio
-    async def test_atom_not_found_404(self):
-        body = v1_angle_gate.CreateRequestBody(atom_id="atom_missing")
-        with patch.object(
-            v1_angle_gate.service, "create_request",
-            new=AsyncMock(side_effect=service.AtomNotFoundError("nope")),
-        ):
-            with pytest.raises(HTTPException) as exc:
-                await v1_angle_gate.create_request(body, _make_request(), tenant={"sub": TENANT_ID})
-        assert exc.value.status_code == 404
 
 
 class TestSetGoal:
@@ -184,60 +158,3 @@ class TestReopen:
         assert exc.value.status_code == 404
 
 
-class TestSetChannel:
-    """AA-469 Việc 4 (flow-order fix) — POST /v1/angle-gate/requests/{id}/channel, the new
-    workflow step 8 (AFTER angle choice, not before angle generation)."""
-
-    @pytest.mark.asyncio
-    async def test_success(self):
-        body = v1_angle_gate.SetChannelBody(channel="facebook")
-        with patch.object(
-            v1_angle_gate.service, "set_channel",
-            new=AsyncMock(return_value={"status": "approved", "channel": "facebook"}),
-        ) as mock_set:
-            result = await v1_angle_gate.set_channel(REQUEST_ID, body, _make_request(), tenant={"sub": TENANT_ID})
-        assert result["channel"] == "facebook"
-        mock_set.assert_awaited_once_with(uuid.UUID(TENANT_ID), REQUEST_ID, "facebook", ANY, year=None, month=None)
-
-    @pytest.mark.asyncio
-    async def test_year_month_pass_through(self):
-        body = v1_angle_gate.SetChannelBody(channel="blog", year=2026, month=9)
-        with patch.object(
-            v1_angle_gate.service, "set_channel",
-            new=AsyncMock(return_value={"status": "approved", "channel": "blog"}),
-        ) as mock_set:
-            await v1_angle_gate.set_channel(REQUEST_ID, body, _make_request(), tenant={"sub": TENANT_ID})
-        mock_set.assert_awaited_once_with(uuid.UUID(TENANT_ID), REQUEST_ID, "blog", ANY, year=2026, month=9)
-
-    @pytest.mark.asyncio
-    async def test_wrong_status_409(self):
-        body = v1_angle_gate.SetChannelBody(channel="facebook")
-        with patch.object(
-            v1_angle_gate.service, "set_channel",
-            new=AsyncMock(side_effect=service.WrongStatusError("not approved")),
-        ):
-            with pytest.raises(HTTPException) as exc:
-                await v1_angle_gate.set_channel(REQUEST_ID, body, _make_request(), tenant={"sub": TENANT_ID})
-        assert exc.value.status_code == 409
-
-    @pytest.mark.asyncio
-    async def test_invalid_channel_422(self):
-        body = v1_angle_gate.SetChannelBody(channel="not_a_real_channel")
-        with patch.object(
-            v1_angle_gate.service, "set_channel",
-            new=AsyncMock(side_effect=service.InvalidChannelError("bad channel")),
-        ):
-            with pytest.raises(HTTPException) as exc:
-                await v1_angle_gate.set_channel(REQUEST_ID, body, _make_request(), tenant={"sub": TENANT_ID})
-        assert exc.value.status_code == 422
-
-    @pytest.mark.asyncio
-    async def test_not_found_404(self):
-        body = v1_angle_gate.SetChannelBody(channel="facebook")
-        with patch.object(
-            v1_angle_gate.service, "set_channel",
-            new=AsyncMock(side_effect=service.RequestNotFoundError("nope")),
-        ):
-            with pytest.raises(HTTPException) as exc:
-                await v1_angle_gate.set_channel(REQUEST_ID, body, _make_request(), tenant={"sub": TENANT_ID})
-        assert exc.value.status_code == 404

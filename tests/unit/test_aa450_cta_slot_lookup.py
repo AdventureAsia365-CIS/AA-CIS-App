@@ -1,8 +1,11 @@
-"""AA-450 — services/acp_angle_gate/service.py's CTA fix (migration 114): `create_request()`
-now looks up a persisted T7 slot's `cta_target` and stores it on the new `angle_gate_request.cta`
-column. Mocked asyncpg pool, same convention test_aa449_angle_gate_service.py already uses.
-Confirms the realistic-NULL case (STEP0/migration 114's own header comment: T7's real tenant
-endpoint never persists slots) is handled gracefully, not as an error."""
+"""AA-450 — services/acp_angle_gate/service.py's CTA column (migration 114):
+`angle_gate_request.cta`. Mocked asyncpg pool, same convention test_aa449_angle_gate_service.py
+already uses.
+
+AA-522 — TestFetchSlotCta removed: `_fetch_slot_cta()`/`_compute_and_persist_slot_cta()` (the T7
+slot-CTA prefill this class tested) were deleted along with `set_channel()`, their only real
+caller — see services/acp_angle_gate/service.py's own module docstring. `cta` is now resolved
+ONLY by services/acp_content_writing/service.py's ask-the-tenant fallback (MissingCTAError)."""
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
@@ -24,10 +27,6 @@ def _make_pool(conn):
     return pool
 
 
-def _atom_row():
-    return {"atom_id": "atom_abc123", "tour_id": TRIP_ID, "text": "Cross the bamboo bridge at dawn"}
-
-
 def _request_row(**over):
     base = {
         "request_id": uuid.uuid4(), "tenant_id": TENANT_ID, "atom_id": "atom_abc123",
@@ -39,38 +38,6 @@ def _request_row(**over):
     }
     base.update(over)
     return base
-
-
-@pytest.mark.asyncio
-class TestFetchSlotCta:
-    async def test_matching_slot_returns_cta_target(self):
-        conn = AsyncMock()
-        conn.fetchrow.return_value = {"cta_target": "Design This Journey"}
-        pool = _make_pool(conn)
-        result = await service._fetch_slot_cta(TENANT_ID, "atom_abc123", "facebook", pool)
-        assert result == "Design This Journey"
-
-    async def test_no_matching_slot_returns_none(self):
-        """The realistic-today case — STEP0/migration 114 confirmed T7's real tenant endpoint
-        never persists a slot for acp_v2_slots to match against."""
-        conn = AsyncMock()
-        conn.fetchrow.return_value = None
-        pool = _make_pool(conn)
-        result = await service._fetch_slot_cta(TENANT_ID, "atom_abc123", "facebook", pool)
-        assert result is None
-
-    async def test_slot_with_empty_cta_target_treated_as_none(self):
-        conn = AsyncMock()
-        conn.fetchrow.return_value = {"cta_target": ""}
-        pool = _make_pool(conn)
-        result = await service._fetch_slot_cta(TENANT_ID, "atom_abc123", "facebook", pool)
-        assert result is None
-
-
-# AA-469 Việc 4 (flow-order fix) — TestCreateRequestCtaWiring removed from here. create_request()
-# no longer does any slot-CTA lookup at all (it doesn't know channel anymore) — that whole
-# mechanism (this class used to test) moved to services/acp_angle_gate/service.py::set_channel(),
-# now covered by tests/unit/test_aa449_angle_gate_service.py::TestSetChannel instead.
 
 
 @pytest.mark.asyncio

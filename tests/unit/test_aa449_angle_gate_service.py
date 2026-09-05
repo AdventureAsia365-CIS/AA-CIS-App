@@ -1,17 +1,19 @@
 """AA-449 — services/acp_angle_gate/service.py (request lifecycle). Mocked asyncpg pool, same
 convention test_aa448_v1_planning.py already uses. generate_angles() is patched — this file
 tests the DB lifecycle/state-machine, not LLM behavior (see test_aa449_angle_gate_generate.py
-for that)."""
+for that).
+
+AA-522 — TestCreateRequest and TestSetChannel (+ their _patch_compute_chain fixture) removed:
+create_request()/set_channel() (Luồng B's atom-only creation + post-angle-choice Channel step)
+were deleted along with the FE that was their only real caller. See services/acp_angle_gate/
+service.py's own module docstring for the full rationale."""
 import uuid
-from contextlib import ExitStack
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from services.acp_angle_gate import service
-from services.acp_planning.models import QuarterPlan, RunwayMap, Slot, SlotGrid
-from services.acp_planning.tenant_config import TenantNotFoundError, TenantPlanningConfig
 
 TENANT_ID = uuid.uuid4()
 OTHER_TENANT_ID = uuid.uuid4()
@@ -103,32 +105,6 @@ class _StatefulAngleOptionConn:
             self.request_status = "approved"
             return "UPDATE 1"
         return "UPDATE 0"
-
-
-@pytest.mark.asyncio
-class TestCreateRequest:
-    async def test_creates_request_for_owned_atom(self):
-        """AA-469 Việc 4 (flow-order fix) — create_request() no longer takes channel, and no
-        longer does any slot-CTA lookup (that moved to set_channel(), see TestSetChannel below)
-        — just the atom ownership check + a bare INSERT with channel/cta both NULL."""
-        conn = AsyncMock()
-        conn.fetchrow.side_effect = [_atom_row(), _request_row(channel=None, cta=None)]
-        pool = _make_pool(conn)
-
-        result = await service.create_request(TENANT_ID, "atom_abc123", pool)
-
-        assert result["status"] == "pending_goal"
-        insert_query, *params = conn.fetchrow.call_args_list[1][0]
-        assert "INSERT INTO acp_shared.angle_gate_request" in insert_query
-        assert params[0] == TENANT_ID
-        assert conn.fetchrow.call_count == 2  # atom check + INSERT — no slot-CTA lookup anymore
-
-    async def test_atom_not_owned_raises_not_found(self):
-        conn = AsyncMock()
-        conn.fetchrow.return_value = None  # owner_scope check finds nothing
-        pool = _make_pool(conn)
-        with pytest.raises(service.AtomNotFoundError):
-            await service.create_request(TENANT_ID, "atom_someone_elses", pool)
 
 
 @pytest.mark.asyncio
@@ -486,145 +462,3 @@ class TestFetchRequest:
         assert result["dfs_paa_snapshot"] is None
 
 
-# AA-451 — create_request()'s optional year/month compute-and-persist path
-# (_compute_and_persist_slot_cta). All the tenant-scoped fetchers/allocator functions are
-# patched at the module level (services.acp_angle_gate.service's own imported names) rather than
-# hitting real DB logic here — that logic (compute_slot_grid, persist_slot_grid, etc.) already
-# has its own dedicated test coverage (test_aa301_allocator.py, test_aa377_aa378_run_slot_persist
-# .py). These tests only verify create_request() wires year/month through correctly and degrades
-# to cta=None (never raises) on every "can't compute yet" state.
-_CONFIG = TenantPlanningConfig(markets=["US"], channels=["facebook"], capacity_posts_per_week=2)
-_PLAN = QuarterPlan(tenant_id=TENANT_ID, year=2026, quarter=3, trip_ids=[TRIP_ID],
-                    approved=True, approved_by="tenant:x")
-_RUNWAY = RunwayMap(tenant_id=TENANT_ID, year=2026, cells=[])
-_SLOT = Slot(slot_id="slot_abc", week=1, channel="facebook", kind="evergreen",
-            trip_id=TRIP_ID, atom_ids=["atom_abc123"], cta_target="https://real-cta.example/book")
-_GRID = SlotGrid(tenant_id=TENANT_ID, year=2026, month=8, slots=[_SLOT])
-
-
-def _patch_compute_chain(stack, **overrides):
-    """Common patch set for the compute-and-persist branch — individual tests override just the
-    pieces they need to exercise a particular early-return. `stack` is a contextlib.ExitStack
-    the caller owns, so patches stay active for the whole `with stack:` block (assertions on the
-    mocks must run before they're torn down)."""
-    defaults = dict(
-        fetch_tenant_planning_config=AsyncMock(return_value=_CONFIG),
-        fetch_approved_quarter_plan=AsyncMock(return_value=_PLAN),
-        fetch_tenant_trips=AsyncMock(return_value=[]),
-        fetch_tenant_atoms_by_trip=AsyncMock(return_value={}),
-        compute_runway_map=MagicMock(return_value=_RUNWAY),
-        compute_slot_grid=MagicMock(return_value=_GRID),
-        create_weekly_produce_run=AsyncMock(return_value="run_1"),
-        persist_slot_grid=AsyncMock(return_value=[_SLOT]),
-    )
-    defaults.update(overrides)
-    for name, mock in defaults.items():
-        stack.enter_context(patch.object(service, name, new=mock))
-
-
-@pytest.mark.asyncio
-class TestSetChannel:
-    """AA-469 Việc 4 (flow-order fix) — set_channel() is the new workflow step 8, replacing
-    create_request()'s old channel param. Also where AA-451's slot-CTA prefill now lives (moved
-    from create_request(), which no longer knows channel at all)."""
-
-    async def test_wrong_status_raises(self):
-        conn = AsyncMock()
-        conn.fetchrow.return_value = _request_row(status="pending_choice")
-        pool = _make_pool(conn)
-        with pytest.raises(service.WrongStatusError):
-            await service.set_channel(TENANT_ID, REQUEST_ID, "facebook", pool)
-
-    async def test_unknown_channel_raises(self):
-        conn = AsyncMock()
-        conn.fetchrow.return_value = _request_row(status="approved", channel=None, cta=None)
-        pool = _make_pool(conn)
-        with pytest.raises(service.InvalidChannelError):
-            await service.set_channel(TENANT_ID, REQUEST_ID, "not_a_real_channel", pool)
-
-    async def test_happy_path_no_year_month_sets_channel_cta_stays_none(self):
-        conn = AsyncMock()
-        conn.fetchrow.side_effect = [
-            _request_row(status="approved", channel=None, cta=None),  # _fetch_request_row
-            None,  # _fetch_slot_cta — nothing persisted
-            _request_row(status="approved", channel="facebook", cta=None),  # fetch_request() re-read
-        ]
-        conn.fetch.return_value = []  # fetch_request()'s angle_gate_option SELECT
-        pool = _make_pool(conn)
-
-        result = await service.set_channel(TENANT_ID, REQUEST_ID, "facebook", pool)
-
-        assert result["channel"] == "facebook"
-        assert result["cta"] is None
-        update_query, *params = conn.execute.call_args_list[0][0]
-        assert "UPDATE acp_shared.angle_gate_request" in update_query
-        assert params == [REQUEST_ID, "facebook", None]
-
-    async def test_year_month_given_computes_persists_and_refetches_cta(self):
-        conn = AsyncMock()
-        conn.fetchrow.side_effect = [
-            _request_row(status="approved", channel=None, cta=None),  # _fetch_request_row
-            None,  # _fetch_slot_cta — nothing yet
-            {"cta_target": "https://real-cta.example/book"},  # _fetch_slot_cta re-read, post-persist
-            _request_row(status="approved", channel="facebook", cta="https://real-cta.example/book"),
-        ]
-        conn.fetch.return_value = []
-        pool = _make_pool(conn)
-
-        with ExitStack() as stack:
-            _patch_compute_chain(stack)
-            result = await service.set_channel(
-                TENANT_ID, REQUEST_ID, "facebook", pool, year=2026, month=8,
-            )
-            service.create_weekly_produce_run.assert_awaited_once()
-            service.persist_slot_grid.assert_awaited_once()
-
-        assert result["cta"] == "https://real-cta.example/book"
-        update_query, *params = conn.execute.call_args_list[0][0]
-        assert params[-1] == "https://real-cta.example/book"
-
-    async def test_already_has_cta_never_overwritten(self):
-        """A request that already resolved a real CTA (however it got there) must not have it
-        clobbered by a later set_channel() call, even if that call also supplies year/month."""
-        conn = AsyncMock()
-        conn.fetchrow.side_effect = [
-            _request_row(status="approved", channel=None, cta="https://existing-cta.example"),
-            _request_row(status="approved", channel="tiktok", cta="https://existing-cta.example"),
-        ]
-        conn.fetch.return_value = []
-        pool = _make_pool(conn)
-
-        with ExitStack() as stack:
-            _patch_compute_chain(stack)
-            result = await service.set_channel(
-                TENANT_ID, REQUEST_ID, "tiktok", pool, year=2026, month=8,
-            )
-            service.fetch_approved_quarter_plan.assert_not_called()  # never reached — cta already set
-
-        assert result["cta"] == "https://existing-cta.example"
-
-    async def test_callable_again_while_still_approved_switches_channel(self):
-        """The tenant can pick a channel, change their mind, pick a different one, all before
-        T9 ever writes — set_channel() has no one-shot guard, unlike choose_angle()."""
-        conn = AsyncMock()
-        conn.fetchrow.side_effect = [
-            _request_row(status="approved", channel="facebook", cta=None),
-            None,
-            _request_row(status="approved", channel="tiktok", cta=None),
-        ]
-        conn.fetch.return_value = []
-        pool = _make_pool(conn)
-
-        result = await service.set_channel(TENANT_ID, REQUEST_ID, "tiktok", pool)
-
-        assert result["channel"] == "tiktok"
-
-    async def test_reusable_status_rejected(self):
-        """set_channel() is only valid from 'approved' — a request mid-reopen ('reusable',
-        re-picking a different angle) is not a valid target. choose_angle() always lands back on
-        'approved' anyway (same reasoning start_write()'s guard already documents)."""
-        conn = AsyncMock()
-        conn.fetchrow.return_value = _request_row(status="reusable")
-        pool = _make_pool(conn)
-        with pytest.raises(service.WrongStatusError):
-            await service.set_channel(TENANT_ID, REQUEST_ID, "facebook", pool)

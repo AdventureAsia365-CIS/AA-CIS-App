@@ -523,6 +523,52 @@ class TestFetchPiece:
         assert result["slug"] is None
 
 
+@pytest.mark.asyncio
+class TestFetchLatestPieceForRequest:
+    """AA-522 — resume support for the T8/T9 wizard's write step (see AngleGateTab.tsx's own
+    header comment for the bug this closes). Scoped to the CURRENTLY chosen angle option, same
+    option-id-first / chosen=true-fallback convention TestFetchReview below already covers for
+    fetch_review()."""
+
+    async def test_no_piece_yet_returns_none(self):
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [{"option_id": OPTION_ID}, None]
+        pool = _make_pool(conn)
+        result = await service.fetch_latest_piece_for_request(TENANT_ID, REQUEST_ID, pool)
+        assert result is None
+
+    async def test_returns_piece_for_current_option(self):
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [{"option_id": OPTION_ID}, _finalized_row()]
+        pool = _make_pool(conn)
+        result = await service.fetch_latest_piece_for_request(TENANT_ID, REQUEST_ID, pool)
+        assert result["status"] == "approved"
+        # The second fetchrow (the piece lookup) must be scoped to the option just resolved.
+        piece_query, *params = conn.fetchrow.call_args_list[1][0]
+        assert params == [REQUEST_ID, TENANT_ID, OPTION_ID]
+
+    async def test_returns_processing_placeholder_for_resume_polling(self):
+        """A write that was already in flight (202 placeholder, not yet finished) must come back
+        as-is — the FE resumes polling it rather than re-firing a second write."""
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [{"option_id": OPTION_ID}, _placeholder_row()]
+        pool = _make_pool(conn)
+        result = await service.fetch_latest_piece_for_request(TENANT_ID, REQUEST_ID, pool)
+        assert result["status"] == "processing"
+
+    async def test_no_chosen_option_still_queries_with_none(self):
+        """Defensive — shouldn't happen via the real API (this is only called once status is
+        'approved', which requires a chosen angle), but must not raise if the chosen-option
+        lookup somehow comes back empty."""
+        conn = AsyncMock()
+        conn.fetchrow.side_effect = [None, None]
+        pool = _make_pool(conn)
+        result = await service.fetch_latest_piece_for_request(TENANT_ID, REQUEST_ID, pool)
+        assert result is None
+        piece_query, *params = conn.fetchrow.call_args_list[1][0]
+        assert params == [REQUEST_ID, TENANT_ID, None]
+
+
 def _review_request(**over):
     base = {
         "request_id": str(REQUEST_ID), "tenant_id": str(TENANT_ID), "atom_id": "atom_abc123",
