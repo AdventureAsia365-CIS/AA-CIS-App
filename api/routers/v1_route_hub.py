@@ -56,6 +56,10 @@ def _route_row_to_dict(row) -> dict:
 
 @router.get("/routes")
 async def list_routes(request: Request, tenant=Depends(get_tenant)):
+    """AA-532: `superseded_at IS NULL` — a tenant only ever picks the CURRENT version of a Route
+    identity (tenant_id, tour_id, first_day, last_day); an older version stays in the table
+    (never deleted, only superseded) so any Subject already pointing at it keeps resolving, but
+    it must not be offered here as if it were still pick-able."""
     tenant_id = tenant["sub"]
     pool = get_pool(request)
     async with pool.acquire() as conn:
@@ -63,7 +67,7 @@ async def list_routes(request: Request, tenant=Depends(get_tenant)):
             SELECT route_id, tour_id, hub_id, hub_name, ordered_segment_ids,
                    first_day, last_day, score, created_at
             FROM acp_contract.route
-            WHERE tenant_id = $1::uuid
+            WHERE tenant_id = $1::uuid AND superseded_at IS NULL
             ORDER BY score ASC, route_id ASC
         """, tenant_id)
     return {"routes": [_route_row_to_dict(r) for r in rows]}
@@ -80,7 +84,10 @@ async def list_hubs(request: Request, tenant=Depends(get_tenant)):
                    array_agg(DISTINCT r.tour_id::text) FILTER (WHERE r.route_id IS NOT NULL)
                        AS tour_ids
             FROM acp_contract.hub h
-            LEFT JOIN acp_contract.route r ON r.hub_id = h.hub_id
+            -- AA-532: only a Route's CURRENT version counts toward route_count/tour_ids — a
+            -- superseded row staying in the table (never deleted) must not double-count or keep
+            -- a Hub looking like it still covers a tour whose Route moved on.
+            LEFT JOIN acp_contract.route r ON r.hub_id = h.hub_id AND r.superseded_at IS NULL
             WHERE h.tenant_id = $1::uuid
             GROUP BY h.hub_id, h.hub_name, h.created_at, h.updated_at
             ORDER BY h.updated_at DESC

@@ -231,10 +231,25 @@ def journey_name(places: Sequence[str], limit: int = 4) -> str:
 # ── DB-facing wrappers (impure) ─────────────────────────────────────────────────────────────
 
 async def run_route_detection(tenant_id: str, pool) -> dict:
-    """Rebuild acp_contract.route WHOLE for one tenant (DELETE+INSERT) — matches the
-    STEP0-confirmed origin behavior (`_store_routes()`, "derived, never accumulated"; see
-    implementation notes Decision 10 for why acp_contract.hub is explicitly NOT rebuilt the
-    same way — it persists and is matched/reused, never deleted).
+    """Rebuild acp_contract.route for one tenant — VERSIONED (AA-532), not DELETE+INSERT-whole
+    (AA-510's original behavior, matching the origin's own `_store_routes()`, "derived, never
+    accumulated"). Changed 05/09/2026 after a real, live FK violation: `acp_shared.subject.
+    route_id` (migration 133, AA-511) is a real FK into this table with NO ACTION on delete — a
+    tenant with an active Subject picking a Route that a re-run then deletes made the whole
+    rebuild fail (docs/implementation-notes/AA-532.md has the full trace).
+
+    A route's identity is (tenant_id, tour_id, first_day, last_day). Per identity, this run:
+      - leaves it alone if the newly-derived Route is byte-for-byte the same as the current row
+        (no write at all — "tránh version rác mỗi lần chạy", the build prompt's own ask);
+      - supersedes the current row (`superseded_at = now()`, never deleted) and inserts a new
+        current row (`version` bumped, `route_id` gains a `:v{n}` suffix for n>=2) if the content
+        changed;
+      - supersedes the current row with no replacement if this run's derivation no longer
+        produces anything for that identity at all (the journey stopped qualifying);
+      - inserts a brand-new version-1 row (unsuffixed `route_id`, same deterministic composite
+        key AA-510 always used) for an identity that never existed before.
+    `acp_contract.hub` is still never rebuilt the same way (unaffected by this change — it
+    already persists and is matched/reused, implementation notes Decision 10 from AA-510).
 
     Reads only non-excluded (`excluded_reason IS NULL`) atom_ranking rows — the transit/
     unnamed-place gate (ADR 0019/0020) already ran one layer down (AA-515) and is not
@@ -259,9 +274,18 @@ async def run_route_detection(tenant_id: str, pool) -> dict:
         old_hubs = await conn.fetch("""
             SELECT h.hub_id, h.hub_name, array_agg(DISTINCT r.tour_id::text) AS tour_ids
             FROM acp_contract.hub h
-            JOIN acp_contract.route r ON r.hub_id = h.hub_id
+            JOIN acp_contract.route r ON r.hub_id = h.hub_id AND r.superseded_at IS NULL
             WHERE h.tenant_id = $1::uuid
             GROUP BY h.hub_id, h.hub_name
+        """, tenant_id)
+
+        # AA-532 — the CURRENT route per identity (tenant_id, tour_id, first_day, last_day), to
+        # diff this run's fresh derivation against instead of blindly deleting everything.
+        current_routes = await conn.fetch("""
+            SELECT route_id, tour_id::text AS tour_id, hub_id, hub_name, ordered_segment_ids,
+                   first_day, last_day, score, version
+            FROM acp_contract.route
+            WHERE tenant_id = $1::uuid AND superseded_at IS NULL
         """, tenant_id)
 
     moments = [
@@ -350,25 +374,81 @@ async def run_route_detection(tenant_id: str, pool) -> dict:
                 route, hub_id=None, hub_name=journey_name(list(route.places)),
             ))
 
+    # AA-532 — diff this run's fresh derivation against the CURRENT row per identity
+    # (tour_id, first_day, last_day) instead of deleting everything. `existing` keys off the
+    # same identity `finished` Routes key off, so a Route with unchanged content is left alone
+    # untouched (no supersede, no insert) and a Subject pointing at ANY current or superseded
+    # route_id keeps resolving — nothing in this table is ever deleted.
+    existing_by_identity = {
+        (r["tour_id"], r["first_day"], r["last_day"]): r for r in current_routes
+    }
+    finished_by_identity = {
+        (r.tour_id, r.first_day, r.last_day): r for r in finished
+    }
+
+    def _unchanged(route: Route, old: object) -> bool:
+        old_segments = old["ordered_segment_ids"]
+        if isinstance(old_segments, str):
+            old_segments = json.loads(old_segments)
+        return (
+            list(route.segment_ids) == list(old_segments)
+            and route.hub_id == (str(old["hub_id"]) if old["hub_id"] else None)
+            and route.hub_name == old["hub_name"]
+            and route.score == old["score"]
+        )
+
+    to_supersede: list[str] = []  # route_id of every current row this run replaces or removes
+    to_insert: list[tuple] = []   # (route_id, tenant_id, tour_id, hub_id, hub_name, segment_ids
+    #                                json, first_day, last_day, score, version)
+    unchanged_count = 0
+
+    for identity, route in finished_by_identity.items():
+        old = existing_by_identity.get(identity)
+        if old is None:
+            to_insert.append((
+                route.route_id, route.tenant_id, route.tour_id, route.hub_id, route.hub_name,
+                json.dumps(list(route.segment_ids)), route.first_day, route.last_day,
+                route.score, 1,
+            ))
+        elif _unchanged(route, old):
+            unchanged_count += 1
+        else:
+            to_supersede.append(old["route_id"])
+            new_version = old["version"] + 1
+            versioned_id = f"{route.route_id}:v{new_version}"
+            to_insert.append((
+                versioned_id, route.tenant_id, route.tour_id, route.hub_id, route.hub_name,
+                json.dumps(list(route.segment_ids)), route.first_day, route.last_day,
+                route.score, new_version,
+            ))
+
+    # An identity that existed before but this run's derivation no longer produces at all — the
+    # journey stopped qualifying (e.g. its Segments dropped below LEAST_DAYS/LEAST_PLACES).
+    # Superseded, never deleted, same as a changed one.
+    for identity, old in existing_by_identity.items():
+        if identity not in finished_by_identity:
+            to_supersede.append(old["route_id"])
+
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await conn.execute(
-                "DELETE FROM acp_contract.route WHERE tenant_id = $1::uuid", tenant_id,
-            )
-            if finished:
+            if to_supersede:
+                await conn.execute(
+                    "UPDATE acp_contract.route SET superseded_at = now() "
+                    "WHERE route_id = ANY($1::text[])",
+                    to_supersede,
+                )
+            if to_insert:
                 await conn.executemany("""
                     INSERT INTO acp_contract.route
                         (route_id, tenant_id, tour_id, hub_id, hub_name, ordered_segment_ids,
-                         first_day, last_day, score)
-                    VALUES ($1, $2::uuid, $3::uuid, $4::uuid, $5, $6::jsonb, $7, $8, $9)
-                """, [
-                    (r.route_id, r.tenant_id, r.tour_id, r.hub_id, r.hub_name,
-                     json.dumps(list(r.segment_ids)), r.first_day, r.last_day, r.score)
-                    for r in finished
-                ])
+                         first_day, last_day, score, version)
+                    VALUES ($1, $2::uuid, $3::uuid, $4::uuid, $5, $6::jsonb, $7, $8, $9, $10)
+                """, to_insert)
 
     return {
-        "routes_written": len(finished),
+        "routes_written": len(to_insert),
+        "routes_superseded": len(to_supersede),
+        "routes_unchanged": unchanged_count,
         "hubs_created": hubs_created,
         "hubs_reused": hubs_reused,
         "families_found": len(grouped),
@@ -389,17 +469,20 @@ async def create_route_pick(
     `acp_shared.subject` this issue builds — the two are a different grain/purpose entirely, not
     a compatibility rename.
 
-    Returns None if the Route no longer exists for this tenant (already rebuilt away) — the
-    caller's job to surface as "pick again", not this function's. Re-joins the underlying
-    Segments at snapshot time (best-effort — a partial/empty join degrades the snapshot's
-    `stops` detail but never fails route_pick creation) so the snapshot is a human-readable,
-    self-sufficient record that no longer depends on anything staying in place afterward.
+    Returns None if the Route no longer exists for this tenant, OR (AA-532) if it exists but has
+    since been superseded by a newer version — the caller's job to surface as "pick again", not
+    this function's; a marketer should never snapshot a Route re-detection has already moved past
+    even though the old row itself is never deleted. Re-joins the underlying Segments at snapshot
+    time (best-effort — a partial/empty join degrades the snapshot's `stops` detail but never
+    fails route_pick creation) so the snapshot is a human-readable, self-sufficient record that no
+    longer depends on anything staying in place afterward.
     """
     async with pool.acquire() as conn:
         route = await conn.fetchrow("""
             SELECT route_id, tour_id, hub_id, hub_name, ordered_segment_ids,
                    first_day, last_day, score
-            FROM acp_contract.route WHERE route_id = $1 AND tenant_id = $2::uuid
+            FROM acp_contract.route
+            WHERE route_id = $1 AND tenant_id = $2::uuid AND superseded_at IS NULL
         """, route_id, tenant_id)
         if not route:
             return None
