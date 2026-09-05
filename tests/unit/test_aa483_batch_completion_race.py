@@ -137,8 +137,13 @@ def _run_process_export(sync_result):
 
     # Real AWS/S3/EventBridge calls must never happen from a unit test — mock the whole ACP-S1
     # side-effect trio explicitly rather than relying on process_export()'s own try/except to
-    # swallow whatever real-world failure an unmocked call would hit.
+    # swallow whatever real-world failure an unmocked call would hit. AA-526's own A3 atomize
+    # trigger (a fire-and-forget asyncio.create_task(), launched unconditionally on every real
+    # export) is mocked out the same way — its own real work happens on a background task this
+    # test doesn't await, so without this it would open a genuine asyncpg connection (via a real
+    # get_database_url() Secrets Manager call) from inside a unit test.
     with patch("services.export.handler.asyncpg.connect", AsyncMock(return_value=conn)), \
+         patch("services.export.handler._run_a3_atomize_background", AsyncMock()), \
          patch("services.export.handler.sync_batch_completion",
                AsyncMock(return_value=sync_result)), \
          patch("services.acp.handler.upload_manifest", MagicMock(return_value="s3://fake/manifest.json")), \

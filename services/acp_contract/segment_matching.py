@@ -372,9 +372,20 @@ def _connected(keyed: list[tuple[str, Key]]) -> list[set[str]]:
 # ── DB-facing wrapper (impure) — everything above this line is a pure function ─────────────
 
 async def run_segment_matching(tenant_id: str, pool) -> dict:
-    """Rebuild one tenant's Segments from its current atoms. Called right after T5 completes for
-    ANY of the tenant's tour versions (Linear AA-509 — Segments span every tour of one tenant),
-    so this recomputes over the tenant's WHOLE atom set, not just the tour that just atomized.
+    """Rebuild one tenant's Segments from its current atoms. Called right after atomize for ANY
+    of the tenant's picked tours (Linear AA-509 — Segments span every tour of one tenant), so
+    this recomputes over the tenant's WHOLE atom set, not just the tour that just atomized.
+    `atom_segment.tenant_id` (migration 129, a real FK to shared.tenants) is UNCHANGED by AA-526
+    — Segments stay a per-tenant product, just built from a now-shared atom pool.
+
+    AA-526 — atoms moved to owner_scope='platform' (A3, services/export/handler.py::
+    process_export()), no longer owner_scope=tenant_id (the old per-tenant T5 trigger, removed).
+    The atom read below matches BOTH: `owner_scope = $1` (any pre-AA-526 legacy atom still tagged
+    with this tenant's own id directly — confirmed live, 75 such rows existed at ship time, kept
+    working rather than silently orphaned) OR (`owner_scope = 'platform'` AND the atom's tour is
+    one this tenant has actually picked/rewritten, via `tenant_tour_versions` — the real
+    correction this task's own STEP0 got wrong at first: NOT "every platform atom is fair game
+    for every tenant's Segments," only the tours this specific tenant made their own).
 
     Excludes: soft-deleted atoms, empty-day markers (`is_empty_marker`), and any atom whose
     place/action are still NULL (atomized before migration 129 and not yet re-atomized — STEP0
@@ -382,10 +393,22 @@ async def run_segment_matching(tenant_id: str, pool) -> dict:
     """
     async with pool.acquire() as conn:
         atom_rows = await conn.fetch("""
-            SELECT atom_id, tour_id, itinerary_day, place, action
-            FROM acp_contract.tour_atoms
-            WHERE owner_scope = $1 AND NOT deleted AND NOT is_empty_marker
-              AND place IS NOT NULL AND action IS NOT NULL
+            SELECT ta.atom_id, ta.tour_id, ta.itinerary_day, ta.place, ta.action
+            FROM acp_contract.tour_atoms ta
+            WHERE NOT ta.deleted AND NOT ta.is_empty_marker
+              AND ta.place IS NOT NULL AND ta.action IS NOT NULL
+              AND (
+                  ta.owner_scope = $1
+                  OR (
+                      ta.owner_scope = 'platform'
+                      AND ta.tour_id IN (
+                          SELECT pt.tour_id
+                          FROM gold_aa_internal.tenant_tour_versions ttv
+                          JOIN gold_aa_internal.published_tours pt ON pt.id = ttv.published_tour_id
+                          WHERE ttv.tenant_id = $1::uuid
+                      )
+                  )
+              )
         """, tenant_id)
         assigned_rows = await conn.fetch("""
             SELECT asm.atom_id, asm.segment_id

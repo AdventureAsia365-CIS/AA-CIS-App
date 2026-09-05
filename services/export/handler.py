@@ -8,6 +8,85 @@ from shared.repository.published_catalog_repository import PublishedCatalogRepos
 
 logger = structlog.get_logger()
 
+# AA-526 — strong refs for the A3-triggered atomize background task, same GC-safety pattern
+# api/routers/v1_tours.py::trigger_rewrite() / v1_content_writing.py::write() already use — a
+# bare asyncio.create_task() with no reference can be garbage-collected mid-flight. Module-level
+# here (not per-call) for the same reason those 2 call sites keep theirs at module level.
+_background_tasks: set = set()
+
+
+class _SingleConnAsPool:
+    """AA-526 — process_export() (and this class's other user, _run_a3_atomize_background()
+    below) each own exactly ONE asyncpg.Connection, Lambda-handler style — no asyncpg.Pool in
+    scope the way every other real caller of services.acp_produce.tenant_pipeline.run_t5_atomize()
+    has (T5's tenant-facing endpoint, api/routers/v1_tours.py, always runs inside a FastAPI
+    request with request.app.state.pool). run_t5_atomize()/atom_extraction.py are reused
+    UNCHANGED (AA-526's own instruction) rather than reworked to accept a bare Connection — this
+    thin adapter exposes the one `.acquire()` async-context-manager shape they call, yielding the
+    SAME connection every time. Safe here specifically because every real call path into
+    run_t5_atomize() (_atomize_whole_tour_legacy/_atomize_per_day) acquires-and-releases
+    sequentially, never concurrently (that module's own docstring: "Days are read SEQUENTIALLY,
+    not concurrently") — a real pool with >1 physical connection is never required."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def acquire(self):
+        return self
+
+    async def __aenter__(self):
+        return self._conn
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+async def _run_a3_atomize_background(tour_id: str, rewritten: dict, country: str, version_id: str) -> None:
+    """AA-526 — the actual A3 atomize call, launched fire-and-forget from process_export() so a
+    slow multi-day LLM atomize run (services.acp_produce.tenant_pipeline.run_t5_atomize(), up to
+    one invoke_claude() call per itinerary day) never adds latency to — or risks an API Gateway
+    504 on — the admin action that triggers publish (api/routers/admin_pipeline.py /
+    v1_pipeline.py, both `await process_export(...)` directly in their own request handler).
+    Opens its OWN connection (process_export()'s own `conn` is closed in its `finally` block
+    before this task would otherwise still be running) — completely independent lifecycle,
+    mirroring how services/acp_content_writing/service.py::run_write_background() is launched
+    with its own already-open pool rather than reusing the request's.
+
+    owner_scope="platform" (not a tenant UUID) — atoms produced here are a shared backend
+    resource, per AA-525/526's architecture decision (Nghiệp, 04/09/2026): tenants never create
+    or see atoms directly anymore, curation moves to AA-admin (AA-527)."""
+    conn = await asyncpg.connect(get_database_url(), ssl="require")
+    try:
+        from services.acp_produce.tenant_pipeline import run_t5_atomize
+        pool = _SingleConnAsPool(conn)
+        result = await run_t5_atomize(
+            "platform", tour_id, rewritten, pool,
+            country=country, version_id=version_id,
+        )
+        logger.info("a3_atomize_done", tour_id=tour_id, result=result)
+
+        # AA-526 — Segment-matching is DELIBERATELY NOT run here. STEP0 initially assumed (per
+        # the issue's own text) that it was purely owner_scope-agnostic and safe to run once,
+        # globally, right after atomize — checking the actual schema disproved that:
+        # acp_contract.atom_segment.tenant_id is `UUID NOT NULL REFERENCES shared.tenants
+        # (tenant_id)` (migration 129), a REAL FK — calling run_segment_matching("platform", ...)
+        # would fail that FK/UUID cast outright, and even if it didn't, services/acp_contract/
+        # atom_ranking.py::run_atom_ranking() reads Segments scoped `WHERE asg.tenant_id =
+        # $1::uuid` for the CALLING tenant specifically — a Segment row tagged "platform" would
+        # be invisible to every real tenant's own ranking read regardless. Confirmed with Nghiệp
+        # (05/09/2026): atoms are shared platform-wide, but Segment/Route/Subject stay
+        # PER-TENANT products built from them once a tenant actually picks/rewrites a tour — not
+        # a single global Segment set. See docs/implementation-notes/AA-526.md for the full
+        # finding and where Segment-matching's real trigger point ended up instead.
+    except Exception as exc:
+        # Best-effort, same precedent as this file's own ACP-S1 manifest fanout (process_export()
+        # below) — atomize failing must never be mistaken for the publish itself having failed;
+        # A3 (gold_aa_internal.published_tours + pipeline_status='published') is already committed
+        # by the time this task is launched.
+        logger.error("a3_atomize_failed", tour_id=tour_id, error=str(exc))
+    finally:
+        await conn.close()
+
 # AA-476: terminal raw_tours.pipeline_status values that mean "this tour will never publish,
 # stop waiting on it" — anything else is still in flight. Before this fix the completion check
 # only recognized 'published', so a rejected/failed tour (which never got any pipeline_status
@@ -148,6 +227,26 @@ async def process_export(version_id: str) -> dict:
             SET pipeline_status = 'published'
             WHERE tour_id = $1::uuid
         """, tour_id)
+
+        # 3b. AA-526 — this tour has now genuinely entered A3 (Master Content Pool, real QA
+        # already passed via the gate at the top of this function, gc.status = 'approved') — the
+        # correct, deliberate trigger point for atomize per the 04/09/2026 architecture decision
+        # (was previously tied to tenant-rewritten-tour content, api/routers/v1_tours.py's now-
+        # removed atomize_version() endpoint; see docs/implementation-notes/AA-526.md). Launched
+        # fire-and-forget (own connection, own lifecycle — see _run_a3_atomize_background()'s own
+        # docstring for why) so a slow multi-day atomize run never adds latency to this function's
+        # own caller (an admin approve/publish action, awaited synchronously).
+        _atomize_task = asyncio.create_task(_run_a3_atomize_background(
+            tour_id=str(tour_id),
+            rewritten={
+                "name": row.get("aa_name"), "summary": row.get("aa_summary"),
+                "highlights": row.get("aa_highlights"), "itineraries": row.get("aa_itineraries"),
+            },
+            country=row.get("country") or "",
+            version_id=str(row["id"]),  # generated_content.id — this tour's real content version
+        ))
+        _background_tasks.add(_atomize_task)
+        _atomize_task.add_done_callback(_background_tasks.discard)
 
         # 4. Update tours_passed to exact published count (always, not just at end)
         if batch_id:

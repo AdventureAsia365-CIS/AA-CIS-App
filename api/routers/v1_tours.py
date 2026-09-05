@@ -37,10 +37,18 @@ def get_pool(request: Request):
 async def _run_ranking_pipeline(tenant_id: str, pool) -> None:
     """AA-515 — research (demand for whatever Segments aren't already fresh) then rank-sum,
     for one tenant's whole current Segment set. Launched via `asyncio.create_task()` right
-    after `run_segment_matching()` in `atomize_version()` below (background, not awaited — see
-    that call site's own comment). Swallows every exception itself (this is the top of its own
-    task, nothing awaits it to propagate one to) — logs and returns, same as every other
-    best-effort step already in this file.
+    after T3 QA in `trigger_rewrite()`'s own background flow above (fire-and-forget — see that
+    call site's own comment; AA-526 moved this here from the removed `atomize_version()`
+    endpoint). Swallows every exception itself (this is the top of its own task, nothing awaits
+    it to propagate one to) — logs and returns, same as every other best-effort step already in
+    this file.
+
+    AA-526 — Segment-matching runs FIRST, in this same task (not a separate create_task()),
+    same ordering the old atomize_version() endpoint used (segment_matching -> ranking ->
+    route-detection): atoms are shared platform-wide now, but Segments stay this tenant's own
+    product built from them (see segment_matching.py's own updated docstring) — research/
+    ranking below has nothing real to read until this tenant's Segments actually exist/are
+    current for whatever tour they just rewrote.
 
     AA-510 — Route/Hub detection runs right after ranking, in the SAME background task (not a
     second create_task()): Route is built entirely from atom_ranking's own output, so a
@@ -50,12 +58,16 @@ async def _run_ranking_pipeline(tenant_id: str, pool) -> None:
     """
     try:
         from services.acp_contract.atom_ranking import run_atom_ranking
+        from services.acp_contract.segment_matching import run_segment_matching
         from services.acp_contract.segment_research import run_segment_research
         from services.seo_intelligence.seed_builder import (
             LOCATION_CODE_TO_MARKET,
             resolve_buyer_markets,
         )
         from shared.services.tenant_config_service import TenantConfigService
+
+        segment_result = await run_segment_matching(tenant_id, pool)
+        logger.info("t5_segment_matching_done", tenant_id=tenant_id, result=segment_result)
 
         async with pool.acquire() as conn:
             cfg = await TenantConfigService(conn).get_seo_config(tenant_id)
@@ -81,21 +93,6 @@ async def _run_ranking_pipeline(tenant_id: str, pool) -> None:
     except Exception:
         logger.warning("t5_route_detection_failed", tenant_id=tenant_id, exc_info=True)
 
-
-# AA-469 Việc 1 — "already atomized" is DERIVED (no new column/migration), same precedent
-# as api/routers/admin_atoms.py's own owner_scope-agnostic atomized_at/atom_count subquery
-# (that file's GET /admin/atoms/summary, ~line 271) — this is the tenant-scoped equivalent,
-# scoped to owner_scope = a specific tenant_id rather than admin's platform-wide view.
-# Chosen over an explicit column because it costs no migration, matches an established
-# pattern in this codebase, and the source of truth (acp_contract.tour_atoms) already has
-# everything needed — a column would just be a cache of this same query. NOT is_empty_marker/
-# deleted rows don't count as "atomized" for the tenant-facing badge (mirrors admin_atoms.py).
-_ATOMIZED_SUBQUERY = """(
-    SELECT tour_id, owner_scope, MAX(created_at) AS atomized_at,
-           COUNT(*) FILTER (WHERE NOT is_empty_marker AND NOT deleted) AS atom_count
-    FROM acp_contract.tour_atoms
-    GROUP BY tour_id, owner_scope
-)"""
 
 
 @router.get("")
@@ -686,14 +683,30 @@ async def trigger_rewrite(
                         qa["structural_issues"], qa["grounding_issues"],
                     )
 
-                # AA-469 Việc 1: T5 (atomize) NO LONGER runs here. AA-436 had it running
-                # unconditionally right after T4 (real pass or QA-auto-passed alike, no
-                # gate) — T4 (this UPDATE, "save to My Catalog") is the real stopping
-                # point of this background chain now. T5 is a separate, tenant-triggered
-                # action: POST /v1/tours/versions/{version_id}/atomize, below — invoked
-                # from My Catalog whenever the tenant is ready (immediately after this, or
-                # days/weeks later). See docs/claude_audit/
-                # AA-469-viec1-step0-t4-t5-split-investigation.md for the removed bug.
+                # AA-526 (04/09/2026 architecture decision) — atomize (T5) no longer runs on
+                # tenant-rewritten content at all, here or via the (now-removed) standalone
+                # POST /v1/tours/versions/{version_id}/atomize AA-469 Việc 1 introduced. Atoms
+                # for this tour already exist (owner_scope='platform') by the time it's even
+                # visible in Browse Pool — atomize now runs once, at A3 (services/export/
+                # handler.py::process_export(), right after the tour is published), not
+                # per-tenant, not on every rewrite. See services/acp_produce/tenant_pipeline.py's
+                # own module docstring + docs/implementation-notes/AA-526.md.
+                #
+                # Segment-matching + research + ranking + route-detection (AA-509/510/515) DO
+                # still need a per-tenant trigger — Segments/Route/Ranking stay a PER-TENANT
+                # product (`atom_segment.tenant_id` is a real FK to shared.tenants, migration
+                # 129) built from the now-shared atom pool, not something A3 can compute once for
+                # everyone (a real bug this build caught and fixed: see
+                # services/acp_contract/segment_matching.py's own updated docstring). This is
+                # that whole sequence's new home, replacing the old post-atomize call site in the
+                # removed endpoint — same fire-and-forget background shape, timed right after T3
+                # QA (Nghiệp's explicit choice among 3 options presented, 05/09/2026 — see that
+                # Linear comment). _run_ranking_pipeline() itself now runs segment_matching()
+                # first, same order the old endpoint used.
+                import asyncio as _asyncio_ranking
+                _ranking_task = _asyncio_ranking.create_task(_run_ranking_pipeline(tenant_id, pool))
+                _background_tasks.add(_ranking_task)
+                _ranking_task.add_done_callback(_background_tasks.discard)
         except Exception as _e:
             import structlog as _sl
             _sl.get_logger().error("tenant_rewrite_failed", error=str(_e))
@@ -764,13 +777,10 @@ async def list_my_versions(
                    ttv.edit_source, ttv.rewrite_language, ttv.created_at,
                    ttv.rewritten_content, ttv.qa_auto_passed,
                    pt.id AS published_tour_id, pt.tour_id, pt.aa_name, pt.quality_score AS aa_quality,
-                   rt.country, rt.duration,
-                   ta.atomized_at, COALESCE(ta.atom_count, 0) AS atom_count
+                   rt.country, rt.duration
             FROM gold_aa_internal.tenant_tour_versions ttv
             JOIN gold_aa_internal.published_tours pt ON pt.id = ttv.published_tour_id
             LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
-            LEFT JOIN {_ATOMIZED_SUBQUERY} ta
-                ON ta.tour_id = pt.tour_id AND ta.owner_scope = ttv.tenant_id::text
             {where}
             ORDER BY ttv.created_at DESC
             LIMIT ${len(params)+1} OFFSET ${len(params)+2}
@@ -902,18 +912,15 @@ async def get_version(
     pool = request.app.state.pool
 
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(f"""
+        row = await conn.fetchrow("""
             SELECT ttv.*, pt.tour_id, pt.aa_name, pt.aa_subtitle, pt.aa_summary,
                    pt.aa_description, pt.aa_highlights, pt.aa_itineraries,
                    pt.seo_title AS aa_seo_title, pt.seo_meta AS aa_seo_meta,
                    pt.quality_score AS aa_quality_score,
-                   rt.country, rt.duration, rt.price_raw,
-                   ta.atomized_at, COALESCE(ta.atom_count, 0) AS atom_count
+                   rt.country, rt.duration, rt.price_raw
             FROM gold_aa_internal.tenant_tour_versions ttv
             JOIN gold_aa_internal.published_tours pt ON pt.id = ttv.published_tour_id
             LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
-            LEFT JOIN {_ATOMIZED_SUBQUERY} ta
-                ON ta.tour_id = pt.tour_id AND ta.owner_scope = ttv.tenant_id::text
             WHERE ttv.id = $1::uuid AND ttv.tenant_id = $2::uuid
         """, version_id, tenant_id)
 
@@ -931,132 +938,6 @@ async def get_version(
     return {
         **dict(row),
         "version_history": [dict(h) for h in history],
-    }
-
-
-# ── AA-469 Việc 1 — standalone T5 (Atomize) trigger ──────────────────────────
-# Decoupled from the T2->T3->T4 background chain (trigger_rewrite() above no longer
-# calls run_t5_atomize() itself — see the comment left at that removed call site).
-# Tenant invokes this explicitly from My Catalog whenever ready: right after T4, or
-# days/weeks later. run_t5_atomize() (services/acp_produce/tenant_pipeline.py) is
-# parameter-pure — STEP0 confirmed it takes `rewritten: dict` + `tour_id` + `country`
-# directly and never queries the DB itself — so this endpoint is exactly the small
-# adapter STEP0 flagged as still needed: reconstruct those 3 values from `version_id`
-# (the only thing the tenant/frontend has to hand) since nothing previously re-read
-# them back out of tenant_tour_versions.
-@router.post("/versions/{version_id}/atomize")
-async def atomize_version(
-    version_id: str,
-    request: Request,
-    tenant=Depends(get_tenant),
-):
-    """Trigger T5 (atomize) for one already-rewritten tenant tour version.
-
-    Idempotent, not just "handled sensibly": run_t5_atomize() itself keys its skip
-    check off (tour_id, owner_scope)'s most recent source_hash — calling this twice
-    on unchanged content is a no-op (`{"status": "skipped", "atom_count": 0}`), no
-    duplicate atoms, no duplicate LLM call. A second call after the tenant requests
-    a NEW version (different rewritten_content -> different hash) legitimately
-    re-atomizes, same as it always would have.
-    """
-    tenant_id = tenant["sub"]
-    pool = request.app.state.pool
-
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            SELECT ttv.status, ttv.rewritten_content, pt.tour_id, rt.country
-            FROM gold_aa_internal.tenant_tour_versions ttv
-            JOIN gold_aa_internal.published_tours pt ON pt.id = ttv.published_tour_id
-            LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
-            WHERE ttv.id = $1::uuid AND ttv.tenant_id = $2::uuid
-        """, version_id, tenant_id)
-
-    if not row:
-        raise HTTPException(status_code=404, detail="Version not found")
-
-    # Only a version whose rewrite actually finished can be atomized — 'pending' is
-    # still generating (or died before ever writing real content, see the except
-    # block in trigger_rewrite()) and 'rejected' is content the tenant asked to
-    # replace. 'ai_generated'/'needs_review' (incl. qa_auto_passed=true)/'approved'
-    # are all fair game — a QA-auto-passed version is the tenant's call to atomize
-    # or not (STEP0's open product question), not blocked here.
-    if row["status"] not in ("ai_generated", "needs_review", "approved"):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Cannot atomize a version with status '{row['status']}' — "
-                "wait for the rewrite to finish, or request a new version first."
-            ),
-        )
-
-    import json as _json
-    rc = row["rewritten_content"]
-    rewritten = (_json.loads(rc) if isinstance(rc, str) else rc) or {}
-    # Defense-in-depth vs. the 'needs_review'-via-exception path (trigger_rewrite()'s
-    # except block can set status='needs_review' while rewritten_content is still the
-    # INITIAL placeholder, status="generating", written before T2 ever ran) — the real
-    # T4 write always sets this inner status to "done".
-    if rewritten.get("status") != "done":
-        raise HTTPException(
-            status_code=409,
-            detail="This version has no completed rewrite content to atomize yet",
-        )
-
-    from services.acp_produce.tenant_pipeline import run_t5_atomize
-    result = await run_t5_atomize(
-        tenant_id, row["tour_id"], rewritten, pool,
-        country=row["country"] or "", version_id=version_id,
-    )
-
-    # AA-509 — Segment: run right after T5, whenever it actually read/wrote anything (not on a
-    # pure "skipped" no-op re-atomize — existing Segments stay correct untouched then). Placed
-    # BEFORE the `status == "failed"` 502 below: a per-day run where SOME days fail still commits
-    # the successful days' atoms (tenant_pipeline.py's own docstring), so Segments should still
-    # pick those up. Best-effort, same pattern as escalate_t5_atomize_failure() just below — a
-    # Segment rebuild failure must not hide (or block) the real T5 result from the tenant.
-    if result.get("status") != "skipped":
-        try:
-            from services.acp_contract.segment_matching import run_segment_matching
-            await run_segment_matching(tenant_id, pool)
-        except Exception:
-            logger.warning("t5_segment_matching_failed", tenant_id=tenant_id, exc_info=True)
-
-        # AA-515 — ranking (research loop + rank-sum), fired in the BACKGROUND, not awaited.
-        # Real DataForSEO + Bedrock calls per NEW canonical_place can run well past the ~29s
-        # API Gateway timeout this repo has already documented for T8/T9 (CLAUDE.md's own
-        # AA-452 LIVE STATE entry) — atomize_version()'s own response must not block on it, the
-        # way T5's own atomize call already does. Strong-ref pattern (module-level
-        # _background_tasks + add_done_callback) is this file's own established one (AA-425,
-        # see its comment at the top of this file), same shape AA-466 also used elsewhere
-        # (services/acp_content_writing/service.py::run_write_background()).
-        import asyncio as _asyncio_ranking
-        _ranking_task = _asyncio_ranking.create_task(_run_ranking_pipeline(tenant_id, pool))
-        _background_tasks.add(_ranking_task)
-        _ranking_task.add_done_callback(_background_tasks.discard)
-
-    if result.get("status") == "failed":
-        # AA-469 Việc 5 — the gap this comment used to flag ("Việc 5's future job") is closed:
-        # persist the same error to silver_aa_internal.review_queue (A4's existing review-log
-        # already reads this table/join key, no new endpoint needed — see
-        # escalate_t5_atomize_failure()'s own docstring) BEFORE returning the 502 to the tenant.
-        # Best-effort: a failure to persist the escalation must not hide the real atomize error
-        # from the tenant, who still needs their own 502 either way.
-        error_msg = result.get("error") or "Atomize failed"
-        try:
-            from services.acp_produce.tenant_pipeline import escalate_t5_atomize_failure
-            await escalate_t5_atomize_failure(pool, tenant_id, row["tour_id"], version_id, error_msg)
-        except Exception:
-            logger.warning("t5_escalate_failed_not_persisted", version_id=version_id, exc_info=True)
-        raise HTTPException(status_code=502, detail=error_msg)
-
-    import datetime as _dt
-    return {
-        "version_id": version_id, "tour_id": row["tour_id"],
-        # UI feedback only — the derived join (_ATOMIZED_SUBQUERY) is the source of
-        # truth on next fetch; "skipped" (unchanged content) still means atoms already
-        # exist from a prior call, so this is accurate either way.
-        "atomized_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-        **result,
     }
 
 
