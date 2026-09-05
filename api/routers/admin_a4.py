@@ -166,20 +166,34 @@ async def get_trust_ramp(request: Request, x_admin_secret: str = Header(None)):
 async def get_publish_log(
     request: Request,
     tenant_id: Optional[str] = Query(None),
+    tour_id: Optional[str] = Query(None),
     limit: int = Query(200, ge=1, le=500),
     x_admin_secret: str = Header(None),
 ):
     """AA-455 bước 1 — T11 delivery-state rows (acp_shared.publish_log). Deploys against an
     empty table until T11's own write path (bước 2, not built here) starts producing rows.
-    Same flat-list-first shape as review-log/trust-ramp above — no server-side aggregation."""
+    Same flat-list-first shape as review-log/trust-ramp above — no server-side aggregation.
+
+    AA-527 (bổ sung, Phương án C dashboard): optional `tour_id` — publish_log has no tour_id
+    column of its own, so this JOINs through content_piece -> angle_gate_request.trip_id (the
+    same path get_content_log below already reads) rather than adding a denormalized column.
+    Used by the dashboard's "Publish" panel when a tour is selected as the page's anchor."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
 
     conditions = ["1=1"]
     params: list = []
+    join_sql = ""
     if tenant_id:
         params.append(tenant_id)
         conditions.append(f"pl.tenant_id = ${len(params)}::uuid")
+    if tour_id:
+        join_sql = (
+            "JOIN acp_shared.content_piece cp ON cp.piece_id = pl.piece_id "
+            "JOIN acp_shared.angle_gate_request agr ON agr.request_id = cp.angle_gate_request_id"
+        )
+        params.append(tour_id)
+        conditions.append(f"agr.trip_id = ${len(params)}::uuid")
     where = " AND ".join(conditions)
     params.append(limit)
 
@@ -193,6 +207,7 @@ async def get_publish_log(
                 pl.last_error, pl.created_at
             FROM acp_shared.publish_log pl
             LEFT JOIN shared.tenants t ON t.tenant_id = pl.tenant_id
+            {join_sql}
             WHERE {where}
             ORDER BY pl.created_at DESC
             LIMIT ${len(params)}
@@ -217,14 +232,15 @@ async def get_publish_log(
         }
         for r in rows
     ]
-    logger.info("a4_publish_log_queried", count=len(data), tenant_filter=tenant_id)
-    return {"data": data, "total": len(data), "tenant_filter": tenant_id}
+    logger.info("a4_publish_log_queried", count=len(data), tenant_filter=tenant_id, tour_filter=tour_id)
+    return {"data": data, "total": len(data), "tenant_filter": tenant_id, "tour_filter": tour_id}
 
 
 @router.get("/content-log")
 async def get_content_log(
     request: Request,
     tenant_id: Optional[str] = Query(None),
+    tour_id: Optional[str] = Query(None),
     limit: int = Query(200, ge=1, le=500),
     x_admin_secret: str = Header(None),
 ):
@@ -267,7 +283,12 @@ async def get_content_log(
     param — this endpoint is cross-tenant, unlike the tenant-scoped Python helper).
 
     NOT built here (explicitly out of scope, AA-505 instead): LLM cost/token tracking — no such
-    column exists on any of these tables yet."""
+    column exists on any of these tables yet.
+
+    AA-527 (bổ sung, Phương án C dashboard): optional `tour_id` filters on `agr.trip_id` (already
+    selected/joined below for the `tour` display block) — lets the dashboard's Write-Gate and
+    Review panels scope this same dataset to whichever tour is the page's current header anchor,
+    with no schema change."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
 
@@ -276,6 +297,9 @@ async def get_content_log(
     if tenant_id:
         params.append(tenant_id)
         conditions.append(f"cp.tenant_id = ${len(params)}::uuid")
+    if tour_id:
+        params.append(tour_id)
+        conditions.append(f"agr.trip_id = ${len(params)}::uuid")
     where = " AND ".join(conditions)
     params.append(limit)
 
@@ -361,8 +385,8 @@ async def get_content_log(
             "publish_status": _publish_status(r["status"], r["publish_id"] is not None),
             "created_at": r["created_at"].isoformat() if r["created_at"] else None,
         })
-    logger.info("a4_content_log_queried", count=len(data), tenant_filter=tenant_id)
-    return {"data": data, "total": len(data), "tenant_filter": tenant_id}
+    logger.info("a4_content_log_queried", count=len(data), tenant_filter=tenant_id, tour_filter=tour_id)
+    return {"data": data, "total": len(data), "tenant_filter": tenant_id, "tour_filter": tour_id}
 
 
 @router.post("/publish-log/{publish_id}/unpublish")

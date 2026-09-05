@@ -152,7 +152,7 @@ class TestListAtoms:
 
         result = await admin_atoms.list_atoms(
             request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness=None, unreviewed_only=False,
-            thin_only=False, include_deleted=False, limit=50, offset=0,
+            thin_only=False, include_deleted=False, owner_scope_class=None, lifecycle_stage=None, limit=50, offset=0,
             owner_scope=None,
         )
         assert result["limit"] == 50
@@ -171,7 +171,7 @@ class TestListAtoms:
 
         result = await admin_atoms.list_atoms(
             request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness=None, unreviewed_only=False,
-            thin_only=False, include_deleted=False, limit=50, offset=0,
+            thin_only=False, include_deleted=False, owner_scope_class=None, lifecycle_stage=None, limit=50, offset=0,
             owner_scope=None,
         )
         assert result["total"] == 137
@@ -187,7 +187,7 @@ class TestListAtoms:
 
         await admin_atoms.list_atoms(
             request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness=None, unreviewed_only=True,
-            thin_only=False, include_deleted=False, limit=50, offset=0,
+            thin_only=False, include_deleted=False, owner_scope_class=None, lifecycle_stage=None, limit=50, offset=0,
             owner_scope=None,
         )
         query = conn.fetch.call_args[0][0]
@@ -204,7 +204,7 @@ class TestListAtoms:
 
         await admin_atoms.list_atoms(
             request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness=None, unreviewed_only=False,
-            thin_only=True, include_deleted=False, limit=50, offset=0,
+            thin_only=True, include_deleted=False, owner_scope_class=None, lifecycle_stage=None, limit=50, offset=0,
             owner_scope=None,
         )
         query, *params = conn.fetch.call_args[0]
@@ -220,7 +220,7 @@ class TestListAtoms:
 
         await admin_atoms.list_atoms(
             request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness="HIGH", unreviewed_only=False,
-            thin_only=False, include_deleted=False, limit=50, offset=0,
+            thin_only=False, include_deleted=False, owner_scope_class=None, lifecycle_stage=None, limit=50, offset=0,
             owner_scope=None,
         )
         query, *params = conn.fetch.call_args[0]
@@ -236,7 +236,7 @@ class TestListAtoms:
 
         await admin_atoms.list_atoms(
             request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness=None, unreviewed_only=False,
-            thin_only=False, include_deleted=False, limit=50, offset=0,
+            thin_only=False, include_deleted=False, owner_scope_class=None, lifecycle_stage=None, limit=50, offset=0,
             owner_scope=None,
         )
         query = conn.fetch.call_args[0][0]
@@ -251,7 +251,7 @@ class TestListAtoms:
 
         await admin_atoms.list_atoms(
             request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness=None, unreviewed_only=False,
-            thin_only=False, include_deleted=True, limit=50, offset=0,
+            thin_only=False, include_deleted=True, owner_scope_class=None, lifecycle_stage=None, limit=50, offset=0,
             owner_scope=None,
         )
         query = conn.fetch.call_args[0][0]
@@ -268,7 +268,7 @@ class TestListAtoms:
 
         await admin_atoms.list_atoms(
             request, tour_id=None, tour_ids=",".join(ids), atom_ids=None, distinctiveness=None,
-            unreviewed_only=False, thin_only=False, include_deleted=False,
+            unreviewed_only=False, thin_only=False, include_deleted=False, owner_scope_class=None, lifecycle_stage=None,
             limit=50, offset=0, owner_scope=None,
         )
         query, *params = conn.fetch.call_args[0]
@@ -285,7 +285,7 @@ class TestListAtoms:
 
         await admin_atoms.list_atoms(
             request, tour_id="some-other-id", tour_ids=ids[0], atom_ids=None, distinctiveness=None,
-            unreviewed_only=False, thin_only=False, include_deleted=False,
+            unreviewed_only=False, thin_only=False, include_deleted=False, owner_scope_class=None, lifecycle_stage=None,
             limit=50, offset=0, owner_scope=None,
         )
         query = conn.fetch.call_args[0][0]
@@ -318,7 +318,7 @@ class TestListAtoms:
 
         await admin_atoms.list_atoms(
             request, tour_id=None, tour_ids=single_id, atom_ids=None, distinctiveness=None,
-            unreviewed_only=False, thin_only=False, include_deleted=False,
+            unreviewed_only=False, thin_only=False, include_deleted=False, owner_scope_class=None, lifecycle_stage=None,
             limit=50, offset=0, owner_scope=None,
         )
         query, *params = conn.fetch.call_args[0]
@@ -336,7 +336,7 @@ class TestListAtoms:
 
         await admin_atoms.list_atoms(
             request, tour_id="abc-123", tour_ids=None, atom_ids=None, distinctiveness=None,
-            unreviewed_only=False, thin_only=False, include_deleted=False,
+            unreviewed_only=False, thin_only=False, include_deleted=False, owner_scope_class=None, lifecycle_stage=None,
             limit=50, offset=0, owner_scope=None,
         )
         query, *params = conn.fetch.call_args[0]
@@ -354,7 +354,7 @@ class TestListAtoms:
 
         await admin_atoms.list_atoms(
             request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness=None,
-            unreviewed_only=False, thin_only=False, include_deleted=False,
+            unreviewed_only=False, thin_only=False, include_deleted=False, owner_scope_class=None, lifecycle_stage=None,
             limit=50, offset=0, owner_scope=tenant_id,
         )
         query, *params = conn.fetch.call_args[0]
@@ -370,7 +370,7 @@ class TestListAtoms:
 
         await admin_atoms.list_atoms(
             request, tour_id=None, tour_ids=None, atom_ids=None, distinctiveness=None,
-            unreviewed_only=False, thin_only=False, include_deleted=False,
+            unreviewed_only=False, thin_only=False, include_deleted=False, owner_scope_class=None, lifecycle_stage=None,
             limit=50, offset=0, owner_scope=None,
         )
         query = conn.fetch.call_args[0][0]
@@ -503,9 +503,11 @@ class TestAtomsSummary:
             [
                 {"tour_id": uuid.uuid4(), "tour_name": "Sapa Valley Trek",
                  "atom_count": 4, "unreviewed_count": 4, "atomized_at": None,
+                 "used_atom_count": 0, "lifecycle_stage": "active",
                  "owner_scopes": ["platform"]},
                 {"tour_id": uuid.uuid4(), "tour_name": "Mongolia Gobi",
                  "atom_count": 12, "unreviewed_count": 0, "atomized_at": None,
+                 "used_atom_count": 0, "lifecycle_stage": "active",
                  "owner_scopes": ["platform"]},
             ],
         ]
@@ -528,9 +530,11 @@ class TestAtomsSummary:
             [
                 {"tour_id": uuid.uuid4(), "tour_name": "Ha Giang Loop",
                  "atom_count": 4, "unreviewed_count": 4, "atomized_at": None,  # < THIN_TRIP_ATOM_MIN=5 -> thin
+                 "used_atom_count": 0, "lifecycle_stage": "active",
                  "owner_scopes": ["platform"]},
                 {"tour_id": uuid.uuid4(), "tour_name": "Mongolia Gobi",
                  "atom_count": 12, "unreviewed_count": 0, "atomized_at": None,  # not thin
+                 "used_atom_count": 0, "lifecycle_stage": "active",
                  "owner_scopes": ["platform"]},
             ],
         ]
@@ -557,6 +561,7 @@ class TestAtomsSummary:
             [],
             [{"tour_id": uuid.uuid4(), "tour_name": "Classic Laos",
               "atom_count": 48, "unreviewed_count": 0, "atomized_at": ts,
+              "used_atom_count": 0, "lifecycle_stage": "active",
               "owner_scopes": ["platform"]}],
         ]
         conn.fetchrow.return_value = {"total": 48, "reviewed": 48}
@@ -579,9 +584,11 @@ class TestAtomsSummary:
             [
                 {"tour_id": uuid.uuid4(), "tour_name": "Sri Lanka Highlands",
                  "atom_count": 108, "unreviewed_count": 108, "atomized_at": None,
+                 "used_atom_count": 0, "lifecycle_stage": "active",
                  "owner_scopes": ["platform"]},
                 {"tour_id": uuid.uuid4(), "tour_name": "Southern Laos",
                  "atom_count": 75, "unreviewed_count": 0, "atomized_at": None,
+                 "used_atom_count": 0, "lifecycle_stage": "active",
                  "owner_scopes": [legacy_tenant]},
             ],
         ]
@@ -602,6 +609,7 @@ class TestAtomsSummary:
             [],
             [{"tour_id": uuid.uuid4(), "tour_name": "Untouched Tour",
               "atom_count": 0, "unreviewed_count": 0, "atomized_at": None,
+              "used_atom_count": 0, "lifecycle_stage": "active",
               "owner_scopes": []}],
         ]
         conn.fetchrow.return_value = {"total": 0, "reviewed": 0}
