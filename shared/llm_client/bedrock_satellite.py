@@ -118,6 +118,14 @@ _SATELLITE_ACCOUNTS = {
 
 # Giữ tên cũ (không xoá — vẫn export, phòng import khác trong repo) trỏ về acc1,
 # đồng thời thêm bảng tra cứu account-aware cho account mới.
+#
+# AA-348 — cả 2 satellite account đều invoke Sonnet 4-6 (`claude-sonnet-4-6`), KHÁC với
+# shared/llm_client/pricing.py's BEDROCK_SONNET constant (4-5-20250929) — constant đó chỉ đặt tên
+# đúng cho nhánh acc2-native (T1); nhánh satellite (T1.5a/b, file này) CỐ Ý invoke version mới hơn
+# (verified thật 16/07/2026, xem STATUS ở đầu file) — không phải lỗi copy-paste, đã xác nhận lại
+# qua investigation của AA-348. Đừng "sửa cho khớp" version ở đây nếu chỉ dựa vào tên hằng số ở
+# pricing.py — đổi model thật invoke ở đây là một thay đổi hành vi/infra thật (IAM ARN scoping +
+# availability check trên cả 2 satellite account), ngoài phạm vi 1 việc đổi tên/comment.
 INFERENCE_PROFILE_SONNET = "arn:aws:bedrock:us-west-1:867490540162:inference-profile/global.anthropic.claude-sonnet-4-6"
 INFERENCE_PROFILE_HAIKU = (
     "arn:aws:bedrock:us-west-1:867490540162:inference-profile/"
