@@ -31,6 +31,17 @@ the funnel stage this codebase already treats as the booking/pricing-intent
 one (see services/acp_planning/constants.py FRAMEWORK_TABLE: BOFU blog =
 AIDA, the sales-closing framework). packets/pieces carry no funnel_stage of
 their own, so this is a live join through pieces.slot_id, not a cached flag.
+
+AA-464 (06/09/2026) — nối dây: suggest_ramp_transition() had 0 real callers until this issue
+(confirmed via STEP0, docs/implementation-notes/AA-464.md) because engagement_ok/weeks_active
+were never computed anywhere. compute_tenant_weeks_active()/compute_tenant_engagement_ok()/
+compute_tenant_ramp_signals()/compute_ramp_suggestion() below close that gap — on-demand only
+(no scheduler/cron, per the issue's own recommendation), called from
+api/routers/admin_a4.py's GET /trust-ramp (surfaces the suggestion) and its 2 new
+approve/skip endpoints (approve is confirm_ramp_transition()'s first real caller; skip logs a
+decision without mutating packets.publish_mode). suggest_ramp_transition()/
+confirm_ramp_transition() themselves are UNCHANGED by this issue — still suggestion-only until
+an admin explicitly approves, exactly as designed (ADR-2026-038 SS0.2).
 """
 from __future__ import annotations
 
@@ -39,6 +50,8 @@ from typing import Optional
 
 import asyncpg
 
+from services.acp_planning.constants import (CONFIDENCE_ATOM_MIN_POSTS,
+                                              ENGAGEMENT_RATE_BASELINE)
 from services.acp_produce.packets import PublishModeBlockedError, set_publish_mode
 
 # Mirrors aamc/delivery.py::RAMP exactly.
@@ -79,6 +92,92 @@ def suggest_ramp_transition(current_mode: str, engagement_ok: bool, weeks_active
     if engagement_ok and weeks_active >= 2 and ix < len(RAMP) - 1:
         return RAMP[ix + 1]
     return current_mode
+
+
+async def compute_tenant_weeks_active(db: asyncpg.Connection, tenant_id: str) -> int:
+    """AA-464: number of real weekly packets this tenant has (acp_deliver.packets, migrations
+    094+106). `UNIQUE (tenant_id, year, month, week)` already guarantees one row per distinct
+    real calendar week for this tenant, so a plain COUNT(*) IS the weeks-active count -- no
+    DISTINCT needed. Real production cadence, not calendar time since account creation."""
+    count = await db.fetchval(
+        "SELECT COUNT(*) FROM acp_deliver.packets WHERE tenant_id = $1", tenant_id,
+    )
+    return int(count or 0)
+
+
+async def compute_tenant_engagement_ok(
+    db: asyncpg.Connection, tenant_id: str, min_posts: int = CONFIDENCE_ATOM_MIN_POSTS,
+) -> bool:
+    """AA-464: tenant-wide engagement_ok signal for the ramp gate, derived from the SAME manual
+    engagement data services/acp_shared/content_metrics.py already collects for atom-weight
+    rollup (acp_shared.content_metric_snapshot, migration 112) -- no new metric invented. Latest
+    snapshot per piece (same "DISTINCT ON piece_id ORDER BY entered_at DESC" shape
+    rollup_atom_weights() already uses), reach-bearing rows only (content_metrics.py's own
+    _piece_score() "unknown stays unknown" rule -- never divide by a fake reach of 1).
+
+    Fail-closed: fewer than `min_posts` real reach-bearing snapshots means "not enough data to
+    say", which returns False, never a fabricated True. `min_posts` reuses
+    CONFIDENCE_ATOM_MIN_POSTS (3) -- the same confidence gate content_metrics.py already applies
+    to this exact table for a different aggregation (per-atom, not tenant-wide)."""
+    rows = await db.fetch(
+        """
+        WITH latest_snapshot AS (
+            SELECT DISTINCT ON (piece_id) piece_id, reach, engagement
+            FROM acp_shared.content_metric_snapshot
+            WHERE tenant_id = $1::uuid
+            ORDER BY piece_id, entered_at DESC
+        )
+        SELECT reach, engagement FROM latest_snapshot WHERE reach IS NOT NULL AND reach > 0
+        """,
+        tenant_id,
+    )
+    scores = [r["engagement"] / r["reach"] for r in rows if r["reach"]]
+    if len(scores) < min_posts:
+        return False
+    return (sum(scores) / len(scores)) >= ENGAGEMENT_RATE_BASELINE
+
+
+async def compute_tenant_ramp_signals(db: asyncpg.Connection, tenant_id: str) -> dict:
+    """AA-464: bundles the 2 read-only signal computations above -- the inputs
+    suggest_ramp_transition() needs but never computed anywhere before this issue (STEP0,
+    docs/implementation-notes/AA-464.md). Never writes, never calls suggest_ramp_transition()
+    itself (callers do that, same "compute signals, then decide" separation the rest of this
+    module already keeps)."""
+    weeks_active = await compute_tenant_weeks_active(db, tenant_id)
+    engagement_ok = await compute_tenant_engagement_ok(db, tenant_id)
+    return {"weeks_active": weeks_active, "engagement_ok": engagement_ok}
+
+
+async def compute_ramp_suggestion(db: asyncpg.Connection, packet_id: str) -> dict:
+    """AA-464: per-packet suggestion, computed fresh on every call (on-demand, per the issue's
+    own recommendation -- no scheduler, no cache, no new table; see docs/implementation-notes/
+    AA-464.md Decisions). Never writes, never calls confirm_ramp_transition() -- callers
+    (api/routers/admin_a4.py) decide what to do with the suggestion; approving it is a separate,
+    explicit call, per ADR-2026-038 SS0.2 (AA never auto-transitions a tenant's ramp state).
+
+    Raises ValueError for an unknown packet_id, same convention confirm_ramp_transition() already
+    uses."""
+    row = await db.fetchrow(
+        "SELECT tenant_id, publish_mode FROM acp_deliver.packets WHERE packet_id = $1", packet_id,
+    )
+    if row is None:
+        raise ValueError(f"compute_ramp_suggestion: no packet {packet_id}")
+
+    current_mode = row["publish_mode"]
+    tenant_id = row["tenant_id"]
+    signals = await compute_tenant_ramp_signals(db, tenant_id)
+    suggested_mode = suggest_ramp_transition(
+        current_mode, engagement_ok=signals["engagement_ok"], weeks_active=signals["weeks_active"],
+    )
+    return {
+        "packet_id": packet_id,
+        "tenant_id": tenant_id,
+        "current_mode": current_mode,
+        "suggested_mode": suggested_mode,
+        "eligible": suggested_mode != current_mode,
+        "engagement_ok": signals["engagement_ok"],
+        "weeks_active": signals["weeks_active"],
+    }
 
 
 async def _log_transition(
@@ -166,4 +265,6 @@ async def confirm_ramp_transition(
 __all__ = [
     "RAMP", "BofuVetoBlockedError",
     "packet_has_bofu_piece", "suggest_ramp_transition", "confirm_ramp_transition",
+    "compute_tenant_weeks_active", "compute_tenant_engagement_ok",
+    "compute_tenant_ramp_signals", "compute_ramp_suggestion",
 ]
