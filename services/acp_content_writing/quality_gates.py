@@ -386,17 +386,46 @@ def _is_offered(text: str) -> bool:
 # STEP0/build task's own explicit instruction: no hardcoded exact per-channel word limit (no
 # source document has one). "Extreme" is deliberately generous — this catches an empty/near-empty
 # response or a multi-thousand-word runaway generation, nothing narrower.
+# AA-531 — that "no source document has one" premise was true for the 7 short channels but wrong
+# for blog: the origin repo (`aa-social-media`) specs blog at 800-2,200 words (~4,700-13,000
+# chars) verbatim (docs/claude_audit referenced in AA-525 Phần 13, real finding — 3 real blog
+# pieces for tenant wanderlux-travel, 6,679-7,266 chars, were held by the shared 6,000-char
+# ceiling despite being BELOW the correct 2,200-word/~13,000-char ceiling). `_MIN_CHARS`/
+# `_MAX_CHARS` stay the shared default for the other 7 channels (facebook/instagram/tiktok/etc —
+# no evidence any of them need a different threshold); blog gets its own pair via
+# `_length_bounds_for_channel()`, not a value swap on the shared constants, so the other channels'
+# behavior is byte-identical to before this change.
 _MIN_CHARS = 20
 _MAX_CHARS = 6000
+_BLOG_MIN_CHARS = 4700  # ~800 words
+_BLOG_MAX_CHARS = 13000  # ~2,200 words
 
 
-def gate_extreme_length(content_text: str) -> GateResultLite:
+def _length_bounds_for_channel(channel: Optional[str]) -> tuple[int, int]:
+    """AA-531 — returns (min_chars, max_chars) for `channel`. `blog` gets its own wider band
+    (see constants above); every other channel (including an unrecognized/None value, so an
+    unexpected channel fails the SAME way it always has, not a new one) keeps the original
+    shared _MIN_CHARS/_MAX_CHARS pair, byte-identical to pre-AA-531 behavior."""
+    if channel == "blog":
+        return _BLOG_MIN_CHARS, _BLOG_MAX_CHARS
+    return _MIN_CHARS, _MAX_CHARS
+
+
+def gate_extreme_length(content_text: str, channel: Optional[str] = None) -> GateResultLite:
     """AA-450-02 gate map, F4 row (replaced, not ported — N7's version needs a Brief.word_range
-    T9 has no equivalent of)."""
+    T9 has no equivalent of).
+
+    AA-531 — `channel` (default None, so every pre-existing direct caller/test keeps the old
+    7-channel-shaped threshold unless it opts in) selects the length band via
+    `_length_bounds_for_channel()`: blog gets its own 4,700-13,000 char band (~800-2,200 words,
+    matching the origin repo's real spec), every other channel is unchanged. Scope deliberately
+    narrow per the issue's own instruction — no FAQ/H2-structure change here, purely the
+    threshold."""
+    min_chars, max_chars = _length_bounds_for_channel(channel)
     length = len(content_text or "")
-    if length < _MIN_CHARS:
+    if length < min_chars:
         return _result("F4_extreme_length", [f"content is only {length} chars — effectively empty"])
-    if length > _MAX_CHARS:
+    if length > max_chars:
         return _result("F4_extreme_length", [f"content is {length} chars — far beyond any real channel example"])
     return _result("F4_extreme_length", [])
 
@@ -742,7 +771,9 @@ def run_quality_gates(
     the other 7 channels get exactly the 6-gate stack this function has always run, unchanged.
     gate_extreme_length() (F4) is deliberately called on the TAG-STRIPPED text, not raw
     `content_text` — citation tags are internal markup and shouldn't count toward a length
-    ceiling meant to bound what the tenant actually reads; every other gate below still sees the
+    ceiling meant to bound what the tenant actually reads (AA-531: also passed `channel` now, so
+    blog gets its own wider length band instead of the shared 7-channel one — see
+    `_length_bounds_for_channel()`); every other gate below still sees the
     tagged text, since F1/F5/F3/F7 all need it (F1/F5 read the tags directly; F3/F7 just don't
     need it stripped, see their own docstrings).
 
@@ -767,7 +798,9 @@ def run_quality_gates(
         # placed right after F2 (another content-safety-class gate), before the DET/judge gates.
         gate_cannibalization(cannibalization_match),
         gate_promises_an_option(content_text, atom_text, route_segments),
-        gate_extreme_length(length_check_text),
+        # AA-531 — channel-aware length band (blog gets its own wider band, see
+        # _length_bounds_for_channel()); the other 7 channels are unaffected.
+        gate_extreme_length(length_check_text, channel),
     ]
     if channel == "blog":
         gate_ledger += [
