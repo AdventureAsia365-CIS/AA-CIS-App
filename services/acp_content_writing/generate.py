@@ -116,6 +116,7 @@ def write_content(
     destination: str | None = None, trip_name: str | None = None, atom_id: str | None = None,
     route_segments: list[tuple[str, str]] | None = None, keyword: str | None = None,
     tenant_id: str | None = None, angle_gate_request_id: str | None = None,  # AA-505, optional
+    facts_text: str | None = None,  # AA-529, optional
 ) -> tuple[str, float, dict, str | None]:
     """Attempt 1 — SKILL_v2.md workflow step 9, fresh write. Returns (content_text, cost_usd,
     seo_meta, summary) — `seo_meta` is `{"seo_title": None, "meta_description": None, "slug":
@@ -134,12 +135,17 @@ def write_content(
     build_user_prompt()'s own docstring.
 
     `keyword` (AA-514, defaults to `None`): the SEO keyword gate_seo_surface() checks title/meta
-    against — passed straight through, only used for `channel=='blog'`."""
+    against — passed straight through, only used for `channel=='blog'`.
+
+    `facts_text` (AA-529, defaults to `None`): a pre-formatted `[Fact id=<id>]`-labeled block
+    (`services/acp_content_writing/facts.py::format_facts_block()`) — passed straight through to
+    `build_user_prompt()`, which appends it to the CONTENT SEED regardless of channel/route
+    branch. `None`/empty (no Facts Entry exists yet for this tenant+platform) is a no-op."""
     user_prompt = build_user_prompt(
         content_seed=content_seed, goal=goal, channel_style=channel_style,
         brand_audience=brand_audience, angle=angle, cta=cta,
         destination=destination, trip_name=trip_name, atom_id=atom_id,
-        route_segments=route_segments, keyword=keyword,
+        route_segments=route_segments, keyword=keyword, facts_text=facts_text,
     )
     client = LLMClient()
     request = LLMRequest(system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt,
@@ -176,6 +182,7 @@ def rewrite_with_feedback(
     destination: str | None = None, trip_name: str | None = None, atom_id: str | None = None,
     route_segments: list[tuple[str, str]] | None = None, keyword: str | None = None,
     tenant_id: str | None = None, angle_gate_request_id: str | None = None,  # AA-505, optional
+    facts_text: str | None = None,  # AA-529, optional
 ) -> tuple[str, float, dict, str | None]:
     """Attempt 2 (the only retry — Phase 1's confirmed cap of 2 total attempts) — the SAME
     write call, with `revision_feedback` (the specific gate/violation strings T10 failed on,
@@ -184,12 +191,15 @@ def rewrite_with_feedback(
     text, never a partial section" contract N7's own repair.py documents, kept here because it's
     the right contract, not because it's ported code (this module imports nothing from
     services.acp_produce.repair). Returns (content_text, cost_usd, seo_meta, summary) — see
-    write_content()'s own docstring for the shape."""
+    write_content()'s own docstring for the shape.
+
+    `facts_text` (AA-529, defaults to `None`): same as `write_content()`'s own — passed straight
+    through, so a rewrite attempt sees the exact same Facts as the first attempt did."""
     user_prompt = build_user_prompt(
         content_seed=content_seed, goal=goal, channel_style=channel_style,
         brand_audience=brand_audience, angle=angle, cta=cta,
         destination=destination, trip_name=trip_name, revision_feedback=revision_feedback,
-        atom_id=atom_id, route_segments=route_segments, keyword=keyword,
+        atom_id=atom_id, route_segments=route_segments, keyword=keyword, facts_text=facts_text,
     )
     client = LLMClient()
     request = LLMRequest(system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt,
