@@ -35,6 +35,7 @@ from services.acp_angle_gate import service as angle_gate_service
 from services.acp_angle_gate.brand_audience import fetch_brand_audience
 from services.acp_angle_gate.channel_style import get_channel_style
 from services.acp_angle_gate.goals import get_goal
+from services.acp_content_writing.facts import fetch_facts_for_writing, format_facts_block
 from services.acp_content_writing.generate import rewrite_with_feedback, write_content
 from services.acp_content_writing.quality_gates import (deep_strip_citation_tags, run_quality_gates,
                                                           strip_citation_tags)
@@ -277,6 +278,16 @@ async def start_write(
     related_keywords = dfs_snapshot.get("related_keywords") or []
     keyword = related_keywords[0] if related_keywords else None
 
+    # AA-529 — Facts Entry source: ALL scope='platform' facts + this tenant's own scope='tenant'
+    # facts, never another tenant's (fetch_facts_for_writing()'s own WHERE clause enforces that).
+    # Fetched once per start_write() call, formatted into a labeled block, and carried in
+    # `context` for run_write_background()/_run_buffer_retry_attempt() to pass into every
+    # write/rewrite call AND fold into the grounding-gate's own `atom_text` argument — see this
+    # module's own AA-529 comments below for why it's merged there rather than threaded as a
+    # wholly separate pipeline.
+    facts = await fetch_facts_for_writing(tenant_id, pool)
+    facts_text = format_facts_block(facts)
+
     context = {
         "atom_text": atom_text, "goal": goal, "channel_style": channel_style,
         "brand_audience": brand_audience, "chosen": chosen, "cta": cta,
@@ -284,6 +295,7 @@ async def start_write(
         "brand_rubric_text": brand_rubric_text, "channel": req["channel"],
         "atom_id": req["atom_id"], "route_segments": route_segments, "keyword": keyword,
         "tenant_id": str(tenant_id),  # AA-505 — attribution for llm_call_log
+        "facts_text": facts_text,  # AA-529 — "" (not None) when no Facts Entry exists yet
         # AA-485 — route_hub_name/route_segment_count weren't previously carried in `context`
         # (only used inline, at the placeholder INSERT above) because nothing needed them again
         # afterward. The buffer-retry path (run_write_background()'s own trailing step) inserts
@@ -344,6 +356,16 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
     # AA-505 — same dict.get() backward-compatibility (None for any pre-AA-505 test that builds
     # a context dict by hand without this key).
     tenant_id = context.get("tenant_id")
+    # AA-529 — same dict.get() backward-compatibility; "" (falsy) for any pre-AA-529 test/caller.
+    facts_text = context.get("facts_text") or ""
+    # AA-529 — the grounding-gate's OWN view of the source text: atom_text (or the joined route
+    # segments) PLUS the Facts block, so a claim genuinely sourced from a Fact (e.g. a price) is
+    # no longer flagged as an unsupported number by gate_grounding()/gate_banned_patterns()/
+    # gate_promises_an_option(). Deliberately NOT what's passed as `content_seed=` to
+    # write_content()/rewrite_with_feedback() below (those get `facts_text=facts_text` as its own
+    # argument instead, appended once inside build_user_prompt()) — this avoids the Facts block
+    # appearing twice in what the model actually reads.
+    grounding_text = f"{atom_text}\n\n{facts_text}" if facts_text else atom_text
 
     attempt = 1  # bound before the try block so the except handler always has a real value
     try:
@@ -380,6 +402,7 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
                     destination=destination, trip_name=trip_name, atom_id=atom_id,
                     route_segments=route_segments, keyword=keyword,
                     tenant_id=tenant_id, angle_gate_request_id=str(request_id),
+                    facts_text=facts_text,
                 )
             else:
                 content_text, cost, seo_meta, summary = await asyncio.to_thread(
@@ -389,6 +412,7 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
                     destination=destination, trip_name=trip_name, atom_id=atom_id,
                     route_segments=route_segments, keyword=keyword,
                     tenant_id=tenant_id, angle_gate_request_id=str(request_id),
+                    facts_text=facts_text,
                 )
             total_cost += cost
 
@@ -423,7 +447,7 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
                         }
 
             outcome = await asyncio.to_thread(
-                run_quality_gates, content_text=content_text, atom_text=atom_text, cta=cta,
+                run_quality_gates, content_text=content_text, atom_text=grounding_text, cta=cta,
                 goal_key=goal["key"], brand_rubric_text=brand_rubric_text, channel=channel,
                 route_segments=route_segments, keyword=keyword,
                 seo_title=seo_meta.get("seo_title"), meta_description=seo_meta.get("meta_description"),
@@ -612,6 +636,11 @@ async def _run_buffer_retry_attempt(
     route_segments = context.get("route_segments")
     keyword = context.get("keyword")
     tenant_id = context.get("tenant_id")
+    # AA-529 — same as run_write_background()'s own facts_text/grounding_text: passed into the
+    # rewrite call so the retry sees the same Facts as every other attempt, and folded into the
+    # gate's atom_text so a Facts-sourced claim still passes grounding on this retry too.
+    facts_text = context.get("facts_text") or ""
+    grounding_text = f"{atom_text}\n\n{facts_text}" if facts_text else atom_text
 
     content_text, cost, seo_meta, summary = await asyncio.to_thread(
         rewrite_with_feedback, content_seed=atom_text, goal=goal, channel_style=channel_style,
@@ -620,9 +649,10 @@ async def _run_buffer_retry_attempt(
         destination=destination, trip_name=trip_name, atom_id=atom_id,
         route_segments=route_segments, keyword=keyword,
         tenant_id=tenant_id, angle_gate_request_id=str(request_id),
+        facts_text=facts_text,
     )
     outcome = await asyncio.to_thread(
-        run_quality_gates, content_text=content_text, atom_text=atom_text, cta=cta,
+        run_quality_gates, content_text=content_text, atom_text=grounding_text, cta=cta,
         goal_key=goal["key"], brand_rubric_text=brand_rubric_text, channel=channel,
         route_segments=route_segments, keyword=keyword,
         seo_title=seo_meta.get("seo_title"), meta_description=seo_meta.get("meta_description"),

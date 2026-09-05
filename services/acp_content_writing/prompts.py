@@ -49,7 +49,10 @@ BLOG-SPECIFIC FORMAT REQUIREMENTS (this channel only — required markup, not a 
   content seed, append the tag [R:{atom_id}] (this literal id, no spaces inside the brackets). A
   sentence with no such detail needs no tag. This tag is internal provenance markup that will be
   removed before the reader ever sees this piece — write the surrounding sentence exactly as if
-  the tag weren't there; it must never change your wording or read as part of the sentence."""
+  the tag weren't there; it must never change your wording or read as part of the sentence.
+- If a sentence instead uses a detail from the FACTS section below (not the itinerary content
+  above) — price, season, visa, transfer time, or similar — tag it [F:<fact id>] using the id
+  shown for that fact there, the exact same way, instead of [R:{atom_id}]."""
 
 # AA-513 — route-aware variant, used INSTEAD of _BLOG_FORMAT_INSTRUCTIONS only when
 # `route_segments` has more than one moment (a Route/Blog pick walking >=2 Segments). The single-
@@ -71,7 +74,10 @@ BLOG-SPECIFIC FORMAT REQUIREMENTS (this channel only — required markup, not a 
   THAT MOMENT'S OWN id exactly as shown — never a different moment's id, and never invent an id.
   A sentence with no such detail needs no tag. This tag is internal provenance markup that will
   be removed before the reader ever sees this piece — write the surrounding sentence exactly as
-  if the tag weren't there; it must never change your wording or read as part of the sentence."""
+  if the tag weren't there; it must never change your wording or read as part of the sentence.
+- If a sentence instead uses a detail from the FACTS section below (not one of the moments above)
+  — price, season, visa, transfer time, or similar — tag it [F:<fact id>] using the id shown for
+  that fact there, the exact same way, instead of a moment's [R:<id>]."""
 
 # AA-514 — blog channel's writer-output contract becomes a JSON envelope (full port of the
 # origin's structured Piece.seo_title/meta_description/slug fields, Nghiệp-confirmed real
@@ -155,6 +161,7 @@ def build_user_prompt(
     destination: str | None = None, trip_name: str | None = None,
     revision_feedback: list[str] | None = None, atom_id: str | None = None,
     route_segments: list[tuple[str, str]] | None = None, keyword: str | None = None,
+    facts_text: str | None = None,
 ) -> str:
     """`angle` is the chosen `angle_gate_option` row (name/why_it_works/formula_fit/
     best_final_style). `revision_feedback` (AA-450 Phase 1's confirmed retry shape — specific,
@@ -174,7 +181,16 @@ def build_user_prompt(
     tells the model to tag a fact with its OWN moment's id. A single-element or empty
     `route_segments` behaves exactly like `None` — one moment needs no "which one"
     disambiguation, so the plain `content_seed`/single-id instruction is used, byte-identical to
-    every non-Route caller."""
+    every non-Route caller.
+
+    `facts_text` (AA-529, keyword-only, defaults to `None` so every pre-AA-529 caller/test is
+    unaffected): a pre-formatted `[Fact id=<id>]`-labeled block from
+    `services/acp_content_writing/facts.py::format_facts_block()` — platform-scope Facts Entries
+    plus the writing tenant's own tenant-scope ones. Appended AFTER whichever CONTENT SEED text
+    was already chosen above (flat `content_seed`, or the route-aware labeled-moments render) —
+    this covers BOTH branches with one change, since the route-aware branch otherwise ignores the
+    plain `content_seed` argument entirely. `None`/empty is a no-op (no FACTS section at all),
+    the normal case for a tenant/trip with no Facts Entry of either scope written yet."""
     segment = brand_audience.get("customer_segment") or "discerning travellers"
     mindset = brand_audience.get("customer_mindset") or "a well-travelled, detail-oriented mindset"
 
@@ -192,6 +208,22 @@ def build_user_prompt(
         "\n\n".join(f"[Moment id={mid}]\n{text}" for mid, text in route_segments)
         if is_route_aware else content_seed
     )
+    # AA-529 — appended INSIDE seed_text itself (not as a separate `lines` entry) so it rides
+    # along with the ONE "CONTENT SEED" line below regardless of branch, and never disturbs the
+    # `lines.insert(-2, ...)` indices destination/trip_name rely on just below. Covers both
+    # branches above (flat atom text, or the route-aware moments render) with one change, since
+    # the route-aware branch otherwise never sees `content_seed` again once `is_route_aware` is
+    # True.
+    if facts_text:
+        seed_text = (
+            f"{seed_text}\n\nFACTS — additional citable facts NOT in the itinerary above "
+            "(reference prices, travel seasons, visa/entry requirements, estimated transfer "
+            "times between places, and similar claims a tour's own itinerary text wouldn't "
+            "state). Use these freely as real, verifiable source material; for the blog channel, "
+            "tag a sentence built from one of these with [F:<fact id>] using the id shown, the "
+            "same way an atom/moment above is tagged [R:<id>] — never invent a fact id.\n"
+            f"{facts_text}"
+        )
 
     lines = [
         f"CHANNEL: {channel_style['display_name']}",
@@ -212,7 +244,8 @@ def build_user_prompt(
         "",
         f"CALL TO ACTION TO INCLUDE: {cta}",
         "",
-        f"CONTENT SEED (the only source of facts — do not add facts beyond this):\n{seed_text}",
+        f"CONTENT SEED (the only source of facts, together with its own FACTS section if one is "
+        f"present below — do not add facts beyond either):\n{seed_text}",
     ]
     if destination:
         lines.insert(-2, f"DESTINATION: {destination}")
