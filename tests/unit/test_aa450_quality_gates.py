@@ -70,6 +70,39 @@ class TestGateExtremeLength:
     def test_runaway_length_fails(self):
         assert qg.gate_extreme_length("A" * 7000)["passed"] is False
 
+    # AA-531 — channel=None (the default, every pre-existing call site above) keeps the
+    # original 7-channel-shaped 20/6000 band untouched; `channel='blog'` gets its own wider band.
+    def test_default_channel_none_unaffected_by_blog_band(self):
+        # 7000 chars still fails the SHARED band when channel is omitted/None — confirms this
+        # fix did not accidentally widen the default for non-blog callers.
+        assert qg.gate_extreme_length("A" * 7000, None)["passed"] is False
+
+    def test_blog_channel_7000_chars_now_passes(self):
+        # Real-world shape: the 3 wanderlux-travel pieces this issue is about (6,679-7,266 chars)
+        # were held by the old shared 6,000-char ceiling despite being under blog's real
+        # 2,200-word (~13,000 char) ceiling.
+        assert qg.gate_extreme_length("A" * 7000, "blog")["passed"] is True
+
+    def test_blog_channel_below_blog_floor_fails(self):
+        # Below the blog-specific 4,700-char floor (~800 words) even though it's well above the
+        # generic 20-char floor — the issue's own "secondary note" (no real blog floor before).
+        result = qg.gate_extreme_length("A" * 3000, "blog")
+        assert result["passed"] is False
+        assert "effectively empty" in result["violations"][0]
+
+    def test_blog_channel_above_blog_ceiling_fails(self):
+        assert qg.gate_extreme_length("A" * 13500, "blog")["passed"] is False
+
+    def test_blog_channel_within_band_passes(self):
+        # Midpoint of the 4,700-13,000 char blog band.
+        assert qg.gate_extreme_length("A" * 9000, "blog")["passed"] is True
+
+    def test_non_blog_channel_still_uses_shared_band(self):
+        # A named non-blog channel (not just None) also keeps the shared 20/6000 band — confirms
+        # the dispatch is "blog vs. everything else", not "blog vs. None".
+        assert qg.gate_extreme_length("A" * 7000, "facebook")["passed"] is False
+        assert qg.gate_extreme_length("A" * 200, "facebook")["passed"] is True
+
 
 def _judge_raw(**fields) -> dict:
     return {"text": json.dumps(fields)}
