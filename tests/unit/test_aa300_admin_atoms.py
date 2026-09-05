@@ -10,8 +10,12 @@ x_admin_secret=.
 
 AA-475: patch_atoms_bulk/preview_slotgrid and their tests were deleted along
 with /admin/curation + /admin/curation/preview (their only callers) — this
-file now covers only list_atoms/atoms_summary/patch_atom, which T6
-(/portal/t6-atoms) still depends on.
+file now covers only list_atoms/atoms_summary/patch_atom. AA-526 removed
+their one tenant-facing caller (/portal/t6-atoms, now deleted along with
+tenant atom visibility entirely) — these endpoints' owner_scope-agnostic
+x-admin-secret path (never filtered by owner_scope, confirmed AA-525 Phần 5
+mục 3) is exactly what AA-527's new admin Atom Curation page is expected to
+build on instead.
 
 Mocks the asyncpg pool — no live DB, no LLM.
 

@@ -73,6 +73,21 @@ TENANT_QA_MAX_REPAIRS = 2  # AA-425 — separate from acp_produce.models.REPAIR_
 # silently under- or over-invalidate the cache).
 _T5_MODEL_TIER = "sonnet"
 
+# AA-526 — run_t5_atomize()'s own `tenant_id` param doubles as BOTH the free-text owner_scope
+# value (any string is valid, tour_atoms.owner_scope has no type/FK constraint) AND the value
+# passed straight through to record_call_with_pool(tenant_id=...), whose INSERT casts it
+# `$1::uuid` (shared/llm_client/call_log.py). Every caller before AA-526 always passed a real
+# tenant UUID, so this never mattered — now that A3's platform-scope atomize (owner_scope=
+# "platform", a non-UUID string) reuses this same function, an uncaught cast error would fire on
+# every single LLM call it logs (silently swallowed by that function's own try/except, but still
+# a real, avoidable loss of cost/usage visibility for a stage that runs on every published tour).
+def _llm_log_tenant_id(owner_scope: str) -> str | None:
+    try:
+        uuid.UUID(owner_scope)
+        return owner_scope
+    except (ValueError, AttributeError, TypeError):
+        return None  # not a real tenant (e.g. "platform") — log with no tenant attribution
+
 # Fields checked for both gates — same set graph.py's validate_node treats as the
 # rewrite's real prose output (name/seo_title/seo_meta excluded: short/derived,
 # not narrative claims — same exclusion s1_from_atom.py's _GATED_FIELDS makes).
@@ -408,7 +423,7 @@ async def _atomize_whole_tour_legacy(
         tokens_in=llm_result.usage.get("input_tokens"), tokens_out=llm_result.usage.get("output_tokens"),
         cost_usd=calc_cost(_t5_cfg.model_id, llm_result.usage.get("input_tokens", 0),
                             llm_result.usage.get("output_tokens", 0)),
-        tenant_id=tenant_id,
+        tenant_id=_llm_log_tenant_id(tenant_id),
         quality_signal={"atoms_extracted": inserted, "is_empty_marker": inserted == 0},
         stop_reason=llm_result.stop_reason,
     )
@@ -569,7 +584,7 @@ async def _atomize_per_day(
             tokens_out=llm_result.usage.get("output_tokens"),
             cost_usd=calc_cost(_t5_cfg.model_id, llm_result.usage.get("input_tokens", 0),
                                 llm_result.usage.get("output_tokens", 0)),
-            tenant_id=tenant_id,
+            tenant_id=_llm_log_tenant_id(tenant_id),
             quality_signal={"atoms_extracted": len(new_atom_ids), "day_number": day_num,
                              "is_empty_marker": not atoms},
             stop_reason=llm_result.stop_reason,
