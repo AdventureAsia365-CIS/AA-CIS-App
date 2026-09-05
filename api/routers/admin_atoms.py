@@ -146,6 +146,20 @@ _LIST_FROM = """
         WHERE r.tour_id = ta.tour_id AND r.ordered_segment_ids @> jsonb_build_array(asm.segment_id)
         LIMIT 1
     ) rte ON asm.segment_id IS NOT NULL
+    -- AA-527 (bổ sung, "Bổ sung yêu cầu kiểm tra" comment, point 3) — real usage count: how many
+    -- DISTINCT T8 requests (acp_shared.angle_gate_request, keyed by atom_id) this atom has ever
+    -- been written from, regardless of write outcome (held/approved/failed) — "was a write
+    -- actually attempted from this atom", not attempt-count (2 attempts of 1 request = 1 use).
+    -- Confirmed NOT backlog (STEP0, live DB read 05/09/2026): angle_gate_request.atom_id already
+    -- exists (migration 113, AA-449) and real repeat usage already exists in prod data (e.g. atom
+    -- 338e362c081d98d5 written from 3 separate times) — this is a plain aggregate over data that
+    -- already exists, distinct from atom_ranking.recurrence (which counts Segment/itinerary
+    -- overlap at atomize time, not actual downstream write usage).
+    LEFT JOIN (
+        SELECT atom_id, count(DISTINCT request_id) AS usage_count
+        FROM acp_shared.angle_gate_request
+        GROUP BY atom_id
+    ) uc ON uc.atom_id = ta.atom_id
     WHERE NOT ta.is_empty_marker
 """
 
@@ -158,7 +172,14 @@ _LIST_SELECT_COLS = """
            tc.atom_count AS tour_atom_count,
            asm.segment_id, asg.canonical_place, asg.canonical_action,
            ar.total_rank AS segment_score, rte.route_id, rte.hub_name AS route_hub_name,
-           ta.owner_scope
+           ta.owner_scope,
+           -- AA-527 (bổ sung): recurrence (Phần 12 kết luận #3 — "N itinerary/Segment", ĐÃ CÓ ở
+           -- atom_ranking, chỉ thiếu JOIN vào response, effort thấp) + usage_count (điểm 3 kiểm
+           -- tra bổ sung — real content_piece write-usage, see uc CTE above) +
+           -- rt.lifecycle_stage (điểm 2 kiểm tra bổ sung — tour active/phasing_out/retired,
+           -- silver_aa_internal.raw_tours, migration 086, đã có sẵn từ AA-301).
+           ar.recurrence, COALESCE(uc.usage_count, 0) AS usage_count,
+           rt.lifecycle_stage::text AS lifecycle_stage
 """
 
 
@@ -172,6 +193,19 @@ async def list_atoms(
     unreviewed_only: bool = Query(False),
     thin_only: bool = Query(False),
     include_deleted: bool = Query(False),
+    owner_scope_class: Optional[str] = Query(
+        None, pattern="^(platform|legacy)$",
+        description="AA-527 (bổ sung) — admin-only coarse filter: 'platform' (owner_scope='platform', "
+                    "post-AA-526 shared pool) vs 'legacy' (any other owner_scope — a real tenant_id, "
+                    "pre-AA-526 row not yet cleaned up). Ignored for a tenant-JWT caller (owner_scope "
+                    "already pinned to that tenant by _resolve_atom_owner_scope, nothing to choose).",
+    ),
+    lifecycle_stage: Optional[str] = Query(
+        None, pattern="^(active|phasing_out|retired)$",
+        description="AA-527 (bổ sung, kiểm tra điểm 2) — filter by the tour's own "
+                    "silver_aa_internal.raw_tours.lifecycle_stage (migration 086), so AA can find "
+                    "atoms sitting on a phasing_out/retired tour, not just active ones.",
+    ),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     owner_scope: Optional[str] = Depends(_resolve_atom_owner_scope),
@@ -207,6 +241,15 @@ async def list_atoms(
 
     if owner_scope is not None:
         _add("ta.owner_scope = ${n}", owner_scope)
+    elif owner_scope_class == "platform":
+        clauses.append("ta.owner_scope = 'platform'")
+    elif owner_scope_class == "legacy":
+        clauses.append("ta.owner_scope != 'platform'")
+
+    if lifecycle_stage:
+        # rt.lifecycle_stage is a Postgres ENUM (silver_aa_internal.tour_lifecycle_stage_enum) —
+        # cast to text rather than the param, Postgres has no implicit text->enum cast for `=`.
+        _add("rt.lifecycle_stage::text = ${n}", lifecycle_stage)
 
     # AA-345 round 2, Việc 4: tour_ids (comma-separated, plural) is the deep
     # link from /admin/atomize after a multi-tour decompose run — lets the
@@ -296,14 +339,27 @@ async def atoms_summary(
         """, *scope_params)
         by_tour_rows = await conn.fetch(f"""
             SELECT ta.tour_id, rt.src_name AS tour_name,
+                   rt.lifecycle_stage::text AS lifecycle_stage,
                    count(*) AS atom_count,
                    count(*) FILTER (WHERE ta.updated_at = ta.created_at) AS unreviewed_count,
+                   count(*) FILTER (WHERE uc.atom_id IS NOT NULL) AS used_atom_count,
                    MAX(ta.created_at) AS atomized_at,
                    array_agg(DISTINCT ta.owner_scope) AS owner_scopes
             FROM acp_contract.tour_atoms ta
             JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = ta.tour_id
+            -- AA-527 (bổ sung, kiểm tra điểm 3) — per-tour "how many distinct atoms of this tour
+            -- have ever been used to write content" (same angle_gate_request.atom_id source as
+            -- the per-atom usage_count added to GET /atoms above). The subquery is DISTINCT
+            -- (atom_id, trip_id) up front, so it can join at most 1 row per ta row — required so
+            -- this LEFT JOIN can't fan out ta rows and inflate the plain count(*) used for
+            -- atom_count/unreviewed_count just above (a JOIN straight onto angle_gate_request,
+            -- which can have several requests per atom, would double-count both).
+            LEFT JOIN (
+                SELECT DISTINCT atom_id, trip_id
+                FROM acp_shared.angle_gate_request
+            ) uc ON uc.atom_id = ta.atom_id AND uc.trip_id = ta.tour_id
             WHERE NOT ta.deleted AND NOT ta.is_empty_marker {scope_clause_ta}
-            GROUP BY ta.tour_id, rt.src_name
+            GROUP BY ta.tour_id, rt.src_name, rt.lifecycle_stage
             ORDER BY rt.src_name
         """, *scope_params)
 
@@ -317,6 +373,12 @@ async def atoms_summary(
             "tour_id": str(r["tour_id"]), "tour_name": r["tour_name"],
             "atom_count": r["atom_count"], "is_thin": r["atom_count"] < THIN_TRIP_ATOM_MIN,
             "unreviewed_count": r["unreviewed_count"],
+            # AA-527 (bổ sung, kiểm tra điểm 3) — atoms of this tour with >=1 real write attempt.
+            "used_atom_count": r["used_atom_count"],
+            # AA-527 (bổ sung, kiểm tra điểm 2) — active|phasing_out|retired (migration 086,
+            # AA-301). Lets the dashboard flag a tour that's winding down/stopped but still has
+            # atoms sitting in the curation pool.
+            "lifecycle_stage": r["lifecycle_stage"],
             # AA-345 round 2, Việc 4: MAX(created_at) — same "last touched"
             # choice as GET /admin/tours-for-atomization's atomized_at, for
             # the new "Newest first" sort + section-header date display.
