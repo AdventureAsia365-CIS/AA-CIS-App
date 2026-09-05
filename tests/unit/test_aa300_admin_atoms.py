@@ -374,7 +374,10 @@ class TestListAtoms:
             limit=50, offset=0, owner_scope=None,
         )
         query = conn.fetch.call_args[0][0]
-        assert "ta.owner_scope" not in query
+        # AA-527 — the SELECT list itself always includes ta.owner_scope now (so the new admin
+        # curation page can show a Platform/legacy-tenant badge per atom); what must NOT appear
+        # for owner_scope=None is a FILTER clause on it.
+        assert "ta.owner_scope = $" not in query
 
 
 class TestPatchAtom:
@@ -499,9 +502,11 @@ class TestAtomsSummary:
             [{"distinctiveness": "LOW", "c": 230}, {"distinctiveness": "HIGH", "c": 5}],
             [
                 {"tour_id": uuid.uuid4(), "tour_name": "Sapa Valley Trek",
-                 "atom_count": 4, "unreviewed_count": 4, "atomized_at": None},
+                 "atom_count": 4, "unreviewed_count": 4, "atomized_at": None,
+                 "owner_scopes": ["platform"]},
                 {"tour_id": uuid.uuid4(), "tour_name": "Mongolia Gobi",
-                 "atom_count": 12, "unreviewed_count": 0, "atomized_at": None},
+                 "atom_count": 12, "unreviewed_count": 0, "atomized_at": None,
+                 "owner_scopes": ["platform"]},
             ],
         ]
         conn.fetchrow.return_value = {"total": 235, "reviewed": 12}
@@ -522,9 +527,11 @@ class TestAtomsSummary:
             [],
             [
                 {"tour_id": uuid.uuid4(), "tour_name": "Ha Giang Loop",
-                 "atom_count": 4, "unreviewed_count": 4, "atomized_at": None},  # < THIN_TRIP_ATOM_MIN=5 -> thin
+                 "atom_count": 4, "unreviewed_count": 4, "atomized_at": None,  # < THIN_TRIP_ATOM_MIN=5 -> thin
+                 "owner_scopes": ["platform"]},
                 {"tour_id": uuid.uuid4(), "tour_name": "Mongolia Gobi",
-                 "atom_count": 12, "unreviewed_count": 0, "atomized_at": None},  # not thin
+                 "atom_count": 12, "unreviewed_count": 0, "atomized_at": None,  # not thin
+                 "owner_scopes": ["platform"]},
             ],
         ]
         conn.fetchrow.return_value = {"total": 16, "reviewed": 0}
@@ -549,7 +556,8 @@ class TestAtomsSummary:
         conn.fetch.side_effect = [
             [],
             [{"tour_id": uuid.uuid4(), "tour_name": "Classic Laos",
-              "atom_count": 48, "unreviewed_count": 0, "atomized_at": ts}],
+              "atom_count": 48, "unreviewed_count": 0, "atomized_at": ts,
+              "owner_scopes": ["platform"]}],
         ]
         conn.fetchrow.return_value = {"total": 48, "reviewed": 48}
         pool = _make_pool(conn)
@@ -560,12 +568,41 @@ class TestAtomsSummary:
         assert result["by_tour"][0]["atomized_at"] == ts.isoformat()
 
     @pytest.mark.asyncio
+    async def test_owner_scopes_exposed_for_new_curation_page_badge(self):
+        """AA-527 — the new admin curation page needs to tell a real platform-scope tour apart
+        from a pre-AA-526 legacy tenant-scoped one; by_tour must expose the real distinct
+        owner_scope value(s) for each tour, not silently drop them."""
+        conn = AsyncMock()
+        legacy_tenant = str(uuid.uuid4())
+        conn.fetch.side_effect = [
+            [],
+            [
+                {"tour_id": uuid.uuid4(), "tour_name": "Sri Lanka Highlands",
+                 "atom_count": 108, "unreviewed_count": 108, "atomized_at": None,
+                 "owner_scopes": ["platform"]},
+                {"tour_id": uuid.uuid4(), "tour_name": "Southern Laos",
+                 "atom_count": 75, "unreviewed_count": 0, "atomized_at": None,
+                 "owner_scopes": [legacy_tenant]},
+            ],
+        ]
+        conn.fetchrow.return_value = {"total": 183, "reviewed": 0}
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await admin_atoms.atoms_summary(request, owner_scope=None)
+
+        by_name = {t["tour_name"]: t for t in result["by_tour"]}
+        assert by_name["Sri Lanka Highlands"]["owner_scopes"] == ["platform"]
+        assert by_name["Southern Laos"]["owner_scopes"] == [legacy_tenant]
+
+    @pytest.mark.asyncio
     async def test_atomized_at_null_when_no_atoms_have_a_timestamp(self):
         conn = AsyncMock()
         conn.fetch.side_effect = [
             [],
             [{"tour_id": uuid.uuid4(), "tour_name": "Untouched Tour",
-              "atom_count": 0, "unreviewed_count": 0, "atomized_at": None}],
+              "atom_count": 0, "unreviewed_count": 0, "atomized_at": None,
+              "owner_scopes": []}],
         ]
         conn.fetchrow.return_value = {"total": 0, "reviewed": 0}
         pool = _make_pool(conn)
