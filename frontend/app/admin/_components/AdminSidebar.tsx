@@ -3,7 +3,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Eye, Gauge } from "lucide-react";
+import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Eye, Gauge, Puzzle } from "lucide-react";
 import { A, serif, sans, SIDEBAR_WIDTH } from "./adminUi";
 
 interface Notif {
@@ -223,6 +223,11 @@ export default function AdminSidebar() {
             <NavItem active={active("/admin/llm-usage")} accent={A.red}
               icon={<Gauge size={15} />} label="LLM Usage"
               onClick={() => router.push("/admin/llm-usage")} />
+            {/* AA-527 — replaces the removed tenant-facing T6 (AA-526): AA now decides which
+                atoms are good to use, admin-only same tier as the 3 items above. */}
+            <NavItem active={active("/admin/atom-curation")} accent={A.red}
+              icon={<Puzzle size={15} />} label="Atom Curation"
+              onClick={() => router.push("/admin/atom-curation")} />
           </NavGroup>
         )}
 

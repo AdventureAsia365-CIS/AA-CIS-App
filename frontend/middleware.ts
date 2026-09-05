@@ -67,6 +67,10 @@ const PROTECTED_ROUTES: { prefix: string; roles: string[] }[] = [
   // a4-oversight/tenants above — this shows real per-call spend + Việc C's model choice is
   // reached via /admin/settings (already admin+reviewer+content, unchanged).
   { prefix: "/admin/llm-usage", roles: ["admin"] },
+  // AA-527 — Atom Curation, replacing the removed tenant-facing T6 (AA-526): admin decides which
+  // atoms are good to use, same admin-only tier as a4-oversight/llm-usage above (Nghiệp's
+  // explicit choice among 2 options presented, 05/09/2026), not the broader content-team tier.
+  { prefix: "/admin/atom-curation", roles: ["admin"] },
   // Internal staff pages (was INTERNAL_PATHS) — admin/reviewer get real JWT
   // verification; content is the known-limitation carve-out described above.
   { prefix: "/admin/dashboard", roles: ["admin", "reviewer", "content"] },

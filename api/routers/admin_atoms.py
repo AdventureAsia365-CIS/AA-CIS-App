@@ -157,7 +157,8 @@ _LIST_SELECT_COLS = """
            (ta.updated_at = ta.created_at) AS unreviewed,
            tc.atom_count AS tour_atom_count,
            asm.segment_id, asg.canonical_place, asg.canonical_action,
-           ar.total_rank AS segment_score, rte.route_id, rte.hub_name AS route_hub_name
+           ar.total_rank AS segment_score, rte.route_id, rte.hub_name AS route_hub_name,
+           ta.owner_scope
 """
 
 
@@ -297,7 +298,8 @@ async def atoms_summary(
             SELECT ta.tour_id, rt.src_name AS tour_name,
                    count(*) AS atom_count,
                    count(*) FILTER (WHERE ta.updated_at = ta.created_at) AS unreviewed_count,
-                   MAX(ta.created_at) AS atomized_at
+                   MAX(ta.created_at) AS atomized_at,
+                   array_agg(DISTINCT ta.owner_scope) AS owner_scopes
             FROM acp_contract.tour_atoms ta
             JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = ta.tour_id
             WHERE NOT ta.deleted AND NOT ta.is_empty_marker {scope_clause_ta}
@@ -319,6 +321,12 @@ async def atoms_summary(
             # choice as GET /admin/tours-for-atomization's atomized_at, for
             # the new "Newest first" sort + section-header date display.
             "atomized_at": r["atomized_at"].isoformat() if r["atomized_at"] else None,
+            # AA-527 — which owner_scope(s) this tour's (live) atoms actually carry: always
+            # ["platform"] for anything atomized after AA-526 (A3), or a real tenant_id for a
+            # pre-AA-526 legacy row (still exists, not yet cleaned up — see AA-526's own
+            # implementation notes). Exposed so the new admin curation page can flag legacy data
+            # distinctly rather than silently mixing it with the new platform-wide atoms.
+            "owner_scopes": list(r["owner_scopes"]) if r["owner_scopes"] else [],
         }
         for r in by_tour_rows
     ]
