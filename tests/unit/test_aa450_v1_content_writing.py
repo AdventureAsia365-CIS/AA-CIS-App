@@ -165,6 +165,31 @@ class TestGetPiece:
         assert exc.value.status_code == 404
 
 
+class TestGetLatestPiece:
+    """AA-522 — GET .../requests/{request_id}/latest-piece, resume support for the T8/T9 wizard's
+    write step. service.fetch_latest_piece_for_request() itself is unit-tested in
+    test_aa450_content_writing_service.py::TestFetchLatestPieceForRequest — this only checks the
+    router wraps it as {"piece": ...}."""
+
+    @pytest.mark.asyncio
+    async def test_returns_piece_when_present(self):
+        with patch.object(
+            v1_content_writing.service, "fetch_latest_piece_for_request",
+            new=AsyncMock(return_value={"status": "approved", "piece_id": str(PIECE_ID)}),
+        ):
+            result = await v1_content_writing.get_latest_piece(REQUEST_ID, _make_request(), tenant={"sub": TENANT_ID})
+        assert result == {"piece": {"status": "approved", "piece_id": str(PIECE_ID)}}
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_nothing_written_yet(self):
+        with patch.object(
+            v1_content_writing.service, "fetch_latest_piece_for_request",
+            new=AsyncMock(return_value=None),
+        ):
+            result = await v1_content_writing.get_latest_piece(REQUEST_ID, _make_request(), tenant={"sub": TENANT_ID})
+        assert result == {"piece": None}
+
+
 class TestListReviews:
     """AA-501 — GET /v1/content-writing/reviews, the /portal/t10-review list."""
 

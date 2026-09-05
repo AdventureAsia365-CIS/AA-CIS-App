@@ -86,6 +86,21 @@ async def get_piece(piece_id: UUID, request: Request, tenant=Depends(get_tenant)
 
 
 @router.get(
+    "/requests/{request_id}/latest-piece",
+    summary="AA-522 — resume support: the latest content_piece for this request's currently "
+            "chosen angle, or {piece: null} if T9 hasn't written anything for it yet. Lets the "
+            "FE restore the write step's real state after a reload (in-flight/finished piece, or "
+            "'still needs a CTA') instead of relying on client-only React state — see AngleGate"
+            "Tab.tsx's own header comment for the bug this closes.",
+)
+async def get_latest_piece(request_id: UUID, request: Request, tenant=Depends(get_tenant)):
+    tenant_id = UUID(tenant["sub"])
+    pool = request.app.state.pool
+    piece = await service.fetch_latest_piece_for_request(tenant_id, request_id, pool)
+    return {"piece": piece}
+
+
+@router.get(
     "/reviews",
     summary="AA-501 — /portal/t10-review's list: one row per request (latest content_piece), "
             "full write context embedded, WITHOUT gate/retry/error detail",

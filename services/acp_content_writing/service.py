@@ -184,12 +184,12 @@ async def start_write(
             "T8's angle-choice step (workflow step 7) must be complete before T9 can write."
         )
     if not req["channel"]:
-        # AA-469 Việc 4 (flow-order fix) — channel is now a separate step (8) AFTER angle
-        # choice, set via angle_gate_service.set_channel(), not a create_request() param
-        # anymore. Defensive in practice: the real UI always calls .../channel before ever
-        # reaching the write step, so this should be unreachable via the shipped flow — kept as
-        # a real error (not a silent fallback) if that invariant is ever violated, same
-        # reasoning as the "chosen is None" defensive check just below.
+        # AA-522 — channel is now always set at request creation (services.acp_shared.slate.
+        # pick_subject(), from the picked Subject) — the old post-angle-choice Channel step
+        # (angle_gate_service.set_channel()) is gone along with Luồng B. Defensive in practice:
+        # this should be unreachable via the shipped flow — kept as a real error (not a silent
+        # fallback) if that invariant is ever violated, same reasoning as the "chosen is None"
+        # defensive check just below.
         raise RequestNotReadyError(
             f"request_id={request_id} has no channel set — T8's channel-choice step "
             "(workflow step 8) must be complete before T9 can write."
@@ -731,6 +731,45 @@ def _row_to_dict(row) -> dict:
     }
 
 
+_CHOSEN_OPTION_QUERY = """
+    SELECT option_id FROM acp_shared.angle_gate_option
+    WHERE request_id = $1 AND chosen = true
+"""
+
+_LATEST_PIECE_FOR_OPTION_QUERY = """
+    SELECT piece_id, tenant_id, angle_gate_request_id, attempt_number, content_text, status,
+           held_reason, gate_ledger, repair_log, created_at, seo_title, meta_description, slug,
+           route_hub_name, route_segment_count, flags
+    FROM acp_shared.content_piece
+    WHERE angle_gate_request_id = $1 AND tenant_id = $2
+      AND (angle_gate_option_id = $3 OR angle_gate_option_id IS NULL)
+    ORDER BY created_at DESC
+    LIMIT 1
+"""
+
+
+async def fetch_latest_piece_for_request(tenant_id: UUID, request_id: UUID, pool) -> Optional[dict]:
+    """AA-522 — resume support for the T8/T9 wizard's write step. The real bug this issue was
+    filed for: a 422 (missing CTA) from start_write() only ever surfaced as CLIENT-side React
+    state (AngleGateTab.tsx's old `needsCtaInput`) — a page reload at that exact moment wiped it,
+    leaving the tenant on an empty Write card with no CTA form and no way forward, even though
+    nothing was actually lost server-side. Fixed by giving the FE a way to ask the server "what's
+    the real state of this request's write, right now" on every load, instead of trusting local
+    state a reload can wipe.
+
+    Scoped to the CURRENTLY chosen angle option (same option-id-first / chosen=true-fallback
+    convention `fetch_review()` above already uses) so a stale piece from a since-reopened-and-
+    re-chosen angle (AA-497) is never mistaken for the current one — reopen_request() doesn't
+    delete the old content_piece row, it just stops being the option this request currently
+    points to. Returns None (not an error) when nothing has been written yet for this option —
+    the normal case right after an angle is first chosen."""
+    async with pool.acquire() as conn:
+        option_row = await conn.fetchrow(_CHOSEN_OPTION_QUERY, request_id)
+        option_id = option_row["option_id"] if option_row else None
+        row = await conn.fetchrow(_LATEST_PIECE_FOR_OPTION_QUERY, request_id, tenant_id, option_id)
+    return _row_to_dict(row) if row else None
+
+
 async def fetch_piece(tenant_id: UUID, piece_id: UUID, pool) -> dict:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -1000,5 +1039,6 @@ async def fetch_review_list(tenant_id: UUID, pool) -> list[dict]:
 
 __all__ = [
     "ContentWritingError", "RequestNotReadyError", "MissingCTAError", "MAX_ATTEMPTS",
-    "start_write", "run_write_background", "fetch_piece", "fetch_review", "fetch_review_list",
+    "start_write", "run_write_background", "fetch_piece", "fetch_latest_piece_for_request",
+    "fetch_review", "fetch_review_list",
 ]

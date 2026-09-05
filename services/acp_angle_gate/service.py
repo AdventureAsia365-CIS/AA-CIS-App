@@ -1,19 +1,28 @@
 """
-services.acp_angle_gate.service — T8 request lifecycle (workflow steps 1-8).
+services.acp_angle_gate.service — T8 request lifecycle.
 
-AA-469 Việc 4 (flow-order fix, this session) — corrected order (confirmed with Nghiệp):
-atom(+DFS/PAA+brand, server-side) -> Goal -> generate 3 angles -> pick 1 (step 7) -> pick
-Channel (step 8, NEW — see set_channel() below) -> T9 write. `channel` used to be a
-`create_request()` param and an input to angle generation; it is neither anymore.
+AA-522 (04/09/2026) — Luồng B removed. Every angle_gate_request is now created by
+services.acp_shared.slate.pick_subject() (atom_id/trip_id/channel/subject_id all set at INSERT
+time, from the picked Subject) — this module no longer creates requests itself. create_request()
+(the old atom-only, no-Subject creation path) and set_channel() (the old post-angle-choice
+Channel step, AA-469 Việc 4's workflow step 8) are both DELETED along with their FE — channel is
+now always fixed from the Subject at creation, never chosen here. This also means the AA-451
+slot-CTA prefill (_fetch_slot_cta()/_compute_and_persist_slot_cta(), which lived inside
+set_channel()) is gone with it — pick_subject() does not populate `cta` either, so it stays NULL
+for every real request today; services/acp_content_writing/service.py's own ask-the-tenant
+fallback (MissingCTAError) is now the ONLY way a CTA gets resolved. See AA-522's implementation
+notes for the full before/after and why this is an acceptable, deliberate simplification rather
+than a regression (the slot-CTA prefill was already unreachable for the current Subject-driven
+flow — channel being fixed at creation meant the FE's Channel-step card, its only caller, never
+rendered for a Subject-driven request).
 
 DB tables: acp_shared.angle_gate_request / angle_gate_option (migration 113, channel now
-nullable per migration 126).
+nullable per migration 126, subject_id migration 133).
 """
 from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from typing import Optional
 from uuid import UUID
 
 import structlog
@@ -23,12 +32,7 @@ from services.acp_angle_gate.channel_style import get_channel_style
 from services.acp_angle_gate.generate import generate_angles
 from services.acp_angle_gate.goals import get_goal
 from services.acp_angle_gate.ranking import rank_angles
-from services.acp_planning.allocator import compute_slot_grid, create_weekly_produce_run, persist_slot_grid
-from services.acp_planning.models import QuarterPlanNotApprovedError
-from services.acp_planning.quarter import fetch_approved_quarter_plan
-from services.acp_planning.runway import compute_runway_map
-from services.acp_planning.tenant_config import TenantNotFoundError, fetch_tenant_planning_config
-from services.acp_planning.tenant_pool import fetch_tenant_atoms_by_trip, fetch_tenant_trips
+from services.acp_planning.tenant_pool import fetch_tenant_trips
 from services.acp_shared.dfs_relevance import fetch_search_demand_signal
 from services.acp_shared.piece_history import fetch_piece_history
 
@@ -53,11 +57,6 @@ class InvalidGoalError(AngleGateError):
     pass
 
 
-class InvalidChannelError(AngleGateError):
-    """AA-469 Việc 4 (flow-order fix) — raised by set_channel() below for an unknown channel key,
-    mirroring InvalidGoalError's shape."""
-
-
 class WrongStatusError(AngleGateError):
     """Raised when an action is attempted on a request in the wrong lifecycle state (e.g.
     choosing an angle before a goal has been set, or setting a goal twice)."""
@@ -68,22 +67,6 @@ _ATOM_QUERY = """
     FROM acp_contract.tour_atoms
     WHERE atom_id = $1 AND owner_scope = $2 AND NOT deleted AND NOT is_empty_marker
 """
-
-# AA-450: migration 114's own header comment documents why this realistically returns NULL for
-# most real tenant self-service requests today — T7's tenant-facing endpoint
-# (api/routers/v1_planning.py::get_slot_grid()) never calls persist_slot_grid(), so
-# acp_v2_slots is populated only by admin-triggered N7 paths. Wired anyway (correct
-# infrastructure for whenever a persisted slot DOES exist, e.g. an admin-run tenant, or a
-# future change that persists the tenant preview) — services/acp_content_writing/ has its own
-# fallback for the NULL case, not this module's job to fabricate one.
-_SLOT_CTA_QUERY = """
-    SELECT payload ->> 'cta_target' AS cta_target
-    FROM acp_shared.acp_v2_slots
-    WHERE tenant_id = $1 AND channel = $2 AND payload -> 'atom_ids' ? $3
-    ORDER BY created_at DESC
-    LIMIT 1
-"""
-
 
 async def _fetch_atom_for_tenant(tenant_id: UUID, atom_id: str, pool) -> dict:
     """Tenant-scoped single-atom fetch, same owner_scope=tenant_id convention
@@ -96,104 +79,6 @@ async def _fetch_atom_for_tenant(tenant_id: UUID, atom_id: str, pool) -> dict:
     if row is None:
         raise AtomNotFoundError(f"atom_id={atom_id!r} not found for this tenant (or not owned by them)")
     return {"atom_id": row["atom_id"], "trip_id": row["tour_id"], "text": row["text"]}
-
-
-async def _fetch_slot_cta(tenant_id: UUID, atom_id: str, channel: str, pool) -> Optional[str]:
-    """AA-450: best-effort CTA lookup from a persisted T7 slot (services.acp_planning.models
-    .Slot.cta_target) matching this (tenant, channel, atom). Returns None (not an error) when no
-    matching slot row exists — see this module's own comment above `_SLOT_CTA_QUERY` and
-    migration 114's header for why that's the common case today, not an edge case."""
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(_SLOT_CTA_QUERY, str(tenant_id), channel, atom_id)
-    cta = row["cta_target"] if row else None
-    return cta or None  # empty string from a slot with no cta_target is treated as "none"
-
-
-async def _compute_and_persist_slot_cta(
-    tenant_id: UUID, atom_id: str, channel: str, year: int, month: int, pool,
-) -> Optional[str]:
-    """AA-451 — closes the gap migration 114's header documented: T7's own tenant-facing
-    endpoint (api/routers/v1_planning.py::get_slot_grid()) never persists its computed
-    SlotGrid, so `_fetch_slot_cta()` above realistically finds nothing for a real self-service
-    tenant. Called ONLY when that lookup already came back empty AND the caller supplied
-    `year`/`month` (Option B, Nghiep-confirmed — see docs/implementation-notes/AA-451.md).
-
-    Recomputes the tenant's month slot-grid using the EXACT SAME tenant-scoped fetchers
-    `get_slot_grid()` uses (`fetch_tenant_planning_config`/`fetch_approved_quarter_plan`/
-    `fetch_tenant_trips`/`fetch_tenant_atoms_by_trip`/`compute_runway_map`/`compute_slot_grid`)
-    — deliberately NOT `allocate_month()`/`allocate_and_persist_week()` (services.acp_planning.
-    allocator), which call the platform-wide `runway.fetch_trips()`/`quarter.fetch_atoms_by_trip
-    ()` AA-445-02 found scope by the tour's OWNING tenant, not `owner_scope` — reusing those here
-    would silently persist a different (wrong-tenant) slot set than what this same tenant's own
-    T7 preview shows them.
-
-    Returns None (never raises) on any "can't compute yet" state — unknown tenant, no finalized
-    quarter plan, or the atom simply isn't in any slot this month (cooldown / trip not in this
-    quarter's share) — exactly the same "best-effort, fall through to T9's own CTA-ask fallback"
-    contract `_fetch_slot_cta()` already has."""
-    try:
-        config = await fetch_tenant_planning_config(tenant_id, pool)
-    except TenantNotFoundError:
-        return None
-
-    quarter = (month - 1) // 3 + 1
-    quarter_plan = await fetch_approved_quarter_plan(tenant_id, year, quarter, pool)
-    if quarter_plan is None:
-        # No finalized T7 quarter plan yet — same 404 condition get_slot_grid() itself would
-        # give a tenant calling it directly. Not an error here: T8 must still work even for a
-        # tenant who never touched T7.
-        return None
-
-    trips = await fetch_tenant_trips(tenant_id, pool)
-    trips_by_id = {t.id: t for t in trips}
-    atoms_by_trip = await fetch_tenant_atoms_by_trip(tenant_id, pool)
-    runway = compute_runway_map(tenant_id, year, trips, config.markets)
-
-    try:
-        grid = compute_slot_grid(
-            tenant_id, year, month, config.channels, config.capacity_posts_per_week,
-            quarter_plan, runway, trips_by_id, atoms_by_trip, config.markets[0],
-        )
-    except QuarterPlanNotApprovedError:
-        # Defensive/unreachable — fetch_approved_quarter_plan() always forces .approved=True.
-        return None
-
-    target = next((s for s in grid.slots if s.channel == channel and atom_id in s.atom_ids), None)
-    if target is None:
-        # Atom didn't land in a slot this month (atom floor / cooldown / trip not selected for
-        # this quarter's destination share) — nothing to persist, cta stays None.
-        return None
-
-    run_id = await create_weekly_produce_run(pool, str(tenant_id), year, month, target.week)
-    await persist_slot_grid(pool, run_id, str(tenant_id), target.week, grid)
-
-    # Re-read from the DB rather than trusting `target.cta_target` in-memory — same "don't
-    # hand-carry pre-write state" lesson AA-448's own finalize-response bug taught, and doubles
-    # as a correctness check that the persist actually landed.
-    return await _fetch_slot_cta(tenant_id, atom_id, channel, pool)
-
-
-async def create_request(tenant_id: UUID, atom_id: str, pool) -> dict:
-    """Workflow step 1. Validates the atom belongs to this tenant (owner_scope check) up front —
-    refuses a cross-tenant atom_id here rather than only failing later at generate time.
-
-    AA-469 Việc 4 (flow-order fix, this session) — no `channel`/`year`/`month` params anymore.
-    Confirmed order: atom(+DFS/PAA+brand, fetched server-side) -> Goal -> 3 angles -> pick 1 ->
-    THEN channel (see set_channel() below) -> T9 write. `channel`/`cta` both start NULL; the
-    AA-451 slot-CTA prefill (`_fetch_slot_cta()`/`_compute_and_persist_slot_cta()`) moved to
-    set_channel() below, since it's genuinely keyed by channel and channel isn't known yet here."""
-    atom = await _fetch_atom_for_tenant(tenant_id, atom_id, pool)
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO acp_shared.angle_gate_request (tenant_id, atom_id, trip_id, channel, cta)
-            VALUES ($1, $2, $3, NULL, NULL)
-            RETURNING request_id, tenant_id, atom_id, trip_id, channel, goal, cta, status,
-                      created_at, updated_at
-            """,
-            tenant_id, atom["atom_id"], atom["trip_id"],
-        )
-    return dict(row)
 
 
 async def _fetch_request_row(tenant_id: UUID, request_id: UUID, pool):
@@ -400,54 +285,6 @@ async def choose_angle(tenant_id: UUID, request_id: UUID, idx: int, pool) -> dic
     return await fetch_request(tenant_id, request_id, pool)
 
 
-async def set_channel(
-    tenant_id: UUID, request_id: UUID, channel: str, pool,
-    year: Optional[int] = None, month: Optional[int] = None,
-) -> dict:
-    """AA-469 Việc 4 (flow-order fix) — workflow step 8 (NEW): the tenant picks a Channel, AFTER
-    an angle is chosen, not before angle generation (see create_request()'s own header for the
-    corrected order). Only valid once an angle has been chosen (status 'approved') — picking a
-    channel before that would have nothing to attach it to as a real T9-ready request; a request
-    that's mid-reopen ('reusable', re-picking a different angle) is deliberately NOT a valid
-    target either, since choose_angle() always lands back on 'approved' anyway (same reasoning
-    T9's start_write() guard already documents).
-
-    Callable more than once while still 'approved' (before T9 writes) — e.g. the tenant picks a
-    channel, changes their mind, picks a different one; nothing downstream has consumed the first
-    choice yet. `angle_gate_request.channel` carries over UNCHANGED across a later reopen()/
-    re-choose-angle cycle (AA-497) — reopening only ever re-picks the ANGLE (per AA-497's own
-    documented scope), and the channel choice has no dependency on which specific angle was
-    picked (T9's write prompt applies the channel's style block independently of the angle's own
-    `best_final_style` — see acp_content_writing/prompts.py), so there is nothing to invalidate.
-
-    AA-451's slot-CTA prefill moves here from create_request() (this is genuinely where it
-    belongs now — it's keyed by channel, which wasn't known at creation time anymore). Never
-    overwrites an already-resolved `cta` (e.g. one T9 itself may resolve some other way in the
-    future) — only fills it in when still NULL."""
-    req = await _fetch_request_row(tenant_id, request_id, pool)
-    if req["status"] != "approved":
-        raise WrongStatusError(
-            f"request_id={request_id} is status={req['status']!r}, expected 'approved' — an "
-            "angle must be chosen (workflow step 7) before picking a channel."
-        )
-    if get_channel_style(channel) is None:
-        raise InvalidChannelError(f"Unknown channel: {channel!r}")
-
-    cta = req["cta"]
-    if cta is None:
-        cta = await _fetch_slot_cta(tenant_id, req["atom_id"], channel, pool)
-    if cta is None and year is not None and month is not None:
-        cta = await _compute_and_persist_slot_cta(tenant_id, req["atom_id"], channel, year, month, pool)
-
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE acp_shared.angle_gate_request SET channel = $2, cta = $3, updated_at = now() "
-            "WHERE request_id = $1",
-            request_id, channel, cta,
-        )
-    return await fetch_request(tenant_id, request_id, pool)
-
-
 async def fetch_request(tenant_id: UUID, request_id: UUID, pool) -> dict:
     req = await _fetch_request_row(tenant_id, request_id, pool)
     async with pool.acquire() as conn:
@@ -526,6 +363,5 @@ async def fetch_request(tenant_id: UUID, request_id: UUID, pool) -> dict:
 
 __all__ = [
     "AngleGateError", "AtomNotFoundError", "RequestNotFoundError", "InvalidGoalError",
-    "InvalidChannelError", "WrongStatusError", "create_request", "set_goal_and_generate",
-    "choose_angle", "reopen_request", "set_channel", "fetch_request",
+    "WrongStatusError", "set_goal_and_generate", "choose_angle", "reopen_request", "fetch_request",
 ]
