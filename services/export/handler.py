@@ -249,100 +249,16 @@ async def process_export(version_id: str) -> dict:
         _atomize_task.add_done_callback(_background_tasks.discard)
 
         # 4. Update tours_passed to exact published count (always, not just at end)
+        # AA-492: this used to also gate a one-time "ACP-S1 manifest.json + EventBridge"
+        # fanout on just_completed (AA-483's own atomic-race fix). That fanout was removed
+        # entirely — STEP0 confirmed via real ECS-exec DB check that both tables it touched
+        # (acp_shared.acp_run_context, acp_shared.acp_runs) were already dropped by migration
+        # 121 (AA-477), so it had crashed on every real invocation since, silently swallowed by
+        # its own try/except, 0 rows ever durably written to shared.acp_runs either. The
+        # EventBridge bus it published to (aa-cis-dev-acp-events) had 0 rules/0 targets for its
+        # entire lifetime — see docs/implementation-notes/AA-492.md for the full trace.
         if batch_id:
-            _pending, just_completed = await sync_batch_completion(conn, batch_id, silver)
-
-            # AA-483: just_completed (the atomic UPDATE's own result), not a separately-read
-            # pending count — see sync_batch_completion()'s docstring for why the old
-            # `pending == 0` check here could double-fire this fanout under real concurrency.
-            if just_completed:
-                # ACP-S1: manifest.json + EventBridge on batch completion
-                try:
-                    from services.acp.handler import upload_manifest, publish_s1_completed
-                    from api.services.run_context_db import write_run_context_stage
-                    from collections import Counter
-
-                    tour_rows = await conn.fetch("""
-                        SELECT pt.tour_id, pt.aa_name, pt.quality_score, rt.country,
-                               pt.seo_keywords_used
-                        FROM gold_aa_internal.published_tours pt
-                        JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
-                        WHERE rt.batch_id = $1::uuid
-                    """, batch_id)
-
-                    country_counts = Counter(r["country"] for r in tour_rows if r["country"])
-                    country = country_counts.most_common(1)[0][0] if country_counts else "unknown"
-
-                    tour_list = [
-                        {
-                            "tour_id":       str(r["tour_id"]),
-                            "aa_name":       r["aa_name"],
-                            "quality_score": float(r["quality_score"] or 0),
-                            "country":       r["country"],
-                        }
-                        for r in tour_rows
-                    ]
-                    tc = len(tour_list)
-                    qs_avg = sum(t["quality_score"] for t in tour_list) / tc if tc else 0.0
-
-                    tenant_row = await conn.fetchrow(
-                        "SELECT tenant_id FROM shared.pipeline_runs WHERE batch_id = $1::uuid",
-                        batch_id,
-                    )
-                    tenant_id_str = (
-                        str(tenant_row["tenant_id"]) if tenant_row
-                        else "00000000-0000-0000-0000-000000000001"
-                    )
-                    run_id = str(batch_id)
-
-                    manifest_key = upload_manifest(
-                        run_id, country, tenant_id_str, tour_list, qs_avg
-                    )
-
-                    # Deduplicate keywords used across all tours in this batch.
-                    # Elements may be plain strings or dicts with "keyword" key.
-                    all_kws: list = []
-                    seen_kws: set = set()
-                    for r in tour_rows:
-                        raw = r["seo_keywords_used"]
-                        if isinstance(raw, str):
-                            try:
-                                raw = json.loads(raw)
-                            except (ValueError, TypeError):
-                                raw = []
-                        for item in (raw or []):
-                            kw = item.get("keyword") if isinstance(item, dict) else str(item)
-                            if kw and kw not in seen_kws:
-                                seen_kws.add(kw)
-                                all_kws.append(kw)
-
-                    # Write acp_runs + acp_run_context atomically.
-                    # publish_s1_completed is called ONLY after successful commit.
-                    async with conn.transaction():
-                        await conn.execute("""
-                            INSERT INTO shared.acp_runs
-                                (batch_id, country, tenant_id, manifest_s3_key,
-                                 tour_count, quality_score_avg, status, completed_at)
-                            VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, 's1_done', NOW())
-                            ON CONFLICT (batch_id) DO UPDATE SET
-                                status            = 's1_done',
-                                manifest_s3_key   = EXCLUDED.manifest_s3_key,
-                                tour_count        = EXCLUDED.tour_count,
-                                quality_score_avg = EXCLUDED.quality_score_avg,
-                                completed_at      = NOW()
-                        """, batch_id, country, tenant_id_str, manifest_key, tc, round(qs_avg, 2))
-
-                        tour_ids = [str(r["tour_id"]) for r in tour_rows]
-                        await write_run_context_stage(conn, run_id, "s1", {
-                            "s1_keywords_used": all_kws,
-                            "s1_tour_ids": tour_ids,
-                        })
-
-                    publish_s1_completed(run_id, country, tenant_id_str, manifest_key, tc, qs_avg)
-
-                except Exception as _acp_err:
-                    logger.error("acp_s1_publish_failed",
-                                 batch_id=str(batch_id), error=str(_acp_err))
+            await sync_batch_completion(conn, batch_id, silver)
 
         return {
             "status":     "exported",
