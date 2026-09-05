@@ -55,6 +55,84 @@ class TestLlmLogTenantId:
 
 
 @pytest.mark.asyncio
+class TestAtomizeSkipsCompetitorIndexForNonTenantScope:
+    """AA-526 — the real bug this build's OWN live-verify caught (unit tests alone missed it,
+    since every existing test mocks build_competitor_index rather than exercising its real
+    ::uuid cast): services/acp_shared/competitor_index.py's queries cast `tenant_id = $1::uuid`
+    — genuinely tenant-only by that module's own docstring (never wired for platform-scope
+    atoms). Calling run_t5_atomize("platform", ...) crashed this on every single call, before
+    a single atom was ever inserted. Confirmed live (05/09/2026, real HTTP admin approve -> real
+    process_export() -> real a3_atomize_failed log: "invalid input for query argument $1:
+    'platform' (invalid UUID...)"). Fixed by skipping the fetch for a non-tenant owner_scope."""
+
+    async def test_atomize_per_day_skips_competitor_fetch_for_platform_scope(self):
+        from services.acp_produce import tenant_pipeline
+        from services.content_generation.itinerary_utils import parse_canonical_itinerary_days
+
+        row = {
+            "id": TOUR_ID, "name": "Tour", "aa_summary": "s", "aa_highlights": [],
+            "itinerary_source": "Day 1 — Arrive\nWalk around the old town.",
+        }
+        days = parse_canonical_itinerary_days(row["itinerary_source"])
+        assert days  # sanity — real parse, not empty
+
+        conn = AsyncMock()
+        conn.fetch.return_value = []  # atomize_day_fingerprint: nothing cached yet
+        conn.execute = AsyncMock(return_value="UPDATE 0")
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=conn)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        pool = MagicMock()
+        pool.acquire = MagicMock(return_value=ctx)
+
+        fake_llm_result = MagicMock(
+            text='{"atoms": []}', model_used="sonnet", usage={}, stop_reason="end_turn",
+        )
+        with patch("services.acp_produce.tenant_pipeline.invoke_claude", return_value=fake_llm_result), \
+             patch("services.acp_produce.tenant_pipeline.get_stage_config",
+                   AsyncMock(return_value=MagicMock(model_id="sonnet", account_route="acc3"))), \
+             patch("services.acp_shared.competitor_index.build_competitor_index", AsyncMock()) as m_build, \
+             patch("shared.llm_client.call_log.record_call_with_pool", AsyncMock()):
+            result = await tenant_pipeline._atomize_per_day(
+                "platform", TOUR_ID, GC_ID, row, days, "somehash", pool, "Vietnam",
+            )
+
+        m_build.assert_not_awaited()  # the actual regression guard
+        assert result["status"] == "success"
+
+    async def test_atomize_whole_tour_legacy_skips_competitor_fetch_for_platform_scope(self):
+        from services.acp_produce import tenant_pipeline
+
+        conn = AsyncMock()
+        conn.fetchval.return_value = None  # no prior source_hash
+        conn.execute = AsyncMock()
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=conn)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        pool = MagicMock()
+        pool.acquire = MagicMock(return_value=ctx)
+
+        fake_llm_result = MagicMock(
+            text='{"atoms": [{"place": "Old town", "action": "walk"}]}',
+            model_used="sonnet", usage={}, stop_reason="end_turn",
+        )
+        row = {"id": TOUR_ID, "name": "Tour", "aa_summary": "s", "aa_highlights": [],
+               "itinerary_source": ""}
+        with patch("services.acp_produce.tenant_pipeline.invoke_claude", return_value=fake_llm_result), \
+             patch("services.acp_produce.tenant_pipeline.get_stage_config",
+                   AsyncMock(return_value=MagicMock(model_id="sonnet", account_route="acc3"))), \
+             patch("services.acp_shared.competitor_index.build_competitor_index", AsyncMock()) as m_build, \
+             patch("shared.llm_client.call_log.record_call_with_pool", AsyncMock()):
+            result = await tenant_pipeline._atomize_whole_tour_legacy(
+                "platform", TOUR_ID, row, "somehash", pool, "Vietnam",
+            )
+
+        m_build.assert_not_awaited()  # the actual regression guard
+        assert result["status"] == "success"
+        assert result["atom_count"] == 1
+
+
+@pytest.mark.asyncio
 class TestSegmentMatchingReadsSharedAtoms:
     """AA-526 — services/acp_contract/segment_matching.py::run_segment_matching()'s atom-read
     query, the real bug this build found and fixed: it used to read `WHERE owner_scope = $1`
