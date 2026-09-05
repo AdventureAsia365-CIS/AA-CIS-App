@@ -132,6 +132,11 @@ interface TrustRampRow {
   publish_mode: string;
   created_at: string | null;
   delivered_at: string | null;
+  // AA-464 — on-demand suggestion fields, computed fresh server-side on every fetch.
+  engagement_ok: boolean;
+  weeks_active: number;
+  suggested_mode: string;
+  eligible: boolean;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -661,14 +666,39 @@ function TrustRampSection() {
   const [rows, setRows] = useState<TrustRampRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [actioningId, setActioningId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const fetchData = useCallback(() => {
+    setLoading(true);
     fetch("/api/admin/a4/trust-ramp")
       .then(r => (r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`)))
       .then(d => { setRows(d.data || []); setError(null); })
       .catch(e => setError(String(e)))
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  // AA-464 — approve/skip a suggested transition. Both re-compute server-side (never trust the
+  // client's own suggested_mode), so this just needs the packet_id; fetchData() re-pulls fresh
+  // state (including whatever the packet's NEW suggestion is, if any) after either action.
+  const handleRampAction = useCallback(async (packetId: string, action: "approve" | "skip") => {
+    setActioningId(packetId);
+    setActionError(null);
+    try {
+      const res = await fetch(`/api/admin/a4/trust-ramp/${packetId}/${action}`, { method: "POST" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `HTTP ${res.status}`);
+      }
+      await fetchData();
+    } catch (e) {
+      setActionError(String(e));
+    } finally {
+      setActioningId(null);
+    }
+  }, [fetchData]);
 
   // Group by tenant for readability — every packet still shown with its own level, never
   // collapsed into one tenant-level number (Nghiep's decision #3).
@@ -688,10 +718,18 @@ function TrustRampSection() {
           Trust Ramp — Current State
         </h2>
         <div style={{ fontSize: 12, color: A.muted }}>
-          acp_deliver.packets.publish_mode per packet — current state only, no auto-suggested
-          next level (suggest_ramp_transition() is not wired into any live process yet).
+          acp_deliver.packets.publish_mode per packet. AA-464 — suggest_ramp_transition() is now
+          wired: eligible packets (engagement_ok AND weeks_active ≥ 2) show a suggested next
+          level below with Approve/Skip. Approving is the only way a ramp state actually
+          changes — nothing here auto-transitions on its own (ADR-2026-038 §0.2).
         </div>
       </div>
+
+      {actionError && (
+        <div style={{ padding: "8px 12px", marginBottom: 12, borderRadius: 6, background: "#fef2f2", color: A.red, fontSize: 12 }}>
+          {actionError}
+        </div>
+      )}
 
       {loading ? (
         <div style={{ padding: 24, textAlign: "center", color: A.muted }}>Loading…</div>
@@ -713,7 +751,7 @@ function TrustRampSection() {
                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead>
                     <tr style={{ background: A.bg }}>
-                      {["Period", "Status", "Ramp Level", "Created", "Delivered"].map(h => (
+                      {["Period", "Status", "Ramp Level", "Suggestion", "Created", "Delivered"].map(h => (
                         <th key={h} style={{
                           padding: "6px 12px", textAlign: "left", fontSize: 10, fontWeight: 600,
                           letterSpacing: "0.08em", textTransform: "uppercase", color: A.muted,
@@ -733,6 +771,39 @@ function TrustRampSection() {
                         </td>
                         <td style={{ padding: "8px 12px", fontSize: 12, borderBottom: `1px solid ${A.line}` }}>
                           <Badge color={rampBadgeColor(p.publish_mode)}>{RAMP_LABEL[p.publish_mode] || p.publish_mode}</Badge>
+                        </td>
+                        <td style={{ padding: "8px 12px", fontSize: 12, borderBottom: `1px solid ${A.line}` }}>
+                          {p.eligible ? (
+                            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                              <Badge color={rampBadgeColor(p.suggested_mode)}>
+                                → {RAMP_LABEL[p.suggested_mode] || p.suggested_mode}
+                              </Badge>
+                              <button
+                                onClick={() => handleRampAction(p.packet_id, "approve")}
+                                disabled={actioningId === p.packet_id}
+                                style={{
+                                  padding: "4px 8px", borderRadius: 6, border: `1px solid ${A.ink}`,
+                                  background: A.ink, color: "#fff", fontSize: 11, cursor: "pointer",
+                                  opacity: actioningId === p.packet_id ? 0.5 : 1,
+                                }}
+                              >
+                                {actioningId === p.packet_id ? "…" : "Approve"}
+                              </button>
+                              <button
+                                onClick={() => handleRampAction(p.packet_id, "skip")}
+                                disabled={actioningId === p.packet_id}
+                                style={{
+                                  padding: "4px 8px", borderRadius: 6, border: `1px solid ${A.line}`,
+                                  background: "transparent", color: A.muted, fontSize: 11, cursor: "pointer",
+                                  opacity: actioningId === p.packet_id ? 0.5 : 1,
+                                }}
+                              >
+                                Skip
+                              </button>
+                            </div>
+                          ) : (
+                            <span style={{ fontSize: 11, color: A.muted2 }}>—</span>
+                          )}
                         </td>
                         <td style={{ padding: "8px 12px", fontSize: 11, fontFamily: mono, color: A.muted, borderBottom: `1px solid ${A.line}` }}>
                           {fmtDate(p.created_at)}
