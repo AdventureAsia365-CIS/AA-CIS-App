@@ -3252,11 +3252,20 @@ async def get_pipeline_metrics(
             ORDER BY day ASC
         """, str(days))
 
+        # AA-348: the 'sonnet' label below is deliberately version-NEUTRAL ('claude-sonnet', not
+        # 'claude-sonnet-4-5') — llm_model here can be the acc2-native model id (really 4-5) OR
+        # a satellite audit label like "satellite-sonnet-4-6" (really 4-6, the common path in
+        # practice — see shared/llm_client/pricing.py's BEDROCK_SONNET comment), and this LIKE
+        # '%sonnet%' match can't tell which. A hardcoded '-4-5' suffix here would silently
+        # mislabel every satellite-Sonnet row (confirmed reachable: this column is written from
+        # LLMResponse.model_used, which IS the real per-call label, at
+        # services/content_generation/graph.py:442 -> api/routers/admin_pipeline.py's own INSERT
+        # further up in this file). Haiku is unaffected (both tiers really are 4-5-20251001).
         cost_by_model = await conn.fetch("""
             SELECT
                 CASE
                     WHEN COALESCE(llm_model,'') LIKE '%haiku%'  THEN 'claude-haiku-4-5'
-                    WHEN COALESCE(llm_model,'') LIKE '%sonnet%' THEN 'claude-sonnet-4-5'
+                    WHEN COALESCE(llm_model,'') LIKE '%sonnet%' THEN 'claude-sonnet'
                     WHEN COALESCE(llm_model,'') LIKE '%gpt-4%'  THEN 'gpt-4.1'
                     ELSE 'claude-haiku-4-5'
                 END                              AS model,
@@ -3277,11 +3286,14 @@ async def get_pipeline_metrics(
         # used to detect "a real call happened" either. An accurate count needs new
         # instrumentation in services/content_generation/graph.py (out of scope here — dashboard-
         # only fix). Frontend labels this "Versions", not "Calls", to match reality.
+        # AA-348: same version-neutral 'claude-sonnet' label as cost_by_model above, same reason
+        # — gc.model_editorial can be the real satellite audit label ("satellite-sonnet-4-6"),
+        # not the acc2-native 4-5 id, and this LIKE match can't distinguish the two.
         models = await conn.fetch(f"""
             SELECT
                 CASE
                     WHEN COALESCE(gc.model_editorial,'') LIKE '%haiku%'  THEN 'claude-haiku-4-5'
-                    WHEN COALESCE(gc.model_editorial,'') LIKE '%sonnet%' THEN 'claude-sonnet-4-5'
+                    WHEN COALESCE(gc.model_editorial,'') LIKE '%sonnet%' THEN 'claude-sonnet'
                     WHEN COALESCE(gc.model_editorial,'') LIKE '%gpt-4%'  THEN 'gpt-4.1'
                     ELSE 'claude-haiku-4-5'
                 END                                          AS model,

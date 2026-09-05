@@ -9,6 +9,16 @@ a repricing. client.py re-exports the same names so nothing importing from clien
 """
 
 # Bedrock model IDs (cross-region inference profiles)
+# AA-348 — BEDROCK_SONNET names the acc2-NATIVE (T1) Sonnet model only. When a call falls
+# through to a satellite account (T1.5a/T1.5b, shared/llm_client/bedrock_satellite.py — the
+# common path in practice, native Sonnet is blocked for channel-program accounts, AA-291/AA-329),
+# the model actually invoked is a DIFFERENT, newer version: `global.anthropic.claude-sonnet-4-6`
+# (see bedrock_satellite.py's INFERENCE_PROFILE_SONNET / _INFERENCE_PROFILES). This is a
+# deliberate, live-verified difference between the two tiers (bedrock_satellite.py's own
+# 16/07/2026 STATUS note), NOT a copy-paste bug — investigated and confirmed still the real state
+# under AA-348. client.py still passes this constant into the satellite call path, but only as a
+# TIER SELECTOR / COST_TABLE key, never as a claim about the literal model string that tier
+# invokes — check bedrock_satellite.py directly if you need the real satellite model version.
 BEDROCK_SONNET = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 BEDROCK_HAIKU = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
