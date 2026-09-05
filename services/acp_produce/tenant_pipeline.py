@@ -377,8 +377,21 @@ async def _atomize_whole_tour_legacy(
     # (not once per atom) and reuse it across every atom this tour produces; the corpus
     # itself is cache-backed (acp_shared.competitor_index_cache, 24h TTL) so this is a DB
     # read on a cache hit, not a re-fetch of every competitor homepage per tour.
-    from services.acp_shared.competitor_index import build_competitor_index, score_distinctiveness
-    competitor_idx = await build_competitor_index(tenant_id, country, pool) if atoms else None
+    #
+    # AA-526 — the real bug this build found live: competitor_index.py's own queries cast
+    # `tenant_id = $1::uuid` (competitor_inputs/competitor_index_cache are BOTH genuinely
+    # tenant-scoped, never platform-scoped — see that module's own docstring, which already
+    # correctly excluded the old platform-scope N2 decompose endpoint from ever calling this).
+    # owner_scope="platform" is not a valid UUID literal — crashed this call outright on every
+    # single A3 atomize (confirmed via a real live-verify run, 05/09/2026), never reaching the
+    # atom-insert loop below at all. Skip the fetch entirely for a non-tenant owner_scope —
+    # score_distinctiveness()'s own empty-index fallback (returns "MED") is exactly the
+    # documented, correct behavior here, not a workaround.
+    from services.acp_shared.competitor_index import CompetitorIndex, build_competitor_index, score_distinctiveness
+    if atoms and _llm_log_tenant_id(tenant_id) is not None:
+        competitor_idx = await build_competitor_index(tenant_id, country, pool)
+    else:
+        competitor_idx = CompetitorIndex() if atoms else None
 
     inserted = 0
     async with pool.acquire() as conn:
@@ -475,8 +488,15 @@ async def _atomize_per_day(
 
     # AA-445-02 (B4/score_distinctiveness()) — built once for the whole call, reused across
     # every day that gets read, same reasoning as the legacy path's own comment.
-    from services.acp_shared.competitor_index import build_competitor_index, score_distinctiveness
-    competitor_idx = await build_competitor_index(tenant_id, country, pool)
+    #
+    # AA-526 — same real, live-confirmed bug as the legacy path above: skip the (genuinely
+    # tenant-only) competitor fetch for a non-tenant owner_scope, fall back to the documented
+    # empty-index "MED" default instead of crashing on the ::uuid cast.
+    from services.acp_shared.competitor_index import CompetitorIndex, build_competitor_index, score_distinctiveness
+    if _llm_log_tenant_id(tenant_id) is not None:
+        competitor_idx = await build_competitor_index(tenant_id, country, pool)
+    else:
+        competitor_idx = CompetitorIndex()
 
     # AA-518 — same "t5_atomize" stage config + explicit account="acc3" fix as the legacy path
     # above (resolved once, reused across every day — cache-hit cost, not a per-day DB round trip).
