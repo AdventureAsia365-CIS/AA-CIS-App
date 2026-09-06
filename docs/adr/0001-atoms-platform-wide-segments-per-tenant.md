@@ -6,30 +6,61 @@ generation to A3 (`services/export/handler.py::process_export()`, right after a 
 (`owner_scope='platform'`), the moment a tour becomes Master Content, not once per tenant that
 later rewrites it.
 
-Segment matching, Atom Ranking (Score), and Route/Hub detection were deliberately NOT moved to
-that same platform-wide, computed-once model. Nghiệp's own confirmation during AA-526's build:
-atoms are shared platform-wide, but a Segment/Score/Route is a PER-TENANT product, built the
-first time that tenant picks or rewrites a given tour — not a single global Segment set every
-tenant shares. `acp_contract.atom_segment.tenant_id` and `atom_ranking`'s tenant-scoped read are
-real, enforced foreign keys, not an oversight to "fix" later.
+Segment matching, Atom Ranking (Score), and Route/Hub detection were NOT moved to that same
+platform-wide, computed-once model — `acp_contract.atom_segment.tenant_id` and
+`atom_ranking`'s tenant-scoped read are real, enforced foreign keys, not an oversight.
+
+**Correction (AA-541, 06/09/2026 — read the real git history, not just AA-526's own summary)**:
+this ADR originally said the reason was "two tenants rewriting the same tour into different
+brand voices need different Segment groupings." That is **not what the evidence shows** and has
+been removed. The real, traced reason:
+
+- Segment was specified and built at AA-509 (`5f6a740`, 01/09/2026), 4 days *before* AA-526 made
+  atoms platform-wide. At that time Atom itself was still a per-tenant resource (the old
+  tenant-triggered T5 endpoint) — the AA-509 build task's own literal opening sentence
+  (`docs/claude_tasks/AA-509-segment-build.md:12-13`) defines Segment as grouping atoms "qua
+  nhiều tour của **cùng tenant**" (across multiple tours **of the same tenant**). Per-tenant
+  wasn't a considered choice weighed against a shared alternative — the premise a shared Segment
+  would even require (shared atoms) didn't exist yet, so the question was never live.
+- When AA-526 later made atoms platform-wide, a platform-wide Segment WAS tried
+  (`docs/implementation-notes/AA-526.md`'s own "STEP0 correction #3"; commit `5f2b438`, item 3)
+  and reverted for two concrete blockers hit in that moment, not a fresh design debate:
+  `atom_segment.tenant_id UUID NOT NULL` crashes on a non-UUID `'platform'` value outright, and
+  even past that, `atom_ranking.py` (AA-515, already shipped) reads Segments
+  `WHERE asg.tenant_id = $1::uuid` for one specific tenant — a platform-scope Segment row would
+  be invisible to every tenant's ranking read regardless. Fixing this properly would have meant
+  redesigning Ranking/Route/Slate too, out of AA-526's own scope; the atom-read query was
+  adjusted instead to keep Segment a per-tenant product built from the now-shared atom pool.
+- Atom itself carries no tenant voice to justify per-tenant grouping either way — it's a bare
+  `place`+`action` pair extracted from A1's neutral, brand-agnostic rewrite (AA-535), before any
+  tenant has touched the tour. The "different voices" framing this ADR used to state does not
+  hold up against what an Atom actually contains.
 
 ## Status
 
-accepted
+accepted (Atom platform-wide half) — Segment/Score/Route/Hub per-tenant half is a **carried-over
+historical default, not a re-validated technical requirement post-AA-526** (see Consequences).
 
 ## Considered Options
 
-Building Segment/Score/Route platform-wide too (one shared set every tenant reads) was the
-alternative — rejected because two different tenants rewriting the same tour into different
-brand voices can produce genuinely different Segment groupings and rankings from the same atom
-pool; a single shared Segment set would force one tenant's grouping onto another's differently-
-voiced content.
+At AA-509 (01/09/2026): none — Segment was speced as per-tenant from its first written task
+description, before a shared-atom alternative was even possible. At AA-526 (05/09/2026): a
+platform-wide Segment was actually attempted and reverted — not on algorithmic grounds (the
+Jaccard/verb-match grouping genuinely doesn't need to know which tenant an atom belongs to), but
+because `atom_segment`'s `NOT NULL` tenant FK and `atom_ranking`'s already-shipped tenant-scoped
+read would have needed a coordinated redesign across 3 modules, which was out of that task's scope.
 
 ## Consequences
 
 A future spec or glossary that assumes "Segment/Score/Route are computed once for the whole
-Master Content, admin-side" (as AA-539's own initial description did, one day after this was
-decided) contradicts this ADR and the live schema — `CONTEXT.md`'s Open Questions section flags
-this explicitly rather than silently picking a side. Any UI or pipeline work built on the
-Admin/Tenant boundary must re-read this ADR, not assume the more intuitive-sounding "all computed
-once" model.
+Master Content, admin-side" (as AA-539's own initial description did) contradicts the live
+schema — `CONTEXT.md`'s cross-tenant table (AA-540) documents the current reality rather than
+silently picking a side. Separately (AA-541): because Segment-matching is pure CPU (Jaccard/
+verb-match, no LLM/API call — confirmed, `services/acp_contract/segment_matching.py` makes zero
+external calls), the cost of N tenants each independently recomputing an identical Segment set
+for the same shared tour is CPU/storage duplication, not a real dollar cost the way Search
+Demand's per-call DataForSEO/Bedrock spend was (`docs/adr/0002-search-demand-shared-across-
+tenants.md`) — a plausible reason this was never revisited with the same urgency, though it was
+never actually evaluated on those terms either. Whether to redesign Segment/Ranking/Route/Slate
+to be platform-wide (a multi-module change touching AA-509/510/511/515's own shipped contracts)
+remains an open decision for Nghiệp, not resolved by this ADR.
