@@ -34,10 +34,18 @@ tenant's own picked/rewritten tours — NOT a single platform-wide Segment set (
 contradiction under Open Questions).
 _Avoid_: cluster, group, topic.
 
+**Search Demand**:
+The cached DataForSEO signal (search volume + People Also Ask) behind one of a tenant's
+Segments' places, bought by an LLM research loop. Cached and looked up by `(keyword, market)` —
+or `(place, market)` for the loop-skip freshness check — with NO tenant scoping at all: the one
+deliberate cross-tenant cache in this pipeline (see Cross-Tenant Mechanisms below).
+_Avoid_: DFS, keyword research (both used loosely elsewhere for the same underlying calls).
+
 **Score** (Atom Ranking):
-The rank-sum of a Segment's three demand/relevance signals, computed once a tenant's Segments
-exist. Persisted on `acp_contract.atom_ranking`; every downstream consumer (Route, Slate) reads
-this value, never recomputes it.
+The rank-sum of a Segment's three demand/relevance signals (Search Demand is one of them),
+computed once a tenant's Segments exist. Persisted on `acp_contract.atom_ranking`; every
+downstream consumer (Route, Slate) reads this value, never recomputes it. Fully per-tenant —
+inherits Search Demand's cross-tenant cache as an input, but the ranking row itself never is.
 _Avoid_: rank, weight, priority.
 
 **Route**:
@@ -152,22 +160,61 @@ _Avoid_: Fact (bare) — always say which scope.
 - **T11 — Publish**: tenant-facing WordPress publish, blog Channel only today
   (`/portal/t11-publish`); the other 7 Channels have no publish step built yet.
 
-## Open questions (found while building this glossary — needs Nghiệp's decision)
+## Ownership / frequency / cross-tenant table (AA-540)
 
-1. **Segment/Route/Score scope contradicts this issue's own boundary statement.** AA-539's own
-   description says Atomize→Segment→Research/DFS→Score→Route/Hub all belong to Admin, "computed
-   once for the whole Master Content." But AA-526 (the day before, 05/09/2026) has Nghiệp's own
-   confirmed, already-shipped decision on record: only the Atom is platform-wide/computed-once —
-   Segment, Score (Atom Ranking), and Route/Hub are each built PER TENANT, the first time that
-   tenant picks/rewrites a given tour (`atom_segment.tenant_id`/`atom_ranking` are real per-tenant
-   FKs, confirmed in code and in `docs/implementation-notes/AA-526.md`'s own STEP0 correction #3).
-   This glossary documents the AA-526 reality (it's what's live and tested) — **flagging, not
-   silently resolving**, since it directly contradicts the wording Nghiệp just wrote into AA-539.
-   Recommend this be the first question in the `/grill-with-docs` pass on the Admin/Tenant UI
-   epic spec.
-2. **T5/T6 labels are now historical/dead** (see above) — any UI epic spec that still refers to
-   "T5" or "T6" as a tenant-facing stage should be corrected to "A3 atomize" / "admin atom
-   curation" respectively before build starts.
+Every step in the A0→A3→T5-T11 chain, answered from real code/schema reads (no inference) —
+this is the table that resolves Open Question 1 below.
+
+| # | Step | Owner | Computed | Cross-tenant mechanism |
+|---|------|-------|----------|-------------------------|
+| 1 | Master Content: Raw Tour→Published Tour (A0-A4) | **Admin** | Once per tour, platform-wide | **Yes — the strongest form: one shared row set.** `silver_aa_internal.raw_tours`/`generated_content`, `gold_aa_internal.published_tours` all carry `tenant_id`, but for Master Content it is always the `aa_internal` sentinel (`_MASTER_TENANT_ID = "00000000-0000-0000-0000-000000000001"`, `api/routers/admin_pipeline.py:71`) — every real tenant reads the exact same rows, not a copy. |
+| 2 | Atom (atomize @ A3) | **Admin** | Once per published tour | **Yes.** `owner_scope='platform'` (`services/export/handler.py:44-65` `_run_a3_atomize_background()` → `services/acp_produce/tenant_pipeline.py::run_t5_atomize("platform", ...)`). Every tenant's Segment build reads the SAME `acp_contract.tour_atoms` rows (`services/acp_contract/segment_matching.py:395-412`, `WHERE ta.owner_scope = 'platform' AND ta.tour_id IN (... that tenant's own tenant_tour_versions ...)`). The skip-cache `acp_contract.atomize_day_fingerprint` (migration 128, no `tenant_id` column at all) is keyed on `generated_content.id` for A3 atoms (`services/export/handler.py:246`, `version_id=str(row["id"])`) — also platform-wide now, correctly so (column name is a stale holdover from the pre-AA-526 per-tenant path, where it held a real `tenant_tour_version_id`). |
+| 3 | Segment | **Tenant** | Fresh, per tenant, every run | **No.** `acp_contract.atom_segment.tenant_id UUID NOT NULL` (migration 129:49). `segment_id` is `sha256(tenant_id, canonical_place, canonical_action)` — tenant_id folded into the hash specifically so two tenants describing the identical real-world moment cannot collide on one row (migration 129:42-46; `segment_matching.py`'s own module docstring, point 1). Two tenants who both pick the same tour each get a full, independent re-derivation — no cache or dedup between them. |
+| 4 | Research/DFS (Search Demand) | **Admin-owned data, Tenant-triggered loop** | Once per `(keyword, market)` / `(place, market)` — NOT per tenant | **Yes — the clearest, most consequential cross-tenant mechanism in the pipeline.** `acp_contract.search_demand` (migration 130:20-27) and `acp_contract.segment_research_log` (migration 130:40-38) have **no `tenant_id` column at all**. `_cached_volume()`/`_store_volume()` (`services/acp_contract/segment_research.py:229-252`) key purely on `(keyword, market)`; `_stale_markets()` (`:440-450`) and `run_segment_research()`'s own skip check (`:476-484`, `if not stale: return`) key on `(canonical_place, market)`. Confirmed real: if tenant A already researched "Kyoto"/`japan` inside `FRESH_FOR` (182 days, `:69`), tenant B's entire LLM ReAct loop for the same place+market is skipped — not just the DataForSEO call, the Bedrock cost too. Deliberate (migration 130:13-19: "a keyword's search volume in a market is a fact about the outside world, not tenant content"), not an oversight. |
+| 5 | Score (Atom Ranking) | **Tenant** | Per tenant, once Segments exist | **No row-sharing.** `acp_contract.atom_ranking`, `PRIMARY KEY (tenant_id, tour_id, segment_id)` (migration 130:60-76) — inherits Segment's (#3) isolation, so two tenants can never share a ranking row. Its only cross-tenant surface is reading from Search Demand (#4) as an input signal. |
+| 6 | Route / Hub | **Tenant** | Route: rebuilt whole per tenant per run. Hub: persists per tenant across rebuilds | **No.** `acp_contract.route.tenant_id UUID NOT NULL` (migration 131:46); `route_id` is the deterministic composite `tenant_id:tour_id:first_day-last_day` (migration 131:32-34) — tenant_id baked into the identity, same isolation pattern as Segment. `acp_contract.hub.tenant_id UUID NOT NULL` (migration 131:18), `hub_id` a random UUID PK — no cross-tenant reuse. |
+| 7 | Slate (Subject) | **Tenant** | Per tenant | **No.** `acp_shared.subject.tenant_id UUID NOT NULL` (migration 133:19). The similarly-named but unrelated `acp_contract.route_pick` (the Route-pick snapshot, renamed from `acp_contract.subject` at migration 132 — "a different, unrelated concept," migration 133:8) is also `tenant_id UUID NOT NULL` (migration 131:74, pre-rename) — both fully isolated. |
+| 8 | Goal / Angle / Write / Gate / Review / Publish | **Tenant** | Per tenant, per request/Piece | **Mostly no, one deliberate exception.** `acp_shared.angle_gate_request.tenant_id` (migration 113:36), `content_piece.tenant_id` (migration 115:36), `publish_log.tenant_id` (migration 116:27) all `NOT NULL`. Exception: the T10 cannibalization Gate (F10) deliberately reads EVERY other tenant's approved Pieces — `find_similar_pieces(cross_tenant=True, ...)`, `_CROSS_TENANT_QUERY` has no `tenant_id` filter at all (`services/acp_shared/piece_similarity.py:46-56, 67-95`), consumed by `gate_cannibalization()` at the 0.92 cosine-similarity threshold. This is a cross-tenant **read/compare**, not a cache — the embedding itself is never shared: `compute_embedding()` (`services/acp_shared/content_embedding.py`) makes one fresh Bedrock call per Piece, every time, for every tenant, with no caching layer at all. |
+| 9 | Facts Entry | **Both** (one table, two scopes) | Platform scope: once, by admin. Tenant scope: per tenant | **Yes for `scope='platform'` rows, by design.** `acp_shared.facts` (migration 145:33-46), `scope` column (`'platform'`\|`'tenant'`), `tenant_id IS NULL iff scope='platform'` (CHECK, migration 145:44-46). RLS policy (migration 145:70) `USING (scope = 'platform' OR tenant_id::text = current_setting('app.tenant_id', true))` — platform rows bypass the tenant filter entirely and are readable by every tenant's T9 write; tenant rows stay fully isolated. |
+
+### Cross-tenant mechanisms — full inventory (AA-540's specific ask)
+
+Exactly **3** deliberate cross-tenant mechanisms exist across the whole A0→T11 chain (rows 1/2/4/9
+above); everything else (rows 3/5/6/7, and 8 outside its one named exception) is 100% isolated
+per tenant, by construction (tenant_id folded into the identity/hash itself wherever a collision
+was structurally possible, not just filtered at query time):
+
+1. **The Master Content pool itself** (row 1) and **the Atom pool** (row 2) — not a cache, THE
+   shared source every tenant reads from directly.
+2. **Search Demand + its research-freshness log** (row 4) — a real shared cache, keyed on
+   `(keyword, market)` / `(place, market)`, no `tenant_id` column anywhere in either table.
+3. **Facts Entry, `scope='platform'` rows only** (row 9) — shared by explicit design, RLS-enforced.
+
+Plus one **cross-tenant read (not a cache)**: the F10 cannibalization Gate (row 8) compares a new
+Piece's embedding against every other tenant's approved content to block near-duplicates —
+confirmed no embedding computation is ever cached or shared, only this one comparison query
+reaches across the tenant boundary.
+
+**No other table in the T5-T11 schema lacks a `tenant_id` column** besides the three named above
+(`search_demand`, `segment_research_log`, `atomize_day_fingerprint` — the last one legitimately
+platform-scoped post-AA-526, see row 2) and `angle_gate_option` (a child row of
+`angle_gate_request`, scoped indirectly through its parent FK, not independently shared).
+
+## Open questions
+
+1. ~~Segment/Route/Score scope contradicts this issue's own boundary statement.~~ **RESOLVED
+   (AA-540, 06/09/2026)** — see the table above. Confirmed by direct code/schema read (not
+   inference): only the Master Content pool, the Atom pool, Search Demand, and platform-scope
+   Facts Entry are genuinely cross-tenant. Segment/Score/Route/Hub/Slate/Subject/route_pick and
+   Goal→Publish are fully per-tenant, each isolated by a real `tenant_id` FK or (where a
+   collision was structurally possible) by folding `tenant_id` into the row's own derived
+   identity. `docs/adr/0001-atoms-platform-wide-segments-per-tenant.md` already recorded the
+   Atom/Segment half of this; `docs/adr/0002-search-demand-shared-across-tenants.md` (new, this
+   task) records the Search Demand half, since it wasn't covered by ADR 0001 and is exactly the
+   kind of fact an admin-oversight UI needs to know about explicitly.
+2. **T5/T6 labels are now historical/dead** (see Pipeline Stages above) — any UI epic spec that
+   still refers to "T5" or "T6" as a tenant-facing stage should be corrected to "A3 atomize" /
+   "admin atom curation" respectively before build starts.
 
 ## Related documents
 
@@ -175,6 +222,9 @@ _Avoid_: Fact (bare) — always say which scope.
   Thư's origin repo (Segment/Route/Slate/Subject/Piece) this glossary's Tenant-side definitions
   are grounded in.
 - `docs/adr/0001-atoms-platform-wide-segments-per-tenant.md` — the ADR for Open Question 1's
-  underlying (already-shipped) decision.
-- `docs/implementation-notes/AA-526.md`, `AA-527.md`, `AA-529.md` — build records for the A3
-  atomize move, the admin atom-curation page, and Facts Entry respectively.
+  Atom/Segment half.
+- `docs/adr/0002-search-demand-shared-across-tenants.md` — the ADR for Open Question 1's Search
+  Demand half (AA-540).
+- `docs/implementation-notes/AA-526.md`, `AA-527.md`, `AA-529.md`, `AA-540.md` — build records
+  for the A3 atomize move, the admin atom-curation page, Facts Entry, and this table
+  respectively.
