@@ -7,6 +7,25 @@ this exact boundary from having no single written glossary. Other subsystems (Ex
 LLM/model routing, marketplace/billing, legacy N0-N8) are out of scope for this file — split into
 their own `CONTEXT.md` under a `CONTEXT-MAP.md` if/when they need one.
 
+## ⚠️ Known tech debt — read before building anything Segment/Score/Route/Hub-related
+
+Segment, Score (Atom Ranking), Route, and Hub are implemented **per-tenant** in code and schema
+today (see their definitions below and the ownership table). **This is tech debt that needs
+fixing — it is NOT a deliberate, re-validated design decision that should stay as-is** (corrected
+AA-542, 06/09/2026; full history in `docs/adr/0001-*.md`, the fix decision in
+`docs/adr/0003-*.md`).
+
+The layering principle that actually governs this, decided by Nghiệp: **any step that does NOT
+read a tenant's own brand voice or a tenant-specific DFS/keyword signal should NOT be per-tenant,
+regardless of what the current code does.** Segment/Score/Route/Hub read neither — they operate
+purely on Atom (platform-wide, A3) and Search Demand (platform-wide cache) inputs — so per-tenant
+here fails that principle. They should be platform-wide, computed once for the whole Master
+Content pool, the same model Atom and Search Demand already use.
+
+**Do not build any new Admin or Tenant UI/feature that assumes Segment/Score/Route/Hub is
+per-tenant** until a separate design/build issue redesigns them platform-wide. If you are about
+to touch T7/Planning, Slate, Route, or Hub work, re-read this warning first.
+
 ## Language
 
 ### Master content (Admin side)
@@ -30,15 +49,21 @@ _Avoid_: Fact (bare), reference data.
 A group of Atoms (usually from different tours) that describe the same real-world moment,
 matched deterministically on place-token-similarity + verb-match on action — never an LLM/
 embedding call, because `segment_id` must stay stable across re-runs; pure CPU, no external API
-cost either way. Built per tenant, from that tenant's own picked/rewritten tours — NOT a single
-platform-wide Segment set. **Per-tenant is a carried-over historical default, not an algorithmic
-requirement**: Segment was speced/built (AA-509, 01/09/2026) 4 days before Atom became
-platform-wide (AA-526, 05/09/2026), back when Atom itself was still per-tenant — the
-"same tenant" framing was simply the only one that existed yet. A platform-wide Segment was
-actually tried during AA-526 and reverted only because `atom_segment.tenant_id`'s `NOT NULL` FK
-and `atom_ranking`'s already-shipped tenant-scoped read would have needed a coordinated
-redesign across 3 modules, out of that task's scope — see `docs/adr/0001-*.md` (corrected
-06/09/2026, AA-541) for the full trace. Still an open architecture question, not resolved here.
+cost either way. Built per tenant today, from that tenant's own picked/rewritten tours — NOT a
+single platform-wide Segment set. **This is tech debt that needs fixing, not correct design**
+(see the warning at the top of this file): Segment-matching never reads a tenant's own brand
+voice or DFS signal, so per-tenant here fails the layering principle above — Segment should be
+platform-wide, computed once for the whole Master Content pool, the same as Atom and Search
+Demand. Per-tenant is a carried-over historical default: Segment was speced/built (AA-509,
+01/09/2026) 4 days before Atom became platform-wide (AA-526, 05/09/2026), back when Atom itself
+was still per-tenant — the "same tenant" framing was simply the only one that existed yet. A
+platform-wide Segment was actually tried during AA-526 and reverted only because
+`atom_segment.tenant_id`'s `NOT NULL` FK and `atom_ranking`'s already-shipped tenant-scoped read
+would have needed a coordinated redesign across 3 modules, out of that task's scope — see
+`docs/adr/0001-*.md` (corrected 06/09/2026, AA-541) for the full trace and
+`docs/adr/0003-*.md` (AA-542) for the decision to fix it. **Do not build new Segment-dependent
+UI/features against the current per-tenant assumption** — a platform-wide redesign issue is
+required first.
 _Avoid_: cluster, group, topic.
 
 **Search Demand**:
@@ -51,14 +76,19 @@ _Avoid_: DFS, keyword research (both used loosely elsewhere for the same underly
 **Score** (Atom Ranking):
 The rank-sum of a Segment's three demand/relevance signals (Search Demand is one of them),
 computed once a tenant's Segments exist. Persisted on `acp_contract.atom_ranking`; every
-downstream consumer (Route, Slate) reads this value, never recomputes it. Fully per-tenant —
-inherits Search Demand's cross-tenant cache as an input, but the ranking row itself never is.
+downstream consumer (Route, Slate) reads this value, never recomputes it. Fully per-tenant
+today — inherits Search Demand's cross-tenant cache as an input, but the ranking row itself
+never is. **Same tech debt as Segment** (see the warning at the top of this file): ranking a
+Segment never reads a tenant's own brand voice or DFS signal directly, so it should become
+platform-wide once Segment does — not a separate decision, the same one (`docs/adr/0003-*.md`).
 _Avoid_: rank, weight, priority.
 
 **Route**:
 A consecutive-day span (2-5 days) of one tour's ranked, non-excluded Segments — a Blog-only
 concept (the only channel scored at Route grain instead of Segment grain). Rebuilt whole
-(delete+insert) on every re-run; never accumulated.
+(delete+insert) on every re-run; never accumulated. Per-tenant today — **same tech debt as
+Segment/Score, not a re-validated design** (see the warning at the top of this file and
+`docs/adr/0003-*.md`).
 _Avoid_: itinerary segment, leg, journey (that's Hub).
 
 **Hub**:
@@ -66,7 +96,8 @@ The marketer's unit of choice: a persistent, human-named journey ("Nakasendo Way
 Valley from Kyoto") that a family of Routes belongs to. Persists across Route rebuilds — reused
 by `route_detection.py` when the same tour-id family regroups, never deleted, even when
 orphaned (no Route currently maps to it), because a Subject that already snapshotted the name
-still needs it to mean something.
+still needs it to mean something. Per-tenant today — **same tech debt as Segment/Score/Route**
+(see the warning at the top of this file and `docs/adr/0003-*.md`).
 _Avoid_: journey, family, group (Route Family, a distinct upstream concept, has no column here).
 
 **Subject**:
@@ -176,10 +207,10 @@ this is the table that resolves Open Question 1 below.
 |---|------|-------|----------|-------------------------|
 | 1 | Master Content: Raw Tour→Published Tour (A0-A4) | **Admin** | Once per tour, platform-wide | **Yes — the strongest form: one shared row set.** `silver_aa_internal.raw_tours`/`generated_content`, `gold_aa_internal.published_tours` all carry `tenant_id`, but for Master Content it is always the `aa_internal` sentinel (`_MASTER_TENANT_ID = "00000000-0000-0000-0000-000000000001"`, `api/routers/admin_pipeline.py:71`) — every real tenant reads the exact same rows, not a copy. |
 | 2 | Atom (atomize @ A3) | **Admin** | Once per published tour | **Yes.** `owner_scope='platform'` (`services/export/handler.py:44-65` `_run_a3_atomize_background()` → `services/acp_produce/tenant_pipeline.py::run_t5_atomize("platform", ...)`). Every tenant's Segment build reads the SAME `acp_contract.tour_atoms` rows (`services/acp_contract/segment_matching.py:395-412`, `WHERE ta.owner_scope = 'platform' AND ta.tour_id IN (... that tenant's own tenant_tour_versions ...)`). The skip-cache `acp_contract.atomize_day_fingerprint` (migration 128, no `tenant_id` column at all) is keyed on `generated_content.id` for A3 atoms (`services/export/handler.py:246`, `version_id=str(row["id"])`) — also platform-wide now, correctly so (column name is a stale holdover from the pre-AA-526 per-tenant path, where it held a real `tenant_tour_version_id`). |
-| 3 | Segment | **Tenant** | Fresh, per tenant, every run | **No — but not for an algorithmic reason (AA-541, corrected 06/09/2026).** `acp_contract.atom_segment.tenant_id UUID NOT NULL` (migration 129:49), `segment_id = sha256(tenant_id, canonical_place, canonical_action)` (129:42-46) — tenant_id folded into the hash so two tenants can't collide, but this is a carried-over historical default: Segment was speced/built (AA-509, `5f6a740`, 01/09/2026) 4 days before Atom became platform-wide (AA-526, 05/09/2026), when Atom itself was still per-tenant (`docs/claude_tasks/AA-509-segment-build.md:12-13`, "gom atom... của cùng tenant"). A platform-wide Segment was tried during AA-526 and reverted only because `atom_segment.tenant_id`'s `NOT NULL` FK crashes on `'platform'`, and `atom_ranking.py` (already shipped, AA-515) reads Segments `WHERE tenant_id=$1` for one specific tenant regardless (`docs/implementation-notes/AA-526.md`, "STEP0 correction #3"; commit `5f2b438`) — a scope/redesign-avoidance reason, not an algorithm requirement (Jaccard/verb-match, pure CPU, never touches tenant identity). Two tenants who both pick the same tour still each get a full, independent re-derivation — no cache or dedup between them, and no real dollar cost either way since there's no external API call. |
+| 3 | Segment | **Tenant** | Fresh, per tenant, every run | **No — and this is tech debt to fix, not a design conclusion (AA-541/AA-542, see `docs/adr/0003-*.md`).** `acp_contract.atom_segment.tenant_id UUID NOT NULL` (migration 129:49), `segment_id = sha256(tenant_id, canonical_place, canonical_action)` (129:42-46) — tenant_id folded into the hash so two tenants can't collide, but this is a carried-over historical default: Segment was speced/built (AA-509, `5f6a740`, 01/09/2026) 4 days before Atom became platform-wide (AA-526, 05/09/2026), when Atom itself was still per-tenant (`docs/claude_tasks/AA-509-segment-build.md:12-13`, "gom atom... của cùng tenant"). A platform-wide Segment was tried during AA-526 and reverted only because `atom_segment.tenant_id`'s `NOT NULL` FK crashes on `'platform'`, and `atom_ranking.py` (already shipped, AA-515) reads Segments `WHERE tenant_id=$1` for one specific tenant regardless (`docs/implementation-notes/AA-526.md`, "STEP0 correction #3"; commit `5f2b438`) — a scope/redesign-avoidance reason, not an algorithm requirement (Jaccard/verb-match, pure CPU, never touches tenant identity). Two tenants who both pick the same tour still each get a full, independent re-derivation — no cache or dedup between them, and no real dollar cost either way since there's no external API call. |
 | 4 | Research/DFS (Search Demand) | **Admin-owned data, Tenant-triggered loop** | Once per `(keyword, market)` / `(place, market)` — NOT per tenant | **Yes — the clearest, most consequential cross-tenant mechanism in the pipeline.** `acp_contract.search_demand` (migration 130:20-27) and `acp_contract.segment_research_log` (migration 130:40-38) have **no `tenant_id` column at all**. `_cached_volume()`/`_store_volume()` (`services/acp_contract/segment_research.py:229-252`) key purely on `(keyword, market)`; `_stale_markets()` (`:440-450`) and `run_segment_research()`'s own skip check (`:476-484`, `if not stale: return`) key on `(canonical_place, market)`. Confirmed real: if tenant A already researched "Kyoto"/`japan` inside `FRESH_FOR` (182 days, `:69`), tenant B's entire LLM ReAct loop for the same place+market is skipped — not just the DataForSEO call, the Bedrock cost too. Deliberate (migration 130:13-19: "a keyword's search volume in a market is a fact about the outside world, not tenant content"), not an oversight. |
-| 5 | Score (Atom Ranking) | **Tenant** | Per tenant, once Segments exist | **No row-sharing.** `acp_contract.atom_ranking`, `PRIMARY KEY (tenant_id, tour_id, segment_id)` (migration 130:60-76) — inherits Segment's (#3) isolation, so two tenants can never share a ranking row. Its only cross-tenant surface is reading from Search Demand (#4) as an input signal. |
-| 6 | Route / Hub | **Tenant** | Route: rebuilt whole per tenant per run. Hub: persists per tenant across rebuilds | **No.** `acp_contract.route.tenant_id UUID NOT NULL` (migration 131:46); `route_id` is the deterministic composite `tenant_id:tour_id:first_day-last_day` (migration 131:32-34) — tenant_id baked into the identity, same isolation pattern as Segment. `acp_contract.hub.tenant_id UUID NOT NULL` (migration 131:18), `hub_id` a random UUID PK — no cross-tenant reuse. |
+| 5 | Score (Atom Ranking) | **Tenant** | Per tenant, once Segments exist | **No row-sharing — same tech debt as Segment (#3), see `docs/adr/0003-*.md`.** `acp_contract.atom_ranking`, `PRIMARY KEY (tenant_id, tour_id, segment_id)` (migration 130:60-76) — inherits Segment's (#3) isolation, so two tenants can never share a ranking row. Its only cross-tenant surface is reading from Search Demand (#4) as an input signal. |
+| 6 | Route / Hub | **Tenant** | Route: rebuilt whole per tenant per run. Hub: persists per tenant across rebuilds | **No — same tech debt as Segment/Score, see `docs/adr/0003-*.md`.** `acp_contract.route.tenant_id UUID NOT NULL` (migration 131:46); `route_id` is the deterministic composite `tenant_id:tour_id:first_day-last_day` (migration 131:32-34) — tenant_id baked into the identity, same isolation pattern as Segment. `acp_contract.hub.tenant_id UUID NOT NULL` (migration 131:18), `hub_id` a random UUID PK — no cross-tenant reuse. |
 | 7 | Slate (Subject) | **Tenant** | Per tenant | **No.** `acp_shared.subject.tenant_id UUID NOT NULL` (migration 133:19). The similarly-named but unrelated `acp_contract.route_pick` (the Route-pick snapshot, renamed from `acp_contract.subject` at migration 132 — "a different, unrelated concept," migration 133:8) is also `tenant_id UUID NOT NULL` (migration 131:74, pre-rename) — both fully isolated. |
 | 8 | Goal / Angle / Write / Gate / Review / Publish | **Tenant** | Per tenant, per request/Piece | **Mostly no, one deliberate exception.** `acp_shared.angle_gate_request.tenant_id` (migration 113:36), `content_piece.tenant_id` (migration 115:36), `publish_log.tenant_id` (migration 116:27) all `NOT NULL`. Exception: the T10 cannibalization Gate (F10) deliberately reads EVERY other tenant's approved Pieces — `find_similar_pieces(cross_tenant=True, ...)`, `_CROSS_TENANT_QUERY` has no `tenant_id` filter at all (`services/acp_shared/piece_similarity.py:46-56, 67-95`), consumed by `gate_cannibalization()` at the 0.92 cosine-similarity threshold. This is a cross-tenant **read/compare**, not a cache — the embedding itself is never shared: `compute_embedding()` (`services/acp_shared/content_embedding.py`) makes one fresh Bedrock call per Piece, every time, for every tenant, with no caching layer at all. |
 | 9 | Facts Entry | **Both** (one table, two scopes) | Platform scope: once, by admin. Tenant scope: per tenant | **Yes for `scope='platform'` rows, by design.** `acp_shared.facts` (migration 145:33-46), `scope` column (`'platform'`\|`'tenant'`), `tenant_id IS NULL iff scope='platform'` (CHECK, migration 145:44-46). RLS policy (migration 145:70) `USING (scope = 'platform' OR tenant_id::text = current_setting('app.tenant_id', true))` — platform rows bypass the tenant filter entirely and are readable by every tenant's T9 write; tenant rows stay fully isolated. |
@@ -209,16 +240,21 @@ platform-scoped post-AA-526, see row 2) and `angle_gate_option` (a child row of
 
 ## Open questions
 
-1. ~~Segment/Route/Score scope contradicts this issue's own boundary statement.~~ **RESOLVED
-   (AA-540, 06/09/2026)** — see the table above. Confirmed by direct code/schema read (not
-   inference): only the Master Content pool, the Atom pool, Search Demand, and platform-scope
-   Facts Entry are genuinely cross-tenant. Segment/Score/Route/Hub/Slate/Subject/route_pick and
-   Goal→Publish are fully per-tenant, each isolated by a real `tenant_id` FK or (where a
-   collision was structurally possible) by folding `tenant_id` into the row's own derived
-   identity. `docs/adr/0001-atoms-platform-wide-segments-per-tenant.md` already recorded the
-   Atom/Segment half of this; `docs/adr/0002-search-demand-shared-across-tenants.md` (new, this
-   task) records the Search Demand half, since it wasn't covered by ADR 0001 and is exactly the
-   kind of fact an admin-oversight UI needs to know about explicitly.
+1. ~~Segment/Route/Score scope contradicts this issue's own boundary statement.~~ **RESOLVED as
+   to current-state fact (AA-540, 06/09/2026)** — see the table above. Confirmed by direct
+   code/schema read (not inference): only the Master Content pool, the Atom pool, Search Demand,
+   and platform-scope Facts Entry are genuinely cross-tenant. Segment/Score/Route/Hub/Slate/
+   Subject/route_pick and Goal→Publish are fully per-tenant, each isolated by a real `tenant_id`
+   FK or (where a collision was structurally possible) by folding `tenant_id` into the row's own
+   derived identity. `docs/adr/0001-atoms-platform-wide-segments-per-tenant.md` already recorded
+   the Atom/Segment half of this; `docs/adr/0002-search-demand-shared-across-tenants.md` (AA-540)
+   records the Search Demand half.
+   **Superseded — do not read as design endorsement (AA-542, 06/09/2026)**: confirming the
+   current per-tenant reality is a fact about the code is NOT the same as confirming it is
+   correct. Segment/Score/Route/Hub being per-tenant is documented **tech debt** (see the
+   warning at the top of this file), not a design conclusion — a separate design/build issue is
+   required to redesign them platform-wide before further work assumes per-tenant is permanent.
+   See `docs/adr/0003-segment-score-route-hub-will-become-platform-wide.md` for the decision.
 2. **T5/T6 labels are now historical/dead** (see Pipeline Stages above) — any UI epic spec that
    still refers to "T5" or "T6" as a tenant-facing stage should be corrected to "A3 atomize" /
    "admin atom curation" respectively before build starts.
@@ -229,9 +265,12 @@ platform-scoped post-AA-526, see row 2) and `angle_gate_option` (a child row of
   Thư's origin repo (Segment/Route/Slate/Subject/Piece) this glossary's Tenant-side definitions
   are grounded in.
 - `docs/adr/0001-atoms-platform-wide-segments-per-tenant.md` — the ADR for Open Question 1's
-  Atom/Segment half.
+  Atom/Segment half; also records why the Segment/Score/Route/Hub per-tenant default exists.
 - `docs/adr/0002-search-demand-shared-across-tenants.md` — the ADR for Open Question 1's Search
   Demand half (AA-540).
+- `docs/adr/0003-segment-score-route-hub-will-become-platform-wide.md` — the decision (AA-542)
+  that Segment/Score/Route/Hub per-tenant is tech debt to be redesigned platform-wide, and the
+  build-freeze on new per-tenant-assuming UI/features until that redesign issue lands.
 - `docs/implementation-notes/AA-526.md`, `AA-527.md`, `AA-529.md`, `AA-540.md` — build records
   for the A3 atomize move, the admin atom-curation page, Facts Entry, and this table
   respectively.
