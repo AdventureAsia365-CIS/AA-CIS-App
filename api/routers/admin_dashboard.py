@@ -66,26 +66,29 @@ async def list_segments(
     x_admin_secret: str = Header(None),
 ):
     """acp_contract.atom_segment for this tour — a Segment has no tour_id column of its own
-    (it's grouped by place/action across a tenant's whole atom pool, AA-509), so this reaches it
-    through atom_segment_member -> tour_atoms.tour_id, one row per Segment that has >=1 member
-    atom on this tour. total_rank/recurrence/route linkage joined in (same LATERAL Route lookup
-    admin_atoms.py's GET /atoms already uses) so this one panel shows Segment + its Score + its
-    Route membership together, rather than 3 separate near-empty tables."""
+    (it's grouped by place/action across the WHOLE platform atom pool, AA-509/AA-545), so this
+    reaches it through atom_segment_member -> tour_atoms.tour_id, one row per (Segment, market)
+    that has >=1 member atom on this tour. total_rank/recurrence/route linkage joined in (same
+    LATERAL Route lookup admin_atoms.py's GET /atoms already uses) so this one panel shows
+    Segment + its Score + its Route membership together, rather than 3 separate near-empty
+    tables.
+
+    AA-545 — no more `tenant_id`/`tenant_name` (`atom_segment` is platform-wide now); `ar.market`
+    is surfaced instead of collapsed, one row per (Segment, market) the way `atom_ranking` itself
+    is now shaped — an audit view should show the real per-market breakdown, not hide it."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT asg.segment_id, asg.canonical_place, asg.canonical_action, asg.tenant_id,
-                   t.name AS tenant_name,
+            SELECT asg.segment_id, asg.canonical_place, asg.canonical_action,
                    count(DISTINCT asm.atom_id) AS member_count,
-                   ar.total_rank, ar.recurrence, ar.excluded_reason,
+                   ar.market, ar.total_rank, ar.recurrence, ar.excluded_reason,
                    rte.route_id, rte.hub_name AS route_hub_name
             FROM acp_contract.atom_segment_member asm
             JOIN acp_contract.tour_atoms ta ON ta.atom_id = asm.atom_id
             JOIN acp_contract.atom_segment asg ON asg.segment_id = asm.segment_id
-            LEFT JOIN shared.tenants t ON t.tenant_id = asg.tenant_id
             LEFT JOIN acp_contract.atom_ranking ar
                 ON ar.segment_id = asm.segment_id AND ar.tour_id = ta.tour_id
             LEFT JOIN LATERAL (
@@ -99,10 +102,10 @@ async def list_segments(
                 LIMIT 1
             ) rte ON true
             WHERE ta.tour_id = $1::uuid AND NOT ta.deleted AND NOT ta.is_empty_marker
-            GROUP BY asg.segment_id, asg.canonical_place, asg.canonical_action, asg.tenant_id,
-                     t.name, ar.total_rank, ar.recurrence, ar.excluded_reason,
+            GROUP BY asg.segment_id, asg.canonical_place, asg.canonical_action,
+                     ar.market, ar.total_rank, ar.recurrence, ar.excluded_reason,
                      rte.route_id, rte.hub_name
-            ORDER BY ar.total_rank ASC NULLS LAST, asg.canonical_place
+            ORDER BY asg.canonical_place, ar.market, ar.total_rank ASC NULLS LAST
             """,
             tour_id,
         )
@@ -119,27 +122,33 @@ async def list_score(
     x_admin_secret: str = Header(None),
 ):
     """acp_contract.atom_ranking rows for this tour, in rank order (lower total_rank = better,
-    same convention as the Route.score docstring, migration 130) — the ranked list feeding Route
-    detection, distinct from the Segment panel above (which shows grouping, not the demand/
-    recurrence/questions/said breakdown a rank is actually made of). A row with excluded_reason
-    set (transit/unnamed_place) is real output too (AA-515: "an exclusion is arguable rather than
-    a silent absence"), sorted after every ranked row rather than hidden."""
+    same convention Route's read-time score computation now uses, AA-545 Q3) — the ranked list
+    feeding Route detection, distinct from the Segment panel above (which shows grouping, not the
+    demand/recurrence/questions/said breakdown a rank is actually made of). A row with
+    excluded_reason set (transit/unnamed_place) is real output too (AA-515: "an exclusion is
+    arguable rather than a silent absence"), sorted after every ranked row rather than hidden.
+
+    AA-545 — no more `tenant_id`/`tenant_name` (`atom_ranking` is platform-wide, PK
+    `(market, tour_id, segment_id)` now); `ar.market` (the row's own PK column, which market this
+    ranking pass was computed for) is shown alongside `ar.demand_market` — the two are now always
+    equal (the old best-of-N-market pick this column used to record is gone, `rank_segments()` is
+    called once per market), kept as a harmless redundant column rather than dropped mid-build,
+    out of this endpoint's own audit-view scope."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT ar.tenant_id, t.name AS tenant_name, ar.segment_id,
+            SELECT ar.market, ar.segment_id,
                    asg.canonical_place, asg.canonical_action,
                    ar.demand_rank, ar.recurrence_rank, ar.questions_rank, ar.said_rank,
                    ar.total_rank, ar.demand_market, ar.demand_volume,
                    ar.recurrence, ar.questions, ar.said, ar.excluded_reason, ar.computed_at
             FROM acp_contract.atom_ranking ar
-            LEFT JOIN shared.tenants t ON t.tenant_id = ar.tenant_id
             LEFT JOIN acp_contract.atom_segment asg ON asg.segment_id = ar.segment_id
             WHERE ar.tour_id = $1::uuid
-            ORDER BY (ar.excluded_reason IS NOT NULL), ar.total_rank ASC NULLS LAST
+            ORDER BY ar.market, (ar.excluded_reason IS NOT NULL), ar.total_rank ASC NULLS LAST
             """,
             tour_id,
         )
@@ -167,20 +176,31 @@ async def list_routes(
     one place seeing a Route's version history (current AND superseded) is the actual point, not
     a bug. `version`/`superseded_at` are exposed so the panel can show that history rather than
     just the current snapshot; current rows sort first (`superseded_at IS NULL` ordered before
-    any timestamp), then best score."""
+    any timestamp), then best score.
+
+    AA-545 — no more `tenant_id`/`tenant_name`/stored `score` (`route` is platform-wide,
+    composition-only now). `score` here is computed per market (`AVG(total_rank)` over the
+    Route's member Segments, same formula `services/acp_shared/slate.py::
+    _fetch_route_candidates()` uses at read time for a real tenant) — one row per (Route version,
+    market), same per-market-breakdown treatment the Segment/Score panels above already apply."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT r.route_id, r.tenant_id, t.name AS tenant_name, r.hub_id, r.hub_name,
-                   r.ordered_segment_ids, r.first_day, r.last_day, r.score, r.created_at,
-                   r.version, r.superseded_at
+            SELECT r.route_id, r.hub_id, r.hub_name,
+                   r.ordered_segment_ids, r.first_day, r.last_day, r.created_at,
+                   r.version, r.superseded_at, ar.market, AVG(ar.total_rank) AS score
             FROM acp_contract.route r
-            LEFT JOIN shared.tenants t ON t.tenant_id = r.tenant_id
+            LEFT JOIN acp_contract.atom_ranking ar
+                ON ar.tour_id = r.tour_id
+               AND ar.segment_id = ANY (SELECT jsonb_array_elements_text(r.ordered_segment_ids))
+               AND ar.excluded_reason IS NULL
             WHERE r.tour_id = $1::uuid
-            ORDER BY (r.superseded_at IS NOT NULL), r.score ASC
+            GROUP BY r.route_id, r.hub_id, r.hub_name, r.ordered_segment_ids,
+                     r.first_day, r.last_day, r.created_at, r.version, r.superseded_at, ar.market
+            ORDER BY (r.superseded_at IS NOT NULL), ar.market, score ASC NULLS LAST
             """,
             tour_id,
         )

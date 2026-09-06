@@ -1,8 +1,8 @@
-"""services/acp_contract/segment_matching.py — AA-509 Segment.
+"""services/acp_contract/segment_matching.py — AA-509 Segment, redesigned platform-wide (AA-545).
 
-Groups tour_atoms describing the same real-world moment across a tenant's tours (not merging
-content — an atom told two different ways stays two atoms, sharing one Segment). Foundation for
-T6 group-by-Segment curation, Route (T7 Blog), Atom Score, Slate (none of those are built here).
+Groups tour_atoms describing the same real-world moment across the WHOLE platform catalog (not
+merging content — an atom told two different ways stays two atoms, sharing one Segment).
+Foundation for T6 group-by-Segment curation, Route (T7 Blog), Atom Score, Slate.
 
 Ported near-verbatim from Ms. Thư's aa-social-media (`src/aa_social/segments.py`) per the build
 prompt and STEP0 (docs/claude_audit/AA-509-step0-schema-matching-investigation.md). The pure
@@ -11,25 +11,38 @@ unmodified port of that algorithm's SHAPE — same Jaccard-on-place + verb-match
 same deterministic-derive-then-reconcile id strategy (ADR 0002, same repo:
 docs/adr/0002-vector-store-scoped-to-search-matching.md — grouping must stay deterministic, no
 embeddings, so a re-run never silently regroups Atoms out from under a Calendar/Slot built on the
-old ids). Two adaptations were required, both because this codebase is multi-tenant and the
-reference repo is one SQLite file per brand:
+old ids).
 
-1. `_mint()` — segment_id derivation — has `tenant_id` folded into its hash input. The reference
-   formula is `sha256(place|verb)` alone; without tenant_id, two tenants both describing "walk
-   the Nakasendo trail" would derive the IDENTICAL segment_id and collide on one
-   `atom_segment` PK row — the exact collision class AA-508 already found and fixed for
-   `tour_atoms.atom_id` (see that task's Decision 2). Confirmed real by construction, not
-   theoretical: `atom_segment.segment_id` has no `tenant_id` in its key otherwise.
-2. `run_segment_matching()` (the DB-facing wrapper below — everything above it is pure, no I/O,
-   per the build prompt's "pure function, không I/O" instruction) scopes every read/write to one
-   `tenant_id` at a time, since one Postgres schema here holds every tenant's atoms, not one file
-   per tenant the way the reference repo's CLI does.
+**AA-545 — `tenant_id` REMOVED from `_mint()`/`derive_segments()`, restoring the exact origin
+formula (`sha256(place|verb)` alone).** AA-509 originally folded `tenant_id` into the hash to
+avoid 2 tenants colliding on one PK row — confirmed (AA-543/ADR-0001) this was a pure PK-collision
+workaround, not a design requirement: Segment never reads a tenant's brand voice or a
+tenant-specific signal. Under a genuinely platform-wide model that same collision is the FEATURE
+(2 tours/tenants describing "walk the Nakasendo trail" dedup into one shared Segment — restoring
+the `recurrence` rank-sum axis, ADR 0014, which the redesign's own first draft nearly killed by
+mistakenly keying on `tour_id` instead — see docs/implementation-notes/AA-545.md and the AA-545
+Linear issue's own grill trail for the full reasoning).
+
+**`run_segment_matching(tour_id, pool)` is now INCREMENTAL, not a full per-tenant recompute**
+(AA-545 Q2 — `derive_segments()`'s own O(n²) warning made a full platform-wide recompute on every
+trigger unsafe once the pool is the whole catalog, not one tenant's atoms). Only the triggering
+tour's own atoms are freshly derived; every EXISTING platform Segment is represented by one cheap
+"pseudo-atom" (reconstructed from its stored `canonical_place`/`canonical_action` — exactly the
+raw text whose own derived `Key` equals that Segment's canonical Key, so this is lossless, not an
+approximation) rather than reloading every atom that segment already has. The existing
+`_connected()`/Jaccard logic decides, over this much smaller pool, whether the new atoms: mint a
+brand new Segment (touch 0 existing), extend exactly one existing Segment (its real
+`atom_segment_member` rows are left alone, only the new atoms get new member rows), or bridge 2+
+existing Segments into one (handled by the EXISTING, unmodified `reconcile_ids()`/`_claims()`
+tie-break — this module does not add a second, separate merge-arbitration rule).
 
 `atom_segment` rows are UPSERT-only, never deleted, by design (see migration 129's own comment
 for the FK reasoning: `atom_segment_alias.segment_id_old` references `atom_segment(segment_id)`,
 so an id that "gave way" to another has to keep existing as a row for that FK to hold — matching
-ADR 0002's own framing that the old id "still resolves", not that it disappears).
-`atom_segment_member` (pure derived membership) IS fully rebuilt per tenant on every run.
+ADR 0002's own framing that the old id "still resolves", not that it disappears). Pre-AA-545 rows
+keep their OLD-formula segment_id string values unchanged forever (an opaque TEXT PK, never
+rehashed — see docs/implementation-notes/AA-545.md Decision 1); only Segments minted from this
+point on use the new formula.
 """
 from __future__ import annotations
 
@@ -101,12 +114,12 @@ class Segment:
     atom_ids: tuple[str, ...]
 
 
-def derive_segments(tenant_id: str, atoms: list[SegmentAtom]) -> list[Segment]:
-    """Sort Atoms into Segments. Same Atoms in, same Segments out (for a given tenant_id).
+def derive_segments(atoms: list[SegmentAtom]) -> list[Segment]:
+    """Sort Atoms into Segments. Same Atoms in, same Segments out.
 
-    Quadratic in the number of Atoms — fine at one tenant's volumes (STEP0 mục 7), worth
-    revisiting if any tenant's inventory reaches thousands, same caveat the reference repo's own
-    `derive_segments()` docstring carries.
+    Quadratic in the number of Atoms given — the DB-facing wrapper below keeps this pool small
+    (one tour's real atoms + one cheap pseudo-atom per EXISTING platform Segment, AA-545 Q2),
+    not the whole catalog's atoms every run.
     """
     keys = {atom.atom_id: _key(atom) for atom in atoms}
     memberships = _connected(sorted(keys.items()))
@@ -123,7 +136,7 @@ def derive_segments(tenant_id: str, atoms: list[SegmentAtom]) -> list[Segment]:
         )
         segments.append(
             Segment(
-                id=_mint(tenant_id, canonical),
+                id=_mint(canonical),
                 place=label.place,
                 action=label.action,
                 atom_ids=tuple(sorted(members)),
@@ -157,15 +170,17 @@ def _canonical(keys: Iterable[Key]) -> Key:
     )
 
 
-def _mint(tenant_id: str, canonical: Key) -> str:
-    """A new Segment's identity, derived from what its members are (and which tenant they belong
-    to — see this module's own docstring, item 1, for why tenant_id has to be in this hash).
+def _mint(canonical: Key) -> str:
+    """A new Segment's identity, derived from what its members are — `sha256(place|verb)`, the
+    exact origin (Ms. Thư) formula, no `tenant_id`/`tour_id` folded in (AA-545 — see this
+    module's own docstring for why: a platform-wide Segment WANTS 2 tours/tenants describing the
+    same real-world moment to collide onto one id, not avoid it).
 
-    Only ever used for a Segment the tenant's own segments have not seen before. Once minted, an
-    id is held: see `reconcile_ids`.
+    Only ever used for a Segment nothing platform-wide has seen before. Once minted, an id is
+    held: see `reconcile_ids`.
     """
     return hashlib.sha256(
-        f"{tenant_id}|{' '.join(canonical.place)}|{canonical.verb}".encode()
+        f"{' '.join(canonical.place)}|{canonical.verb}".encode()
     ).hexdigest()[:16]
 
 
@@ -371,21 +386,24 @@ def _connected(keyed: list[tuple[str, Key]]) -> list[set[str]]:
 
 # ── DB-facing wrapper (impure) — everything above this line is a pure function ─────────────
 
-async def run_segment_matching(tenant_id: str, pool) -> dict:
-    """Rebuild one tenant's Segments from its current atoms. Called right after atomize for ANY
-    of the tenant's picked tours (Linear AA-509 — Segments span every tour of one tenant), so
-    this recomputes over the tenant's WHOLE atom set, not just the tour that just atomized.
-    `atom_segment.tenant_id` (migration 129, a real FK to shared.tenants) is UNCHANGED by AA-526
-    — Segments stay a per-tenant product, just built from a now-shared atom pool.
+_PSEUDO_PREFIX = "__existing_segment__"
 
-    AA-526 — atoms moved to owner_scope='platform' (A3, services/export/handler.py::
-    process_export()), no longer owner_scope=tenant_id (the old per-tenant T5 trigger, removed).
-    The atom read below matches BOTH: `owner_scope = $1` (any pre-AA-526 legacy atom still tagged
-    with this tenant's own id directly — confirmed live, 75 such rows existed at ship time, kept
-    working rather than silently orphaned) OR (`owner_scope = 'platform'` AND the atom's tour is
-    one this tenant has actually picked/rewritten, via `tenant_tour_versions` — the real
-    correction this task's own STEP0 got wrong at first: NOT "every platform atom is fair game
-    for every tenant's Segments," only the tours this specific tenant made their own).
+
+async def run_segment_matching(tour_id: str, pool) -> dict:
+    """Incrementally fold ONE tour's atoms into the platform-wide Segment set (AA-545 — replaces
+    AA-509's per-tenant, full-recompute wrapper; see this module's own docstring for why and
+    how). Triggered once, at A3, right after that tour's own atomize (`services/export/
+    handler.py::_run_a3_atomize_background()`) — never per-tenant, per-rewrite.
+
+    Loads only: (a) this tour's own atoms, and (b) a cheap one-row-per-Segment "pseudo-atom" for
+    EVERY existing platform Segment (its stored `canonical_place`/`canonical_action`, reused
+    as-is — see docstring). Runs the unmodified `derive_segments()`/`reconcile_ids()` pair over
+    that combined pool, then strips the pseudo entries back out before writing — a pseudo id is
+    never a real `tour_atoms` row and must never reach `atom_segment_member`.
+
+    Idempotent: also loads this tour's atoms' own PRIOR assignment (if this tour was already
+    processed — a retry, or a re-atomize) so a repeat run for identical content writes nothing
+    new.
 
     Excludes: soft-deleted atoms, empty-day markers (`is_empty_marker`), and any atom whose
     place/action are still NULL (atomized before migration 129 and not yet re-atomized — STEP0
@@ -395,68 +413,83 @@ async def run_segment_matching(tenant_id: str, pool) -> dict:
         atom_rows = await conn.fetch("""
             SELECT ta.atom_id, ta.tour_id, ta.itinerary_day, ta.place, ta.action
             FROM acp_contract.tour_atoms ta
-            WHERE NOT ta.deleted AND NOT ta.is_empty_marker
+            WHERE ta.tour_id = $1::uuid
+              AND NOT ta.deleted AND NOT ta.is_empty_marker
               AND ta.place IS NOT NULL AND ta.action IS NOT NULL
-              AND (
-                  ta.owner_scope = $1
-                  OR (
-                      ta.owner_scope = 'platform'
-                      AND ta.tour_id IN (
-                          SELECT pt.tour_id
-                          FROM gold_aa_internal.tenant_tour_versions ttv
-                          JOIN gold_aa_internal.published_tours pt ON pt.id = ttv.published_tour_id
-                          WHERE ttv.tenant_id = $1::uuid
-                      )
-                  )
-              )
-        """, tenant_id)
-        assigned_rows = await conn.fetch("""
-            SELECT asm.atom_id, asm.segment_id
-            FROM acp_contract.atom_segment_member asm
-            JOIN acp_contract.atom_segment asg ON asg.segment_id = asm.segment_id
-            WHERE asg.tenant_id = $1::uuid
-        """, tenant_id)
+        """, tour_id)
+        if not atom_rows:
+            return {"segments_written": 0, "atoms": 0, "aliases": 0, "existing_segments": 0}
 
-    atoms = [
+        existing_rows = await conn.fetch(
+            "SELECT segment_id, canonical_place, canonical_action FROM acp_contract.atom_segment"
+        )
+        atom_ids = [r["atom_id"] for r in atom_rows]
+        assigned_rows = await conn.fetch("""
+            SELECT atom_id, segment_id FROM acp_contract.atom_segment_member
+            WHERE atom_id = ANY($1::text[])
+        """, atom_ids)
+
+    new_atoms = [
         SegmentAtom(r["atom_id"], str(r["tour_id"]), r["itinerary_day"], r["place"], r["action"])
         for r in atom_rows
     ]
+    pseudo_atoms = [
+        SegmentAtom(f"{_PSEUDO_PREFIX}{r['segment_id']}", "", None,
+                    r["canonical_place"], r["canonical_action"])
+        for r in existing_rows
+    ]
     assigned = {r["atom_id"]: r["segment_id"] for r in assigned_rows}
+    for r in existing_rows:
+        assigned[f"{_PSEUDO_PREFIX}{r['segment_id']}"] = r["segment_id"]
 
-    segments, aliases = reconcile_ids(derive_segments(tenant_id, atoms), assigned)
-    live_ids = {segment.id for segment in segments}
+    derived = derive_segments(new_atoms + pseudo_atoms)
+    segments, aliases = reconcile_ids(derived, assigned)
+
+    # Strip pseudo membership before persisting, and drop any resulting segment whose ONLY
+    # membership this run is pseudo (nothing new actually touched it — e.g. an existing Segment
+    # that reconcile_ids() re-confirmed but this tour's atoms didn't extend).
+    real_segments = [
+        replace(s, atom_ids=tuple(a for a in s.atom_ids if not a.startswith(_PSEUDO_PREFIX)))
+        for s in segments
+    ]
+    to_write = [s for s in real_segments if s.atom_ids]
+
+    live_ids = {s.id for s in segments}
+    # `aliases` (old segment_id -> surviving segment_id) covers every REAL existing Segment that
+    # gave way this run — both the ordinary "id superseded" case AA-509 already had, and a
+    # bridging merge (2+ existing Segments joined by one of this tour's new atoms), which
+    # `reconcile_ids()`/`_claims()` already arbitrates unmodified (this module adds no second,
+    # separate merge rule). A losing id's PRE-EXISTING real `atom_segment_member` rows (never
+    # loaded into this run's pool — only its pseudo-atom was) must be re-pointed explicitly; the
+    # original per-tenant code never needed this because it rebuilt membership from scratch every
+    # run.
     alias_rows = [(was, target) for was, target in aliases.items() if target in live_ids]
 
     async with pool.acquire() as conn:
         async with conn.transaction():
+            if alias_rows:
+                await conn.executemany("""
+                    UPDATE acp_contract.atom_segment_member SET segment_id = $2
+                    WHERE segment_id = $1
+                """, alias_rows)
+
             # atom_segment: UPSERT-only, never DELETEd (module docstring + migration 129 comment
             # — required by atom_segment_alias's own FK, an id that "gave way" still has to
             # exist as a row).
-            if segments:
+            if to_write:
                 await conn.executemany("""
                     INSERT INTO acp_contract.atom_segment
-                        (segment_id, tenant_id, canonical_place, canonical_action)
-                    VALUES ($1, $2::uuid, $3, $4)
+                        (segment_id, canonical_place, canonical_action)
+                    VALUES ($1, $2, $3)
                     ON CONFLICT (segment_id) DO UPDATE SET
                         canonical_place = excluded.canonical_place,
                         canonical_action = excluded.canonical_action
-                """, [(s.id, tenant_id, s.place, s.action) for s in segments])
-
-            # atom_segment_member: membership is fully derived, so fully rebuilt for this
-            # tenant's segments every run — safe because every segment_id being deleted-from
-            # here is an existing row in atom_segment (never itself deleted), and every
-            # segment_id being inserted-into was just UPSERTed above.
-            await conn.execute("""
-                DELETE FROM acp_contract.atom_segment_member
-                WHERE segment_id IN (
-                    SELECT segment_id FROM acp_contract.atom_segment WHERE tenant_id = $1::uuid
-                )
-            """, tenant_id)
-            if segments:
+                """, [(s.id, s.place, s.action) for s in to_write])
                 await conn.executemany("""
                     INSERT INTO acp_contract.atom_segment_member (segment_id, atom_id)
                     VALUES ($1, $2)
-                """, [(s.id, atom_id) for s in segments for atom_id in s.atom_ids])
+                    ON CONFLICT DO NOTHING
+                """, [(s.id, atom_id) for s in to_write for atom_id in s.atom_ids])
 
             if alias_rows:
                 await conn.executemany("""
@@ -468,18 +501,19 @@ async def run_segment_matching(tenant_id: str, pool) -> dict:
                 """, alias_rows)
                 # An alias whose target has itself since given way (this run, or a prior one)
                 # follows it on — mirrors aa_social.stages.atoms._store_segments()'s own 2-pass
-                # chain-resolve, scoped to this tenant's own segment_id space.
+                # chain-resolve, now over the whole platform segment_id space (no tenant filter).
                 await conn.execute("""
                     UPDATE acp_contract.atom_segment_alias outer_a
                     SET segment_id_canonical = inner_a.segment_id_canonical
                     FROM acp_contract.atom_segment_alias inner_a
-                    JOIN acp_contract.atom_segment s ON s.segment_id = outer_a.segment_id_old
                     WHERE inner_a.segment_id_old = outer_a.segment_id_canonical
-                      AND s.tenant_id = $1::uuid
-                """, tenant_id)
+                """)
                 await conn.execute("""
                     DELETE FROM acp_contract.atom_segment_alias
                     WHERE segment_id_old = segment_id_canonical
                 """)
 
-    return {"segments": len(segments), "atoms": len(atoms), "aliases": len(alias_rows)}
+    return {
+        "segments_written": len(to_write), "atoms": len(new_atoms), "aliases": len(alias_rows),
+        "existing_segments": len(existing_rows),
+    }

@@ -8,23 +8,20 @@ atomize_version() endpoint). Covers:
      process_export() directly.
   2. _run_a3_atomize_background() itself: calls run_t5_atomize() with owner_scope='platform'
      (not a tenant UUID) and the right `rewritten` shape built from generated_content's own
-     columns. Deliberately does NOT also run Segment-matching here (a real bug this build found
-     mid-session and reverted — see run_segment_matching()'s own updated docstring: Segments
-     stay a per-tenant product, a real FK to shared.tenants, so a "platform"-scoped Segment is
-     both an FK violation and invisible to every tenant's own ranking read either way).
+     columns.
   3. _SingleConnAsPool — the thin adapter that lets run_t5_atomize()'s pool.acquire() calls work
      against a single bare asyncpg.Connection.
   4. _llm_log_tenant_id() (services/acp_produce/tenant_pipeline.py) — the real bug this build
      found: record_call_with_pool()'s tenant_id is cast `$1::uuid`, so passing the literal string
      "platform" straight through (as every pre-AA-526 caller's real tenant UUID always did
      safely) would silently fail that INSERT on every single atomize LLM call.
-  5. services/acp_contract/segment_matching.py::run_segment_matching()'s atom-read query — the
-     OTHER real bug this build found: it used to read `WHERE owner_scope = $1` (a real tenant
-     UUID) only, which would find ZERO atoms for any tour rewritten after atoms moved to
-     owner_scope='platform' at A3 — silently breaking Segment/Route/Ranking for all future
-     content. Fixed to also match platform-scope atoms whose tour this tenant has actually
-     picked/rewritten, and re-wired into _run_ranking_pipeline() (api/routers/v1_tours.py),
-     which now runs it FIRST, same ordering the removed atomize_version() endpoint used.
+
+AA-545 (06/09/2026) — Segment/Score/Route ARE now run here, platform-wide, right after atomize —
+this file's original point 2/5 (which explicitly reverted that as a real FK/scoping bug) is
+superseded; see `TestA3RunsSegmentScoreRouteAfterAtomize` below and
+docs/implementation-notes/AA-545.md. `TestSegmentMatchingReadsSharedAtoms`/
+`TestRunRankingPipelineRunsSegmentMatchingFirst` (AA-526's own tests for the old per-tenant
+trigger) are replaced accordingly.
 """
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -133,39 +130,32 @@ class TestAtomizeSkipsCompetitorIndexForNonTenantScope:
 
 
 @pytest.mark.asyncio
-class TestSegmentMatchingReadsSharedAtoms:
-    """AA-526 — services/acp_contract/segment_matching.py::run_segment_matching()'s atom-read
-    query, the real bug this build found and fixed: it used to read `WHERE owner_scope = $1`
-    only (a real tenant UUID) — once atomize moved to A3 (owner_scope='platform'), that query
-    would find ZERO atoms for every tour rewritten after this ships, silently breaking Segment/
-    Route/Ranking for all future content. Fixed to match legacy owner_scope=tenant_id atoms
-    (any pre-AA-526 row, kept working) OR owner_scope='platform' atoms whose tour this tenant
-    has actually picked/rewritten (via tenant_tour_versions) — not indiscriminately every
-    platform atom for every tenant."""
+class TestSegmentMatchingReadsByTourIdPlatformWide:
+    """AA-545 — `run_segment_matching()` is now `(tour_id, pool)`, platform-wide, incremental —
+    reads THIS tour's atoms by `tour_id` directly (no `owner_scope`/`tenant_tour_versions`
+    filter at all anymore, since atoms are already platform-wide since AA-526 and Segment no
+    longer needs a tenant to scope by). Returns early (no queries beyond the first) when the
+    tour has no eligible atoms."""
 
-    async def test_query_matches_legacy_owner_scope_or_platform_scoped_own_tours(self):
+    async def test_query_scopes_by_tour_id_no_tenant_filter(self):
         from services.acp_contract import segment_matching
 
         conn = AsyncMock()
-        # Only the atom-read query (this test's real subject) needs a real return — bail out
-        # right after via a sentinel on the SECOND conn.fetch call (assigned_rows) so the write
-        # phase below (its own transaction/UPSERT machinery, unit-tested elsewhere) never runs.
-        conn.fetch.side_effect = [[], RuntimeError("stop here — not under test")]
+        conn.fetch.return_value = []  # no atoms for this tour -> early return
         ctx = AsyncMock()
         ctx.__aenter__ = AsyncMock(return_value=conn)
         ctx.__aexit__ = AsyncMock(return_value=False)
         pool = MagicMock()
         pool.acquire = MagicMock(return_value=ctx)
 
-        tenant_id = str(uuid.uuid4())
-        with pytest.raises(RuntimeError, match="stop here"):
-            await segment_matching.run_segment_matching(tenant_id, pool)
+        result = await segment_matching.run_segment_matching(TOUR_ID, pool)
 
         atom_query, *params = conn.fetch.call_args_list[0][0]
-        assert "owner_scope = $1" in atom_query
-        assert "owner_scope = 'platform'" in atom_query
-        assert "tenant_tour_versions" in atom_query  # scoped to THIS tenant's own picked tours
-        assert params == [tenant_id]
+        assert "tour_id = $1" in atom_query
+        assert "owner_scope" not in atom_query
+        assert "tenant_tour_versions" not in atom_query
+        assert params == [TOUR_ID]
+        assert result == {"segments_written": 0, "atoms": 0, "aliases": 0, "existing_segments": 0}
 
 
 @pytest.mark.asyncio
@@ -191,7 +181,10 @@ class TestRunA3AtomizeBackground:
              patch(
                  "services.acp_produce.tenant_pipeline.run_t5_atomize",
                  AsyncMock(return_value={"status": "success", "atom_count": 3}),
-             ) as m_atomize:
+             ) as m_atomize, \
+             patch("services.acp_contract.segment_matching.run_segment_matching", AsyncMock()), \
+             patch("services.acp_contract.atom_ranking.run_atom_ranking", AsyncMock()), \
+             patch("services.acp_contract.route_detection.run_route_detection", AsyncMock()):
             await export_handler._run_a3_atomize_background(
                 tour_id=TOUR_ID, rewritten=rewritten, country="Vietnam", version_id=GC_ID,
             )
@@ -226,45 +219,93 @@ class TestRunA3AtomizeBackground:
 
 
 @pytest.mark.asyncio
-class TestRunRankingPipelineRunsSegmentMatchingFirst:
-    """AA-526 — api/routers/v1_tours.py::_run_ranking_pipeline() (moved here from the removed
-    atomize_version() endpoint) must run Segment-matching FIRST, same ordering the old endpoint
-    used — research/ranking below has nothing real to read until this tenant's Segments are
-    current for whatever tour they just rewrote."""
+class TestRunResearchOnlyNoLongerTouchesSegmentScoreRoute:
+    """AA-545 — api/routers/v1_tours.py::_run_research_only() (replaces the removed
+    _run_ranking_pipeline()) ONLY runs `run_segment_research()` now — Segment/Score/Route moved
+    to A3, explicitly out of this function's job. Confirms it does NOT import/call any of the 3
+    (a regression here would silently double-run ranking per-tenant-rewrite AND per-tour-at-A3)."""
 
-    async def test_segment_matching_runs_before_research_and_ranking(self):
+    async def test_only_calls_segment_research(self):
         from api.routers import v1_tours
 
-        call_order = []
         pool = MagicMock()
-
-        async def fake_segment_matching(tenant_id, _pool):
-            call_order.append("segment_matching")
-            return {"status": "success"}
-
-        async def fake_segment_research(tenant_id, market, _pool):
-            call_order.append("segment_research")
-            return {"status": "success"}
-
-        async def fake_atom_ranking(tenant_id, markets, _pool):
-            call_order.append("atom_ranking")
-            return {"status": "success"}
-
-        async def fake_route_detection(tenant_id, _pool):
-            call_order.append("route_detection")
-            return {"status": "success"}
-
         fake_cfg = MagicMock(target_market={"country": "Vietnam"})
-        with patch("services.acp_contract.segment_matching.run_segment_matching", fake_segment_matching), \
-             patch("services.acp_contract.segment_research.run_segment_research", fake_segment_research), \
-             patch("services.acp_contract.atom_ranking.run_atom_ranking", fake_atom_ranking), \
-             patch("services.acp_contract.route_detection.run_route_detection", fake_route_detection), \
-             patch("shared.services.tenant_config_service.TenantConfigService") as MockCfgSvc, \
-             patch("services.seo_intelligence.seed_builder.resolve_buyer_markets", MagicMock(return_value=[])):
-            MockCfgSvc.return_value.get_seo_config = AsyncMock(return_value=fake_cfg)
-            await v1_tours._run_ranking_pipeline("some-tenant-id", pool)
+        research_called = AsyncMock(return_value={"status": "success"})
 
-        assert call_order == ["segment_matching", "segment_research", "atom_ranking", "route_detection"]
+        with patch("services.acp_contract.segment_research.run_segment_research", research_called), \
+             patch("shared.services.tenant_config_service.TenantConfigService") as MockCfgSvc:
+            MockCfgSvc.return_value.get_seo_config = AsyncMock(return_value=fake_cfg)
+            await v1_tours._run_research_only("some-tenant-id", pool)
+
+        research_called.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+class TestA3RunsSegmentScoreRouteAfterAtomize:
+    """AA-545 — Segment/Score/Route now run at A3, right after atomize succeeds, platform-wide
+    (no tenant param) — the real permanent trigger point (see docs/implementation-notes/
+    AA-545.md), superseding AA-526's own original "deliberately not run here" decision."""
+
+    async def test_segment_score_route_run_in_order_after_atomize(self):
+        conn = AsyncMock()
+        conn.close = AsyncMock()
+        rewritten = {"name": "Tour", "summary": "s", "highlights": "[]", "itineraries": "Day 1..."}
+
+        call_order = []
+
+        async def fake_segment_matching(tour_id, _pool):
+            call_order.append(("segment_matching", tour_id))
+            return {"segments_written": 1}
+
+        async def fake_atom_ranking(market, _pool):
+            call_order.append(("atom_ranking", market))
+            return {"segments_ranked": 1}
+
+        async def fake_route_detection(_pool):
+            call_order.append(("route_detection",))
+            return {"routes_written": 1}
+
+        with patch("services.export.handler.asyncpg.connect", AsyncMock(return_value=conn)), \
+             patch("services.export.handler.get_database_url", MagicMock(return_value="postgresql://fake")), \
+             patch(
+                 "services.acp_produce.tenant_pipeline.run_t5_atomize",
+                 AsyncMock(return_value={"status": "success", "atom_count": 3}),
+             ), \
+             patch("services.acp_contract.segment_matching.run_segment_matching", fake_segment_matching), \
+             patch("services.acp_contract.atom_ranking.run_atom_ranking", fake_atom_ranking), \
+             patch("services.acp_contract.route_detection.run_route_detection", fake_route_detection):
+            await export_handler._run_a3_atomize_background(
+                tour_id=TOUR_ID, rewritten=rewritten, country="Vietnam", version_id=GC_ID,
+            )
+
+        assert call_order[0] == ("segment_matching", TOUR_ID)
+        # Score runs once per DFS_LOCATION_MAP market, all before Route.
+        from services.seo_intelligence.seed_builder import DFS_LOCATION_MAP
+        markets_called = [c[1] for c in call_order if c[0] == "atom_ranking"]
+        assert set(markets_called) == set(DFS_LOCATION_MAP)
+        assert call_order[-1] == ("route_detection",)
+
+    async def test_segment_score_route_failure_is_swallowed_never_raises(self):
+        """Best-effort, same precedent as atomize itself — must never surface as the publish
+        having failed."""
+        conn = AsyncMock()
+        conn.close = AsyncMock()
+
+        with patch("services.export.handler.asyncpg.connect", AsyncMock(return_value=conn)), \
+             patch("services.export.handler.get_database_url", MagicMock(return_value="postgresql://fake")), \
+             patch(
+                 "services.acp_produce.tenant_pipeline.run_t5_atomize",
+                 AsyncMock(return_value={"status": "success", "atom_count": 1}),
+             ), \
+             patch(
+                 "services.acp_contract.segment_matching.run_segment_matching",
+                 AsyncMock(side_effect=RuntimeError("boom")),
+             ):
+            await export_handler._run_a3_atomize_background(
+                tour_id=TOUR_ID, rewritten={}, country="", version_id=GC_ID,
+            )  # must not raise
+
+        conn.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio

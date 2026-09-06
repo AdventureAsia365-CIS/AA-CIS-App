@@ -6,13 +6,19 @@ Ported/adapted from Ms. Thư's aa-social-media `src/aa_social/stages/slate.py`
 docs/claude_audit/AA-511-step0-slate-investigation.md. Read that file first for the "why", not
 just this module's docstrings.
 
-**Does not compute a score.** Per STEP0 Q1 (confirmed by reading the origin's own `slate.py`:
-it reads `atom_scores` verbatim, never recomputes), `subject.score` is copied as-is from
-`acp_contract.atom_ranking.total_rank` (Segment subjects — 7 non-Blog channels) or
-`acp_contract.route.score` (Route/Blog subjects, AA-510's own mean-of-total_rank formula — the
-origin has no Route-Subject concept at all to answer this from, see STEP0 Q2). Building a
-second, parallel scoring formula here (an `acp_shared.segment_score` table) would duplicate
-already-live AA-515 data — confirmed NOT to build it (STEP0 point 3a).
+**Does not compute a NEW score formula** — still true after AA-545, though it now does real
+aggregation work `atom_ranking`/`route` themselves no longer do. `subject.score` is `MIN(total_
+rank)` across this tenant's own markets (Segment subjects — 7 non-Blog channels, `_fetch_segment_
+candidates()`) or `AVG(total_rank)` of a Route's member Segments for its best market (Route/Blog
+subjects, `_fetch_route_candidates()`, AA-510's own mean-of-total_rank formula, AA-545 Q3) —
+copied into `subject.score` at propose time same as before. Before AA-545 this really was a
+verbatim copy of one already-merged, per-tenant row; `atom_ranking`/`route` are now platform-wide
+per-market with no merge step of their own left (AA-545 removed it from `rank_segments()` and
+from `route.score` entirely), so THIS module is now where that merge happens, at read time —
+disclosed explicitly (AA-545 grill round 3 caught the original draft's own claim that Slate
+"already had" this logic; it didn't). Building a second, parallel scoring formula here (an
+`acp_shared.segment_score` table) would still duplicate already-live AA-515 data — still not
+built (STEP0 point 3a, unchanged by AA-545).
 
 **Bar thresholds are the origin's real numbers** (`reference/channels.toml`, STEP0 Q3), not
 invented, not a binary "has data" check:
@@ -131,15 +137,50 @@ def _clears_bar(channel: str, candidate: Candidate) -> tuple[bool, dict]:
     return cleared, reason
 
 
-async def _fetch_segment_candidates(tenant_id: UUID, pool) -> list[Candidate]:
-    """One Candidate per ranked, non-excluded Segment.
+async def _tenant_tour_ids(tenant_id: UUID, conn) -> list:
+    """AA-545 — tours this tenant has actually picked/rewritten. Segment/Score/Route are now
+    platform-wide (no `tenant_id` column at all), so this scoping — implicit before via each
+    table's own tenant_id filter — must now be explicit here, same join
+    `segment_matching.py::run_segment_matching()`'s own docstring already established as "the
+    tours this tenant made their own"."""
+    rows = await conn.fetch("""
+        SELECT pt.tour_id
+        FROM gold_aa_internal.tenant_tour_versions ttv
+        JOIN gold_aa_internal.published_tours pt ON pt.id = ttv.published_tour_id
+        WHERE ttv.tenant_id = $1::uuid
+    """, tenant_id)
+    return [r["tour_id"] for r in rows]
 
-    `atom_ranking`'s grain is (tenant, tour, segment) with identical rank/measured values
-    replicated per tour a Segment touches (AA-515 Decision 3, confirmed in STEP0) — `MIN()` over
-    the GROUP BY collapses that multiplicity back to one row per Segment without approximating
-    anything (the values are guaranteed equal, not merely similar).
+
+async def _tenant_market_codes(tenant_id: UUID, conn) -> list[str]:
+    """AA-545 Q3/segment-grain follow-up — every finite market this tenant targets, as the short
+    codes `atom_ranking.market` stores (not DataForSEO location codes). Mirrors
+    `resolve_buyer_markets()`'s own fallback (unknown/empty -> `["US"]`) so a tenant with no
+    usable `target_market` still gets a real, non-empty market list to read against."""
+    from services.seo_intelligence.seed_builder import LOCATION_CODE_TO_MARKET, resolve_buyer_markets
+    from shared.services.tenant_config_service import TenantConfigService
+
+    cfg = await TenantConfigService(conn).get_seo_config(tenant_id)
+    return [
+        LOCATION_CODE_TO_MARKET[loc] for loc, _name, _lang in resolve_buyer_markets(cfg.target_market)
+    ]
+
+
+async def _fetch_segment_candidates(tenant_id: UUID, pool) -> list[Candidate]:
+    """One Candidate per ranked, non-excluded Segment, scoped to tours this tenant picked.
+
+    AA-545 — `atom_ranking` is now platform-wide per (market, tour, segment), not per tenant.
+    `MIN(total_rank)` across the tenant's OWN market list reproduces exactly what
+    `rank_segments()` used to pick at write time ("market for the lowest total wins" — AA-545's
+    Score section, confirmed NOT an existing Slate mechanism before this build, see the AA-545
+    Linear issue's own grill-round-3 correction) — just relocated to read time, over rows that
+    are now real per-market data instead of one already-merged row.
     """
     async with pool.acquire() as conn:
+        tour_ids = await _tenant_tour_ids(tenant_id, conn)
+        if not tour_ids:
+            return []
+        markets = await _tenant_market_codes(tenant_id, conn)
         rows = await conn.fetch("""
             SELECT ar.segment_id,
                    MIN(ar.total_rank)     AS total_rank,
@@ -150,9 +191,10 @@ async def _fetch_segment_candidates(tenant_id: UUID, pool) -> list[Candidate]:
                    MAX(asg.canonical_action) AS canonical_action
             FROM acp_contract.atom_ranking ar
             JOIN acp_contract.atom_segment asg ON asg.segment_id = ar.segment_id
-            WHERE ar.tenant_id = $1::uuid AND ar.excluded_reason IS NULL
+            WHERE ar.tour_id = ANY($1::uuid[]) AND ar.market = ANY($2::text[])
+              AND ar.excluded_reason IS NULL
             GROUP BY ar.segment_id
-        """, tenant_id)
+        """, tour_ids, markets)
     return [
         Candidate(
             segment_id=r["segment_id"], route_id=None, score=r["total_rank"],
@@ -164,40 +206,57 @@ async def _fetch_segment_candidates(tenant_id: UUID, pool) -> list[Candidate]:
 
 
 async def _fetch_route_candidates(tenant_id: UUID, pool) -> list[Candidate]:
-    """One Candidate per Route (Blog-only grain, AA-CIS's own extension — STEP0 Q2).
+    """One Candidate per Route (Blog-only grain, AA-CIS's own extension — STEP0 Q2), scoped to
+    tours this tenant picked.
 
-    Demand/questions are aggregated across the Route's member Segments, a choice this build
-    discloses rather than ports (the origin never bars a Route at all): demand = the STRONGEST
-    single keyword any member Segment carries (mirrors `_demand()`'s own "the strongest rather
-    than the sum" philosophy, one level up — a Route's search case rests on its best moment, not
-    an average of weaker ones); questions = the SUM across member Segments (the FAQ pool a Blog
-    piece draws from is genuinely the union of every moment's questions along the walk, matching
-    how `slate.py::_asked()` already pools questions across every atom_id a Subject carries).
+    AA-545 Q3 — `route` no longer stores `score`/`tenant_id` at all (platform-wide composition
+    only). Score is computed HERE, at read time: `AVG(total_rank)` over the Route's member
+    Segments (AA-510's own mean-of-total_rank formula, unchanged), for EACH of the tenant's
+    markets, and the market giving the lowest average wins — same "best market wins, its numbers
+    travel together" principle `rank_segments()` used to apply at write time, now applied to
+    Route's read-time score exactly like Segment's above. Demand/questions travel with whichever
+    market wins (not independently maximized across markets — mirrors the pre-AA-545 write-time
+    `RankedSegment.demand_market`/`demand_volume` pairing).
+
+    A Route with no matching `atom_ranking` row for ANY of the tenant's markets (e.g. a route
+    just detected, one A3 ranking pass behind) does not appear here — same "derived, eventually
+    consistent" gap every other consumer of freshly-derived data in this pipeline already
+    tolerates, disclosed rather than silently different from the pre-AA-545 behavior (which
+    always had a stored `score`, even if stale).
     """
     async with pool.acquire() as conn:
+        tour_ids = await _tenant_tour_ids(tenant_id, conn)
+        if not tour_ids:
+            return []
+        markets = await _tenant_market_codes(tenant_id, conn)
         rows = await conn.fetch("""
-            SELECT r.route_id, r.score, r.hub_name, r.hub_id,
-                   MAX(ar.demand_volume) AS demand_volume,
-                   COALESCE(SUM(ar.questions), 0) AS questions
-            FROM acp_contract.route r
-            LEFT JOIN LATERAL (
-                SELECT ar2.demand_volume, ar2.questions
-                FROM acp_contract.atom_ranking ar2
-                WHERE ar2.tenant_id = r.tenant_id AND ar2.tour_id = r.tour_id
-                  AND ar2.segment_id = ANY (
-                      SELECT jsonb_array_elements_text(r.ordered_segment_ids)
-                  )
-                  AND ar2.excluded_reason IS NULL
-            ) ar ON true
-            -- AA-532: only the CURRENT version of a Route identity is a real candidate — a
-            -- superseded row stays in the table (never deleted, so a Subject already pointing at
-            -- it keeps resolving) but must not keep getting freshly proposed here forever.
-            WHERE r.tenant_id = $1::uuid AND r.superseded_at IS NULL
-            GROUP BY r.route_id, r.score, r.hub_name, r.hub_id
-        """, tenant_id)
+            WITH per_market AS (
+                SELECT r.route_id, r.hub_name, r.hub_id, ar.market,
+                       AVG(ar.total_rank) AS avg_rank,
+                       MAX(ar.demand_volume) AS demand_volume,
+                       COALESCE(SUM(ar.questions), 0) AS questions
+                FROM acp_contract.route r
+                JOIN acp_contract.atom_ranking ar
+                    ON ar.tour_id = r.tour_id
+                   AND ar.segment_id = ANY (
+                           SELECT jsonb_array_elements_text(r.ordered_segment_ids)
+                       )
+                   AND ar.excluded_reason IS NULL
+                   AND ar.market = ANY($2::text[])
+                -- AA-532: only the CURRENT version of a Route identity is a real candidate — a
+                -- superseded row stays in the table (never deleted, so a Subject already
+                -- pointing at it keeps resolving) but must not keep getting freshly proposed.
+                WHERE r.superseded_at IS NULL AND r.tour_id = ANY($1::uuid[])
+                GROUP BY r.route_id, r.hub_name, r.hub_id, ar.market
+            )
+            SELECT DISTINCT ON (route_id)
+                   route_id, hub_name, hub_id, avg_rank AS score, demand_volume, questions
+            FROM per_market
+            ORDER BY route_id, avg_rank ASC
+        """, tour_ids, markets)
     return [
         Candidate(
-            segment_id=None, route_id=r["route_id"], score=r["score"],
+            segment_id=None, route_id=r["route_id"], score=float(r["score"]),
             demand=r["demand_volume"], questions=int(r["questions"] or 0), said=0,
             hub_name=r["hub_name"], hub_id=str(r["hub_id"]) if r["hub_id"] else None,
         )
@@ -221,12 +280,15 @@ async def _fetch_segment_hub_map(tenant_id: UUID, pool) -> dict[str, str]:
     where there is no family" fallback.
     """
     async with pool.acquire() as conn:
+        tour_ids = await _tenant_tour_ids(tenant_id, conn)
+        if not tour_ids:
+            return {}
         rows = await conn.fetch("""
             SELECT r.route_id, r.hub_id, r.hub_name,
                    jsonb_array_elements_text(r.ordered_segment_ids) AS segment_id
             FROM acp_contract.route r
-            WHERE r.tenant_id = $1::uuid AND r.superseded_at IS NULL  -- AA-532
-        """, tenant_id)
+            WHERE r.tour_id = ANY($1::uuid[]) AND r.superseded_at IS NULL  -- AA-532
+        """, tour_ids)
 
     counts: dict[str, dict[str, int]] = {}
     names: dict[str, str] = {}

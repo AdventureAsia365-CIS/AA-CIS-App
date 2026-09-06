@@ -154,13 +154,13 @@ def _candidate(segment_id, recurrence=1, questions=0, said=0, demand=None):
 
 
 def test_rank_segments_empty_returns_empty():
-    assert rank_segments([], ["US"]) == []
+    assert rank_segments([], "US") == []
 
 
 def test_rank_segments_lowest_total_wins():
     strong = _candidate("strong", recurrence=5, questions=3, said=500, demand={"US": 10000})
     weak = _candidate("weak", recurrence=1, questions=0, said=10, demand={"US": 10})
-    ranked = rank_segments([strong, weak], ["US"])
+    ranked = rank_segments([strong, weak], "US")
     assert [r.segment_id for r in ranked] == ["strong", "weak"]
     assert ranked[0].total_rank < ranked[1].total_rank
 
@@ -169,7 +169,7 @@ def test_rank_segments_ties_share_a_rank():
     a = _candidate("a", recurrence=2)
     b = _candidate("b", recurrence=2)
     c = _candidate("c", recurrence=1)
-    ranked = {r.segment_id: r for r in rank_segments([a, b, c], ["US"])}
+    ranked = {r.segment_id: r for r in rank_segments([a, b, c], "US")}
     assert ranked["a"].recurrence_rank == ranked["b"].recurrence_rank == 1
     assert ranked["c"].recurrence_rank == 3  # competition ranking: 1, 1, 3 — not 1, 1, 2
 
@@ -179,7 +179,7 @@ def test_rank_segments_unmeasured_demand_gets_median_not_last():
     measured_high = _candidate("high", demand={"US": 10000})
     unmeasured = _candidate("unmeasured", demand={})
     ranked = {r.segment_id: r for r in rank_segments(
-        [measured_low, measured_high, unmeasured], ["US"],
+        [measured_low, measured_high, unmeasured], "US",
     )}
     # 2 measured -> ranks {high: 1, low: 2}, median of [1, 2] at index 1 -> 2, not the worst (2
     # is already the worst of 2 measured, but crucially not appended as a 3rd/last place: with
@@ -188,13 +188,19 @@ def test_rank_segments_unmeasured_demand_gets_median_not_last():
     assert ranked["unmeasured"].demand_rank in (1, 2)
 
 
-def test_rank_segments_keeps_best_market_per_segment():
-    # A single candidate always ranks 1st in whatever market measures it — the "best market"
-    # choice only shows up against a competing candidate that reverses which market ranks
-    # higher, so this needs 2 candidates, not 1.
+def test_rank_segments_one_market_per_call_no_best_of_n_anymore():
+    """AA-545 — `rank_segments()` no longer picks a "best market" itself (that merge moved to
+    read time, `services/acp_shared/slate.py`); calling it once per market for the SAME
+    candidates can rank them differently, and `demand_market` always reports back exactly the
+    market it was called with."""
     target = _candidate("s", demand={"US": 5, "UK": 50000})
     competitor = _candidate("c", demand={"US": 100000, "UK": 100})
-    ranked = {r.segment_id: r for r in rank_segments([target, competitor], ["US", "UK"])}
-    assert ranked["s"].demand_market == "UK"
-    assert ranked["s"].demand_rank == 1
-    assert ranked["c"].demand_market == "US"
+
+    ranked_us = {r.segment_id: r for r in rank_segments([target, competitor], "US")}
+    ranked_uk = {r.segment_id: r for r in rank_segments([target, competitor], "UK")}
+
+    assert ranked_us["s"].demand_market == "US"
+    assert ranked_uk["s"].demand_market == "UK"
+    # "s" loses on US demand (5 vs 100000) but wins on UK demand (50000 vs 100).
+    assert ranked_us["s"].demand_rank > ranked_us["c"].demand_rank
+    assert ranked_uk["s"].demand_rank < ranked_uk["c"].demand_rank

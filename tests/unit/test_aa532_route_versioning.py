@@ -3,6 +3,11 @@
 (supersede, never delete) to stop a real FK violation against acp_shared.subject.route_id
 (migration 133) on any tenant with an active Subject.
 
+AA-545 — `run_route_detection()` is now `(pool)`, no `tenant_id`, platform-wide; `route_id` is
+`{tour_id}:{first}-{last}` (no tenant prefix); `route`/`Moment` carry no `score` anymore (see
+docs/implementation-notes/AA-545.md and route_detection.py's own docstrings) — row shapes and
+assertions below updated accordingly, mechanics (versioning itself) unchanged.
+
 Mocks the asyncpg pool — no live DB. `run_route_detection()` acquires the pool 3 separate times
 (read moments/old_hubs/current_routes -> hub create/reuse loop -> final supersede+insert
 transaction); `pool.acquire()`/`ctx.__aenter__()` return the SAME mock connection every call
@@ -16,7 +21,6 @@ import pytest
 
 from services.acp_contract import route_detection
 
-TENANT = str(uuid.uuid4())
 TOUR = str(uuid.uuid4())
 
 
@@ -40,9 +44,9 @@ def _txn_conn():
     return conn
 
 
-def _moment_row(segment_id, day, place="Kyoto", action="walk", rank=1):
+def _moment_row(segment_id, day, place="Kyoto", action="walk"):
     return {
-        "segment_id": segment_id, "tour_id": TOUR, "total_rank": rank,
+        "segment_id": segment_id, "tour_id": TOUR,
         "canonical_place": place, "canonical_action": action, "day": day,
     }
 
@@ -58,7 +62,7 @@ class TestRunRouteDetectionVersioning:
         ]
         pool = _make_pool(conn)
 
-        result = await route_detection.run_route_detection(TENANT, pool)
+        result = await route_detection.run_route_detection(pool)
 
         assert result["routes_written"] == 1
         assert result["routes_superseded"] == 0
@@ -68,7 +72,7 @@ class TestRunRouteDetectionVersioning:
             assert "DELETE" not in call.args[0]
         insert_call = conn.executemany.call_args
         route_id = insert_call.args[1][0][0]
-        assert route_id == f"{TENANT}:{TOUR}:1-2"  # no :vN suffix for a first version
+        assert route_id == f"{TOUR}:1-2"  # no tenant prefix, no :vN suffix for a first version
         version = insert_call.args[1][0][-1]
         assert version == 1
 
@@ -80,14 +84,14 @@ class TestRunRouteDetectionVersioning:
             [_moment_row("s1", 1), _moment_row("s2", 2, place="Magome")],
             [],
             [{
-                "route_id": f"{TENANT}:{TOUR}:1-2", "tour_id": TOUR, "hub_id": None,
+                "route_id": f"{TOUR}:1-2", "tour_id": TOUR, "hub_id": None,
                 "hub_name": "Kyoto → Magome", "ordered_segment_ids": json.dumps(["s1", "s2"]),
-                "first_day": 1, "last_day": 2, "score": 1, "version": 1,
+                "first_day": 1, "last_day": 2, "version": 1,
             }],
         ]
         pool = _make_pool(conn)
 
-        result = await route_detection.run_route_detection(TENANT, pool)
+        result = await route_detection.run_route_detection(pool)
 
         assert result["routes_unchanged"] == 1
         assert result["routes_written"] == 0
@@ -100,19 +104,19 @@ class TestRunRouteDetectionVersioning:
         """The real bug this issue fixes: the old row must survive (a Subject's FK depends on
         it), only a NEW version is written alongside it."""
         conn = _txn_conn()
-        old_route_id = f"{TENANT}:{TOUR}:1-2"
+        old_route_id = f"{TOUR}:1-2"
         conn.fetch.side_effect = [
             [_moment_row("s1", 1), _moment_row("s2", 2, place="Magome")],  # new derivation
             [],
             [{  # old current row has a DIFFERENT segment set -> content changed
                 "route_id": old_route_id, "tour_id": TOUR, "hub_id": None,
                 "hub_name": "Old Name", "ordered_segment_ids": json.dumps(["s_old"]),
-                "first_day": 1, "last_day": 2, "score": 9, "version": 1,
+                "first_day": 1, "last_day": 2, "version": 1,
             }],
         ]
         pool = _make_pool(conn)
 
-        result = await route_detection.run_route_detection(TENANT, pool)
+        result = await route_detection.run_route_detection(pool)
 
         assert result["routes_superseded"] == 1
         assert result["routes_written"] == 1
@@ -134,19 +138,19 @@ class TestRunRouteDetectionVersioning:
     @pytest.mark.asyncio
     async def test_identity_that_disappears_is_superseded_with_no_replacement(self):
         conn = _txn_conn()
-        old_route_id = f"{TENANT}:{TOUR}:1-2"
+        old_route_id = f"{TOUR}:1-2"
         conn.fetch.side_effect = [
             [],  # this run derives NOTHING (e.g. Segments dropped below LEAST_DAYS/LEAST_PLACES)
             [],
             [{
                 "route_id": old_route_id, "tour_id": TOUR, "hub_id": None,
                 "hub_name": "Old Name", "ordered_segment_ids": json.dumps(["s1", "s2"]),
-                "first_day": 1, "last_day": 2, "score": 1, "version": 1,
+                "first_day": 1, "last_day": 2, "version": 1,
             }],
         ]
         pool = _make_pool(conn)
 
-        result = await route_detection.run_route_detection(TENANT, pool)
+        result = await route_detection.run_route_detection(pool)
 
         assert result["routes_superseded"] == 1
         assert result["routes_written"] == 0
@@ -162,7 +166,7 @@ class TestRunRouteDetectionVersioning:
         conn.fetch.side_effect = [[], [], []]
         pool = _make_pool(conn)
 
-        await route_detection.run_route_detection(TENANT, pool)
+        await route_detection.run_route_detection(pool)
 
         old_hubs_query = conn.fetch.call_args_list[1].args[0]
         assert "r.superseded_at IS NULL" in old_hubs_query
@@ -177,7 +181,7 @@ class TestCreateRoutePick:
         conn.fetchrow.return_value = None  # WHERE ... AND superseded_at IS NULL matches 0 rows
         pool = _make_pool(conn)
 
-        result = await route_detection.create_route_pick(TENANT, "some-route-id", pool)
+        result = await route_detection.create_route_pick(str(uuid.uuid4()), "some-route-id", pool)
 
         assert result is None
         query = conn.fetchrow.call_args.args[0]

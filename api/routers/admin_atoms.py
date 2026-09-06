@@ -133,8 +133,13 @@ _LIST_FROM = """
     -- lone/ungrouped atom (asm.segment_id NULL) simply never matches, ar.total_rank comes back
     -- NULL, same "nothing to show" convention canonical_place/canonical_action already use for
     -- an ungrouped atom.
+    -- AA-545 — atom_ranking now has up to 6 rows per (tour, segment), one per finite market
+    -- (PK (market, tour_id, segment_id)); pinned to 'US' here (the platform's own established
+    -- default, services/seo_intelligence/seed_builder.py::_DEFAULT_MARKET) so this admin listing
+    -- shows exactly one representative row per atom, not a 6x fan-out — this page is a curation
+    -- list, not a per-market audit (that's admin_dashboard.py's job).
     LEFT JOIN acp_contract.atom_ranking ar
-        ON ar.tour_id = ta.tour_id AND ar.segment_id = asm.segment_id
+        ON ar.tour_id = ta.tour_id AND ar.segment_id = asm.segment_id AND ar.market = 'US'
     -- Route/Hub link — a Segment is "part of a Route" when some Route's ordered_segment_ids
     -- (migration 131, AA-510) contains it. LATERAL + LIMIT 1: a Segment could in principle
     -- appear in more than one Route (re-detection across tours); this page only ever needs ONE

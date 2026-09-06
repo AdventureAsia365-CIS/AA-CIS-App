@@ -7,10 +7,22 @@ step0-ranking-investigation.md`, `AA-515-step0b-demand-research-loop.md`,
 
 **The unit ranked is the Segment**, per ADR 0014 (rank-sum, no weights, no tuning constant) —
 4 axes, each a competition rank (1, 2, 2, 4 — ties share a rank), summed, lowest total wins:
-demand (per market, best market kept), recurrence (distinct tours a Segment spans, within one
-tenant — STEP0b/the build prompt both confirm this stays single-tenant, never cross-tenant,
-matching every other AA-508/509 convention), questions (People Also Ask landing on the
+demand (one specific market per run — see AA-545 below), recurrence (distinct tours a Segment
+spans, now platform-wide, not single-tenant — AA-545 made Segment itself platform-wide, so this
+axis measures a real-world moment's recurrence across the WHOLE catalog, restoring what AA-509's
+original per-tenant Segment scoping had suppressed), questions (People Also Ask landing on the
 Segment), said (how much the itineraries describe the moment).
+
+**AA-545 — platform-wide, one full rank-sum pass per finite market, no more per-tenant "best
+market kept" merge.** `run_atom_ranking(market, pool)` computes ranks over the WHOLE platform
+Segment pool for exactly ONE market per call (looped once per market in
+`services/seo_intelligence/seed_builder.py::DFS_LOCATION_MAP`, triggered at A3 alongside Segment
+— see `services/export/handler.py`). Previously (AA-515) one call took a TENANT's whole
+`target_market` list and picked, per Segment, whichever single market gave the lowest total
+(`rank_segments(candidates, markets)`'s old best-of-N loop) — that merge is GONE from this module
+entirely; a tenant with several target markets now reads/merges across the matching
+`(market, tour_id, segment_id)` rows at READ TIME instead (`services/acp_shared/slate.py`), the
+same principle Route's own read-time `AVG(total_rank)` already applies (AA-545 Q3).
 
 **`_demand()` reads the `search_demand` cache by NAME (word-overlap), never embedding-match**
 — a deliberate choice this build keeps, not re-litigates (STEP0b Q1: the reference repo
@@ -128,15 +140,16 @@ def _demand_ranks(candidates: Sequence[Candidate], market: str) -> dict[str, int
     return {c.segment_id: ranks.get(c.segment_id, middle) for c in candidates}
 
 
-def rank_segments(candidates: list[Candidate], markets: list[str]) -> list[RankedSegment]:
-    """Rank-sum every candidate, keeping each one's best market. No weights, no tuning constant
-    — a straight sum of 4 competition ranks, lowest wins (ADR 0014).
+def rank_segments(candidates: list[Candidate], market: str) -> list[RankedSegment]:
+    """Rank-sum every candidate for ONE market. No weights, no tuning constant — a straight sum
+    of 4 competition ranks, lowest wins (ADR 0014).
 
-    Hoists Ms. Thư's own `_demand_ranks(candidates, market)` call out of the per-candidate loop
-    her reference `rank()` runs it inside — that call's result depends only on `candidates` and
-    `market`, never on which candidate is currently being scored, so it was being recomputed
-    identically once per (candidate × market) pair for no reason. Same output, not a change to
-    the algorithm — a straightforward hoist, not a re-design.
+    AA-545 — no more best-of-N-market loop: `run_atom_ranking()` now calls this once per finite
+    platform market (looped by its caller), so there is exactly one `market` to score against,
+    not a tenant's list to pick the best of. The old best-of-N merge (Ms. Thư's own `rank()`
+    never had this either — it was AA-515's own addition for a per-tenant multi-market Segment
+    row) now happens at READ TIME instead, across the resulting per-market rows
+    (`services/acp_shared/slate.py`).
     """
     if not candidates:
         return []
@@ -144,24 +157,18 @@ def rank_segments(candidates: list[Candidate], markets: list[str]) -> list[Ranke
     recurrence_rank = _competition_ranks(candidates, lambda c: c.recurrence)
     questions_rank = _competition_ranks(candidates, lambda c: c.questions)
     said_rank = _competition_ranks(candidates, lambda c: c.said)
-    demand_rank_by_market = {market: _demand_ranks(candidates, market) for market in markets}
+    demand_rank = _demand_ranks(candidates, market)
 
     ranked = []
     for candidate in candidates:
-        placings = []
-        for market in markets:
-            demand_rank = demand_rank_by_market[market][candidate.segment_id]
-            total = (
-                demand_rank + recurrence_rank[candidate.segment_id]
-                + questions_rank[candidate.segment_id] + said_rank[candidate.segment_id]
-            )
-            placings.append((total, market, demand_rank))
-        # A tie between markets goes to the first the tenant listed (resolve_buyer_markets'
-        # own MARKET_RANK order) — arbitrary but stable, and recorded, so it can be argued with.
-        total, market, demand_rank = min(placings, key=lambda p: (p[0], markets.index(p[1])))
+        total = (
+            demand_rank[candidate.segment_id] + recurrence_rank[candidate.segment_id]
+            + questions_rank[candidate.segment_id] + said_rank[candidate.segment_id]
+        )
         ranked.append(RankedSegment(
             segment_id=candidate.segment_id, tour_ids=candidate.tour_ids,
-            demand_rank=demand_rank, recurrence_rank=recurrence_rank[candidate.segment_id],
+            demand_rank=demand_rank[candidate.segment_id],
+            recurrence_rank=recurrence_rank[candidate.segment_id],
             questions_rank=questions_rank[candidate.segment_id],
             said_rank=said_rank[candidate.segment_id], total_rank=total,
             demand_market=market, demand_volume=candidate.demand.get(market),
@@ -220,17 +227,18 @@ def classify_exclusion(place: str, action: str) -> str | None:
 
 # ── DB-facing wrapper (impure) ──────────────────────────────────────────────────────────────
 
-async def run_atom_ranking(tenant_id: str, markets: list[str], pool) -> dict:
-    """Rebuild atom_ranking WHOLE for one tenant (DELETE+INSERT) — matches the AA-510 STEP0
-    finding that Ms. Thư's own `routes`/`atom_scores` are "derived, never accumulated"; no
-    downstream table has an FK into this one yet expecting stability across re-runs.
+async def run_atom_ranking(market: str, pool) -> dict:
+    """Rebuild atom_ranking WHOLE for one market, platform-wide (DELETE+INSERT) — matches the
+    AA-510 STEP0 finding that Ms. Thư's own `routes`/`atom_scores` are "derived, never
+    accumulated"; no downstream table has an FK into this one yet expecting stability across
+    re-runs (AA-545 build confirmed this still holds: neither Route/Hub nor Slate FK a specific
+    `atom_ranking` row).
 
-    Recomputes over the tenant's WHOLE Segment set, like `run_segment_matching()` and
-    `run_segment_research()` — recurrence needs full-tenant visibility regardless of which one
-    tour just finished atomizing. `markets` is the tenant's resolved market-code list
-    (`resolve_buyer_markets()`, via the caller's already-loaded `target_market` — this module
-    has no DB access to `shared.tenant_seo_config` of its own, kept a pure input like the
-    reference repo's own `rank(candidates, markets)` signature).
+    AA-545 — recomputes over the WHOLE PLATFORM Segment set (every tenant, every tour), for
+    exactly this one `market`, not one tenant's Segment set across several markets. Triggered at
+    A3, once per `services/seo_intelligence/seed_builder.py::DFS_LOCATION_MAP` market, right
+    after `run_segment_matching()` (`services/export/handler.py`) — not per-tenant-rewrite
+    anymore.
     """
     async with pool.acquire() as conn:
         segment_rows = await conn.fetch("""
@@ -240,9 +248,9 @@ async def run_atom_ranking(tenant_id: str, markets: list[str], pool) -> dict:
             FROM acp_contract.atom_segment asg
             JOIN acp_contract.atom_segment_member asm ON asm.segment_id = asg.segment_id
             JOIN acp_contract.tour_atoms ta ON ta.atom_id = asm.atom_id
-            WHERE asg.tenant_id = $1::uuid AND NOT ta.deleted AND NOT ta.is_empty_marker
+            WHERE NOT ta.deleted AND NOT ta.is_empty_marker
             GROUP BY asg.segment_id, asg.canonical_place, asg.canonical_action
-        """, tenant_id)
+        """)
 
         demand_rows = await conn.fetch("""
             SELECT keyword, market, search_volume, people_also_ask
@@ -275,8 +283,7 @@ async def run_atom_ranking(tenant_id: str, markets: list[str], pool) -> dict:
             demand=compute_demand(place, action, demand_tuples),
         ))
 
-    ranked = rank_segments(included, markets or ["US"])
-    by_id = {r.segment_id: r for r in ranked}
+    ranked = rank_segments(included, market)
 
     ranked_row_count = sum(len(r.tour_ids) for r in ranked)
     excluded_row_count = sum(len(e.tour_ids) for e in excluded)
@@ -284,18 +291,18 @@ async def run_atom_ranking(tenant_id: str, markets: list[str], pool) -> dict:
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
-                "DELETE FROM acp_contract.atom_ranking WHERE tenant_id = $1::uuid", tenant_id,
+                "DELETE FROM acp_contract.atom_ranking WHERE market = $1", market,
             )
             if ranked:
                 await conn.executemany("""
                     INSERT INTO acp_contract.atom_ranking
-                        (tenant_id, tour_id, segment_id, demand_rank, recurrence_rank,
+                        (market, tour_id, segment_id, demand_rank, recurrence_rank,
                          questions_rank, said_rank, total_rank, demand_market, demand_volume,
                          recurrence, questions, said, excluded_reason)
-                    VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                    VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
                             NULL)
                 """, [
-                    (tenant_id, tour_id, r.segment_id, r.demand_rank, r.recurrence_rank,
+                    (market, tour_id, r.segment_id, r.demand_rank, r.recurrence_rank,
                      r.questions_rank, r.said_rank, r.total_rank, r.demand_market,
                      r.demand_volume, r.recurrence, r.questions, r.said)
                     for r in ranked for tour_id in r.tour_ids
@@ -303,11 +310,11 @@ async def run_atom_ranking(tenant_id: str, markets: list[str], pool) -> dict:
             if excluded:
                 await conn.executemany("""
                     INSERT INTO acp_contract.atom_ranking
-                        (tenant_id, tour_id, segment_id, recurrence, questions, said,
+                        (market, tour_id, segment_id, recurrence, questions, said,
                          excluded_reason)
-                    VALUES ($1::uuid, $2::uuid, $3, 0, 0, 0, $4)
+                    VALUES ($1, $2::uuid, $3, 0, 0, 0, $4)
                 """, [
-                    (tenant_id, tour_id, e.segment_id, e.reason)
+                    (market, tour_id, e.segment_id, e.reason)
                     for e in excluded for tour_id in e.tour_ids
                 ])
 

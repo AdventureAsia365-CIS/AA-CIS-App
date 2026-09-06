@@ -464,10 +464,13 @@ async def run_segment_research(tenant_id: str, target_market: dict, pool) -> dic
     }
 
     async with pool.acquire() as conn:
+        # AA-545 — atom_segment dropped tenant_id (platform-wide now); reads every platform
+        # Segment regardless of `tenant_id` (still accepted as a parameter — resolves this
+        # tenant's own `target_market`, out of AA-545's 4-layer scope to re-trigger from A3, see
+        # docs/implementation-notes/AA-545.md Decision 3). `tenant_id` param itself is otherwise
+        # unused now, kept for call-site compatibility per that same decision.
         rows = await conn.fetch(
             "SELECT canonical_place, canonical_action FROM acp_contract.atom_segment"
-            " WHERE tenant_id = $1::uuid",
-            tenant_id,
         )
     by_place: dict[str, list[str]] = {}
     for r in rows:
