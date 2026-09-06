@@ -486,3 +486,20 @@ Required sections:
 
 Trigger: create when starting any task — "implement AA-XX", "fix AA-XX", "build AA-XX"
 Update incrementally as decisions are made — not in one batch at the end.
+
+## Domain Model / Architecture Process (AA-539, 06/09/2026)
+After AA-527 shipped a page that mixed up the Admin/Tenant boundary from having no single
+written glossary, `mattpocock/skills` (`domain-modeling`/`grill-with-docs`/
+`improve-codebase-architecture`/`codebase-design`) is installed (`.claude/skills/`) and this is
+now standing process, not optional:
+
+- Before starting any build/architecture task that touches multiple modules (especially UI
+  Admin/Tenant work, or the T5-T11 social pipeline), read `CONTEXT.md` (repo root) first.
+- If the task involves an architecture decision that is hard to reverse + surprising without
+  context + the result of a real trade-off, write a new ADR in `docs/adr/` in the existing format
+  (see `docs/adr/0001-*.md` for the first one, or the 26-ADR convention in
+  `docs/AI-gent-for automation works/aa-soscial-media-main` for reference) — do not skip this
+  because the decision "felt obvious in the moment."
+- When a build prompt from Claude Chat has large scope (an epic, a multi-section redesign), run
+  `/grill-with-docs` on that spec BEFORE writing code — even when the spec reads as complete.
+  This is exactly the step AA-527 skipped.
