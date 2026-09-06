@@ -444,6 +444,102 @@ class TestRunWriteBackground:
 
 
 @pytest.mark.asyncio
+class TestGateRegressionGuard:
+    """AA-528 — a full-text rewrite (attempt 2) can fix the gate it was told about while breaking
+    a DIFFERENT one that was already passing. Modeled directly on the two real held pieces AA-525
+    Phần 11.B.2 found (wanderlux-travel, before this fix): 8b2562a1 (a genuinely NEW gate failure
+    appeared on attempt 2 — case this guard reverts) and 319bd3d8 (the SAME gate failed on both
+    attempts, just with different violation text — case this guard deliberately leaves alone,
+    since reverting wouldn't change the outcome and the issue's own proposal only defines
+    "regression" as a previously-PASSING gate turning to FAIL)."""
+
+    def _outcome(self, *gates):
+        """gates: (name, passed, blocking) triples. Builds a run_quality_gates()-shaped dict."""
+        ledger = [{"gate": g, "passed": p, "violations": [] if p else [f"{g} violation"],
+                   "repairable": True, "blocking": b} for g, p, b in gates]
+        first_failure = next((g for g in ledger if not g["passed"] and g["blocking"]), None)
+        return {"passed": first_failure is None, "gate_ledger": ledger,
+                "first_failure": first_failure, "flags": []}
+
+    async def test_new_blocking_gate_failure_reverts_to_attempt_one(self):
+        """Case 8b2562a1: attempt 1 fails only F4_extreme_length. Attempt 2 (rewrite) STILL fails
+        F4_extreme_length AND newly fails F1_grounding — strictly worse (2 blocking failures vs
+        1, one of them brand new) — revert to attempt 1's own output/ledger."""
+        attempt1_outcome = self._outcome(("F4_extreme_length", False, True))
+        attempt2_outcome = self._outcome(("F4_extreme_length", False, True), ("F1_grounding", False, True))
+        with patch.object(service, "write_content", return_value=("attempt 1 text", 0.02, {}, None)), \
+             patch.object(service, "rewrite_with_feedback", return_value=("attempt 2 text", 0.02, {}, None)), \
+             patch.object(service, "run_quality_gates", side_effect=[attempt1_outcome, attempt2_outcome]), \
+             patch.object(service, "_finalize_piece",
+                           new=AsyncMock(return_value=_finalized_row(status="held"))) as mock_fin:
+            await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())
+
+        assert mock_fin.call_args.kwargs["status"] == "held"
+        assert mock_fin.call_args.kwargs["content_text"] == "attempt 1 text"  # NOT "attempt 2 text"
+        assert mock_fin.call_args.kwargs["held_reason"] == "F4_extreme_length: F4_extreme_length violation"
+        gate_names = {g["gate"] for g in mock_fin.call_args.kwargs["gate_ledger"]}
+        assert gate_names == {"F4_extreme_length"}  # attempt 2's F1_grounding never persisted
+        # audit trail: repair_log keeps BOTH attempts' own failures (attempt 2's real, worse
+        # outcome is not hidden) plus a final entry recording the revert decision
+        targets = [r["gate_targeted"] for r in mock_fin.call_args.kwargs["repair_log"]]
+        assert targets == ["F4_extreme_length", "F4_extreme_length", "gate_regression_guard"]
+
+    async def test_same_gate_different_violation_does_not_revert(self):
+        """Case 319bd3d8: attempt 1 fails F1_grounding on one ungrounded number; attempt 2 fixes
+        THAT number but fabricates a different one — F1_grounding fails again, same gate name,
+        not a new one. Per the issue's own definition (a previously-PASSING gate turning to FAIL),
+        this is not a "regression" — attempt 2's output is kept, same as before this fix."""
+        attempt1_outcome = self._outcome(("F1_grounding", False, True))
+        attempt2_outcome = self._outcome(("F1_grounding", False, True))
+        with patch.object(service, "write_content", return_value=("attempt 1 text", 0.02, {}, None)), \
+             patch.object(service, "rewrite_with_feedback", return_value=("attempt 2 text", 0.02, {}, None)), \
+             patch.object(service, "run_quality_gates", side_effect=[attempt1_outcome, attempt2_outcome]), \
+             patch.object(service, "_finalize_piece",
+                           new=AsyncMock(return_value=_finalized_row(status="held"))) as mock_fin:
+            await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())
+
+        assert mock_fin.call_args.kwargs["content_text"] == "attempt 2 text"  # kept, not reverted
+        targets = [r["gate_targeted"] for r in mock_fin.call_args.kwargs["repair_log"]]
+        assert "gate_regression_guard" not in targets
+
+    async def test_new_gate_failure_with_fewer_total_failures_does_not_revert(self):
+        """A rewrite that fixes 2 gates and breaks 1 new one is a net improvement (1 < 2 total
+        blocking failures) even though the 1 remaining failure is a gate that wasn't failing
+        before — the guard only reverts when attempt 2 is NOT strictly better on total count."""
+        attempt1_outcome = self._outcome(("F2_banned_patterns", False, True), ("F6_cta_present", False, True))
+        attempt2_outcome = self._outcome(("F2_banned_patterns", True, True), ("F6_cta_present", True, True),
+                                          ("F1_grounding", False, True))
+        with patch.object(service, "write_content", return_value=("attempt 1 text", 0.02, {}, None)), \
+             patch.object(service, "rewrite_with_feedback", return_value=("attempt 2 text", 0.02, {}, None)), \
+             patch.object(service, "run_quality_gates", side_effect=[attempt1_outcome, attempt2_outcome]), \
+             patch.object(service, "_finalize_piece",
+                           new=AsyncMock(return_value=_finalized_row(status="held"))) as mock_fin:
+            await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())
+
+        assert mock_fin.call_args.kwargs["content_text"] == "attempt 2 text"  # kept, net improvement
+        assert mock_fin.call_args.kwargs["held_reason"] == "F1_grounding: F1_grounding violation"
+
+    async def test_regression_on_approved_second_attempt_never_triggered(self):
+        """The guard lives inside the failure branch only — an attempt 2 that fully PASSES never
+        reaches it, even though (in principle) it could have regressed a gate that isn't checked
+        because run_quality_gates() short-circuits on CTA (AA-514) or simply doesn't re-surface a
+        passing gate as a violation. Documents that this is deliberately out of scope: 'approved'
+        already means every blocking gate passed on THIS attempt, which is the real invariant that
+        matters for what ships."""
+        attempt1_outcome = self._outcome(("F4_extreme_length", False, True))
+        attempt2_outcome = self._outcome(("F4_extreme_length", True, True))
+        with patch.object(service, "write_content", return_value=("attempt 1 text", 0.02, {}, None)), \
+             patch.object(service, "rewrite_with_feedback", return_value=("attempt 2 text", 0.02, {}, None)), \
+             patch.object(service, "run_quality_gates", side_effect=[attempt1_outcome, attempt2_outcome]), \
+             patch.object(service, "_finalize_piece",
+                           new=AsyncMock(return_value=_finalized_row(status="approved"))) as mock_fin:
+            await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())
+
+        assert mock_fin.call_args.kwargs["status"] == "approved"
+        assert mock_fin.call_args.kwargs["content_text"] == "attempt 2 text"
+
+
+@pytest.mark.asyncio
 class TestFetchRouteSegments:
     """AA-513 — services/acp_content_writing/service.py::_fetch_route_segments() itself (AA-511
     Gap A's own `_fetch_route_text()` had zero direct test coverage before this build — added
