@@ -307,7 +307,7 @@ def generate_node(state: ContentState) -> ContentState:
     if state.get("feedback"):
         prompt += f"\n\nPREVIOUS ATTEMPT FEEDBACK:\n{state['feedback']}\nPlease fix these issues."
 
-    # P3-S3: Build system prompt = AA core + tenant append
+    # P3-S3: Build system prompt = master-catalog base (SYSTEM_PROMPT) + tenant append
     brand_sp   = state.get("brand_system_prompt", "") or ""
     style_guide = state.get("brand_style_guide", "") or ""
     language   = state.get("rewrite_language", "en-US") or "en-US"
@@ -321,7 +321,7 @@ def generate_node(state: ContentState) -> ContentState:
     else:
         system += "\n\nLANGUAGE: Use American English spelling and conventions."
     if brand_sp:
-        system += f"\n\nCLIENT BRAND CONTEXT (append only — do not override AA rules):\n{brand_sp}"
+        system += f"\n\nCLIENT BRAND CONTEXT (append only — do not override the base rules above):\n{brand_sp}"
     # AA-202: inject brand differentiation profile + contrast rule (no-op for old/default brands)
     system += _build_brand_diff_block(state)
     if style_guide:

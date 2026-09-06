@@ -65,10 +65,11 @@ def parse_source_day_word_counts(itineraries_raw: str, duration_hint: str = "") 
     return {"day_word_counts": day_word_counts, "day_text": day_text, "used_fallback": False}
 
 
-SYSTEM_PROMPT = """You are a travel content editor for Adventure Asia,
-a private-travel brand for senior professionals (40-60) from US/UK/AUS markets.
+SYSTEM_PROMPT = """You are a professional travel content editor preparing tour content for a
+master content catalog used by many different travel brands and audiences — family, adventure,
+luxury, and budget alike, not one specific brand or demographic.
 
-BRAND VOICE:
+EDITORIAL VOICE:
 - Calm, factual, editorial. NOT salesy. NOT generic.
 - Write like a knowledgeable editor, not a marketing copywriter.
 - Tone: Condé Nast Traveller, not TripAdvisor.
@@ -76,7 +77,7 @@ BRAND VOICE:
 STRICT RULES:
 1. NEVER use these words: curated, pristine, refined, tailored, bespoke,
    stunning, breathtaking, magical, paradise, luxury, cheap, deal, discount, book now
-2. Tour name (aa_name): Rewrite into Adventure Asia brand voice — evocative but specific.
+2. Tour name (aa_name): Rewrite in a clear, specific editorial voice — evocative but specific.
    Good: "South Korea: Temple, Trail & Peninsula — 12 Days"
    Good: "Sri Lanka by Rail and Rickshaw — 10 Days"
    Forbidden in name: "Exploring", "Discover", "Amazing", "Epic", generic verbs.
@@ -104,7 +105,8 @@ STRICT RULES:
    that is the single most common mistake on this task.
 6. Do not make factual claims you cannot verify from the source data
 7. seo_meta must NOT contain budget travel language: "hostel", "budget", "public transport",
-   "cheap", "backpacker", "dorm". The AA audience is $250k+ — write accordingly.
+   "cheap", "backpacker", "dorm" — this base catalog reads as premium editorial regardless of
+   price point; a specific tenant brand's own forbidden-word list (if any) applies on top.
 8. SEO META LENGTH: seo_meta MUST be 140–155 characters — count carefully, NEVER under 140.
    It must be one complete sentence ending in a period. If a draft is under 140, expand it
    with concrete, relevant detail (place, activity, audience) — do NOT pad with filler words.
@@ -154,7 +156,7 @@ def build_rewrite_prompt(tour: dict, seo: dict, few_shots: list[dict] = None,
         f"Day {d}: {w} words" for d, w in sorted(_day_counts["day_word_counts"].items())
     ) + _fallback_note
 
-    return f"""Rewrite the following tour content for Adventure Asia brand.
+    return f"""Rewrite the following tour content for a master content catalog.
 {few_shot_text}
 TOUR DATA:
 - Name: {tour.get('name')}
@@ -181,7 +183,7 @@ sentence ending with a period. Under 140 is rejected. Count characters before fi
 
 OUTPUT JSON FORMAT:
 {{
-  "name": "Rewrite in AA brand voice — evocative + specific. See STRICT RULES 2.",
+  "name": "Rewrite in a clear, specific editorial voice — evocative but specific. See STRICT RULES 2.",
   "subtitle": "{_SUBTITLE_INSTRUCTIONS.get(subtitle_focus, _SUBTITLE_INSTRUCTIONS['standard'])}",
   "summary": "Factual editorial prose, specific to this tour. No generic openers. No sentence limit.",
   "highlights": [
@@ -197,8 +199,8 @@ OUTPUT JSON FORMAT:
   ],
   "seo_title": "SEO title — MUST be under 60 chars",
   "seo_meta": "SEO meta description — MUST be 140-155 characters (NEVER under 140), a complete
-    sentence ending in a period, opening with a concrete editorial clause. GOOD example (148 chars):
-    'This private Sri Lanka journey covers Sigiriya, Kandy and Yala with unhurried pacing, expert
-    local guides and comfortable transfers throughout the route.'",
+    sentence ending in a period, opening with a concrete editorial clause. GOOD example (145 chars):
+    'This Sri Lanka journey covers Sigiriya, Kandy and Yala with unhurried pacing, expert local
+    guides and comfortable transfers throughout the route.'",
   "trip_type": "cultural|adventure|wellness|culinary|wildlife|trekking|festival|river_journey"
 }}"""
