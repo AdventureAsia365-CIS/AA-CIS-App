@@ -505,9 +505,9 @@ function useTourScopedFetch<T>(endpoint: string, tourId: string | null) {
 }
 
 interface SegmentRow {
-  segment_id: string; canonical_place: string; canonical_action: string; tenant_name: string | null;
-  member_count: number; total_rank: number | null; recurrence: number | null; excluded_reason: string | null;
-  route_id: string | null; route_hub_name: string | null;
+  segment_id: string; canonical_place: string; canonical_action: string;
+  member_count: number; market: string | null; total_rank: number | null; recurrence: number | null;
+  excluded_reason: string | null; route_id: string | null; route_hub_name: string | null;
 }
 
 function SegmentSection({ tourId }: { tourId: string | null }) {
@@ -517,9 +517,14 @@ function SegmentSection({ tourId }: { tourId: string | null }) {
   if (loading) return <LoadingScreen msg="Loading Segments…" />;
   if (!data || data.total === 0) return <EmptyState title="No Segments yet" body="No atom on this tour has been grouped into a Segment (services/acp_contract/segment_matching.py) yet." />;
   return (
-    <AuditTable rows={data.data} rowKey={r => r.segment_id} columns={[
+    // AA-548 — "Tenant" column removed (AA-545 made Segment/Score/Route platform-wide, no
+    // tenant_name in any of the 3 responses anymore). "Market" column NOT added here on purpose:
+    // this panel's own backend query (admin_dashboard.py::list_segments) joins atom_ranking
+    // WITHOUT a market filter and GROUPs by ar.market, so it DOES fan out one row per (Segment,
+    // market) same as Score below — rowKey below reflects that.
+    <AuditTable rows={data.data} rowKey={r => `${r.segment_id}-${r.market ?? "none"}`} columns={[
       { key: "place", label: "Place — Action", render: r => <>{r.canonical_place} — {r.canonical_action}</> },
-      { key: "tenant", label: "Tenant", render: r => r.tenant_name ?? "—" },
+      { key: "market", label: "Market", render: r => r.market ?? "—" },
       { key: "members", label: "Atoms", render: r => r.member_count },
       { key: "rank", label: "Total rank", render: r => r.excluded_reason ? <Badge color="gray">{r.excluded_reason}</Badge> : (r.total_rank ?? "—") },
       { key: "recurrence", label: "Recurrence", render: r => r.recurrence ?? "—" },
@@ -529,7 +534,7 @@ function SegmentSection({ tourId }: { tourId: string | null }) {
 }
 
 interface ScoreRow {
-  segment_id: string; canonical_place: string | null; canonical_action: string | null; tenant_name: string | null;
+  market: string | null; segment_id: string; canonical_place: string | null; canonical_action: string | null;
   demand_rank: number | null; recurrence_rank: number | null; questions_rank: number | null; said_rank: number | null;
   total_rank: number | null; demand_market: string | null; demand_volume: number | null;
   recurrence: number; questions: number; said: number; excluded_reason: string | null;
@@ -542,9 +547,11 @@ function ScoreSection({ tourId }: { tourId: string | null }) {
   if (loading) return <LoadingScreen msg="Loading Score…" />;
   if (!data || data.total === 0) return <EmptyState title="No ranked Segments yet" body="atom_ranking has no rows for this tour — Score runs as part of Route detection (AA-515)." />;
   return (
-    <AuditTable rows={data.data} rowKey={r => r.segment_id} columns={[
+    // AA-548 — "Tenant" column removed, "Market" column added (AA-545 made atom_ranking's PK
+    // (market, tour_id, segment_id) — up to 6 rows/Segment now, one per finite platform market).
+    <AuditTable rows={data.data} rowKey={r => `${r.segment_id}-${r.market ?? "none"}`} columns={[
       { key: "place", label: "Segment", render: r => r.canonical_place ? `${r.canonical_place} — ${r.canonical_action}` : "—" },
-      { key: "tenant", label: "Tenant", render: r => r.tenant_name ?? "—" },
+      { key: "market", label: "Market", render: r => r.market ?? "—" },
       { key: "total", label: "Total rank", render: r => r.excluded_reason ? <Badge color="gray">{r.excluded_reason}</Badge> : (r.total_rank ?? "—") },
       { key: "demand", label: "Demand", render: r => r.demand_rank != null ? `#${r.demand_rank} (${r.demand_volume ?? "—"} · ${r.demand_market ?? "—"})` : "—" },
       { key: "recurrence", label: "Recurrence", render: r => r.recurrence_rank != null ? `#${r.recurrence_rank} (${r.recurrence})` : "—" },
@@ -555,8 +562,8 @@ function ScoreSection({ tourId }: { tourId: string | null }) {
 }
 
 interface RouteRow {
-  route_id: string; tenant_name: string | null; hub_name: string;
-  ordered_segment_ids: string[]; first_day: number; last_day: number; score: number; created_at: string;
+  route_id: string; hub_name: string; market: string | null;
+  ordered_segment_ids: string[]; first_day: number; last_day: number; score: number | null; created_at: string;
   version: number; superseded_at: string | null; // AA-532 — versioning, never delete-and-reinsert
 }
 
@@ -575,7 +582,10 @@ function RouteHubSection({ tourId }: { tourId: string | null }) {
       {(!data || data.total === 0) ? (
         <EmptyState title="No Routes yet" body="acp_contract.route has no rows for this tour — Route detection (route_detection.py) hasn't run, or found no consecutive-day span of ranked Segments." />
       ) : (
-        <AuditTable rows={data.data} rowKey={r => r.route_id} columns={[
+        // AA-548 — "Tenant" column removed, "Market" column added (AA-545 dropped route.
+        // tenant_id/score entirely; score is now AVG(total_rank) computed per market at read
+        // time — one row per (Route version, market) from admin_dashboard.py::list_routes).
+        <AuditTable rows={data.data} rowKey={r => `${r.route_id}-${r.market ?? "none"}`} columns={[
           // AA-532 — status/version: this panel shows the full version history on purpose
           // (route rows are versioned/superseded, never deleted), unlike every other reader of
           // this table which only ever sees the current one.
@@ -583,10 +593,10 @@ function RouteHubSection({ tourId }: { tourId: string | null }) {
             ? <Badge color="gray">superseded v{r.version}</Badge>
             : <Badge color="green">current{r.version > 1 ? ` v${r.version}` : ""}</Badge> },
           { key: "hub", label: "Hub name", render: r => r.hub_name },
-          { key: "tenant", label: "Tenant", render: r => r.tenant_name ?? "—" },
+          { key: "market", label: "Market", render: r => r.market ?? "—" },
           { key: "days", label: "Days", render: r => `${r.first_day}–${r.last_day}` },
           { key: "segments", label: "Segments", render: r => (r.ordered_segment_ids || []).length },
-          { key: "score", label: "Score", render: r => r.score },
+          { key: "score", label: "Score", render: r => r.score ?? "—" },
           { key: "created", label: "Created", render: r => new Date(r.created_at).toLocaleString() },
         ]} />
       )}
