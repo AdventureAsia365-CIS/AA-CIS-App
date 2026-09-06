@@ -1,4 +1,4 @@
-# Atoms are platform-wide; Segments/Score/Route stay per-tenant
+# Atoms are platform-wide; Segment/Score/Route/Hub per-tenant is unresolved tech debt
 
 Atomize used to be a tenant-triggered, per-tenant step (old T5). AA-526 (05/09/2026) moved atom
 generation to A3 (`services/export/handler.py::process_export()`, right after a tour enters
@@ -8,7 +8,9 @@ later rewrites it.
 
 Segment matching, Atom Ranking (Score), and Route/Hub detection were NOT moved to that same
 platform-wide, computed-once model — `acp_contract.atom_segment.tenant_id` and
-`atom_ranking`'s tenant-scoped read are real, enforced foreign keys, not an oversight.
+`atom_ranking`'s tenant-scoped read are real, enforced foreign keys, not a bug. **They ARE,
+however, unresolved tech debt — not a design decision that should stay as-is** (AA-542,
+06/09/2026; see Decision below).
 
 **Correction (AA-541, 06/09/2026 — read the real git history, not just AA-526's own summary)**:
 this ADR originally said the reason was "two tenants rewriting the same tour into different
@@ -38,8 +40,12 @@ been removed. The real, traced reason:
 
 ## Status
 
-accepted (Atom platform-wide half) — Segment/Score/Route/Hub per-tenant half is a **carried-over
-historical default, not a re-validated technical requirement post-AA-526** (see Consequences).
+**Accepted** — Atom platform-wide half.
+**Tech debt, fix required — NOT accepted design** — Segment/Score/Route/Hub per-tenant half
+(AA-542, 06/09/2026). This ADR records WHY the per-tenant default exists (the history above and
+Considered Options below); it does not endorse per-tenant as correct going forward. See Decision
+below and `docs/adr/0003-segment-score-route-hub-will-become-platform-wide.md` for the decision
+to fix it.
 
 ## Considered Options
 
@@ -50,17 +56,34 @@ Jaccard/verb-match grouping genuinely doesn't need to know which tenant an atom 
 because `atom_segment`'s `NOT NULL` tenant FK and `atom_ranking`'s already-shipped tenant-scoped
 read would have needed a coordinated redesign across 3 modules, which was out of that task's scope.
 
+## Decision (AA-542, 06/09/2026)
+
+Segment/Score/Route/Hub will be redesigned to platform-wide (computed once for the whole Master
+Content pool — the same model Atom and Search Demand already use) in a separate design/build
+issue — **before** any new Admin or Tenant UI/feature is built on top of the current per-tenant
+assumption. The governing layering principle (stated in `CONTEXT.md`'s warning banner, decided
+by Nghiệp): **any step that does not read a tenant's own brand voice or a tenant-specific
+DFS/keyword signal should not be per-tenant, regardless of what the current code does.**
+Segment/Score/Route/Hub read neither. Full decision record and rationale:
+`docs/adr/0003-segment-score-route-hub-will-become-platform-wide.md`.
+
+This issue (AA-542) is documentation-only — it does not redesign the schema or code. The
+redesign itself (schema/code changes across AA-509/510/511/515's shipped contracts) is out of
+scope here and tracked as a future issue.
+
 ## Consequences
 
 A future spec or glossary that assumes "Segment/Score/Route are computed once for the whole
-Master Content, admin-side" (as AA-539's own initial description did) contradicts the live
-schema — `CONTEXT.md`'s cross-tenant table (AA-540) documents the current reality rather than
-silently picking a side. Separately (AA-541): because Segment-matching is pure CPU (Jaccard/
-verb-match, no LLM/API call — confirmed, `services/acp_contract/segment_matching.py` makes zero
-external calls), the cost of N tenants each independently recomputing an identical Segment set
-for the same shared tour is CPU/storage duplication, not a real dollar cost the way Search
-Demand's per-call DataForSEO/Bedrock spend was (`docs/adr/0002-search-demand-shared-across-
-tenants.md`) — a plausible reason this was never revisited with the same urgency, though it was
-never actually evaluated on those terms either. Whether to redesign Segment/Ranking/Route/Slate
-to be platform-wide (a multi-module change touching AA-509/510/511/515's own shipped contracts)
-remains an open decision for Nghiệp, not resolved by this ADR.
+Master Content, admin-side" (as AA-539's own initial description did) was, before AA-542,
+treated as contradicting the live schema; `CONTEXT.md`'s cross-tenant table (AA-540) documented
+the current reality without picking a side. AA-542 now settles the "should it stay this way"
+question: **no** — see Decision above. Separately (AA-541): because Segment-matching is pure CPU
+(Jaccard/verb-match, no LLM/API call — confirmed, `services/acp_contract/segment_matching.py`
+makes zero external calls), the cost of N tenants each independently recomputing an identical
+Segment set for the same shared tour is CPU/storage duplication, not a real dollar cost the way
+Search Demand's per-call DataForSEO/Bedrock spend was (`docs/adr/0002-search-demand-shared-
+across-tenants.md`) — a plausible reason this was never revisited with the same urgency, though
+it was never actually evaluated on those terms either. **That** the redesign will happen is now
+decided (see Decision above); the **how/when** — the concrete migration/schema plan across
+AA-509/510/511/515's shipped contracts — remains open, to be resolved in the future design/build
+issue, not by this ADR.
