@@ -9,8 +9,9 @@ status='processing') and is awaited synchronously by the router — same 404/409
 contract as before. `run_write_background()` is the part that was always slow (the write/rewrite
 + T10-check loop) — launched via `asyncio.create_task()` by the router (strong-ref pattern, see
 that file) and updates the SAME placeholder row in place when done. The write/check loop body
-itself is UNCHANGED from the pre-AA-466 single-function version — only the HTTP/persistence
-layer around it moved.
+itself was UNCHANGED from the pre-AA-466 single-function version at the time of AA-466 — only the
+HTTP/persistence layer around it moved. AA-528 later added the gate-regression-guard inside this
+same loop (see MAX_ATTEMPTS below) — the first change to the loop's own decision logic since.
 
 Max 2 total write attempts, confirmed cap (Phase 1 §2c's real N7 convergence data: judge-class
 checks converge on repair only 2.5%-14.6% of the time — a low cap is better supported by that
@@ -393,6 +394,10 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
         # other gate). Kept across the loop and reused (not recomputed) by the post-loop
         # within-tenant reuse check below — one embedding call per attempt, not two.
         embedding: list[float] | None = None
+        # AA-528 — snapshot of the immediately-preceding attempt's own finalized outcome, taken
+        # right before that attempt gets overwritten by a rewrite. Only used by the gate-
+        # regression-guard below; stays None on attempt 1 (nothing to compare against yet).
+        prev_snapshot: dict | None = None
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
             if attempt == 1:
@@ -405,6 +410,13 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
                     facts_text=facts_text,
                 )
             else:
+                # AA-528 — capture attempt (attempt-1)'s outcome before rewrite_with_feedback()
+                # overwrites content_text/gate_ledger/etc. below. This is what a detected
+                # regression gets reverted to.
+                prev_snapshot = {
+                    "content_text": content_text, "gate_ledger": gate_ledger, "seo_meta": seo_meta,
+                    "summary": summary, "embedding": embedding,
+                }
                 content_text, cost, seo_meta, summary = await asyncio.to_thread(
                     rewrite_with_feedback, content_seed=atom_text, goal=goal, channel_style=channel_style,
                     brand_audience=brand_audience, angle=chosen, cta=cta,
@@ -469,6 +481,48 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
                 "t9_attempt_failed_quality_check", request_id=str(request_id), attempt=attempt,
                 gate=first_failure["gate"], repairable=first_failure["repairable"],
             )
+
+            # AA-528 gate-regression-guard — a full rewrite (not a targeted field fix) can break a
+            # gate that was already passing while it fixes the one it was told to fix (real cases:
+            # piece 8b2562a1 introduced a brand-new F1_grounding failure on attempt 2 that attempt
+            # 1 never had; piece 319bd3d8 fabricated a different ungrounded number while fixing the
+            # one it was told about). Compare this attempt's BLOCKING gate failures against the
+            # immediately-preceding attempt's: if at least one gate that previously passed now
+            # fails, AND this attempt is not net-better (same or more total blocking failures),
+            # the rewrite is treated as a regression — revert to the previous attempt's own
+            # content/gate_ledger/seo_meta/summary/embedding rather than persisting a rewrite that
+            # traded a known problem for a new (or additional) one. Deliberately does NOT spend an
+            # extra LLM call (option (a) from the issue) — this is option (b): pick the better of
+            # the two already-computed attempts.
+            if prev_snapshot is not None:
+                prev_ledger = prev_snapshot["gate_ledger"]
+                prev_blocking_fail = {g["gate"] for g in prev_ledger if g.get("blocking", True) and not g["passed"]}
+                cur_blocking_fail = {g["gate"] for g in gate_ledger if g.get("blocking", True) and not g["passed"]}
+                new_regressions = cur_blocking_fail - prev_blocking_fail
+                if new_regressions and len(cur_blocking_fail) >= len(prev_blocking_fail):
+                    logger.info(
+                        "t9_gate_regression_reverted", request_id=str(request_id), attempt=attempt,
+                        regressed_gates=sorted(new_regressions),
+                        prev_blocking_fail=sorted(prev_blocking_fail),
+                        cur_blocking_fail=sorted(cur_blocking_fail),
+                    )
+                    content_text = prev_snapshot["content_text"]
+                    gate_ledger = prev_ledger
+                    seo_meta = prev_snapshot["seo_meta"]
+                    summary = prev_snapshot["summary"]
+                    embedding = prev_snapshot["embedding"]
+                    repair_log.append({
+                        "attempt": attempt, "gate_targeted": "gate_regression_guard",
+                        "violations": [
+                            f"Rewrite reverted — attempt {attempt} newly failed "
+                            f"{sorted(new_regressions)} without fixing more than it broke; "
+                            f"kept attempt {attempt - 1}'s output instead."
+                        ],
+                        "repairable": False,
+                    })
+                    first_failure = next(
+                        (g for g in prev_ledger if not g["passed"] and g.get("blocking", True)), None
+                    )
 
             if not first_failure["repairable"] or attempt >= MAX_ATTEMPTS:
                 status, held_reason = "held", _held_reason_from(first_failure)
