@@ -41,11 +41,13 @@ def _make_request(pool):
 class TestListSegments:
     @pytest.mark.asyncio
     async def test_returns_segment_rows_scoped_to_tour(self):
+        """AA-545 — no more tenant_id/tenant_name (atom_segment is platform-wide); `market` is
+        now a real column since a Segment can carry one row per finite market."""
         tour_id = str(uuid.uuid4())
         conn = AsyncMock()
         conn.fetch.return_value = [
             {"segment_id": "seg1", "canonical_place": "Sigiriya", "canonical_action": "climb",
-             "tenant_id": uuid.uuid4(), "tenant_name": "WanderLux", "member_count": 3,
+             "member_count": 3, "market": "US",
              "total_rank": 2, "recurrence": 5, "excluded_reason": None,
              "route_id": "r1", "route_hub_name": "Cultural Triangle"},
         ]
@@ -85,9 +87,11 @@ class TestListSegments:
 class TestListScore:
     @pytest.mark.asyncio
     async def test_returns_ranking_rows(self):
+        """AA-545 — no more tenant_id/tenant_name (atom_ranking is platform-wide, PK
+        (market, tour_id, segment_id)); `market` is the row's own PK column now."""
         conn = AsyncMock()
         conn.fetch.return_value = [
-            {"tenant_id": uuid.uuid4(), "tenant_name": "WanderLux", "segment_id": "seg1",
+            {"market": "US", "segment_id": "seg1",
              "canonical_place": "Sigiriya", "canonical_action": "climb",
              "demand_rank": 1, "recurrence_rank": 2, "questions_rank": 3, "said_rank": 4,
              "total_rank": 10, "demand_market": "US", "demand_volume": 1300,
@@ -105,12 +109,15 @@ class TestListScore:
 class TestListRoutes:
     @pytest.mark.asyncio
     async def test_returns_routes_and_hub_backlog_flag(self):
+        """AA-545 — no more tenant_id/tenant_name/stored score (route is platform-wide,
+        composition-only); `market`/`score` are computed columns now (AVG(total_rank) per
+        market, joined in — one row per (Route version, market))."""
         conn = AsyncMock()
         conn.fetch.return_value = [
-            {"route_id": "r1", "tenant_id": uuid.uuid4(), "tenant_name": "WanderLux",
-             "hub_id": None, "hub_name": "Cultural Triangle", "ordered_segment_ids": '["seg1", "seg2"]',
-             "first_day": 1, "last_day": 3, "score": 5, "created_at": "2026-09-01T00:00:00",
-             "version": 1, "superseded_at": None},
+            {"route_id": "r1", "hub_id": None, "hub_name": "Cultural Triangle",
+             "ordered_segment_ids": '["seg1", "seg2"]',
+             "first_day": 1, "last_day": 3, "created_at": "2026-09-01T00:00:00",
+             "version": 1, "superseded_at": None, "market": "US", "score": 5.0},
         ]
         pool = _make_pool(conn)
         request = _make_request(pool)
@@ -125,17 +132,20 @@ class TestListRoutes:
     @pytest.mark.asyncio
     async def test_does_not_filter_superseded_rows_this_is_the_audit_view(self):
         """AA-532 — every OTHER reader of acp_contract.route filters `superseded_at IS NULL`;
-        this admin audit panel deliberately does not, since showing version history is the point."""
+        this admin audit panel deliberately does not, since showing version history is the point.
+        AA-545 — `superseded_at` now also appears in GROUP BY (needed once `score` became a
+        computed AVG()) — the assertion below checks the WHERE clause specifically, not the
+        whole WHERE..ORDER BY span, so it isn't confused by that unrelated GROUP BY mention."""
         conn = AsyncMock()
         conn.fetch.return_value = [
-            {"route_id": "r1", "tenant_id": uuid.uuid4(), "tenant_name": "WanderLux",
-             "hub_id": None, "hub_name": "Cultural Triangle", "ordered_segment_ids": '["seg1"]',
-             "first_day": 1, "last_day": 3, "score": 5, "created_at": "2026-09-01T00:00:00",
-             "version": 1, "superseded_at": "2026-09-02T00:00:00"},
-            {"route_id": "r1:v2", "tenant_id": uuid.uuid4(), "tenant_name": "WanderLux",
-             "hub_id": None, "hub_name": "Cultural Triangle", "ordered_segment_ids": '["seg1", "seg2"]',
-             "first_day": 1, "last_day": 3, "score": 4, "created_at": "2026-09-02T00:00:00",
-             "version": 2, "superseded_at": None},
+            {"route_id": "r1", "hub_id": None, "hub_name": "Cultural Triangle",
+             "ordered_segment_ids": '["seg1"]',
+             "first_day": 1, "last_day": 3, "created_at": "2026-09-01T00:00:00",
+             "version": 1, "superseded_at": "2026-09-02T00:00:00", "market": "US", "score": 5.0},
+            {"route_id": "r1:v2", "hub_id": None, "hub_name": "Cultural Triangle",
+             "ordered_segment_ids": '["seg1", "seg2"]',
+             "first_day": 1, "last_day": 3, "created_at": "2026-09-02T00:00:00",
+             "version": 2, "superseded_at": None, "market": "US", "score": 4.0},
         ]
         pool = _make_pool(conn)
         request = _make_request(pool)
@@ -143,7 +153,8 @@ class TestListRoutes:
         result = await admin_dashboard.list_routes(request, tour_id=str(uuid.uuid4()), x_admin_secret=_TEST_SECRET)
         assert result["total"] == 2
         query, *_params = conn.fetch.call_args[0]
-        assert "superseded_at" not in query.split("WHERE")[1].split("ORDER BY")[0]
+        where_clause = query.split("WHERE")[1].split("GROUP BY")[0]
+        assert "superseded_at" not in where_clause
 
 
 class TestListSlate:

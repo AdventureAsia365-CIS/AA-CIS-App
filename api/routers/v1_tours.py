@@ -34,65 +34,26 @@ def get_pool(request: Request):
     return request.app.state.pool
 
 
-async def _run_ranking_pipeline(tenant_id: str, pool) -> None:
-    """AA-515 — research (demand for whatever Segments aren't already fresh) then rank-sum,
-    for one tenant's whole current Segment set. Launched via `asyncio.create_task()` right
-    after T3 QA in `trigger_rewrite()`'s own background flow above (fire-and-forget — see that
-    call site's own comment; AA-526 moved this here from the removed `atomize_version()`
-    endpoint). Swallows every exception itself (this is the top of its own task, nothing awaits
-    it to propagate one to) — logs and returns, same as every other best-effort step already in
-    this file.
-
-    AA-526 — Segment-matching runs FIRST, in this same task (not a separate create_task()),
-    same ordering the old atomize_version() endpoint used (segment_matching -> ranking ->
-    route-detection): atoms are shared platform-wide now, but Segments stay this tenant's own
-    product built from them (see segment_matching.py's own updated docstring) — research/
-    ranking below has nothing real to read until this tenant's Segments actually exist/are
-    current for whatever tour they just rewrote.
-
-    AA-510 — Route/Hub detection runs right after ranking, in the SAME background task (not a
-    second create_task()): Route is built entirely from atom_ranking's own output, so a
-    detection run against a ranking result this same call just wrote is the natural ordering,
-    and a route_detection-only failure must not be allowed to silently starve on its own
-    unreferenced task the way AA-425's own comment (top of this file) already warned about.
+async def _run_research_only(tenant_id: str, pool) -> None:
+    """AA-545 — Segment-matching/ranking/route-detection MOVED to A3
+    (`services/export/handler.py::_run_a3_atomize_background()`), platform-wide, per Q2's locked
+    decision (see docs/implementation-notes/AA-545.md Decision 3 and the AA-545 Linear issue).
+    Only `run_segment_research()` (the search-demand PURCHASE decision — explicitly OUTSIDE
+    AA-545's 4-layer scope: Segment/Score/Route/Hub, not this module) stays triggered here,
+    per-tenant-rewrite, exactly as before AA-545 — its cost profile (real DataForSEO spend) and
+    per-tenant `target_market` scoping were a deliberate, disclosed non-change, not an oversight.
     """
     try:
-        from services.acp_contract.atom_ranking import run_atom_ranking
-        from services.acp_contract.segment_matching import run_segment_matching
         from services.acp_contract.segment_research import run_segment_research
-        from services.seo_intelligence.seed_builder import (
-            LOCATION_CODE_TO_MARKET,
-            resolve_buyer_markets,
-        )
         from shared.services.tenant_config_service import TenantConfigService
-
-        segment_result = await run_segment_matching(tenant_id, pool)
-        logger.info("t5_segment_matching_done", tenant_id=tenant_id, result=segment_result)
 
         async with pool.acquire() as conn:
             cfg = await TenantConfigService(conn).get_seo_config(tenant_id)
 
         research_result = await run_segment_research(tenant_id, cfg.target_market, pool)
-        market_codes = [
-            LOCATION_CODE_TO_MARKET[loc]
-            for loc, _name, _lang in resolve_buyer_markets(cfg.target_market)
-        ]
-        ranking_result = await run_atom_ranking(tenant_id, market_codes, pool)
-        logger.info(
-            "t5_ranking_pipeline_done", tenant_id=tenant_id,
-            research=research_result, ranking=ranking_result,
-        )
+        logger.info("t5_segment_research_done", tenant_id=tenant_id, result=research_result)
     except Exception:
-        logger.warning("t5_ranking_pipeline_failed", tenant_id=tenant_id, exc_info=True)
-        return
-
-    try:
-        from services.acp_contract.route_detection import run_route_detection
-        route_result = await run_route_detection(tenant_id, pool)
-        logger.info("t5_route_detection_done", tenant_id=tenant_id, route=route_result)
-    except Exception:
-        logger.warning("t5_route_detection_failed", tenant_id=tenant_id, exc_info=True)
-
+        logger.warning("t5_segment_research_failed", tenant_id=tenant_id, exc_info=True)
 
 
 @router.get("")
@@ -692,19 +653,16 @@ async def trigger_rewrite(
                 # per-tenant, not on every rewrite. See services/acp_produce/tenant_pipeline.py's
                 # own module docstring + docs/implementation-notes/AA-526.md.
                 #
-                # Segment-matching + research + ranking + route-detection (AA-509/510/515) DO
-                # still need a per-tenant trigger — Segments/Route/Ranking stay a PER-TENANT
-                # product (`atom_segment.tenant_id` is a real FK to shared.tenants, migration
-                # 129) built from the now-shared atom pool, not something A3 can compute once for
-                # everyone (a real bug this build caught and fixed: see
-                # services/acp_contract/segment_matching.py's own updated docstring). This is
-                # that whole sequence's new home, replacing the old post-atomize call site in the
-                # removed endpoint — same fire-and-forget background shape, timed right after T3
-                # QA (Nghiệp's explicit choice among 3 options presented, 05/09/2026 — see that
-                # Linear comment). _run_ranking_pipeline() itself now runs segment_matching()
-                # first, same order the old endpoint used.
+                # AA-545 — Segment-matching + ranking + route-detection (AA-509/510/515) ALSO
+                # moved to A3 (`services/export/handler.py::_run_a3_atomize_background()`),
+                # right after atomize itself, platform-wide — not per-tenant-rewrite anymore
+                # (AA-526's own note above, kept for history, is now superseded: Segment/Route/
+                # Ranking are the single global set A3 already computes once for everyone; see
+                # docs/implementation-notes/AA-545.md). Only `run_segment_research()` (search-
+                # demand purchase decision, explicitly out of AA-545's scope) still fires here,
+                # per-tenant-rewrite, unchanged.
                 import asyncio as _asyncio_ranking
-                _ranking_task = _asyncio_ranking.create_task(_run_ranking_pipeline(tenant_id, pool))
+                _ranking_task = _asyncio_ranking.create_task(_run_research_only(tenant_id, pool))
                 _background_tasks.add(_ranking_task)
                 _ranking_task.add_done_callback(_background_tasks.discard)
         except Exception as _e:

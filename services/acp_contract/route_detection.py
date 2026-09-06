@@ -51,27 +51,33 @@ SHARED_ENOUGH = 0.3
 
 @dataclass(frozen=True)
 class Moment:
-    """One ranked, non-excluded Segment, as a Route needs to see it — for ONE tour."""
+    """One ranked, non-excluded Segment, as a Route needs to see it — for ONE tour.
+
+    AA-545 — no `score` field. Route composition (which days/Segments form a journey) never
+    read `atom_ranking.total_rank` values, only `excluded_reason IS NULL` membership (STEP0 Q2)
+    — and that flag doesn't vary by market (`classify_exclusion()` is pure place/action text, no
+    demand signal), so Route needs no market context to build a platform-wide-correct Route at
+    all. Ordering/scoring for DISPLAY is computed at read time instead (`services/acp_shared/
+    slate.py`, AA-545 Q3).
+    """
 
     segment_id: str
     tour_id: str
     day: int
     place: str
-    score: int  # atom_ranking.total_rank -- lower is better (rank-sum, AA-515)
 
 
 @dataclass(frozen=True)
 class Route:
-    """Consecutive days of one tour, and the ranked Segments along them."""
+    """Consecutive days of one tour, and the ranked Segments along them. Platform-wide (AA-545)
+    — no `tenant_id`, no `score` (see `Moment`'s own docstring)."""
 
     route_id: str
-    tenant_id: str
     tour_id: str
     first_day: int
     last_day: int
     segment_ids: tuple[str, ...]
     places: tuple[str, ...]
-    score: int
     hub_name: str = ""
     hub_id: str | None = None
 
@@ -80,14 +86,14 @@ class Route:
         return self.last_day - self.first_day + 1
 
 
-def derive_routes(tenant_id: str, moments: Iterable[Moment]) -> list[Route]:
-    """Every journey in one tenant's ranked inventory. Same moments in, same Routes out.
+def derive_routes(moments: Iterable[Moment]) -> list[Route]:
+    """Every journey in the platform's ranked inventory. Same moments in, same Routes out.
 
-    Score is the mean of the member moments' total_rank, rounded — a strong run is not
-    outranked by a longer weaker one, a weak tail is not hidden by a strong opening. Sorted
-    ascending (lowest/best total_rank first), matching the rank-sum convention (AA-515:
-    "lowest total wins"). `hub_id`/`hub_name` are resolved separately, after family detection
-    — every Route here starts with `hub_name=""`.
+    AA-545 — platform-wide (no `tenant_id` in `route_id`), no `score`. Sorted by `route_id`
+    alone (was: score-then-route_id) — deterministic, but carries no ranking meaning of its own;
+    a reader wanting "best first" computes that itself from `atom_ranking` for its own market
+    (`hub_id`/`hub_name` are resolved separately, after family detection — every Route here
+    starts with `hub_name=""`).
     """
     by_tour: dict[str, list[Moment]] = {}
     for moment in moments:
@@ -102,16 +108,14 @@ def derive_routes(tenant_id: str, moments: Iterable[Moment]) -> list[Route]:
                 continue
             first, last = min(days), max(days)
             routes.append(Route(
-                route_id=f"{tenant_id}:{tour_id}:{first}-{last}",
-                tenant_id=tenant_id,
+                route_id=f"{tour_id}:{first}-{last}",
                 tour_id=tour_id,
                 first_day=first,
                 last_day=last,
                 segment_ids=tuple(m.segment_id for m in run),
                 places=places,
-                score=round(sum(m.score for m in run) / len(run)),
             ))
-    return sorted(routes, key=lambda route: (route.score, route.route_id))
+    return sorted(routes, key=lambda route: route.route_id)
 
 
 def _runs(held: list[Moment]) -> list[list[Moment]]:
@@ -230,15 +234,19 @@ def journey_name(places: Sequence[str], limit: int = 4) -> str:
 
 # ── DB-facing wrappers (impure) ─────────────────────────────────────────────────────────────
 
-async def run_route_detection(tenant_id: str, pool) -> dict:
-    """Rebuild acp_contract.route for one tenant — VERSIONED (AA-532), not DELETE+INSERT-whole
+async def run_route_detection(pool) -> dict:
+    """Rebuild acp_contract.route platform-wide — VERSIONED (AA-532), not DELETE+INSERT-whole
     (AA-510's original behavior, matching the origin's own `_store_routes()`, "derived, never
     accumulated"). Changed 05/09/2026 after a real, live FK violation: `acp_shared.subject.
     route_id` (migration 133, AA-511) is a real FK into this table with NO ACTION on delete — a
     tenant with an active Subject picking a Route that a re-run then deletes made the whole
     rebuild fail (docs/implementation-notes/AA-532.md has the full trace).
 
-    A route's identity is (tenant_id, tour_id, first_day, last_day). Per identity, this run:
+    AA-545 — no `tenant_id` parameter, no per-tenant scoping: a route's identity is now
+    `(tour_id, first_day, last_day)` alone. Reads platform-wide `atom_ranking`/`atom_segment`/
+    `route`/`hub`; needs no market context at all (STEP0 Q2 confirmed composition only depends on
+    `excluded_reason IS NULL` membership, which doesn't vary by market — see `Moment`'s own
+    docstring). Per identity, this run:
       - leaves it alone if the newly-derived Route is byte-for-byte the same as the current row
         (no write at all — "tránh version rác mỗi lần chạy", the build prompt's own ask);
       - supersedes the current row (`superseded_at = now()`, never deleted) and inserts a new
@@ -253,44 +261,46 @@ async def run_route_detection(tenant_id: str, pool) -> dict:
 
     Reads only non-excluded (`excluded_reason IS NULL`) atom_ranking rows — the transit/
     unnamed-place gate (ADR 0019/0020) already ran one layer down (AA-515) and is not
-    re-applied here.
+    re-applied here. Dedupes the per-market fan-out (a (tour_id, segment_id) pair now has up to
+    6 `atom_ranking` rows, one per finite market) down to distinct ranked pairs FIRST — exclusion
+    doesn't vary by market, so any one of them agrees.
     """
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT ar.segment_id, ar.tour_id::text AS tour_id, ar.total_rank,
+            SELECT ar.segment_id, ar.tour_id::text AS tour_id,
                    asg.canonical_place, asg.canonical_action,
                    MIN(ta.itinerary_day) AS day
-            FROM acp_contract.atom_ranking ar
+            FROM (
+                SELECT DISTINCT segment_id, tour_id FROM acp_contract.atom_ranking
+                WHERE excluded_reason IS NULL
+            ) ar
             JOIN acp_contract.atom_segment asg ON asg.segment_id = ar.segment_id
             JOIN acp_contract.atom_segment_member asm ON asm.segment_id = ar.segment_id
             JOIN acp_contract.tour_atoms ta
                 ON ta.atom_id = asm.atom_id AND ta.tour_id = ar.tour_id
-            WHERE ar.tenant_id = $1::uuid AND ar.excluded_reason IS NULL
-              AND ta.itinerary_day IS NOT NULL AND NOT ta.deleted AND NOT ta.is_empty_marker
-            GROUP BY ar.segment_id, ar.tour_id, ar.total_rank, asg.canonical_place,
-                     asg.canonical_action
-        """, tenant_id)
+            WHERE ta.itinerary_day IS NOT NULL AND NOT ta.deleted AND NOT ta.is_empty_marker
+            GROUP BY ar.segment_id, ar.tour_id, asg.canonical_place, asg.canonical_action
+        """)
 
         old_hubs = await conn.fetch("""
             SELECT h.hub_id, h.hub_name, array_agg(DISTINCT r.tour_id::text) AS tour_ids
             FROM acp_contract.hub h
             JOIN acp_contract.route r ON r.hub_id = h.hub_id AND r.superseded_at IS NULL
-            WHERE h.tenant_id = $1::uuid
             GROUP BY h.hub_id, h.hub_name
-        """, tenant_id)
+        """)
 
-        # AA-532 — the CURRENT route per identity (tenant_id, tour_id, first_day, last_day), to
-        # diff this run's fresh derivation against instead of blindly deleting everything.
+        # AA-532 — the CURRENT route per identity (tour_id, first_day, last_day), to diff this
+        # run's fresh derivation against instead of blindly deleting everything.
         current_routes = await conn.fetch("""
             SELECT route_id, tour_id::text AS tour_id, hub_id, hub_name, ordered_segment_ids,
-                   first_day, last_day, score, version
+                   first_day, last_day, version
             FROM acp_contract.route
-            WHERE tenant_id = $1::uuid AND superseded_at IS NULL
-        """, tenant_id)
+            WHERE superseded_at IS NULL
+        """)
 
     moments = [
         Moment(segment_id=r["segment_id"], tour_id=r["tour_id"], day=r["day"],
-               place=r["canonical_place"], score=r["total_rank"])
+               place=r["canonical_place"])
         for r in rows
     ]
     tour_segments: dict[str, set[str]] = defaultdict(set)
@@ -299,7 +309,7 @@ async def run_route_detection(tenant_id: str, pool) -> dict:
         tour_segments[r["tour_id"]].add(r["segment_id"])
         tour_steps[r["tour_id"]].append((r["day"], r["canonical_place"], r["canonical_action"]))
 
-    routes = derive_routes(tenant_id, moments)
+    routes = derive_routes(moments)
     family_of = families(dict(tour_segments), SHARED_ENOUGH)
 
     routes_by_tour: dict[str, list[Route]] = defaultdict(list)
@@ -337,7 +347,12 @@ async def run_route_detection(tenant_id: str, pool) -> dict:
 
             candidates = routes_by_tour.get(family_key, [])
             if candidates:
-                canonical_places = list(min(candidates, key=lambda r: r.score).places)
+                # AA-545 Q3 condition 3 — market-independent tie-break (was: min by score,
+                # which no longer exists on Route at all): most member Segments first, then
+                # alphabetically by route_id for a total, deterministic order.
+                canonical_places = list(
+                    min(candidates, key=lambda r: (-len(r.segment_ids), r.route_id)).places
+                )
             else:
                 canonical_places = [
                     p for _d, p, _a in sorted(tour_steps.get(family_key, []))
@@ -355,9 +370,9 @@ async def run_route_detection(tenant_id: str, pool) -> dict:
                 hubs_reused += 1
             else:
                 new_hub_id = await conn.fetchval("""
-                    INSERT INTO acp_contract.hub (tenant_id, hub_name)
-                    VALUES ($1::uuid, $2) RETURNING hub_id
-                """, tenant_id, name)
+                    INSERT INTO acp_contract.hub (hub_name)
+                    VALUES ($1) RETURNING hub_id
+                """, name)
                 resolved_hub[family_key] = (str(new_hub_id), name)
                 hubs_created += 1
 
@@ -394,21 +409,19 @@ async def run_route_detection(tenant_id: str, pool) -> dict:
             list(route.segment_ids) == list(old_segments)
             and route.hub_id == (str(old["hub_id"]) if old["hub_id"] else None)
             and route.hub_name == old["hub_name"]
-            and route.score == old["score"]
         )
 
     to_supersede: list[str] = []  # route_id of every current row this run replaces or removes
-    to_insert: list[tuple] = []   # (route_id, tenant_id, tour_id, hub_id, hub_name, segment_ids
-    #                                json, first_day, last_day, score, version)
+    to_insert: list[tuple] = []   # (route_id, tour_id, hub_id, hub_name, segment_ids json,
+    #                                first_day, last_day, version)
     unchanged_count = 0
 
     for identity, route in finished_by_identity.items():
         old = existing_by_identity.get(identity)
         if old is None:
             to_insert.append((
-                route.route_id, route.tenant_id, route.tour_id, route.hub_id, route.hub_name,
-                json.dumps(list(route.segment_ids)), route.first_day, route.last_day,
-                route.score, 1,
+                route.route_id, route.tour_id, route.hub_id, route.hub_name,
+                json.dumps(list(route.segment_ids)), route.first_day, route.last_day, 1,
             ))
         elif _unchanged(route, old):
             unchanged_count += 1
@@ -417,9 +430,9 @@ async def run_route_detection(tenant_id: str, pool) -> dict:
             new_version = old["version"] + 1
             versioned_id = f"{route.route_id}:v{new_version}"
             to_insert.append((
-                versioned_id, route.tenant_id, route.tour_id, route.hub_id, route.hub_name,
+                versioned_id, route.tour_id, route.hub_id, route.hub_name,
                 json.dumps(list(route.segment_ids)), route.first_day, route.last_day,
-                route.score, new_version,
+                new_version,
             ))
 
     # An identity that existed before but this run's derivation no longer produces at all — the
@@ -440,9 +453,9 @@ async def run_route_detection(tenant_id: str, pool) -> dict:
             if to_insert:
                 await conn.executemany("""
                     INSERT INTO acp_contract.route
-                        (route_id, tenant_id, tour_id, hub_id, hub_name, ordered_segment_ids,
-                         first_day, last_day, score, version)
-                    VALUES ($1, $2::uuid, $3::uuid, $4::uuid, $5, $6::jsonb, $7, $8, $9, $10)
+                        (route_id, tour_id, hub_id, hub_name, ordered_segment_ids,
+                         first_day, last_day, version)
+                    VALUES ($1, $2::uuid, $3::uuid, $4, $5::jsonb, $6, $7, $8)
                 """, to_insert)
 
     return {
@@ -469,21 +482,25 @@ async def create_route_pick(
     `acp_shared.subject` this issue builds — the two are a different grain/purpose entirely, not
     a compatibility rename.
 
-    Returns None if the Route no longer exists for this tenant, OR (AA-532) if it exists but has
-    since been superseded by a newer version — the caller's job to surface as "pick again", not
-    this function's; a marketer should never snapshot a Route re-detection has already moved past
+    Returns None if the Route no longer exists, OR (AA-532) if it exists but has since been
+    superseded by a newer version — the caller's job to surface as "pick again", not this
+    function's; a marketer should never snapshot a Route re-detection has already moved past
     even though the old row itself is never deleted. Re-joins the underlying Segments at snapshot
     time (best-effort — a partial/empty join degrades the snapshot's `stops` detail but never
     fails route_pick creation) so the snapshot is a human-readable, self-sufficient record that no
     longer depends on anything staying in place afterward.
+
+    `tenant_id` here is the PICKING tenant, written onto the (still per-tenant, unchanged by
+    AA-545) `route_pick` row it creates — NOT a filter on `route` itself, which is platform-wide
+    and carries no tenant column at all.
     """
     async with pool.acquire() as conn:
         route = await conn.fetchrow("""
             SELECT route_id, tour_id, hub_id, hub_name, ordered_segment_ids,
-                   first_day, last_day, score
+                   first_day, last_day
             FROM acp_contract.route
-            WHERE route_id = $1 AND tenant_id = $2::uuid AND superseded_at IS NULL
-        """, route_id, tenant_id)
+            WHERE route_id = $1 AND superseded_at IS NULL
+        """, route_id)
         if not route:
             return None
 
@@ -530,7 +547,6 @@ def _build_snapshot(route, segment_ids: list[str], step_rows) -> dict:
         "ordered_segment_ids": segment_ids,
         "first_day": route["first_day"],
         "last_day": route["last_day"],
-        "score": route["score"],
         "places": list(dict.fromkeys(s.place for s in resolved_stops)),
         "stops": [
             {"day": s.day, "place": s.place, "actions": list(s.actions)}

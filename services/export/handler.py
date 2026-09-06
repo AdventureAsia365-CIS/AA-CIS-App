@@ -65,19 +65,38 @@ async def _run_a3_atomize_background(tour_id: str, rewritten: dict, country: str
         )
         logger.info("a3_atomize_done", tour_id=tour_id, result=result)
 
-        # AA-526 — Segment-matching is DELIBERATELY NOT run here. STEP0 initially assumed (per
-        # the issue's own text) that it was purely owner_scope-agnostic and safe to run once,
-        # globally, right after atomize — checking the actual schema disproved that:
-        # acp_contract.atom_segment.tenant_id is `UUID NOT NULL REFERENCES shared.tenants
-        # (tenant_id)` (migration 129), a REAL FK — calling run_segment_matching("platform", ...)
-        # would fail that FK/UUID cast outright, and even if it didn't, services/acp_contract/
-        # atom_ranking.py::run_atom_ranking() reads Segments scoped `WHERE asg.tenant_id =
-        # $1::uuid` for the CALLING tenant specifically — a Segment row tagged "platform" would
-        # be invisible to every real tenant's own ranking read regardless. Confirmed with Nghiệp
-        # (05/09/2026): atoms are shared platform-wide, but Segment/Route/Subject stay
-        # PER-TENANT products built from them once a tenant actually picks/rewrites a tour — not
-        # a single global Segment set. See docs/implementation-notes/AA-526.md for the full
-        # finding and where Segment-matching's real trigger point ended up instead.
+        # AA-545 — Segment/Score/Route now DO run here, platform-wide, right after atomize.
+        # AA-526's own note (kept below, historical) explains why this was blocked at the time:
+        # `atom_segment.tenant_id NOT NULL` (migration 129) would have failed the FK/UUID cast
+        # outright, and `atom_ranking.py` read Segments `WHERE tenant_id = $1::uuid` for one
+        # tenant specifically. AA-545 (migration 146) removed both blockers — Segment/Score/Route
+        # are genuinely platform-wide now (ADR-0001/0003), so this is their real, permanent
+        # trigger point, not a workaround.
+        #
+        # AA-526's original note, for history: "Segment-matching is DELIBERATELY NOT run here...
+        # Segment/Route/Subject stay PER-TENANT products... not a single global Segment set." —
+        # superseded by AA-545; Segment/Score/Route are that single global set now, Slate/Subject
+        # (T7) remain the per-tenant layer on top (unchanged, out of AA-545's scope).
+        try:
+            from services.acp_contract.segment_matching import run_segment_matching
+            segment_result = await run_segment_matching(tour_id, pool)
+            logger.info("a3_segment_matching_done", tour_id=tour_id, result=segment_result)
+
+            from services.acp_contract.atom_ranking import run_atom_ranking
+            from services.seo_intelligence.seed_builder import DFS_LOCATION_MAP
+            ranking_results = {}
+            for market_code in DFS_LOCATION_MAP:
+                ranking_results[market_code] = await run_atom_ranking(market_code, pool)
+            logger.info("a3_ranking_done", tour_id=tour_id, result=ranking_results)
+
+            from services.acp_contract.route_detection import run_route_detection
+            route_result = await run_route_detection(pool)
+            logger.info("a3_route_detection_done", tour_id=tour_id, result=route_result)
+        except Exception:
+            # Best-effort, same precedent as every other step in this function — a Segment/Score/
+            # Route failure must never be mistaken for atomize (already logged done above) or the
+            # publish itself having failed.
+            logger.warning("a3_segment_score_route_failed", tour_id=tour_id, exc_info=True)
     except Exception as exc:
         # Best-effort, same precedent as this file's own ACP-S1 manifest fanout (process_export()
         # below) — atomize failing must never be mistaken for the publish itself having failed;

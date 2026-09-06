@@ -37,6 +37,19 @@ def get_pool(request: Request):
     return request.app.state.pool
 
 
+async def _tenant_tour_ids(tenant_id: str, conn) -> list:
+    """AA-545 — Route/Hub are platform-wide now (no `tenant_id` column); scope this router's
+    reads to tours the tenant has actually picked, same join `services/acp_shared/slate.py`'s
+    own `_tenant_tour_ids()` uses."""
+    rows = await conn.fetch("""
+        SELECT pt.tour_id
+        FROM gold_aa_internal.tenant_tour_versions ttv
+        JOIN gold_aa_internal.published_tours pt ON pt.id = ttv.published_tour_id
+        WHERE ttv.tenant_id = $1::uuid
+    """, tenant_id)
+    return [r["tour_id"] for r in rows]
+
+
 def _route_row_to_dict(row) -> dict:
     segment_ids = row["ordered_segment_ids"]
     if isinstance(segment_ids, str):
@@ -49,7 +62,7 @@ def _route_row_to_dict(row) -> dict:
         "ordered_segment_ids": segment_ids,
         "first_day": row["first_day"],
         "last_day": row["last_day"],
-        "score": row["score"],
+        "score": float(row["score"]) if row["score"] is not None else None,
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
     }
 
@@ -57,20 +70,50 @@ def _route_row_to_dict(row) -> dict:
 @router.get("/routes")
 async def list_routes(request: Request, tenant=Depends(get_tenant)):
     """AA-532: `superseded_at IS NULL` — a tenant only ever picks the CURRENT version of a Route
-    identity (tenant_id, tour_id, first_day, last_day); an older version stays in the table
-    (never deleted, only superseded) so any Subject already pointing at it keeps resolving, but
-    it must not be offered here as if it were still pick-able."""
+    identity (tour_id, first_day, last_day); an older version stays in the table (never deleted,
+    only superseded) so any Subject already pointing at it keeps resolving, but it must not be
+    offered here as if it were still pick-able.
+
+    AA-545 — `route` no longer stores `score`/`tenant_id`; this endpoint applies the same
+    read-time `AVG(total_rank)`-by-market computation `services/acp_shared/slate.py::
+    _fetch_route_candidates()` already does (0 real frontend traffic on this router, confirmed
+    before touching it — fixed anyway so the next real call doesn't 500 on a dropped column)."""
     tenant_id = tenant["sub"]
     pool = get_pool(request)
     async with pool.acquire() as conn:
+        tour_ids = await _tenant_tour_ids(tenant_id, conn)
+        if not tour_ids:
+            return {"routes": []}
+        from services.acp_shared.slate import _tenant_market_codes
+        markets = await _tenant_market_codes(tenant_id, conn)
         rows = await conn.fetch("""
-            SELECT route_id, tour_id, hub_id, hub_name, ordered_segment_ids,
-                   first_day, last_day, score, created_at
-            FROM acp_contract.route
-            WHERE tenant_id = $1::uuid AND superseded_at IS NULL
-            ORDER BY score ASC, route_id ASC
-        """, tenant_id)
-    return {"routes": [_route_row_to_dict(r) for r in rows]}
+            WITH per_market AS (
+                SELECT r.route_id, r.tour_id, r.hub_id, r.hub_name, r.ordered_segment_ids,
+                       r.first_day, r.last_day, r.created_at, ar.market,
+                       AVG(ar.total_rank) AS avg_rank
+                FROM acp_contract.route r
+                JOIN acp_contract.atom_ranking ar
+                    ON ar.tour_id = r.tour_id
+                   AND ar.segment_id = ANY (
+                           SELECT jsonb_array_elements_text(r.ordered_segment_ids)
+                       )
+                   AND ar.excluded_reason IS NULL
+                   AND ar.market = ANY($2::text[])
+                WHERE r.superseded_at IS NULL AND r.tour_id = ANY($1::uuid[])
+                GROUP BY r.route_id, r.tour_id, r.hub_id, r.hub_name, r.ordered_segment_ids,
+                         r.first_day, r.last_day, r.created_at, ar.market
+            )
+            SELECT DISTINCT ON (route_id)
+                   route_id, tour_id, hub_id, hub_name, ordered_segment_ids,
+                   first_day, last_day, created_at, avg_rank AS score
+            FROM per_market
+            ORDER BY route_id, avg_rank ASC
+        """, tour_ids, markets)
+    routes = sorted(
+        (_route_row_to_dict(r) for r in rows),
+        key=lambda r: (r["score"] if r["score"] is not None else float("inf"), r["route_id"]),
+    )
+    return {"routes": routes}
 
 
 @router.get("/hubs")
@@ -78,6 +121,9 @@ async def list_hubs(request: Request, tenant=Depends(get_tenant)):
     tenant_id = tenant["sub"]
     pool = get_pool(request)
     async with pool.acquire() as conn:
+        tour_ids = await _tenant_tour_ids(tenant_id, conn)
+        if not tour_ids:
+            return {"hubs": []}
         rows = await conn.fetch("""
             SELECT h.hub_id, h.hub_name, h.created_at, h.updated_at,
                    COUNT(r.route_id) AS route_count,
@@ -86,12 +132,15 @@ async def list_hubs(request: Request, tenant=Depends(get_tenant)):
             FROM acp_contract.hub h
             -- AA-532: only a Route's CURRENT version counts toward route_count/tour_ids — a
             -- superseded row staying in the table (never deleted) must not double-count or keep
-            -- a Hub looking like it still covers a tour whose Route moved on.
-            LEFT JOIN acp_contract.route r ON r.hub_id = h.hub_id AND r.superseded_at IS NULL
-            WHERE h.tenant_id = $1::uuid
+            -- a Hub looking like it still covers a tour whose Route moved on. AA-545: scoped to
+            -- this tenant's OWN picked tours (hub itself is platform-wide, no tenant_id left).
+            LEFT JOIN acp_contract.route r
+                ON r.hub_id = h.hub_id AND r.superseded_at IS NULL
+               AND r.tour_id = ANY($1::uuid[])
             GROUP BY h.hub_id, h.hub_name, h.created_at, h.updated_at
+            HAVING COUNT(r.route_id) > 0
             ORDER BY h.updated_at DESC
-        """, tenant_id)
+        """, tour_ids)
     return {"hubs": [
         {
             "hub_id": str(r["hub_id"]),

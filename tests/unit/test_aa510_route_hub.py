@@ -1,5 +1,10 @@
 """AA-510: Route detection (derive_routes/_runs/_spans), Hub family detection (families),
-Subject snapshot presentation (stops/journey_name). Pure-function tests only — no DB, no HTTP."""
+Subject snapshot presentation (stops/journey_name). Pure-function tests only — no DB, no HTTP.
+
+AA-545 — `Moment`/`Route` drop `score`/`tenant_id` (platform-wide redesign; Route composition
+never needed a score value, only `derive_routes()`'s own now-removed sort did — see
+docs/implementation-notes/AA-545.md and services/acp_contract/route_detection.py's docstrings).
+"""
 
 from services.acp_contract.route_detection import (
     LEAST_DAYS,
@@ -13,35 +18,30 @@ from services.acp_contract.route_detection import (
     stops,
 )
 
-TENANT = "11111111-1111-1111-1111-111111111111"
 
-
-def _m(segment_id, tour_id, day, place, score=1):
-    return Moment(segment_id=segment_id, tour_id=tour_id, day=day, place=place, score=score)
+def _m(segment_id, tour_id, day, place):
+    return Moment(segment_id=segment_id, tour_id=tour_id, day=day, place=place)
 
 
 # ── derive_routes / _runs / _spans ──────────────────────────────────────────────────────────
 
 
 def test_derive_routes_basic_consecutive_days_two_places():
-    moments = [
-        _m("s1", "t1", 1, "Kyoto", score=2),
-        _m("s2", "t1", 2, "Magome", score=4),
-    ]
-    routes = derive_routes(TENANT, moments)
+    moments = [_m("s1", "t1", 1, "Kyoto"), _m("s2", "t1", 2, "Magome")]
+    routes = derive_routes(moments)
     assert len(routes) == 1
     r = routes[0]
     assert r.tour_id == "t1"
     assert r.first_day == 1 and r.last_day == 2
     assert r.places == ("Kyoto", "Magome")
     assert r.segment_ids == ("s1", "s2")
-    assert r.score == 3  # mean(2, 4) rounded
 
 
 def test_derive_routes_route_id_is_deterministic_composite_not_hash_or_uuid():
+    """AA-545 — no tenant_id in the composite anymore: tour_id:first-last."""
     moments = [_m("s1", "t1", 1, "Kyoto"), _m("s2", "t1", 2, "Magome")]
-    routes = derive_routes(TENANT, moments)
-    assert routes[0].route_id == f"{TENANT}:t1:1-2"
+    routes = derive_routes(moments)
+    assert routes[0].route_id == "t1:1-2"
 
 
 def test_derive_routes_gap_breaks_the_run():
@@ -50,7 +50,7 @@ def test_derive_routes_gap_breaks_the_run():
         _m("s1", "t1", 1, "Kyoto"), _m("s2", "t1", 2, "Magome"),
         _m("s3", "t1", 5, "Tsumago"), _m("s4", "t1", 6, "Matsumoto"),
     ]
-    routes = derive_routes(TENANT, moments)
+    routes = derive_routes(moments)
     assert len(routes) == 2
     assert (routes[0].first_day, routes[0].last_day) in {(1, 2), (5, 6)}
     spans = {(r.first_day, r.last_day) for r in routes}
@@ -59,13 +59,13 @@ def test_derive_routes_gap_breaks_the_run():
 
 def test_derive_routes_drops_single_day_span():
     moments = [_m("s1", "t1", 1, "Kyoto")]
-    assert derive_routes(TENANT, moments) == []
+    assert derive_routes(moments) == []
 
 
 def test_derive_routes_drops_single_place_span():
     # 2 consecutive days but only 1 distinct place -- a stay, not a journey.
     moments = [_m("s1", "t1", 1, "Kyoto"), _m("s2", "t1", 2, "Kyoto")]
-    assert derive_routes(TENANT, moments) == []
+    assert derive_routes(moments) == []
 
 
 def test_derive_routes_least_days_and_places_constants():
@@ -79,7 +79,7 @@ def test_derive_routes_long_run_cut_into_most_days_spans():
     # IS exactly LEAST_DAYS=2, so it stays its own span here; use 8 days to force a genuine
     # trailing short (1-day) span that must fold.
     moments = [_m(f"s{d}", "t1", d, f"Place{d}") for d in range(1, 9)]  # days 1..8
-    routes = derive_routes(TENANT, moments)
+    routes = derive_routes(moments)
     spans = sorted((r.first_day, r.last_day) for r in routes)
     # cuts: [1..5], [6,7,8] (len 3 -- not < LEAST_DAYS=2, stays separate)
     assert spans == [(1, 5), (6, 8)]
@@ -88,18 +88,20 @@ def test_derive_routes_long_run_cut_into_most_days_spans():
 def test_derive_routes_trailing_single_day_span_folds_into_previous():
     # 6 consecutive days -- cuts would be [1..5], [6] (len 1 < LEAST_DAYS) -> folds into [1..6].
     moments = [_m(f"s{d}", "t1", d, f"Place{d}") for d in range(1, 7)]
-    routes = derive_routes(TENANT, moments)
+    routes = derive_routes(moments)
     assert len(routes) == 1
     assert (routes[0].first_day, routes[0].last_day) == (1, 6)
 
 
-def test_derive_routes_sorted_ascending_by_score_lowest_first():
+def test_derive_routes_sorted_by_route_id():
+    """AA-545 — Route carries no score anymore (composition never needed one, STEP0 Q2); the
+    only ordering `derive_routes()` itself still promises is a deterministic one, by route_id."""
     moments = [
-        _m("s1", "weak", 1, "A", score=9), _m("s2", "weak", 2, "B", score=9),
-        _m("s3", "strong", 1, "A", score=1), _m("s4", "strong", 2, "B", score=1),
+        _m("s1", "weak", 1, "A"), _m("s2", "weak", 2, "B"),
+        _m("s3", "strong", 1, "A"), _m("s4", "strong", 2, "B"),
     ]
-    routes = derive_routes(TENANT, moments)
-    assert [r.tour_id for r in routes] == ["strong", "weak"]
+    routes = derive_routes(moments)
+    assert [r.tour_id for r in routes] == sorted(r.tour_id for r in routes)
 
 
 def test_derive_routes_groups_independently_per_tour():
@@ -107,7 +109,7 @@ def test_derive_routes_groups_independently_per_tour():
         _m("s1", "t1", 1, "Kyoto"), _m("s2", "t1", 2, "Magome"),
         _m("s3", "t2", 1, "Sapporo"), _m("s4", "t2", 2, "Otaru"),
     ]
-    routes = derive_routes(TENANT, moments)
+    routes = derive_routes(moments)
     assert {r.tour_id for r in routes} == {"t1", "t2"}
 
 
