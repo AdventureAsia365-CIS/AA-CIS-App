@@ -24,6 +24,17 @@
 // `segments`/`score`/`routes` (each also gained a `market` filter + a section-specific filter +
 // pagination + `tour_id`/`tour_name` on every row); `slate` is unchanged. New
 // `GET /admin/dashboard/summary` feeds the header stat bar.
+//
+// AA-554 (07/09/2026, this build) — page title/sidebar label renamed "Social Content" (route
+// unchanged); Tours sidebar (Atomize) is now sticky + taller + "Load more" paginated, no longer a
+// fixed 640px box; bulk-select + "Star selected" added to AtomCard; Segment rows now grouped by
+// segment_id with numbering + a clickable Route badge (client-side cross-filter into Route/Hub);
+// Score section gained a formula explainer, Demand tooltip, row numbering, and a link into
+// Segment (client-side `segment_id` cross-filter); a shared MARKET_NAMES legend covers Segment +
+// Score. All 8 empty-state DB-table/file/issue-number leaks AA-552 found are rewritten in plain
+// English (see this task's Linear comment for the grep before/after). Route/Hub's own redesign
+// (split Route/Hub tables) and Slate's used/cut wiring are OUT of this build — AA-554 explicitly
+// deferred those two pending a decision, see Linear.
 import { useState, useEffect, useCallback } from "react";
 import {
   Star, Trash2, ChevronDown, ChevronRight, Layers, Milestone, Puzzle,
@@ -34,6 +45,27 @@ import { A, serif, mono, sans, Card, Badge, Btn, LoadingScreen } from "../_compo
 import { fetchJson, EmptyState, ErrorState, AuditTable, Col } from "../_components/auditPanels";
 
 const MARKETS = ["US", "UK", "AU", "DE", "FR", "NL"];
+
+// AA-554 E.13 — shared market-code legend, used by Segment + Score (Route/Hub's own copy of this
+// is part of the deferred G redesign, not added here).
+const MARKET_NAMES: Record<string, string> = {
+  US: "United States", UK: "United Kingdom", AU: "Australia",
+  DE: "Germany", FR: "France", NL: "Netherlands",
+};
+
+function MarketLegend() {
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 10, fontSize: 11, color: A.muted2, marginBottom: 10 }}>
+      {Object.entries(MARKET_NAMES).map(([code, name]) => (
+        <span key={code}><strong style={{ color: A.muted }}>{code}</strong> = {name}</span>
+      ))}
+    </div>
+  );
+}
+
+function marketTitle(code: string | null): string | undefined {
+  return code ? MARKET_NAMES[code] : undefined;
+}
 
 // ── Shared types ─────────────────────────────────────────────────────────────
 
@@ -113,6 +145,7 @@ interface Atom {
 
 const DIST_COLOR: Record<string, "green" | "amber" | "gray"> = { HIGH: "green", MED: "amber", LOW: "gray" };
 const PAGE_SIZE = 50;
+const TOURS_PAGE_SIZE = 30; // AA-554 B.6 — Tours sidebar "Load more" window size
 
 function isLegacyScope(scope: string): boolean { return scope !== "platform"; }
 
@@ -135,6 +168,12 @@ function AtomizeSection({ summary, summaryLoading, selectedTour, onTourChange, o
   const [atomsError, setAtomsError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [collapsedSegments, setCollapsedSegments] = useState<Set<string>>(new Set());
+  // AA-554 B.6 — Tours sidebar "Load more" window (client-side; `summary.by_tour` already
+  // arrives whole from GET /admin/atoms/summary, no backend pagination to wire).
+  const [toursShown, setToursShown] = useState(TOURS_PAGE_SIZE);
+  // AA-554 D.9 — bulk-star selection, cleared whenever the atom list itself reloads.
+  const [selectedAtomIds, setSelectedAtomIds] = useState<Set<string>>(new Set());
+  const [bulkStarring, setBulkStarring] = useState(false);
 
   const loadAtoms = useCallback((offset: number, append: boolean) => {
     if (append) setLoadingMore(true); else setAtomsLoading(true);
@@ -154,7 +193,7 @@ function AtomizeSection({ summary, summaryLoading, selectedTour, onTourChange, o
       .finally(() => { setAtomsLoading(false); setLoadingMore(false); });
   }, [distinctiveness, unreviewedOnly, selectedTour, ownerScopeClass, lifecycleFilter]);
 
-  useEffect(() => { loadAtoms(0, false); }, [loadAtoms]);
+  useEffect(() => { loadAtoms(0, false); setSelectedAtomIds(new Set()); }, [loadAtoms]);
 
   async function toggleStar(atom: Atom) {
     const next = !atom.starred;
@@ -173,6 +212,28 @@ function AtomizeSection({ summary, summaryLoading, selectedTour, onTourChange, o
       body: JSON.stringify({ deleted: true }),
     });
     onSummaryChange();
+  }
+
+  function toggleSelect(atomId: string) {
+    setSelectedAtomIds(prev => {
+      const next = new Set(prev);
+      next.has(atomId) ? next.delete(atomId) : next.add(atomId);
+      return next;
+    });
+  }
+
+  // AA-554 D.9 — bulk-star: confirmed safe via AA-552 mục 2e (star is a single boolean UPDATE,
+  // triggers no downstream recompute) — fired in parallel, same PATCH each single-star click uses.
+  async function starSelected() {
+    setBulkStarring(true);
+    const ids = Array.from(selectedAtomIds);
+    setAtoms(prev => prev.map(a => (selectedAtomIds.has(a.atom_id) ? { ...a, starred: true } : a)));
+    await Promise.all(ids.map(id => fetch(`/api/admin/atoms/${id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ starred: true }),
+    })));
+    setSelectedAtomIds(new Set());
+    setBulkStarring(false);
   }
 
   const breakdown = summary?.distinctiveness_breakdown ?? { HIGH: 0, MED: 0, LOW: 0 };
@@ -197,11 +258,16 @@ function AtomizeSection({ summary, summaryLoading, selectedTour, onTourChange, o
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "280px 1fr", gap: 18, alignItems: "start" }}>
-            <Card style={{ padding: 0, overflow: "hidden" }}>
+            {/* AA-554 B.4/B.5 — sticky (same `position: sticky, top: 0` pattern AA-551 already
+                proved works for the 01-05 section-nav, within this same page's outer scroll
+                container — see that inner-nav below for the identical mechanism) + taller
+                viewport-relative maxHeight (was a fixed 640px, too small for 74+ tours) with its
+                own internal scroll for the list itself. */}
+            <Card style={{ padding: 0, overflow: "hidden", position: "sticky", top: 0 }}>
               <div style={{ padding: "12px 16px", borderBottom: `1px solid ${A.line}`, fontSize: 12, fontWeight: 600, color: A.ink3, textTransform: "uppercase", letterSpacing: "0.06em" }}>
                 Tours ({summary?.by_tour.length ?? 0})
               </div>
-              <div style={{ maxHeight: 640, overflowY: "auto" }}>
+              <div style={{ maxHeight: "calc(100vh - 260px)", overflowY: "auto" }}>
                 <button onClick={() => onTourChange(null)} style={{
                   display: "block", width: "100%", textAlign: "left", padding: "10px 16px",
                   background: selectedTour === null ? A.bg : "transparent", border: "none",
@@ -210,7 +276,7 @@ function AtomizeSection({ summary, summaryLoading, selectedTour, onTourChange, o
                 }}>
                   All tours
                 </button>
-                {(summary?.by_tour ?? []).map(t => (
+                {(summary?.by_tour ?? []).slice(0, toursShown).map(t => (
                   <button key={t.tour_id} onClick={() => onTourChange(t.tour_id)} style={{
                     display: "block", width: "100%", textAlign: "left", padding: "10px 16px",
                     background: selectedTour === t.tour_id ? A.bg : "transparent", border: "none",
@@ -231,6 +297,15 @@ function AtomizeSection({ summary, summaryLoading, selectedTour, onTourChange, o
                     </div>
                   </button>
                 ))}
+                {(summary?.by_tour.length ?? 0) > toursShown && (
+                  <button onClick={() => setToursShown(n => n + TOURS_PAGE_SIZE)} style={{
+                    display: "block", width: "100%", textAlign: "center", padding: "10px 16px",
+                    background: "none", border: "none", borderTop: `1px solid ${A.line2}`,
+                    cursor: "pointer", fontFamily: sans, fontSize: 12, fontWeight: 600, color: A.gold,
+                  }}>
+                    Load more ({Math.min(toursShown, summary?.by_tour.length ?? 0)} / {summary?.by_tour.length})
+                  </button>
+                )}
               </div>
             </Card>
 
@@ -246,7 +321,10 @@ function AtomizeSection({ summary, summaryLoading, selectedTour, onTourChange, o
                 <select value={ownerScopeClass} onChange={e => setOwnerScopeClass(e.target.value)} style={selectStyle}>
                   <option value="">All owners</option>
                   <option value="platform">Platform only</option>
-                  <option value="legacy">Legacy tenant-owned only</option>
+                  {/* AA-554 C.7 — copy clarified (was "Legacy tenant-owned only"): the filter itself
+                      is meaningful (302 platform vs 75 legacy tenant-owned, AA-552 mục 2c) — only
+                      the label was ambiguous about WHY legacy rows still exist. */}
+                  <option value="legacy">Legacy tenant-owned only (pre-Sep 4 data, pending cleanup)</option>
                 </select>
                 <select value={lifecycleFilter} onChange={e => setLifecycleFilter(e.target.value)} style={selectStyle}>
                   <option value="">All lifecycle stages</option>
@@ -258,7 +336,21 @@ function AtomizeSection({ summary, summaryLoading, selectedTour, onTourChange, o
                   <input type="checkbox" checked={unreviewedOnly} onChange={e => setUnreviewedOnly(e.target.checked)} />
                   Unreviewed only
                 </label>
+                {/* AA-554 D.9 — bulk-star, visible once at least 1 atom is checked. */}
+                {selectedAtomIds.size > 0 && (
+                  <Btn variant="secondary" size="sm" disabled={bulkStarring} onClick={starSelected}>
+                    <Star size={12} /> {bulkStarring ? "Starring…" : `Star selected (${selectedAtomIds.size})`}
+                  </Btn>
+                )}
               </div>
+              {/* AA-554 C.8 — schema supports phasing_out/retired but every tour currently loaded
+                  is "active" — this note is computed from the real, currently-loaded Tours list
+                  (not hardcoded), so it disappears on its own the day a non-active tour exists. */}
+              {(summary?.by_tour.length ?? 0) > 0 && (summary?.by_tour ?? []).every(t => t.lifecycle_stage === "active") && (
+                <div style={{ fontSize: 11, color: A.muted2, marginTop: -8, marginBottom: 14 }}>
+                  All {summary?.by_tour.length} tours are currently Active — Phasing out/Retired not yet in use.
+                </div>
+              )}
 
               {atomsError ? <ErrorState message={atomsError} onRetry={() => loadAtoms(0, false)} /> :
                 atomsLoading ? <LoadingScreen msg="Loading atoms…" /> : atoms.length === 0 ? (
@@ -268,7 +360,8 @@ function AtomizeSection({ summary, summaryLoading, selectedTour, onTourChange, o
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   {groupBySegment(atoms).map(row =>
                     row.kind === "atom" ? (
-                      <AtomCard key={row.atom.atom_id} atom={row.atom} showTour={!selectedTour} onStar={toggleStar} onDelete={deleteAtom} />
+                      <AtomCard key={row.atom.atom_id} atom={row.atom} showTour={!selectedTour} onStar={toggleStar} onDelete={deleteAtom}
+                        selected={selectedAtomIds.has(row.atom.atom_id)} onToggleSelect={toggleSelect} />
                     ) : (
                       <SegmentGroup key={row.segmentId} place={row.place} action={row.action} atoms={row.atoms}
                         score={row.score} routeHubName={row.routeHubName} showTour={!selectedTour}
@@ -278,7 +371,8 @@ function AtomizeSection({ summary, summaryLoading, selectedTour, onTourChange, o
                           next.has(row.segmentId) ? next.delete(row.segmentId) : next.add(row.segmentId);
                           return next;
                         })}
-                        onStar={toggleStar} onDelete={deleteAtom} />
+                        onStar={toggleStar} onDelete={deleteAtom}
+                        selectedIds={selectedAtomIds} onToggleSelect={toggleSelect} />
                     )
                   )}
                 </div>
@@ -331,12 +425,16 @@ function groupBySegment(atoms: Atom[]): AtomRow[] {
   return rows;
 }
 
-function AtomCard({ atom, showTour, onStar, onDelete }: {
+function AtomCard({ atom, showTour, onStar, onDelete, selected, onToggleSelect }: {
   atom: Atom; showTour: boolean; onStar: (a: Atom) => void; onDelete: (a: Atom) => void;
+  selected: boolean; onToggleSelect: (atomId: string) => void;
 }) {
   return (
-    <Card style={{ padding: "14px 18px" }}>
+    <Card style={{ padding: "14px 18px", ...(selected ? { border: `1px solid ${A.gold}` } : {}) }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+        {/* AA-554 D.9 — bulk-select checkbox. */}
+        <input type="checkbox" checked={selected} onChange={() => onToggleSelect(atom.atom_id)}
+          style={{ marginTop: 3, flexShrink: 0, cursor: "pointer" }} title="Select for bulk star" />
         <div style={{ flex: 1, minWidth: 0 }}>
           {showTour && <div style={{ fontSize: 11, color: A.muted2, marginBottom: 4, fontFamily: mono }}>{atom.tour_name}</div>}
           <div style={{ fontSize: 13.5, color: A.body, lineHeight: 1.5 }}>{atom.text}</div>
@@ -349,7 +447,9 @@ function AtomCard({ atom, showTour, onStar, onDelete }: {
             {atom.recurrence != null && atom.recurrence > 0 && (
               <span style={{ fontSize: 10.5, fontFamily: mono, color: A.muted }}>↻ {atom.recurrence} itineraries</span>
             )}
-            <span style={{ fontSize: 10.5, fontFamily: mono, color: atom.usage_count > 0 ? A.ink3 : A.muted2 }}>
+            {/* AA-554 D.10 — tooltip explaining what "used" counts. */}
+            <span style={{ fontSize: 10.5, fontFamily: mono, color: atom.usage_count > 0 ? A.ink3 : A.muted2 }}
+              title="Number of times a tenant has selected this atom's Segment to write about (via T8 Angle Gate)">
               {atom.usage_count > 0 ? `✎ used ${atom.usage_count}×` : "not yet used"}
             </span>
           </div>
@@ -369,9 +469,10 @@ function AtomCard({ atom, showTour, onStar, onDelete }: {
   );
 }
 
-function SegmentGroup({ place, action, atoms, score, routeHubName, showTour, collapsed, onToggle, onStar, onDelete }: {
+function SegmentGroup({ place, action, atoms, score, routeHubName, showTour, collapsed, onToggle, onStar, onDelete, selectedIds, onToggleSelect }: {
   place: string; action: string; atoms: Atom[]; score: number | null; routeHubName: string | null;
   showTour: boolean; collapsed: boolean; onToggle: () => void; onStar: (a: Atom) => void; onDelete: (a: Atom) => void;
+  selectedIds: Set<string>; onToggleSelect: (atomId: string) => void;
 }) {
   return (
     <div style={{ border: `1px solid ${A.line}`, borderRadius: 10, overflow: "hidden" }}>
@@ -396,7 +497,8 @@ function SegmentGroup({ place, action, atoms, score, routeHubName, showTour, col
       </button>
       {!collapsed && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 8, background: A.card }}>
-          {atoms.map(atom => <AtomCard key={atom.atom_id} atom={atom} showTour={showTour} onStar={onStar} onDelete={onDelete} />)}
+          {atoms.map(atom => <AtomCard key={atom.atom_id} atom={atom} showTour={showTour} onStar={onStar} onDelete={onDelete}
+            selected={selectedIds.has(atom.atom_id)} onToggleSelect={onToggleSelect} />)}
         </div>
       )}
     </div>
@@ -450,45 +552,110 @@ interface SegmentRow {
   excluded_reason: string | null; route_id: string | null; route_hub_name: string | null;
 }
 
-function SegmentSection({ tourId, market }: { tourId: string | null; market: string }) {
+// AA-554 E.11 — one card per distinct segment_id (was one flat AuditTable row per
+// (Segment, Tour, Market)); numbered in display order within the current page.
+interface SegmentGroupDisplay {
+  segmentId: string; place: string; action: string; rows: SegmentRow[];
+  routeId: string | null; routeHubName: string | null;
+}
+
+function groupSegmentRows(rows: SegmentRow[]): SegmentGroupDisplay[] {
+  const order: string[] = [];
+  const map = new Map<string, SegmentRow[]>();
+  for (const r of rows) {
+    if (!map.has(r.segment_id)) { map.set(r.segment_id, []); order.push(r.segment_id); }
+    map.get(r.segment_id)!.push(r);
+  }
+  return order.map(id => {
+    const members = map.get(id)!;
+    const withRoute = members.find(m => m.route_hub_name != null);
+    return {
+      segmentId: id, place: members[0].canonical_place, action: members[0].canonical_action,
+      rows: members, routeId: withRoute?.route_id ?? null, routeHubName: withRoute?.route_hub_name ?? null,
+    };
+  });
+}
+
+function SegmentSection({ tourId, market, focusRouteId, focusSegmentId, onClearFocus, onNavigateToRoute }: {
+  tourId: string | null; market: string; focusRouteId: string | null; focusSegmentId: string | null;
+  onClearFocus: () => void; onNavigateToRoute: (routeId: string) => void;
+}) {
   const [placeSearch, setPlaceSearch] = useState("");
   const [minRecurrence, setMinRecurrence] = useState("");
   const [offset, setOffset] = useState(0);
-  useEffect(() => { setOffset(0); }, [tourId, market, placeSearch, minRecurrence]);
+  useEffect(() => { setOffset(0); }, [tourId, market, placeSearch, minRecurrence, focusRouteId, focusSegmentId]);
 
+  // AA-554 — a cross-filter (focusRouteId/focusSegmentId) narrows AFTER fetch, client-side (see
+  // below); real data has up to 138 raw Segment rows, well past PAGE_SIZE=50, so the target row
+  // of a cross-nav click can land past the first page and show a false "not found" empty state —
+  // found live during this task's own Playwright verify (Score → Segment cross-nav), not
+  // theoretical. Fixed by fetching a much larger page whenever a focus filter is active, and
+  // hiding the Previous/Next footer in that mode (it isn't really "browsing pages" anymore).
+  const hasFocus = !!(focusRouteId || focusSegmentId);
   const { data, loading, error, reload } = usePlatformFetch<{ data: SegmentRow[]; total: number }>(
     "/api/admin/dashboard/segments",
     { tour_id: tourId ?? undefined, market: market || undefined, place_search: placeSearch || undefined,
-      min_recurrence: minRecurrence || undefined, limit: PAGE_SIZE, offset },
+      min_recurrence: minRecurrence || undefined, limit: hasFocus ? 200 : PAGE_SIZE, offset: hasFocus ? 0 : offset },
   );
+
+  // AA-554 E.12 — client-side narrow to a single Route/Segment when arriving via a cross-section
+  // link (Route badge below, or Score's row link) — the backend endpoint gained no new query
+  // param for this, it only narrows whatever page is already loaded.
+  const filteredRows = (data?.data ?? []).filter(r =>
+    (!focusRouteId || r.route_id === focusRouteId) && (!focusSegmentId || r.segment_id === focusSegmentId));
+  const groups = groupSegmentRows(filteredRows);
 
   return (
     <>
-      <div style={filterBarStyle}>
+      {/* AA-554 E.14 — sticky filter row, same `position: sticky, top: 0` mechanism AA-551
+          proved for the 01-05 section-nav within this page's one scroll container. */}
+      <div style={{ ...filterBarStyle, position: "sticky", top: 0, background: A.bg, zIndex: 5, paddingTop: 4, paddingBottom: 10 }}>
         <input style={inputStyle} placeholder="Search place/verb…" value={placeSearch}
           onChange={e => setPlaceSearch(e.target.value)} />
         <input style={{ ...inputStyle, width: 110 }} type="number" min={0} placeholder="Min recurrence"
           value={minRecurrence} onChange={e => setMinRecurrence(e.target.value)} />
+        {(focusRouteId || focusSegmentId) && (
+          <Btn variant="ghost" size="sm" onClick={onClearFocus}>Clear cross-filter</Btn>
+        )}
       </div>
+      {/* AA-554 E.13 — shared market legend. */}
+      <MarketLegend />
       {error ? <ErrorState message={error} onRetry={reload} /> :
         loading ? <LoadingScreen msg="Loading Segments…" /> :
-        (!data || data.total === 0) ? <EmptyState title="No Segments match this filter" body="No atom_segment row (services/acp_contract/segment_matching.py) matches the current Tour/Market/search filter." /> : (
-        <>
-          {/* AA-548's Market column (no more Tenant — atom_segment is platform-wide, AA-545).
-              AA-551 adds a Tour column back since a row is no longer scoped to one Tour by
-              default — showing which tour each row came from is the whole point of the
-              "All tours" view. */}
-          <AuditTable rows={data.data} rowKey={r => `${r.tour_id}-${r.segment_id}-${r.market ?? "none"}`} columns={[
-            { key: "tour", label: "Tour", render: r => r.tour_name ?? "—" },
-            { key: "place", label: "Place — Action", render: r => <>{r.canonical_place} — {r.canonical_action}</> },
-            { key: "market", label: "Market", render: r => r.market ?? "—" },
-            { key: "members", label: "Atoms", render: r => r.member_count },
-            { key: "rank", label: "Total rank", render: r => r.excluded_reason ? <Badge color="gray">{r.excluded_reason}</Badge> : (r.total_rank ?? "—") },
-            { key: "recurrence", label: "Recurrence", render: r => r.recurrence ?? "—" },
-            { key: "route", label: "Route", render: r => r.route_hub_name ? <Badge color="gold">{r.route_hub_name}</Badge> : "—" },
-          ] as Col<SegmentRow>[]} />
-          <PageFooter total={data.total} offset={offset} pageSize={PAGE_SIZE} onOffset={setOffset} />
-        </>
+        (!data || data.total === 0 || groups.length === 0) ? (
+          <EmptyState title="No Segments match this filter" body="No Segment detected yet for this filter." />
+        ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {groups.map((g, i) => (
+            <div key={g.segmentId} style={{ border: `1px solid ${A.line}`, borderRadius: 10, overflow: "hidden" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", background: A.card, flexWrap: "wrap" }}>
+                <span style={{ fontFamily: mono, fontSize: 11, color: A.muted2 }}>#{i + 1}</span>
+                <span style={{ fontSize: 13, fontWeight: 600, color: A.body, fontFamily: sans }}>
+                  {g.place}{g.action ? ` — ${g.action}` : ""}
+                </span>
+                {/* AA-554 E.12 — was a static Badge, now navigates to Route/Hub filtered by route_id. */}
+                {g.routeHubName && g.routeId && (
+                  <button onClick={() => onNavigateToRoute(g.routeId!)}
+                    style={{ background: "none", border: "none", padding: 0, cursor: "pointer" }}
+                    title="View this Route in Route/Hub">
+                    <Badge color="gold"><Milestone size={11} style={{ verticalAlign: -2, marginRight: 3 }} />{g.routeHubName}</Badge>
+                  </button>
+                )}
+                <span style={{ fontSize: 11, color: A.muted2, marginLeft: "auto" }}>
+                  {g.rows.length} tour/market row{g.rows.length !== 1 ? "s" : ""}
+                </span>
+              </div>
+              <AuditTable rows={g.rows} rowKey={r => `${r.tour_id}-${r.market ?? "none"}`} columns={[
+                { key: "tour", label: "Tour", render: r => r.tour_name ?? "—" },
+                { key: "market", label: "Market", render: r => r.market ? <span title={marketTitle(r.market)}>{r.market}</span> : "—" },
+                { key: "members", label: "Atoms", render: r => r.member_count },
+                { key: "rank", label: "Total rank", render: r => r.excluded_reason ? <Badge color="gray">{r.excluded_reason}</Badge> : (r.total_rank ?? "—") },
+                { key: "recurrence", label: "Recurrence", render: r => r.recurrence ?? "—" },
+              ] as Col<SegmentRow>[]} />
+            </div>
+          ))}
+          {!hasFocus && <PageFooter total={data.total} offset={offset} pageSize={PAGE_SIZE} onOffset={setOffset} />}
+        </div>
       )}
     </>
   );
@@ -502,7 +669,9 @@ interface ScoreRow {
   recurrence: number; questions: number; said: number; excluded_reason: string | null;
 }
 
-function ScoreSection({ tourId, market }: { tourId: string | null; market: string }) {
+function ScoreSection({ tourId, market, onNavigateToSegment }: {
+  tourId: string | null; market: string; onNavigateToSegment: (segmentId: string) => void;
+}) {
   const [minRank, setMinRank] = useState("");
   const [maxRank, setMaxRank] = useState("");
   const [offset, setOffset] = useState(0);
@@ -514,26 +683,60 @@ function ScoreSection({ tourId, market }: { tourId: string | null; market: strin
       min_total_rank: minRank || undefined, max_total_rank: maxRank || undefined, limit: PAGE_SIZE, offset },
   );
 
+  // AA-554 F.18 — row numbering, stable across pages (offset-relative, not just index-in-page).
+  const numbered = (data?.data ?? []).map((r, i) => ({ ...r, __num: offset + i + 1 }));
+
   return (
     <>
-      <div style={filterBarStyle}>
+      {/* AA-554 F.15 — formula explainer. Issue text said "see ADR-0014"; the repo's highest ADR
+          is 0003 (docs/adr/0003-segment-score-route-hub-will-become-platform-wide.md, the actual
+          doc covering this design) — pointing at a real doc instead of a nonexistent number. */}
+      <div style={{ fontSize: 12, color: A.muted, marginBottom: 10 }}>
+        Score ranks Segments (not individual atoms) — see ADR-0003.{" "}
+        <span
+          title="total_rank = demand_rank + recurrence_rank + questions_rank + said_rank (rank-sum, lower is better)"
+          style={{ borderBottom: `1px dotted ${A.muted2}`, cursor: "help" }}
+        >
+          What does total rank mean?
+        </span>
+      </div>
+      {/* AA-554 F.19 — sticky filter row. */}
+      <div style={{ ...filterBarStyle, position: "sticky", top: 0, background: A.bg, zIndex: 5, paddingTop: 4, paddingBottom: 10 }}>
         <input style={{ ...inputStyle, width: 110 }} type="number" placeholder="Min total rank" value={minRank} onChange={e => setMinRank(e.target.value)} />
         <input style={{ ...inputStyle, width: 110 }} type="number" placeholder="Max total rank" value={maxRank} onChange={e => setMaxRank(e.target.value)} />
       </div>
+      <MarketLegend />
       {error ? <ErrorState message={error} onRetry={reload} /> :
         loading ? <LoadingScreen msg="Loading Score…" /> :
-        (!data || data.total === 0) ? <EmptyState title="No ranked Segments match this filter" body="atom_ranking has no rows matching the current Tour/Market/rank filter — Score runs as part of Route detection (AA-515)." /> : (
+        (!data || data.total === 0) ? <EmptyState title="No ranked Segments match this filter" body="Score runs automatically as part of Route detection." /> : (
         <>
-          <AuditTable rows={data.data} rowKey={r => `${r.tour_id}-${r.segment_id}-${r.market ?? "none"}`} columns={[
+          <AuditTable rows={numbered} rowKey={r => `${r.tour_id}-${r.segment_id}-${r.market ?? "none"}`} columns={[
+            { key: "num", label: "#", render: r => r.__num },
             { key: "tour", label: "Tour", render: r => r.tour_name ?? "—" },
-            { key: "place", label: "Segment", render: r => r.canonical_place ? `${r.canonical_place} — ${r.canonical_action}` : "—" },
-            { key: "market", label: "Market", render: r => r.market ?? "—" },
+            {
+              key: "place", label: "Segment", render: r => r.canonical_place ? (
+                // AA-554 F.17 — link into Segment, filtered to this segment_id.
+                <button onClick={() => onNavigateToSegment(r.segment_id)}
+                  style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: A.gold, textAlign: "left", font: "inherit" }}
+                  title="View this Segment">
+                  {r.canonical_place} — {r.canonical_action} ↗
+                </button>
+              ) : "—",
+            },
+            { key: "market", label: "Market", render: r => r.market ? <span title={marketTitle(r.market)}>{r.market}</span> : "—" },
             { key: "total", label: "Total rank", render: r => r.excluded_reason ? <Badge color="gray">{r.excluded_reason}</Badge> : (r.total_rank ?? "—") },
-            { key: "demand", label: "Demand", render: r => r.demand_rank != null ? `#${r.demand_rank} (${r.demand_volume ?? "—"} · ${r.demand_market ?? "—"})` : "—" },
+            {
+              key: "demand", label: "Demand", render: r => r.demand_rank != null ? (
+                // AA-554 F.16 — tooltip explaining the 3-part "#rank (volume · market)" format.
+                <span title="Rank among Segments by search demand · raw monthly search volume · the market that volume was measured in">
+                  #{r.demand_rank} ({r.demand_volume ?? "—"} · {r.demand_market ?? "—"})
+                </span>
+              ) : "—",
+            },
             { key: "recurrence", label: "Recurrence", render: r => r.recurrence_rank != null ? `#${r.recurrence_rank} (${r.recurrence})` : "—" },
             { key: "questions", label: "Questions", render: r => r.questions_rank != null ? `#${r.questions_rank} (${r.questions})` : "—" },
             { key: "said", label: "Said", render: r => r.said_rank != null ? `#${r.said_rank} (${r.said})` : "—" },
-          ] as Col<ScoreRow>[]} />
+          ] as Col<ScoreRow & { __num: number }>[]} />
           <PageFooter total={data.total} offset={offset} pageSize={PAGE_SIZE} onOffset={setOffset} />
         </>
       )}
@@ -547,18 +750,31 @@ interface RouteRow {
   version: number; superseded_at: string | null;
 }
 
-function RouteHubSection({ tourId, market }: { tourId: string | null; market: string }) {
+// AA-554 — Route/Hub's own redesign (split tables, market legend, sticky filter, member-links —
+// AA-554 mục G, items 20-22) is deferred pending Nghiệp's decision (see Linear comment). The only
+// change here is the minimal receiving end for Segment's E.12 cross-link (`focusRouteId`) and the
+// J.29 empty-state copy fix — everything else in this section is untouched by this build.
+function RouteHubSection({ tourId, market, focusRouteId, onClearFocus }: {
+  tourId: string | null; market: string; focusRouteId: string | null; onClearFocus: () => void;
+}) {
   const [minDays, setMinDays] = useState("");
   const [maxDays, setMaxDays] = useState("");
   const [hubSearch, setHubSearch] = useState("");
   const [offset, setOffset] = useState(0);
   useEffect(() => { setOffset(0); }, [tourId, market, minDays, maxDays, hubSearch]);
 
+  // AA-554 — same fix as Segment's identical bug (found live via this task's own Playwright
+  // verify): fetch a much larger page when a focus filter is active, so the cross-nav target
+  // isn't missed just because it falls past PAGE_SIZE on the default, unfiltered query.
+  const hasFocus = !!focusRouteId;
   const { data, loading, error, reload } = usePlatformFetch<{ data: RouteRow[]; total: number }>(
     "/api/admin/dashboard/routes",
     { tour_id: tourId ?? undefined, market: market || undefined, min_days: minDays || undefined,
-      max_days: maxDays || undefined, hub_name_search: hubSearch || undefined, limit: PAGE_SIZE, offset },
+      max_days: maxDays || undefined, hub_name_search: hubSearch || undefined,
+      limit: hasFocus ? 200 : PAGE_SIZE, offset: hasFocus ? 0 : offset },
   );
+
+  const filteredRows = focusRouteId ? (data?.data ?? []).filter(r => r.route_id === focusRouteId) : (data?.data ?? []);
 
   return (
     <>
@@ -566,6 +782,7 @@ function RouteHubSection({ tourId, market }: { tourId: string | null; market: st
         <input style={{ ...inputStyle, width: 100 }} type="number" min={1} placeholder="Min days" value={minDays} onChange={e => setMinDays(e.target.value)} />
         <input style={{ ...inputStyle, width: 100 }} type="number" min={1} placeholder="Max days" value={maxDays} onChange={e => setMaxDays(e.target.value)} />
         <input style={inputStyle} placeholder="Search hub name…" value={hubSearch} onChange={e => setHubSearch(e.target.value)} />
+        {focusRouteId && <Btn variant="ghost" size="sm" onClick={onClearFocus}>Clear filter (from Segment)</Btn>}
         {!tourId && (
           <span style={{ fontSize: 11.5, color: A.muted2, fontStyle: "italic" }}>
             Showing current Routes only — pick a Tour to see superseded versions too.
@@ -574,9 +791,11 @@ function RouteHubSection({ tourId, market }: { tourId: string | null; market: st
       </div>
       {error ? <ErrorState message={error} onRetry={reload} /> :
         loading ? <LoadingScreen msg="Loading Routes…" /> :
-        (!data || data.total === 0) ? <EmptyState title="No Routes match this filter" body="acp_contract.route has no rows matching the current Tour/Market/day-span/hub filter — Route detection (route_detection.py) hasn't run, or found no consecutive-day span of ranked Segments." /> : (
+        (!data || data.total === 0 || (focusRouteId != null && filteredRows.length === 0)) ? (
+          <EmptyState title="No Routes match this filter" body="Route detection hasn't run for this Tour/Market yet, or found no consecutive-day span of ranked Segments." />
+        ) : (
         <>
-          <AuditTable rows={data.data} rowKey={r => `${r.route_id}-${r.market ?? "none"}`} columns={[
+          <AuditTable rows={filteredRows} rowKey={r => `${r.route_id}-${r.market ?? "none"}`} columns={[
             { key: "status", label: "Status", render: r => r.superseded_at
               ? <Badge color="gray">superseded v{r.version}</Badge>
               : <Badge color="green">current{r.version > 1 ? ` v${r.version}` : ""}</Badge> },
@@ -588,7 +807,7 @@ function RouteHubSection({ tourId, market }: { tourId: string | null; market: st
             { key: "score", label: "Score", render: r => r.score ?? "—" },
             { key: "created", label: "Created", render: r => new Date(r.created_at).toLocaleString() },
           ] as Col<RouteRow>[]} />
-          <PageFooter total={data.total} offset={offset} pageSize={PAGE_SIZE} onOffset={setOffset} />
+          {!hasFocus && <PageFooter total={data.total} offset={offset} pageSize={PAGE_SIZE} onOffset={setOffset} />}
         </>
       )}
     </>
@@ -628,11 +847,11 @@ function SlateSection({ tourId }: { tourId: string | null }) {
     "/api/admin/dashboard/slate", { tour_id: tourId ?? undefined }, !!tourId,
   );
   if (!tourId) {
-    return <EmptyState title="Select a Tour" body="Slate is per-tenant, per-Tour data (acp_shared.subject.tenant_id is a real, required column — not part of AA-545's platform-wide fix) — pick one Tour above to view it." />;
+    return <EmptyState title="Select a Tour" body="Slate is tenant-specific — pick a Tour above to see it." />;
   }
   if (error) return <ErrorState message={error} onRetry={reload} />;
   if (loading) return <LoadingScreen msg="Loading Slate…" />;
-  if (!data || data.total === 0) return <EmptyState title="No Slate proposals yet" body="acp_shared.subject has no rows for this tour — the Slate (AA-511) proposes a Subject once a Segment/Route clears a Channel's Bar." />;
+  if (!data || data.total === 0) return <EmptyState title="No Slate proposals yet" body="No proposals yet for this Tour — Slate proposes a Subject once a Segment/Route clears a Channel's Bar." />;
   return (
     <>
       <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
@@ -664,6 +883,18 @@ export default function AtomCurationDashboardPage() {
   const [activeSection, setActiveSection] = useState<SectionKey>("atomize");
   const [stats, setStats] = useState<DashboardSummary | null>(null);
   const [statsLoading, setStatsLoading] = useState(true);
+  // AA-554 E.12/F.17 — cross-navigation between sections: Segment's Route badge sets
+  // `focusRouteId` and jumps to Route/Hub; Score's row link sets `focusSegmentId` and jumps to
+  // Segment. Both sections filter their already-fetched page client-side (no new backend
+  // query param) and clear when the user picks a section tab manually.
+  const [focusRouteId, setFocusRouteId] = useState<string | null>(null);
+  const [focusSegmentId, setFocusSegmentId] = useState<string | null>(null);
+
+  function gotoSection(key: SectionKey) {
+    setActiveSection(key);
+    setFocusRouteId(null);
+    setFocusSegmentId(null);
+  }
 
   const loadSummary = useCallback(() => {
     setSummaryLoading(true);
@@ -709,7 +940,7 @@ export default function AtomCurationDashboardPage() {
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12, marginBottom: 16 }}>
             <div>
               <h1 style={{ fontFamily: serif, fontSize: 26, fontWeight: 500, color: A.ink, margin: 0 }}>
-                Master Content Pipeline (01–05)
+                Social Content
               </h1>
               <div style={{ fontSize: 12, color: A.muted, marginTop: 4 }}>
                 Platform-wide monitoring — Atomize is the only section AA acts on; 02–05 show what
@@ -725,7 +956,10 @@ export default function AtomCurationDashboardPage() {
                 onChange={e => setSelectedTour(e.target.value || null)}
                 style={{ ...selectStyle, minWidth: 200, fontWeight: 600 }}
               >
-                <option value="">All tours</option>
+                {/* AA-554 A.3 — copy reflects the real behavior of this filter (narrows the view;
+                    it's never required to see data, unlike Slate below) instead of implying a
+                    Tour must be picked. */}
+                <option value="">All tours (or narrow to one)</option>
                 {(summary?.by_tour ?? []).map(t => (
                   <option key={t.tour_id} value={t.tour_id}>{t.tour_name}</option>
                 ))}
@@ -773,7 +1007,7 @@ export default function AtomCurationDashboardPage() {
               {SECTIONS.map(s => {
                 const active = activeSection === s.key;
                 return (
-                  <button key={s.key} onClick={() => setActiveSection(s.key)} style={{
+                  <button key={s.key} onClick={() => gotoSection(s.key)} style={{
                     display: "flex", alignItems: "center", gap: 8, padding: "9px 12px", borderRadius: 7,
                     border: "none", background: active ? A.goldTint : "transparent",
                     color: active ? A.gold : A.body, cursor: "pointer", fontFamily: sans,
@@ -794,9 +1028,20 @@ export default function AtomCurationDashboardPage() {
                   onSummaryChange={loadSummary}
                 />
               )}
-              {activeSection === "segment" && <SegmentSection tourId={selectedTour} market={selectedMarket} />}
-              {activeSection === "score" && <ScoreSection tourId={selectedTour} market={selectedMarket} />}
-              {activeSection === "route_hub" && <RouteHubSection tourId={selectedTour} market={selectedMarket} />}
+              {activeSection === "segment" && (
+                <SegmentSection tourId={selectedTour} market={selectedMarket}
+                  focusRouteId={focusRouteId} focusSegmentId={focusSegmentId}
+                  onClearFocus={() => { setFocusRouteId(null); setFocusSegmentId(null); }}
+                  onNavigateToRoute={routeId => { setFocusRouteId(routeId); setActiveSection("route_hub"); }} />
+              )}
+              {activeSection === "score" && (
+                <ScoreSection tourId={selectedTour} market={selectedMarket}
+                  onNavigateToSegment={segmentId => { setFocusSegmentId(segmentId); setActiveSection("segment"); }} />
+              )}
+              {activeSection === "route_hub" && (
+                <RouteHubSection tourId={selectedTour} market={selectedMarket}
+                  focusRouteId={focusRouteId} onClearFocus={() => setFocusRouteId(null)} />
+              )}
               {activeSection === "slate" && <SlateSection tourId={selectedTour} />}
             </div>
           </div>

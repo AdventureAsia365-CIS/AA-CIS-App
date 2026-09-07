@@ -261,11 +261,12 @@ export default function AdminSidebar() {
               this group itself is NOT role-gated (renders for reviewer/content too) but
               middleware.ts's PROTECTED_ROUTES still restricts /admin/atom-curation to
               roles: ["admin"] — left that restriction untouched (out of this issue's scope), so a
-              non-admin NavItem here would be a dead link. Rename still pending Nghiệp's decision
-              (AA-553 Linear comment lists 3+ name options) — label kept as "Atom Curation" for now. */}
+              non-admin NavItem here would be a dead link. AA-554 A.2 — label renamed "Social
+              Content" (Nghiệp's decision from AA-553's name options), route
+              (`/admin/atom-curation`) unchanged. */}
           {isAdmin && (
             <NavItem active={active("/admin/atom-curation")} accent={A.red}
-              icon={<Puzzle size={15} />} label="Atom Curation"
+              icon={<Puzzle size={15} />} label="Social Content"
               onClick={() => router.push("/admin/atom-curation")} />
           )}
         </NavGroup>
