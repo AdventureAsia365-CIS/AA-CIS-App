@@ -121,7 +121,7 @@ export function WriteGateSection({ tourId }: { tourId: string | null }) {
   if (!tourId) return <PickTourPrompt sectionLabel="Write/Gate" />;
   if (error) return <ErrorState message={error} onRetry={reload} />;
   if (loading) return <LoadingScreen msg="Loading Write/Gate…" />;
-  if (!data || data.total === 0) return <EmptyState title="No write attempts yet" body="acp_shared.content_piece has no rows for this tour — T9 write hasn't run for any Slate/angle pick here yet." />;
+  if (!data || data.total === 0) return <EmptyState title="No write attempts yet" body="No content written yet for this Tour — T9 write hasn't run for any Slate/angle pick here yet." />;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       {data.data.map(p => (
@@ -150,24 +150,44 @@ export function WriteGateSection({ tourId }: { tourId: string | null }) {
   );
 }
 
+// AA-554 I.26 — cross-link copy, shared by ReviewSection/PublishSection below: same dataset as
+// Cross-Tenant Oversight's Content Log/Publish Log, just filtered to one Tour here vs across all
+// tenants there. Rendered unconditionally (ABOVE the loading/error/empty early returns) — an
+// earlier version only showed it once real rows existed, which meant it never appeared for the
+// (common) case of a Tour with 0 rows yet, exactly when a reader most benefits from a pointer to
+// the cross-tenant view to check whether the data exists elsewhere.
+function CrossLinkNote({ oversightSection }: { oversightSection: string }) {
+  return (
+    <div style={{ fontSize: 11.5, color: A.muted2, marginBottom: 10 }}>
+      Same dataset as{" "}
+      <a href="/admin/a4-oversight" style={{ color: A.gold }}>Cross-Tenant Oversight</a>&apos;s
+      {" "}{oversightSection} — across all tenants there, filtered to this one Tour here.
+    </div>
+  );
+}
+
 export function ReviewSection({ tourId }: { tourId: string | null }) {
   const { data, loading, error, reload } = useContentLog(tourId);
   if (!tourId) return <PickTourPrompt sectionLabel="Review" />;
-  if (error) return <ErrorState message={error} onRetry={reload} />;
-  if (loading) return <LoadingScreen msg="Loading Review…" />;
-  if (!data || data.total === 0) return <EmptyState title="Nothing to review yet" body="No content_piece rows for this tour." />;
+  const crossLink = <CrossLinkNote oversightSection="Content Log" />;
+  if (error) return <>{crossLink}<ErrorState message={error} onRetry={reload} /></>;
+  if (loading) return <>{crossLink}<LoadingScreen msg="Loading Review…" /></>;
+  if (!data || data.total === 0) return <>{crossLink}<EmptyState title="Nothing to review yet" body="No content written yet for this Tour." /></>;
   // Review = same content-log dataset as Write/Gate, a queue-status lens instead of gate-detail —
   // "which pieces are waiting on what" rather than "why did this attempt hold" (per AA-501: AA's
   // review need is already fully served by content-log, no separate table/query).
   return (
-    <AuditTable rows={data.data} rowKey={r => r.piece_id} columns={[
+    <>
+      {crossLink}
+      <AuditTable rows={data.data} rowKey={r => r.piece_id} columns={[
       { key: "tour", label: "Tour", render: r => r.tour?.name ?? "—" },
       { key: "tenant", label: "Tenant", render: r => r.tenant_name ?? "—" },
       { key: "channel", label: "Channel", render: r => r.channel },
       { key: "status", label: "Gate status", render: r => <Badge color={STATUS_COLOR[r.status] ?? "gray"}>{r.status}</Badge> },
       { key: "publish", label: "Publish status", render: r => <Badge color={r.publish_status === "published" ? "green" : r.publish_status === "pending_publish" ? "amber" : "gray"}>{r.publish_status}</Badge> },
       { key: "created", label: "Written", render: r => new Date(r.created_at).toLocaleString() },
-    ]} />
+      ]} />
+    </>
   );
 }
 
@@ -183,17 +203,21 @@ export interface PublishRow {
 export function PublishSection({ tourId }: { tourId: string | null }) {
   const { data, loading, error, reload } = useTourScopedFetch<{ data: PublishRow[]; total: number }>("/api/admin/a4/publish-log", tourId);
   if (!tourId) return <PickTourPrompt sectionLabel="Publish" />;
-  if (error) return <ErrorState message={error} onRetry={reload} />;
-  if (loading) return <LoadingScreen msg="Loading Publish…" />;
-  if (!data || data.total === 0) return <EmptyState title="Nothing published yet" body="acp_shared.publish_log has no rows for this tour — T11 hasn't published any piece from it yet." />;
+  const crossLink = <CrossLinkNote oversightSection="Publish Log" />;
+  if (error) return <>{crossLink}<ErrorState message={error} onRetry={reload} /></>;
+  if (loading) return <>{crossLink}<LoadingScreen msg="Loading Publish…" /></>;
+  if (!data || data.total === 0) return <>{crossLink}<EmptyState title="Nothing published yet" body="Nothing published yet for this Tour — T11 hasn't published any piece from it yet." /></>;
   return (
-    <AuditTable rows={data.data} rowKey={r => r.publish_id} columns={[
-      { key: "tenant", label: "Tenant", render: r => r.tenant_name ?? "—" },
-      { key: "channel", label: "Channel", render: r => r.channel },
-      { key: "status", label: "Status", render: r => <Badge color={r.status === "published" ? "green" : r.status === "failed" ? "red" : "gray"}>{r.status}</Badge> },
-      { key: "url", label: "URL", render: r => r.external_url ? <a href={r.external_url} target="_blank" rel="noreferrer" style={{ color: A.gold }}>Link ↗</a> : "—" },
-      { key: "error", label: "Last error", render: r => r.last_error ?? "—" },
-      { key: "when", label: "When", render: r => new Date(r.published_at ?? r.created_at).toLocaleString() },
-    ]} />
+    <>
+      {crossLink}
+      <AuditTable rows={data.data} rowKey={r => r.publish_id} columns={[
+        { key: "tenant", label: "Tenant", render: r => r.tenant_name ?? "—" },
+        { key: "channel", label: "Channel", render: r => r.channel },
+        { key: "status", label: "Status", render: r => <Badge color={r.status === "published" ? "green" : r.status === "failed" ? "red" : "gray"}>{r.status}</Badge> },
+        { key: "url", label: "URL", render: r => r.external_url ? <a href={r.external_url} target="_blank" rel="noreferrer" style={{ color: A.gold }}>Link ↗</a> : "—" },
+        { key: "error", label: "Last error", render: r => r.last_error ?? "—" },
+        { key: "when", label: "When", render: r => new Date(r.published_at ?? r.created_at).toLocaleString() },
+      ]} />
+    </>
   );
 }

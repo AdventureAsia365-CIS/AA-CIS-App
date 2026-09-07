@@ -224,10 +224,11 @@ function ReviewLogSection() {
             Review Log — T3/T5 Escalations
           </h2>
           <div style={{ fontSize: 12, color: A.muted }}>
-            silver_aa_internal.review_queue rows: T3 QA-gate failures (auto-passed to the tenant,
-            logged here for pattern review) and, since AA-469 Việc 5, T5 atomize failures
-            (check_id prefixed t5_atomize: — filterable via the Checks badges below) — neither is
-            a queue to action, both are post-hoc pattern review.
+            {/* AA-554 — additional leak found+fixed while working mục J (same class as the 8
+                listed items: internal table name + issue number in user-visible copy). */}
+            T3 QA-gate failures (auto-passed to the tenant, logged here for pattern review) and T5
+            atomize failures (check_id prefixed t5_atomize: — filterable via the Checks badges
+            below) — neither is a queue to action, both are post-hoc pattern review.
           </div>
         </div>
         <input
@@ -377,9 +378,12 @@ function PublishLogSection() {
             Publish Log — T11 Delivery State
           </h2>
           <div style={{ fontSize: 12, color: A.muted }}>
-            acp_shared.publish_log — force-unpublish a live piece if something's wrong (grounding
-            miss, brand-rule violation T10 didn't catch). Tenants can also unpublish their own
-            content; this table doesn&apos;t distinguish who acted beyond unpublished_by.
+            Force-unpublish a live piece if something&apos;s wrong (grounding miss, brand-rule
+            violation T10 didn&apos;t catch). Tenants can also unpublish their own content; this
+            log doesn&apos;t distinguish who acted beyond the &quot;Unpublished By&quot; column.
+            Same dataset as{" "}
+            <a href="/admin/tenant-activity" style={{ color: A.ink }}>Tenant Activity</a>&apos;s 08
+            Publish, across all tenants here vs filtered per-Tour there.
           </div>
         </div>
         <input
@@ -405,7 +409,7 @@ function PublishLogSection() {
         <div style={{ padding: 24, textAlign: "center", color: A.red }}>{error}</div>
       ) : rows.length === 0 ? (
         <div style={{ padding: 24, textAlign: "center", color: A.muted2 }}>
-          No publish_log rows yet — T11&apos;s own write path isn&apos;t built yet (bước 2).
+          Nothing published yet — T11 hasn&apos;t published anything.
         </div>
       ) : (
         <div style={{ overflowX: "auto" }}>
@@ -509,11 +513,12 @@ function ContentLogSection() {
             Content Log — T9/T10 Every Piece + Full Context
           </h2>
           <div style={{ fontSize: 12, color: A.muted }}>
-            Every acp_shared.content_piece row (AA-501 — widened from held/failed-only: this is
-            the widest of the two AA-501 views, everything the tenant sees plus full gate/retry/
-            error/publish detail) — full write context (atom/tour/goal/angle/DFS-PAA) and, for
+            Every written piece — full write context (atom/tour/goal/angle/DFS-PAA) and, for
             held/failed rows, per-gate pass/fail + the retry-feedback trail. Post-hoc pattern
             review + lesson log, not a queue to action — AA does not gate tenant content.
+            Same dataset as{" "}
+            <a href="/admin/tenant-activity" style={{ color: A.ink }}>Tenant Activity</a>&apos;s 07
+            Review, across all tenants here vs filtered per-Tour there.
           </div>
         </div>
         <input
@@ -718,10 +723,9 @@ function TrustRampSection() {
           Trust Ramp — Current State
         </h2>
         <div style={{ fontSize: 12, color: A.muted }}>
-          acp_deliver.packets.publish_mode per packet. AA-464 — suggest_ramp_transition() is now
-          wired: eligible packets (engagement_ok AND weeks_active ≥ 2) show a suggested next
-          level below with Approve/Skip. Approving is the only way a ramp state actually
-          changes — nothing here auto-transitions on its own (ADR-2026-038 §0.2).
+          Publish mode per weekly packet. Eligible packets (steady engagement over 2+ active
+          weeks) show a suggested next level below with Approve/Skip. Approving is the only way a
+          ramp state actually changes — nothing here auto-transitions on its own.
         </div>
       </div>
 
@@ -837,8 +841,8 @@ export default function A4OversightPage() {
           </h1>
           <div style={{ fontSize: 12, color: A.muted, marginTop: 4 }}>
             Post-hoc monitoring — AA does not gate tenant content at any T0-T11 step. Review Log,
-            Content Log, and Trust Ramp are read-only; Publish Log below is the one exception, per
-            AA-455 — force-unpublish is a safety-net intervention, not a content-approval gate.
+            Content Log, and Trust Ramp are read-only; Publish Log below is the one exception —
+            force-unpublish is a safety-net intervention, not a content-approval gate.
           </div>
         </div>
         <ReviewLogSection />

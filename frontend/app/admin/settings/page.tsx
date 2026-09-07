@@ -387,7 +387,7 @@ interface StageConfigRow {
 // Human label + display grouping — a pure presentation layer over the 16 stage rows the API
 // returns; the API itself is the source of truth for which stages/values actually exist.
 const STAGE_GROUPS: { key: string; label: string; stages: string[] }[] = [
-  { key: "s1", label: "S1 rewrite pipeline (dùng chung cho A1 admin & T2 tenant — cùng 1 code, xem docs/implementation-notes/AA-518.md)",
+  { key: "s1", label: "S1 rewrite pipeline (shared by A1 admin & T2 tenant — same code path)",
     stages: ["s1_generate", "s1_judge", "s1_brand_audit", "s1_flag_fix", "s1_itinerary_nudge", "s1_atom_writer"] },
   { key: "t5", label: "T5 — Atomize", stages: ["t5_atomize"] },
   { key: "t8", label: "T8 — Angle generation", stages: ["t8_angle_gen"] },
