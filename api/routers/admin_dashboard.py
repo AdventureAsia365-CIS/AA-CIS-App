@@ -373,6 +373,78 @@ async def list_routes(
     }
 
 
+# ── GET /admin/dashboard/routes/{route_id}/days — AA-557 F.12 ───────────────
+
+@router.get("/routes/{route_id}/days")
+async def route_day_breakdown(
+    route_id: str,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    """Per-Day breakdown of one Route's member Segments — AA-557 F.12 ("chỉ ghi '1-5' ngày là vô
+    nghĩa, không biết Day 1 có gì").
+
+    STEP0 (read `services/acp_contract/route_detection.py` before building this): `acp_contract.
+    route.ordered_segment_ids` is segment_id order ONLY — the day number itself is NOT persisted
+    on the route row (`derive_routes()`'s own `Route.segment_ids` tuple drops the `Moment.day` it
+    was built from; only the route's own `first_day`/`last_day` SPAN survives). So a naive
+    `first_day + index` mapping would be wrong whenever a day holds >1 Segment (routes.py's
+    `_runs()` groups multiple same-day Moments together) — real day-per-segment data is NOT at
+    the response layer today, but it IS re-derivable: `acp_contract.tour_atoms.itinerary_day`
+    (migration 093) is the real source `route_detection.py` itself reads at generation time
+    (`MIN(ta.itinerary_day) AS day`, route_detection.py:272). This endpoint re-runs that exact
+    same aggregation for one Route's own segment_ids instead of fabricating a day count.
+    """
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        route = await conn.fetchrow(
+            "SELECT route_id, tour_id, ordered_segment_ids, first_day, last_day "
+            "FROM acp_contract.route WHERE route_id = $1",
+            route_id,
+        )
+        if not route:
+            return {"route_id": route_id, "days": [], "found": False}
+
+        segment_ids = list(route["ordered_segment_ids"] or [])
+        if isinstance(route["ordered_segment_ids"], str):
+            import json
+            segment_ids = json.loads(route["ordered_segment_ids"])
+
+        rows = await conn.fetch(
+            """
+            SELECT asg.segment_id, asg.canonical_place, asg.canonical_action,
+                   MIN(ta.itinerary_day) AS day
+            FROM acp_contract.atom_segment_member asm
+            JOIN acp_contract.tour_atoms ta ON ta.atom_id = asm.atom_id
+            JOIN acp_contract.atom_segment asg ON asg.segment_id = asm.segment_id
+            WHERE asm.segment_id = ANY($1::text[]) AND ta.tour_id = $2::uuid
+              AND NOT ta.deleted AND NOT ta.is_empty_marker
+            GROUP BY asg.segment_id, asg.canonical_place, asg.canonical_action
+            """,
+            segment_ids, route["tour_id"],
+        )
+    by_segment = {r["segment_id"]: r for r in rows}
+    by_day: dict[int, list] = {}
+    for seg_id in segment_ids:
+        r = by_segment.get(seg_id)
+        day = r["day"] if r else None
+        by_day.setdefault(day, []).append({
+            "segment_id": seg_id,
+            "canonical_place": r["canonical_place"] if r else None,
+            "canonical_action": r["canonical_action"] if r else None,
+        })
+    days = [
+        {"day": day, "segments": segs}
+        for day, segs in sorted(by_day.items(), key=lambda kv: (kv[0] is None, kv[0]))
+    ]
+    return {
+        "route_id": route_id, "first_day": route["first_day"], "last_day": route["last_day"],
+        "days": days, "found": True,
+    }
+
+
 # ── GET /admin/dashboard/hubs — Section 04, Hub half of AA-554 mục G's table split ──────────
 
 @router.get("/hubs")

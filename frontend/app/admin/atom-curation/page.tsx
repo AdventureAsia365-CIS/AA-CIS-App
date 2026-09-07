@@ -46,7 +46,7 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   Star, Trash2, ChevronDown, ChevronRight, Layers, Milestone, Puzzle,
-  TrendingUp, GitBranch, FileStack,
+  TrendingUp, GitBranch, FileStack, Radio,
 } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
 import { A, serif, mono, sans, Card, Badge, Btn, LoadingScreen } from "../_components/adminUi";
@@ -170,7 +170,6 @@ function AtomizeSection({ summary, summaryLoading, selectedTour, onTourChange, o
   const [total, setTotal] = useState(0);
   const [distinctiveness, setDistinctiveness] = useState("");
   const [unreviewedOnly, setUnreviewedOnly] = useState(false);
-  const [ownerScopeClass, setOwnerScopeClass] = useState("");
   const [lifecycleFilter, setLifecycleFilter] = useState("");
   const [atomsLoading, setAtomsLoading] = useState(true);
   const [atomsError, setAtomsError] = useState<string | null>(null);
@@ -190,7 +189,6 @@ function AtomizeSection({ summary, summaryLoading, selectedTour, onTourChange, o
     if (distinctiveness) params.set("distinctiveness", distinctiveness);
     if (unreviewedOnly) params.set("unreviewed_only", "true");
     if (selectedTour) params.set("tour_id", selectedTour);
-    if (ownerScopeClass) params.set("owner_scope_class", ownerScopeClass);
     if (lifecycleFilter) params.set("lifecycle_stage", lifecycleFilter);
     fetchJson<{ atoms: Atom[]; total: number }>(`/api/admin/atoms?${params}`)
       .then(d => {
@@ -199,7 +197,7 @@ function AtomizeSection({ summary, summaryLoading, selectedTour, onTourChange, o
       })
       .catch(e => setAtomsError(String(e.message || e)))
       .finally(() => { setAtomsLoading(false); setLoadingMore(false); });
-  }, [distinctiveness, unreviewedOnly, selectedTour, ownerScopeClass, lifecycleFilter]);
+  }, [distinctiveness, unreviewedOnly, selectedTour, lifecycleFilter]);
 
   useEffect(() => { loadAtoms(0, false); setSelectedAtomIds(new Set()); }, [loadAtoms]);
 
@@ -325,14 +323,6 @@ function AtomizeSection({ summary, summaryLoading, selectedTour, onTourChange, o
                   <option value="HIGH">High</option>
                   <option value="MED">Medium</option>
                   <option value="LOW">Low</option>
-                </select>
-                <select value={ownerScopeClass} onChange={e => setOwnerScopeClass(e.target.value)} style={selectStyle}>
-                  <option value="">All owners</option>
-                  <option value="platform">Platform only</option>
-                  {/* AA-554 C.7 — copy clarified (was "Legacy tenant-owned only"): the filter itself
-                      is meaningful (302 platform vs 75 legacy tenant-owned, AA-552 mục 2c) — only
-                      the label was ambiguous about WHY legacy rows still exist. */}
-                  <option value="legacy">Legacy tenant-owned only (pre-Sep 4 data, pending cleanup)</option>
                 </select>
                 <select value={lifecycleFilter} onChange={e => setLifecycleFilter(e.target.value)} style={selectStyle}>
                   <option value="">All lifecycle stages</option>
@@ -553,6 +543,19 @@ const filterBarStyle: React.CSSProperties = {
   display: "flex", gap: 8, marginBottom: 14, alignItems: "center", flexWrap: "wrap",
 };
 
+// AA-557 D.3/E.7/F.9 — live Playwright confirmed the previous sticky filter row (plain
+// `position:sticky, background:A.bg`, no border) visually merges with whatever content scrolls
+// up beneath it once stuck — the next Segment/Route group's own header sits flush against it with
+// no visible seam (tests/e2e/results/aa557/D-00-segment-after-scroll-PREFIX.png). A bottom
+// border + drop shadow gives it a real visual edge (the standard "elevated sticky bar" pattern)
+// so scrolled content reads as passing UNDER it, not merging into it; extra paddingBottom widens
+// the gap before the next card.
+const stickyFilterBarStyle: React.CSSProperties = {
+  ...filterBarStyle, position: "sticky", top: 0, background: A.bg, zIndex: 5,
+  paddingTop: 8, paddingBottom: 14, marginBottom: 10,
+  borderBottom: `1px solid ${A.line}`, boxShadow: "0 4px 10px -6px rgba(0,0,0,0.18)",
+};
+
 interface SegmentRow {
   tour_id: string; tour_name: string | null;
   segment_id: string; canonical_place: string; canonical_action: string;
@@ -615,9 +618,8 @@ function SegmentSection({ tourId, market, focusRouteId, focusSegmentId, onClearF
 
   return (
     <>
-      {/* AA-554 E.14 — sticky filter row, same `position: sticky, top: 0` mechanism AA-551
-          proved for the 01-05 section-nav within this page's one scroll container. */}
-      <div style={{ ...filterBarStyle, position: "sticky", top: 0, background: A.bg, zIndex: 5, paddingTop: 4, paddingBottom: 10 }}>
+      {/* AA-557 D.3 — sticky filter row, now with a real visual edge (see stickyFilterBarStyle). */}
+      <div style={stickyFilterBarStyle}>
         <input style={inputStyle} placeholder="Search place/verb…" value={placeSearch}
           onChange={e => setPlaceSearch(e.target.value)} />
         <input style={{ ...inputStyle, width: 110 }} type="number" min={0} placeholder="Min recurrence"
@@ -637,7 +639,12 @@ function SegmentSection({ tourId, market, focusRouteId, focusSegmentId, onClearF
           {groups.map((g, i) => (
             <div key={g.segmentId} style={{ border: `1px solid ${A.line}`, borderRadius: 10, overflow: "hidden" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", background: A.card, flexWrap: "wrap" }}>
-                <span style={{ fontFamily: mono, fontSize: 11, color: A.muted2 }}>#{i + 1}</span>
+                {/* AA-557 D.5 — offset-relative, not page-local (was always `i + 1`, resetting
+                    to #1 every page — real bug, Nghiệp-confirmed). `offset` is row-based; groups
+                    are fewer than rows, so this is monotonically increasing and never repeats
+                    across pages but isn't a mathematically exact "distinct segment index" — same
+                    tradeoff Score's own row numbering (F.18) already accepted for the same reason. */}
+                <span style={{ fontFamily: mono, fontSize: 11, color: A.muted2 }}>#{offset + i + 1}</span>
                 <span style={{ fontSize: 13, fontWeight: 600, color: A.body, fontFamily: sans }}>
                   {g.place}{g.action ? ` — ${g.action}` : ""}
                 </span>
@@ -649,16 +656,23 @@ function SegmentSection({ tourId, market, focusRouteId, focusSegmentId, onClearF
                     <Badge color="gold"><Milestone size={11} style={{ verticalAlign: -2, marginRight: 3 }} />{g.routeHubName}</Badge>
                   </button>
                 )}
+                {/* AA-557 D.4 — was "N tour/market rows"; real relationship is market-first (each
+                    Segment spans several markets, each market maps to exactly 1 tour). */}
                 <span style={{ fontSize: 11, color: A.muted2, marginLeft: "auto" }}>
-                  {g.rows.length} tour/market row{g.rows.length !== 1 ? "s" : ""}
+                  {g.rows.length} market/tour row{g.rows.length !== 1 ? "s" : ""}
                 </span>
               </div>
-              <AuditTable rows={g.rows} rowKey={r => `${r.tour_id}-${r.market ?? "none"}`} columns={[
-                { key: "tour", label: "Tour", render: r => r.tour_name ?? "—" },
-                { key: "market", label: "Market", render: r => r.market ? <span title={marketTitle(r.market)}>{r.market}</span> : "—" },
-                { key: "members", label: "Atoms", render: r => r.member_count },
-                { key: "rank", label: "Total rank", render: r => r.excluded_reason ? <Badge color="gray">{r.excluded_reason}</Badge> : (r.total_rank ?? "—") },
-                { key: "recurrence", label: "Recurrence", render: r => r.recurrence ?? "—" },
+              {/* AA-557 D.6 — real table: sortable + per-column filter (client-side, over this
+                  group's own already-fetched rows). */}
+              <AuditTable sortable rows={g.rows} rowKey={r => `${r.tour_id}-${r.market ?? "none"}`} columns={[
+                { key: "tour", label: "Tour", render: r => r.tour_name ?? "—",
+                  sortValue: r => r.tour_name ?? "", filterValue: r => r.tour_name ?? "" },
+                { key: "market", label: "Market", render: r => r.market ? <span title={marketTitle(r.market)}>{r.market}</span> : "—",
+                  sortValue: r => r.market ?? "", filterValue: r => r.market ?? "" },
+                { key: "members", label: "Atoms", render: r => r.member_count, sortValue: r => r.member_count },
+                { key: "rank", label: "Total rank", render: r => r.excluded_reason ? <Badge color="gray">{r.excluded_reason}</Badge> : (r.total_rank ?? "—"),
+                  sortValue: r => r.total_rank ?? (r.excluded_reason ? Number.MAX_SAFE_INTEGER : null) },
+                { key: "recurrence", label: "Recurrence", render: r => r.recurrence ?? "—", sortValue: r => r.recurrence ?? 0 },
               ] as Col<SegmentRow>[]} />
             </div>
           ))}
@@ -708,8 +722,8 @@ function ScoreSection({ tourId, market, onNavigateToSegment }: {
           What does total rank mean?
         </span>
       </div>
-      {/* AA-554 F.19 — sticky filter row. */}
-      <div style={{ ...filterBarStyle, position: "sticky", top: 0, background: A.bg, zIndex: 5, paddingTop: 4, paddingBottom: 10 }}>
+      {/* AA-557 E.7 — sticky filter row, now with a real visual edge. */}
+      <div style={stickyFilterBarStyle}>
         <input style={{ ...inputStyle, width: 110 }} type="number" placeholder="Min total rank" value={minRank} onChange={e => setMinRank(e.target.value)} />
         <input style={{ ...inputStyle, width: 110 }} type="number" placeholder="Max total rank" value={maxRank} onChange={e => setMaxRank(e.target.value)} />
       </div>
@@ -718,9 +732,11 @@ function ScoreSection({ tourId, market, onNavigateToSegment }: {
         loading ? <LoadingScreen msg="Loading Score…" /> :
         (!data || data.total === 0) ? <EmptyState title="No ranked Segments match this filter" body="Score runs automatically as part of Route detection." /> : (
         <>
-          <AuditTable rows={numbered} rowKey={r => `${r.tour_id}-${r.segment_id}-${r.market ?? "none"}`} columns={[
-            { key: "num", label: "#", render: r => r.__num },
-            { key: "tour", label: "Tour", render: r => r.tour_name ?? "—" },
+          {/* AA-557 E.8 — real table: sortable + per-column filter. */}
+          <AuditTable sortable rows={numbered} rowKey={r => `${r.tour_id}-${r.segment_id}-${r.market ?? "none"}`} columns={[
+            { key: "num", label: "#", render: r => r.__num, sortValue: r => r.__num },
+            { key: "tour", label: "Tour", render: r => r.tour_name ?? "—",
+              sortValue: r => r.tour_name ?? "", filterValue: r => r.tour_name ?? "" },
             {
               key: "place", label: "Segment", render: r => r.canonical_place ? (
                 // AA-554 F.17 — link into Segment, filtered to this segment_id.
@@ -730,9 +746,13 @@ function ScoreSection({ tourId, market, onNavigateToSegment }: {
                   {r.canonical_place} — {r.canonical_action} ↗
                 </button>
               ) : "—",
+              sortValue: r => r.canonical_place ?? "",
+              filterValue: r => `${r.canonical_place ?? ""} ${r.canonical_action ?? ""}`,
             },
-            { key: "market", label: "Market", render: r => r.market ? <span title={marketTitle(r.market)}>{r.market}</span> : "—" },
-            { key: "total", label: "Total rank", render: r => r.excluded_reason ? <Badge color="gray">{r.excluded_reason}</Badge> : (r.total_rank ?? "—") },
+            { key: "market", label: "Market", render: r => r.market ? <span title={marketTitle(r.market)}>{r.market}</span> : "—",
+              sortValue: r => r.market ?? "", filterValue: r => r.market ?? "" },
+            { key: "total", label: "Total rank", render: r => r.excluded_reason ? <Badge color="gray">{r.excluded_reason}</Badge> : (r.total_rank ?? "—"),
+              sortValue: r => r.total_rank ?? (r.excluded_reason ? Number.MAX_SAFE_INTEGER : null) },
             {
               key: "demand", label: "Demand", render: r => r.demand_rank != null ? (
                 // AA-554 F.16 — tooltip explaining the 3-part "#rank (volume · market)" format.
@@ -740,10 +760,14 @@ function ScoreSection({ tourId, market, onNavigateToSegment }: {
                   #{r.demand_rank} ({r.demand_volume ?? "—"} · {r.demand_market ?? "—"})
                 </span>
               ) : "—",
+              sortValue: r => r.demand_rank,
             },
-            { key: "recurrence", label: "Recurrence", render: r => r.recurrence_rank != null ? `#${r.recurrence_rank} (${r.recurrence})` : "—" },
-            { key: "questions", label: "Questions", render: r => r.questions_rank != null ? `#${r.questions_rank} (${r.questions})` : "—" },
-            { key: "said", label: "Said", render: r => r.said_rank != null ? `#${r.said_rank} (${r.said})` : "—" },
+            { key: "recurrence", label: "Recurrence", render: r => r.recurrence_rank != null ? `#${r.recurrence_rank} (${r.recurrence})` : "—",
+              sortValue: r => r.recurrence_rank },
+            { key: "questions", label: "Questions", render: r => r.questions_rank != null ? `#${r.questions_rank} (${r.questions})` : "—",
+              sortValue: r => r.questions_rank },
+            { key: "said", label: "Said", render: r => r.said_rank != null ? `#${r.said_rank} (${r.said})` : "—",
+              sortValue: r => r.said_rank },
           ] as Col<ScoreRow & { __num: number }>[]} />
           <PageFooter total={data.total} offset={offset} pageSize={PAGE_SIZE} onOffset={setOffset} />
         </>
@@ -796,6 +820,7 @@ function RouteHubSection({ tourId, market, focusRouteId, onClearFocus, onNavigat
   );
 
   const filteredRows = focusRouteId ? (data?.data ?? []).filter(r => r.route_id === focusRouteId) : (data?.data ?? []);
+  const [expandedRouteId, setExpandedRouteId] = useState<string | null>(null);
 
   return (
     <>
@@ -803,11 +828,16 @@ function RouteHubSection({ tourId, market, focusRouteId, onClearFocus, onNavigat
       <div style={{ fontSize: 11.5, color: A.muted2, marginBottom: 10 }}>
         One tour's own journey — a consecutive-day span of that tour's ranked Segments.
       </div>
-      {/* AA-554 G.20 — sticky filter row, same mechanism Segment/Score already use. */}
-      <div style={{ ...filterBarStyle, position: "sticky", top: 0, background: A.bg, zIndex: 5, paddingTop: 4, paddingBottom: 10 }}>
+      {/* AA-557 F.11 — Nghiệp confirmed this reading directly; noted so admins don't need to ask. */}
+      <div style={{ fontSize: 11.5, color: A.muted, marginBottom: 10, fontStyle: "italic" }}>
+        Each row = one Tour&apos;s ranked-Segment journey for one Market (same Route content,
+        market-specific Score).
+      </div>
+      {/* AA-557 F.9 — sticky filter row, now with a real visual edge. */}
+      <div style={stickyFilterBarStyle}>
         <input style={{ ...inputStyle, width: 100 }} type="number" min={1} placeholder="Min days" value={minDays} onChange={e => setMinDays(e.target.value)} />
         <input style={{ ...inputStyle, width: 100 }} type="number" min={1} placeholder="Max days" value={maxDays} onChange={e => setMaxDays(e.target.value)} />
-        <input style={inputStyle} placeholder="Search hub name…" value={hubSearch} onChange={e => setHubSearch(e.target.value)} />
+        <input style={inputStyle} placeholder="Search Route name…" value={hubSearch} onChange={e => setHubSearch(e.target.value)} />
         {focusRouteId && <Btn variant="ghost" size="sm" onClick={onClearFocus}>Clear filter (from Segment)</Btn>}
         {!tourId && (
           <span style={{ fontSize: 11.5, color: A.muted2, fontStyle: "italic" }}>
@@ -823,14 +853,31 @@ function RouteHubSection({ tourId, market, focusRouteId, onClearFocus, onNavigat
           <EmptyState title="No Routes match this filter" body="Route detection hasn't run for this Tour/Market yet, or found no consecutive-day span of ranked Segments." />
         ) : (
         <>
-          <AuditTable rows={filteredRows} rowKey={r => `${r.route_id}-${r.market ?? "none"}`} columns={[
+          {/* AA-557 F.10 — real table: sortable + per-column filter. F.12 — click a row (or its
+              own "Days" cell) to expand a real per-Day breakdown below it. */}
+          <AuditTable sortable rows={filteredRows} rowKey={r => `${r.route_id}-${r.market ?? "none"}`} columns={[
             { key: "status", label: "Status", render: r => r.superseded_at
               ? <Badge color="gray">superseded v{r.version}</Badge>
-              : <Badge color="green">current{r.version > 1 ? ` v${r.version}` : ""}</Badge> },
-            { key: "tour", label: "Tour", render: r => r.tour_name ?? "—" },
-            { key: "hub", label: "Hub name", render: r => r.hub_name },
-            { key: "market", label: "Market", render: r => r.market ? <span title={marketTitle(r.market)}>{r.market}</span> : "—" },
-            { key: "days", label: "Days", render: r => `${r.first_day}–${r.last_day}` },
+              : <Badge color="green">current{r.version > 1 ? ` v${r.version}` : ""}</Badge>,
+              sortValue: r => r.superseded_at ? 1 : 0 },
+            { key: "tour", label: "Tour", render: r => r.tour_name ?? "—",
+              sortValue: r => r.tour_name ?? "", filterValue: r => r.tour_name ?? "" },
+            // AA-557 F.9 — was mislabeled "Hub Name"; this column is the Route's OWN name
+            // (Hub — a genuinely different concept — has its own table + column below).
+            { key: "routeName", label: "Route Name", render: r => r.hub_name,
+              sortValue: r => r.hub_name ?? "", filterValue: r => r.hub_name ?? "" },
+            { key: "market", label: "Market", render: r => r.market ? <span title={marketTitle(r.market)}>{r.market}</span> : "—",
+              sortValue: r => r.market ?? "", filterValue: r => r.market ?? "" },
+            {
+              key: "days", label: "Days", render: r => (
+                <button onClick={() => setExpandedRouteId(id => id === r.route_id ? null : r.route_id)}
+                  style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: A.gold, font: "inherit" }}
+                  title="View this Route's day-by-day breakdown">
+                  {r.first_day}–{r.last_day} {expandedRouteId === r.route_id ? "▲" : "▼"}
+                </button>
+              ),
+              sortValue: r => r.first_day,
+            },
             {
               key: "segments", label: "Segments", render: r => {
                 const n = (r.ordered_segment_ids || []).length;
@@ -845,10 +892,12 @@ function RouteHubSection({ tourId, market, focusRouteId, onClearFocus, onNavigat
                   </button>
                 ) : 0;
               },
+              sortValue: r => (r.ordered_segment_ids || []).length,
             },
-            { key: "score", label: "Score", render: r => r.score ?? "—" },
-            { key: "created", label: "Created", render: r => new Date(r.created_at).toLocaleString() },
+            { key: "score", label: "Score", render: r => r.score ?? "—", sortValue: r => r.score },
+            { key: "created", label: "Created", render: r => new Date(r.created_at).toLocaleString(), sortValue: r => r.created_at },
           ] as Col<RouteRow>[]} />
+          {expandedRouteId && <RouteDayBreakdown routeId={expandedRouteId} />}
           {!hasFocus && <PageFooter total={data.total} offset={offset} pageSize={PAGE_SIZE} onOffset={setOffset} />}
         </>
       )}
@@ -875,6 +924,58 @@ function RouteHubSection({ tourId, market, focusRouteId, onClearFocus, onNavigat
         </>
       )}
     </>
+  );
+}
+
+interface RouteDayRow { day: number | null; segments: { segment_id: string; canonical_place: string | null; canonical_action: string | null }[]; }
+
+// AA-557 F.12 — real per-Day breakdown, backed by GET /admin/dashboard/routes/{route_id}/days
+// (see that endpoint's own docstring for why day-per-segment isn't on the route row itself and
+// has to be re-derived from acp_contract.tour_atoms.itinerary_day).
+function RouteDayBreakdown({ routeId }: { routeId: string }) {
+  const [data, setData] = useState<{ days: RouteDayRow[]; found: boolean } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setLoading(true); setError(null); setData(null);
+    fetchJson<{ days: RouteDayRow[]; found: boolean }>(`/api/admin/dashboard/routes/${encodeURIComponent(routeId)}/days`)
+      .then(setData)
+      .catch(e => setError(String(e.message || e)))
+      .finally(() => setLoading(false));
+  }, [routeId]);
+
+  return (
+    <Card style={{ marginTop: -1, borderTop: "none", borderTopLeftRadius: 0, borderTopRightRadius: 0, padding: "14px 18px" }}>
+      {loading ? <div style={{ fontSize: 12, color: A.muted2 }}>Loading day breakdown…</div> :
+        error ? <div style={{ fontSize: 12, color: A.red }}>Could not load day breakdown: {error}</div> :
+        (!data || !data.found || data.days.length === 0) ? (
+          <div style={{ fontSize: 12, color: A.muted2 }}>No day-level data for this Route.</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {data.days.map((d, i) => (
+              <div key={i} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                <div style={{
+                  flexShrink: 0, width: 62, fontSize: 11, fontFamily: mono, fontWeight: 600,
+                  color: A.gold, background: A.goldTint, borderRadius: 6, padding: "4px 8px", textAlign: "center",
+                }}>
+                  {d.day != null ? `Day ${d.day}` : "Day —"}
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {d.segments.map(s => (
+                    <span key={s.segment_id} style={{
+                      fontSize: 12, color: A.body, background: A.card, border: `1px solid ${A.line}`,
+                      borderRadius: 6, padding: "3px 9px",
+                    }}>
+                      {s.canonical_place ?? "—"}{s.canonical_action ? ` — ${s.canonical_action}` : ""}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+    </Card>
   );
 }
 
@@ -948,25 +1049,39 @@ function SlateSection({ tourId }: { tourId: string | null }) {
           </div>
         ))}
       </div>
+      {/* AA-557 G.14 — answers Nghiệp's direct question ("trang Slate này hiển thị gì, tenant
+          thấy nó ở đâu"), confirmed against AA-555 (Done): tenant portal already has its own real
+          `/portal/slate` page. */}
+      <div style={{ fontSize: 12, color: A.muted, marginBottom: 6 }}>
+        Read-only platform-wide view of every tenant&apos;s Slate — the actual per-tenant Slate
+        tenants use to pick topics lives in their portal at Workspace → Slate (tenant-facing
+        route: <code style={{ fontFamily: mono }}>/portal/slate</code>).
+      </div>
       {/* AA-554 H.25 — Score here is copied as-is from Segment's total_rank / Route's score at
           proposal time, never recomputed by Slate itself. */}
       <div style={{ fontSize: 12, color: A.muted, marginBottom: 10 }}>
         Score is copied as-is from the Segment's total rank or Route's score at proposal time —
         Slate never recalculates it.
       </div>
-      <AuditTable rows={data.data} rowKey={r => r.subject_id} columns={[
-        { key: "channel", label: "Channel", render: r => r.channel },
+      {/* AA-557 G.13 — real table: sortable + per-column filter. */}
+      <AuditTable sortable rows={data.data} rowKey={r => r.subject_id} columns={[
+        { key: "channel", label: "Channel", render: r => r.channel,
+          sortValue: r => r.channel, filterValue: r => r.channel },
         {
           key: "state", label: "State", render: r => (
             <span title={SLATE_STATE_TOOLTIP[r.state]} style={{ cursor: "help" }}>
               <Badge color={SLATE_STATE_COLOR[r.state] ?? "gray"}>{r.state}</Badge>
             </span>
           ),
+          sortValue: r => r.state, filterValue: r => r.state,
         },
-        { key: "tenant", label: "Tenant", render: r => r.tenant_name ?? "—" },
-        { key: "score", label: "Score", render: r => r.score ?? "—" },
-        { key: "kind", label: "Kind", render: r => r.route_id ? "Route" : "Segment" },
-        { key: "created", label: "Proposed", render: r => new Date(r.created_at).toLocaleString() },
+        { key: "tenant", label: "Tenant", render: r => r.tenant_name ?? "—",
+          sortValue: r => r.tenant_name ?? "", filterValue: r => r.tenant_name ?? "" },
+        { key: "score", label: "Score", render: r => r.score ?? "—", sortValue: r => r.score },
+        { key: "kind", label: "Kind", render: r => r.route_id ? "Route" : "Segment",
+          sortValue: r => r.route_id ? "Route" : "Segment", filterValue: r => r.route_id ? "Route" : "Segment" },
+        { key: "created", label: "Proposed", render: r => new Date(r.created_at).toLocaleString(),
+          sortValue: r => r.created_at },
       ] as Col<SlateRow>[]} />
     </>
   );
@@ -1119,6 +1234,20 @@ export default function AtomCurationDashboardPage() {
                   </button>
                 );
               })}
+              {/* AA-557 H.15 — "Tenant Activity" is really Write/Gate→Review→Publish per-tenant
+                  content activity, genuinely part of this same Social Content flow (01-05), not
+                  general tenant account activity — moved into this same tab-group per Nghiệp's
+                  decision. Route (`/admin/tenant-activity`) UNCHANGED (real full navigation, not
+                  an inline tab — 06-08's content stays on its own page, only the MENU position
+                  moved); removed as its own top-level AdminSidebar entry (see that file). */}
+              <a href="/admin/tenant-activity" style={{
+                display: "flex", alignItems: "center", gap: 8, padding: "9px 12px", borderRadius: 7,
+                color: A.body, cursor: "pointer", fontFamily: sans, textDecoration: "none",
+                fontSize: 12.5, fontWeight: 500, marginTop: 4, borderTop: `1px solid ${A.line2}`, paddingTop: 13,
+              }}>
+                <Radio size={15} />
+                <span style={{ flex: 1 }}>06-08 · Tenant Activity</span>
+              </a>
             </div>
 
             <div style={{ flex: 1, minWidth: 0 }}>
