@@ -1,42 +1,39 @@
 "use client";
-// app/admin/atom-curation/page.tsx — AA-527, admin-only Atom Curation dashboard.
+// app/admin/atom-curation/page.tsx — AA-527 original build, rebuilt AA-551 (07/09/2026).
 //
-// AA-527 ORIGINAL SCOPE (PR #311, merged, NOT rebuilt here): the Atomize page itself — AA
-// decides which atoms are good to use, ported near-verbatim from the deleted tenant-facing
-// AtomsTab.tsx (AA-526 removed T6). See that PR / this file's git history for the full original
-// docstring; it's preserved below inside <AtomizeSection>.
+// AA-551 STEP0 (docs/investigation/AA-550-admin-ui-real-audit.md): the original 8-section page
+// (AA-527 "bổ sung") required a single selected Tour for sections 02-08, which meant Segment/
+// Score/Route/Hub could never show anything in "All tours" mode — directly contradicting AA-545's
+// own platform-wide redesign of exactly those 3 (dropped `tenant_id` from the schema entirely,
+// same day, but the API layer here stayed hard-scoped to one Tour regardless). This page is now
+// SPLIT in two, per Nghiệp's decision (AA-551, "Phương án B"):
+//   - THIS page (`/admin/atom-curation`, same URL) = 01 Atomize + 02 Segment + 03 Score +
+//     04 Route/Hub + 05 Slate — genuinely platform-wide Master Content monitoring. A common
+//     Tour+Market filter applies to 01-04 at once (05 Slate is the one deliberate exception, see
+//     below); each of 02-04 also has its own extra filter row. A header stat bar (Tour/Atom/
+//     Segment/Score-row/Route/Hub counts) re-filters live with the same common filter.
+//   - `/admin/tenant-activity` (new page) = 06 Write/Gate + 07 Review + 08 Publish — a specific
+//     TENANT's activity on a specific Tour, a different subject entirely (AA-550 point C.8: the
+//     original single page "lẫn lộn nội dung của tầng admin và tenant").
 //
-// AA-527 BỔ SUNG (05/09/2026, "Quyết định bố cục — Phương án C" comment, Nghiệp): this page is
-// now a full 8-section dashboard, not a single atom-curation screen — sidebar (this page's own
-// INNER sidebar, nested inside the site-wide <AdminSidebar>) listing all 8 T5-T11 pipeline
-// stages (Atomize/Segment/Score/Route-Hub/Slate/Write-Gate/Review/Publish) with real counts, a
-// header dropdown that picks ONE Tour as the whole page's filter anchor, and 7 new read-only
-// AUDIT panels (Atomize, section 01, is the only section with actions — star/delete/edit; the
-// other 7 show data that already exists elsewhere in the schema, per AA-525 Phần 12's own
-// inventory, never let a reader believe more exists than actually does).
+// 05 Slate is NOT part of the platform-wide fix (AA-550 A.3, confirmed real schema:
+// `acp_shared.subject.tenant_id NOT NULL`) — it keeps requiring one selected Tour, unchanged
+// behavior, only its prompt copy is now English.
 //
-// New backend surface used by the 7 non-Atomize panels (all admin-only, x-admin-secret):
-//   GET /api/admin/dashboard/segments?tour_id=   — acp_contract.atom_segment (+ranking, +route)
-//   GET /api/admin/dashboard/score?tour_id=      — acp_contract.atom_ranking, rank order
-//   GET /api/admin/dashboard/routes?tour_id=     — acp_contract.route
-//   GET /api/admin/dashboard/slate?tour_id=      — acp_shared.subject (the Slate proposal)
-//   GET /api/admin/a4/content-log?tour_id=       — Write-Gate AND Review both read this (2 lenses
-//                                                   on 1 dataset — no duplicate query, see below)
-//   GET /api/admin/a4/publish-log?tour_id=       — Publish
-// (admin_dashboard.py is new; admin_a4.py's content-log/publish-log gained an optional tour_id
-// filter in this same change — both already existed for AA-437/AA-455/AA-469/AA-501.)
-//
-// Sections 2-8 all REQUIRE one selected Tour (their endpoints are Tour-scoped by schema) — the
-// header's "All tours" option is only meaningful for Atomize (section 01), which predates the
-// Tour-anchor concept and still supports browsing every tour's atom pool at once.
-
-import { useState, useEffect, useCallback, useMemo } from "react";
+// Backend (api/routers/admin_dashboard.py, AA-551): `tour_id` is now OPTIONAL on
+// `segments`/`score`/`routes` (each also gained a `market` filter + a section-specific filter +
+// pagination + `tour_id`/`tour_name` on every row); `slate` is unchanged. New
+// `GET /admin/dashboard/summary` feeds the header stat bar.
+import { useState, useEffect, useCallback } from "react";
 import {
   Star, Trash2, ChevronDown, ChevronRight, Layers, Milestone, Puzzle,
-  TrendingUp, GitBranch, FileStack, PenSquare, Eye, Send, AlertTriangle, RotateCw,
+  TrendingUp, GitBranch, FileStack,
 } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
-import { A, serif, mono, sans, Card, Badge, Btn, LoadingScreen, TH, TD } from "../_components/adminUi";
+import { A, serif, mono, sans, Card, Badge, Btn, LoadingScreen } from "../_components/adminUi";
+import { fetchJson, EmptyState, ErrorState, AuditTable, Col } from "../_components/auditPanels";
+
+const MARKETS = ["US", "UK", "AU", "DE", "FR", "NL"];
 
 // ── Shared types ─────────────────────────────────────────────────────────────
 
@@ -59,105 +56,37 @@ interface Summary {
   by_tour: TourSummary[];
 }
 
-type SectionKey =
-  | "atomize" | "segment" | "score" | "route_hub" | "slate"
-  | "write_gate" | "review" | "publish";
+interface DashboardSummary {
+  tour_count: number; atom_count: number; segment_count: number;
+  score_count: number; route_count: number; hub_count: number;
+}
 
-const SECTIONS: { key: SectionKey; label: string; icon: React.ReactNode; requiresTour: boolean }[] = [
-  { key: "atomize",    label: "01 · Atomize",   icon: <Puzzle size={15} />,      requiresTour: false },
-  { key: "segment",    label: "02 · Segment",   icon: <Layers size={15} />,      requiresTour: true },
-  { key: "score",      label: "03 · Score",     icon: <TrendingUp size={15} />,  requiresTour: true },
-  { key: "route_hub",  label: "04 · Route/Hub", icon: <GitBranch size={15} />,   requiresTour: true },
-  { key: "slate",      label: "05 · Slate",     icon: <FileStack size={15} />,   requiresTour: true },
-  { key: "write_gate", label: "06 · Write/Gate",icon: <PenSquare size={15} />,   requiresTour: true },
-  { key: "review",     label: "07 · Review",    icon: <Eye size={15} />,         requiresTour: true },
-  { key: "publish",    label: "08 · Publish",   icon: <Send size={15} />,        requiresTour: true },
+type SectionKey = "atomize" | "segment" | "score" | "route_hub" | "slate";
+
+const SECTIONS: { key: SectionKey; label: string; icon: React.ReactNode }[] = [
+  { key: "atomize",    label: "01 · Atomize",   icon: <Puzzle size={15} /> },
+  { key: "segment",    label: "02 · Segment",   icon: <Layers size={15} /> },
+  { key: "score",      label: "03 · Score",     icon: <TrendingUp size={15} /> },
+  { key: "route_hub",  label: "04 · Route/Hub", icon: <GitBranch size={15} /> },
+  { key: "slate",      label: "05 · Slate",     icon: <FileStack size={15} /> },
 ];
 
 const LIFECYCLE_COLOR: Record<string, "green" | "amber" | "gray"> = {
   active: "green", phasing_out: "amber", retired: "gray",
 };
 
-// ── Small shared UI helpers (not yet in adminUi.tsx — audit-panel specific) ──
+const selectStyle: React.CSSProperties = {
+  padding: "8px 12px", background: A.card, border: `1px solid ${A.line}`, borderRadius: 8,
+  fontSize: 13, fontFamily: sans, color: A.body, cursor: "pointer",
+};
 
-function EmptyState({ title, body }: { title: string; body: string }) {
-  return (
-    <Card>
-      <div style={{ textAlign: "center", padding: "40px 20px" }}>
-        <div style={{ fontSize: 32, marginBottom: 10 }}>🗒️</div>
-        <div style={{ fontSize: 15, fontWeight: 600, color: A.ink, marginBottom: 6 }}>{title}</div>
-        <div style={{ fontSize: 13, color: A.muted }}>{body}</div>
-      </div>
-    </Card>
-  );
-}
-
-function ErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
-  return (
-    <Card style={{ borderColor: A.redBorder }}>
-      <div style={{ textAlign: "center", padding: "32px 20px" }}>
-        <AlertTriangle size={26} color={A.red} style={{ marginBottom: 10 }} />
-        <div style={{ fontSize: 14, fontWeight: 600, color: A.ink, marginBottom: 6 }}>Could not load this panel</div>
-        <div style={{ fontSize: 12.5, color: A.muted, marginBottom: 14 }}>{message}</div>
-        <Btn variant="secondary" size="sm" onClick={onRetry}><RotateCw size={13} /> Retry</Btn>
-      </div>
-    </Card>
-  );
-}
-
-function PickTourPrompt({ sectionLabel }: { sectionLabel: string }) {
-  return (
-    <EmptyState
-      title="Chọn 1 Tour cụ thể"
-      body={`${sectionLabel} là dữ liệu theo Tour — chọn 1 Tour ở dropdown phía trên (không phải "All tours") để xem.`}
-    />
-  );
-}
-
-function BacklogNote({ children }: { children: React.ReactNode }) {
-  return (
-    <div style={{
-      display: "flex", alignItems: "flex-start", gap: 8, padding: "10px 14px",
-      background: A.amberSoft, border: `1px solid ${A.amber}40`, borderRadius: 8,
-      fontSize: 12, color: A.ink3, marginBottom: 14, fontFamily: sans,
-    }}>
-      <AlertTriangle size={14} color={A.amber} style={{ flexShrink: 0, marginTop: 1 }} />
-      <div>{children}</div>
-    </div>
-  );
-}
-
-async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`${url} → HTTP ${res.status}`);
-  return res.json();
-}
-
-// ── Generic audit table ────────────────────────────────────────────────────
-
-interface Col<T> { key: string; label: string; render: (row: T) => React.ReactNode; }
-
-function AuditTable<T>({ rows, columns, rowKey }: {
-  rows: T[]; columns: Col<T>[]; rowKey: (row: T) => string;
-}) {
-  return (
-    <div style={{ overflowX: "auto", border: `1px solid ${A.line}`, borderRadius: 10 }}>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: sans }}>
-        <thead><tr>{columns.map(c => <th key={c.key} style={TH}>{c.label}</th>)}</tr></thead>
-        <tbody>
-          {rows.map(row => (
-            <tr key={rowKey(row)}>
-              {columns.map(c => <td key={c.key} style={TD}>{c.render(row)}</td>)}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
+const inputStyle: React.CSSProperties = {
+  padding: "7px 10px", background: A.card, border: `1px solid ${A.line}`, borderRadius: 8,
+  fontSize: 12.5, fontFamily: sans, color: A.body, width: 140,
+};
 
 // ══════════════════════════════════════════════════════════════════════════
-// Section 01 — Atomize (PR #311's original build, bổ sung filter/recurrence/usage per STEP0)
+// Section 01 — Atomize (PR #311's original build, unchanged by AA-551)
 // ══════════════════════════════════════════════════════════════════════════
 
 interface Atom {
@@ -176,10 +105,10 @@ interface Atom {
   segment_score: number | null;
   route_id: string | null;
   route_hub_name: string | null;
-  owner_scope: string; // "platform" (A3, AA-526+) or a real tenant_id (pre-AA-526 legacy row)
-  recurrence: number | null; // AA-527 bổ sung — atom_ranking.recurrence (N itinerary/Segment)
-  usage_count: number;       // AA-527 bổ sung — real content_piece write count (via T8 request)
-  lifecycle_stage: "active" | "phasing_out" | "retired"; // AA-527 bổ sung
+  owner_scope: string;
+  recurrence: number | null;
+  usage_count: number;
+  lifecycle_stage: "active" | "phasing_out" | "retired";
 }
 
 const DIST_COLOR: Record<string, "green" | "amber" | "gray"> = { HIGH: "green", MED: "amber", LOW: "gray" };
@@ -200,8 +129,8 @@ function AtomizeSection({ summary, summaryLoading, selectedTour, onTourChange, o
   const [total, setTotal] = useState(0);
   const [distinctiveness, setDistinctiveness] = useState("");
   const [unreviewedOnly, setUnreviewedOnly] = useState(false);
-  const [ownerScopeClass, setOwnerScopeClass] = useState(""); // AA-527 bổ sung, kiểm tra điểm 1
-  const [lifecycleFilter, setLifecycleFilter] = useState("");  // AA-527 bổ sung, kiểm tra điểm 2
+  const [ownerScopeClass, setOwnerScopeClass] = useState("");
+  const [lifecycleFilter, setLifecycleFilter] = useState("");
   const [atomsLoading, setAtomsLoading] = useState(true);
   const [atomsError, setAtomsError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -314,13 +243,11 @@ function AtomizeSection({ summary, summaryLoading, selectedTour, onTourChange, o
                   <option value="MED">Medium</option>
                   <option value="LOW">Low</option>
                 </select>
-                {/* AA-527 bổ sung, kiểm tra điểm 1 — owner_scope filter (Platform vs Legacy) */}
                 <select value={ownerScopeClass} onChange={e => setOwnerScopeClass(e.target.value)} style={selectStyle}>
                   <option value="">All owners</option>
                   <option value="platform">Platform only</option>
                   <option value="legacy">Legacy tenant-owned only</option>
                 </select>
-                {/* AA-527 bổ sung, kiểm tra điểm 2 — tour lifecycle_stage filter */}
                 <select value={lifecycleFilter} onChange={e => setLifecycleFilter(e.target.value)} style={selectStyle}>
                   <option value="">All lifecycle stages</option>
                   <option value="active">Active</option>
@@ -372,11 +299,6 @@ function AtomizeSection({ summary, summaryLoading, selectedTour, onTourChange, o
   );
 }
 
-const selectStyle: React.CSSProperties = {
-  padding: "8px 12px", background: A.card, border: `1px solid ${A.line}`, borderRadius: 8,
-  fontSize: 13, fontFamily: sans, color: A.body, cursor: "pointer",
-};
-
 type AtomRow =
   | { kind: "atom"; atom: Atom }
   | { kind: "segment"; segmentId: string; place: string; action: string; atoms: Atom[]; score: number | null; routeHubName: string | null };
@@ -424,7 +346,6 @@ function AtomCard({ atom, showTour, onStar, onDelete }: {
             {atom.unreviewed && <Badge color="blue">New</Badge>}
             <OwnerBadge scope={atom.owner_scope} />
             {atom.lifecycle_stage !== "active" && <Badge color={LIFECYCLE_COLOR[atom.lifecycle_stage]}>{atom.lifecycle_stage}</Badge>}
-            {/* AA-527 bổ sung: recurrence (atom_ranking.recurrence) + usage_count (real content_piece writes) */}
             {atom.recurrence != null && atom.recurrence > 0 && (
               <span style={{ fontSize: 10.5, fontFamily: mono, color: A.muted }}>↻ {atom.recurrence} itineraries</span>
             )}
@@ -483,126 +404,206 @@ function SegmentGroup({ place, action, atoms, score, routeHubName, showTour, col
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// Sections 02-05 — Segment / Score / Route-Hub / Slate (new, read-only audit)
+// Sections 02-04 — Segment / Score / Route-Hub — AA-551: platform-wide, paginated,
+// common Tour+Market filter + own extra filter row each.
 // ══════════════════════════════════════════════════════════════════════════
 
-function useTourScopedFetch<T>(endpoint: string, tourId: string | null) {
+function usePlatformFetch<T>(endpoint: string, params: Record<string, string | number | undefined>) {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Stable dep key — `params` is a fresh object every render otherwise.
+  const key = JSON.stringify(params);
 
   const load = useCallback(() => {
-    if (!tourId) { setData(null); setLoading(false); setError(null); return; }
     setLoading(true); setError(null);
-    fetchJson<T>(`${endpoint}?tour_id=${encodeURIComponent(tourId)}`)
+    const qs = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== "") qs.set(k, String(v)); });
+    fetchJson<T>(`${endpoint}?${qs}`)
       .then(setData)
       .catch(e => setError(String(e.message || e)))
       .finally(() => setLoading(false));
-  }, [endpoint, tourId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [endpoint, key]);
 
   useEffect(() => { load(); }, [load]);
   return { data, loading, error, reload: load };
 }
 
+const filterBarStyle: React.CSSProperties = {
+  display: "flex", gap: 8, marginBottom: 14, alignItems: "center", flexWrap: "wrap",
+};
+
 interface SegmentRow {
+  tour_id: string; tour_name: string | null;
   segment_id: string; canonical_place: string; canonical_action: string;
   member_count: number; market: string | null; total_rank: number | null; recurrence: number | null;
   excluded_reason: string | null; route_id: string | null; route_hub_name: string | null;
 }
 
-function SegmentSection({ tourId }: { tourId: string | null }) {
-  const { data, loading, error, reload } = useTourScopedFetch<{ data: SegmentRow[]; total: number }>("/api/admin/dashboard/segments", tourId);
-  if (!tourId) return <PickTourPrompt sectionLabel="Segment" />;
-  if (error) return <ErrorState message={error} onRetry={reload} />;
-  if (loading) return <LoadingScreen msg="Loading Segments…" />;
-  if (!data || data.total === 0) return <EmptyState title="No Segments yet" body="No atom on this tour has been grouped into a Segment (services/acp_contract/segment_matching.py) yet." />;
+function SegmentSection({ tourId, market }: { tourId: string | null; market: string }) {
+  const [placeSearch, setPlaceSearch] = useState("");
+  const [minRecurrence, setMinRecurrence] = useState("");
+  const [offset, setOffset] = useState(0);
+  useEffect(() => { setOffset(0); }, [tourId, market, placeSearch, minRecurrence]);
+
+  const { data, loading, error, reload } = usePlatformFetch<{ data: SegmentRow[]; total: number }>(
+    "/api/admin/dashboard/segments",
+    { tour_id: tourId ?? undefined, market: market || undefined, place_search: placeSearch || undefined,
+      min_recurrence: minRecurrence || undefined, limit: PAGE_SIZE, offset },
+  );
+
   return (
-    // AA-548 — "Tenant" column removed (AA-545 made Segment/Score/Route platform-wide, no
-    // tenant_name in any of the 3 responses anymore). "Market" column NOT added here on purpose:
-    // this panel's own backend query (admin_dashboard.py::list_segments) joins atom_ranking
-    // WITHOUT a market filter and GROUPs by ar.market, so it DOES fan out one row per (Segment,
-    // market) same as Score below — rowKey below reflects that.
-    <AuditTable rows={data.data} rowKey={r => `${r.segment_id}-${r.market ?? "none"}`} columns={[
-      { key: "place", label: "Place — Action", render: r => <>{r.canonical_place} — {r.canonical_action}</> },
-      { key: "market", label: "Market", render: r => r.market ?? "—" },
-      { key: "members", label: "Atoms", render: r => r.member_count },
-      { key: "rank", label: "Total rank", render: r => r.excluded_reason ? <Badge color="gray">{r.excluded_reason}</Badge> : (r.total_rank ?? "—") },
-      { key: "recurrence", label: "Recurrence", render: r => r.recurrence ?? "—" },
-      { key: "route", label: "Route", render: r => r.route_hub_name ? <Badge color="gold">{r.route_hub_name}</Badge> : "—" },
-    ]} />
+    <>
+      <div style={filterBarStyle}>
+        <input style={inputStyle} placeholder="Search place/verb…" value={placeSearch}
+          onChange={e => setPlaceSearch(e.target.value)} />
+        <input style={{ ...inputStyle, width: 110 }} type="number" min={0} placeholder="Min recurrence"
+          value={minRecurrence} onChange={e => setMinRecurrence(e.target.value)} />
+      </div>
+      {error ? <ErrorState message={error} onRetry={reload} /> :
+        loading ? <LoadingScreen msg="Loading Segments…" /> :
+        (!data || data.total === 0) ? <EmptyState title="No Segments match this filter" body="No atom_segment row (services/acp_contract/segment_matching.py) matches the current Tour/Market/search filter." /> : (
+        <>
+          {/* AA-548's Market column (no more Tenant — atom_segment is platform-wide, AA-545).
+              AA-551 adds a Tour column back since a row is no longer scoped to one Tour by
+              default — showing which tour each row came from is the whole point of the
+              "All tours" view. */}
+          <AuditTable rows={data.data} rowKey={r => `${r.tour_id}-${r.segment_id}-${r.market ?? "none"}`} columns={[
+            { key: "tour", label: "Tour", render: r => r.tour_name ?? "—" },
+            { key: "place", label: "Place — Action", render: r => <>{r.canonical_place} — {r.canonical_action}</> },
+            { key: "market", label: "Market", render: r => r.market ?? "—" },
+            { key: "members", label: "Atoms", render: r => r.member_count },
+            { key: "rank", label: "Total rank", render: r => r.excluded_reason ? <Badge color="gray">{r.excluded_reason}</Badge> : (r.total_rank ?? "—") },
+            { key: "recurrence", label: "Recurrence", render: r => r.recurrence ?? "—" },
+            { key: "route", label: "Route", render: r => r.route_hub_name ? <Badge color="gold">{r.route_hub_name}</Badge> : "—" },
+          ] as Col<SegmentRow>[]} />
+          <PageFooter total={data.total} offset={offset} pageSize={PAGE_SIZE} onOffset={setOffset} />
+        </>
+      )}
+    </>
   );
 }
 
 interface ScoreRow {
+  tour_id: string; tour_name: string | null;
   market: string | null; segment_id: string; canonical_place: string | null; canonical_action: string | null;
   demand_rank: number | null; recurrence_rank: number | null; questions_rank: number | null; said_rank: number | null;
   total_rank: number | null; demand_market: string | null; demand_volume: number | null;
   recurrence: number; questions: number; said: number; excluded_reason: string | null;
 }
 
-function ScoreSection({ tourId }: { tourId: string | null }) {
-  const { data, loading, error, reload } = useTourScopedFetch<{ data: ScoreRow[]; total: number }>("/api/admin/dashboard/score", tourId);
-  if (!tourId) return <PickTourPrompt sectionLabel="Score" />;
-  if (error) return <ErrorState message={error} onRetry={reload} />;
-  if (loading) return <LoadingScreen msg="Loading Score…" />;
-  if (!data || data.total === 0) return <EmptyState title="No ranked Segments yet" body="atom_ranking has no rows for this tour — Score runs as part of Route detection (AA-515)." />;
-  return (
-    // AA-548 — "Tenant" column removed, "Market" column added (AA-545 made atom_ranking's PK
-    // (market, tour_id, segment_id) — up to 6 rows/Segment now, one per finite platform market).
-    <AuditTable rows={data.data} rowKey={r => `${r.segment_id}-${r.market ?? "none"}`} columns={[
-      { key: "place", label: "Segment", render: r => r.canonical_place ? `${r.canonical_place} — ${r.canonical_action}` : "—" },
-      { key: "market", label: "Market", render: r => r.market ?? "—" },
-      { key: "total", label: "Total rank", render: r => r.excluded_reason ? <Badge color="gray">{r.excluded_reason}</Badge> : (r.total_rank ?? "—") },
-      { key: "demand", label: "Demand", render: r => r.demand_rank != null ? `#${r.demand_rank} (${r.demand_volume ?? "—"} · ${r.demand_market ?? "—"})` : "—" },
-      { key: "recurrence", label: "Recurrence", render: r => r.recurrence_rank != null ? `#${r.recurrence_rank} (${r.recurrence})` : "—" },
-      { key: "questions", label: "Questions", render: r => r.questions_rank != null ? `#${r.questions_rank} (${r.questions})` : "—" },
-      { key: "said", label: "Said", render: r => r.said_rank != null ? `#${r.said_rank} (${r.said})` : "—" },
-    ]} />
+function ScoreSection({ tourId, market }: { tourId: string | null; market: string }) {
+  const [minRank, setMinRank] = useState("");
+  const [maxRank, setMaxRank] = useState("");
+  const [offset, setOffset] = useState(0);
+  useEffect(() => { setOffset(0); }, [tourId, market, minRank, maxRank]);
+
+  const { data, loading, error, reload } = usePlatformFetch<{ data: ScoreRow[]; total: number }>(
+    "/api/admin/dashboard/score",
+    { tour_id: tourId ?? undefined, market: market || undefined,
+      min_total_rank: minRank || undefined, max_total_rank: maxRank || undefined, limit: PAGE_SIZE, offset },
   );
-}
 
-interface RouteRow {
-  route_id: string; hub_name: string; market: string | null;
-  ordered_segment_ids: string[]; first_day: number; last_day: number; score: number | null; created_at: string;
-  version: number; superseded_at: string | null; // AA-532 — versioning, never delete-and-reinsert
-}
-
-function RouteHubSection({ tourId }: { tourId: string | null }) {
-  const { data, loading, error, reload } = useTourScopedFetch<{ data: RouteRow[]; total: number; hub_grouping_backlog: boolean }>("/api/admin/dashboard/routes", tourId);
-  if (!tourId) return <PickTourPrompt sectionLabel="Route/Hub" />;
-  if (error) return <ErrorState message={error} onRetry={reload} />;
-  if (loading) return <LoadingScreen msg="Loading Routes…" />;
   return (
     <>
-      <BacklogNote>
-        <strong>Backlog (AA-525 Phần 12 mục 8):</strong> chưa có UI liệt kê Hub/Family (tour nào được
-        gộp chung 1 hành trình, vì sao) — bảng dưới đây chỉ hiện Route.hub_name (text), không hiện lý
-        do gộp Hub.
-      </BacklogNote>
-      {(!data || data.total === 0) ? (
-        <EmptyState title="No Routes yet" body="acp_contract.route has no rows for this tour — Route detection (route_detection.py) hasn't run, or found no consecutive-day span of ranked Segments." />
-      ) : (
-        // AA-548 — "Tenant" column removed, "Market" column added (AA-545 dropped route.
-        // tenant_id/score entirely; score is now AVG(total_rank) computed per market at read
-        // time — one row per (Route version, market) from admin_dashboard.py::list_routes).
-        <AuditTable rows={data.data} rowKey={r => `${r.route_id}-${r.market ?? "none"}`} columns={[
-          // AA-532 — status/version: this panel shows the full version history on purpose
-          // (route rows are versioned/superseded, never deleted), unlike every other reader of
-          // this table which only ever sees the current one.
-          { key: "status", label: "Status", render: r => r.superseded_at
-            ? <Badge color="gray">superseded v{r.version}</Badge>
-            : <Badge color="green">current{r.version > 1 ? ` v${r.version}` : ""}</Badge> },
-          { key: "hub", label: "Hub name", render: r => r.hub_name },
-          { key: "market", label: "Market", render: r => r.market ?? "—" },
-          { key: "days", label: "Days", render: r => `${r.first_day}–${r.last_day}` },
-          { key: "segments", label: "Segments", render: r => (r.ordered_segment_ids || []).length },
-          { key: "score", label: "Score", render: r => r.score ?? "—" },
-          { key: "created", label: "Created", render: r => new Date(r.created_at).toLocaleString() },
-        ]} />
+      <div style={filterBarStyle}>
+        <input style={{ ...inputStyle, width: 110 }} type="number" placeholder="Min total rank" value={minRank} onChange={e => setMinRank(e.target.value)} />
+        <input style={{ ...inputStyle, width: 110 }} type="number" placeholder="Max total rank" value={maxRank} onChange={e => setMaxRank(e.target.value)} />
+      </div>
+      {error ? <ErrorState message={error} onRetry={reload} /> :
+        loading ? <LoadingScreen msg="Loading Score…" /> :
+        (!data || data.total === 0) ? <EmptyState title="No ranked Segments match this filter" body="atom_ranking has no rows matching the current Tour/Market/rank filter — Score runs as part of Route detection (AA-515)." /> : (
+        <>
+          <AuditTable rows={data.data} rowKey={r => `${r.tour_id}-${r.segment_id}-${r.market ?? "none"}`} columns={[
+            { key: "tour", label: "Tour", render: r => r.tour_name ?? "—" },
+            { key: "place", label: "Segment", render: r => r.canonical_place ? `${r.canonical_place} — ${r.canonical_action}` : "—" },
+            { key: "market", label: "Market", render: r => r.market ?? "—" },
+            { key: "total", label: "Total rank", render: r => r.excluded_reason ? <Badge color="gray">{r.excluded_reason}</Badge> : (r.total_rank ?? "—") },
+            { key: "demand", label: "Demand", render: r => r.demand_rank != null ? `#${r.demand_rank} (${r.demand_volume ?? "—"} · ${r.demand_market ?? "—"})` : "—" },
+            { key: "recurrence", label: "Recurrence", render: r => r.recurrence_rank != null ? `#${r.recurrence_rank} (${r.recurrence})` : "—" },
+            { key: "questions", label: "Questions", render: r => r.questions_rank != null ? `#${r.questions_rank} (${r.questions})` : "—" },
+            { key: "said", label: "Said", render: r => r.said_rank != null ? `#${r.said_rank} (${r.said})` : "—" },
+          ] as Col<ScoreRow>[]} />
+          <PageFooter total={data.total} offset={offset} pageSize={PAGE_SIZE} onOffset={setOffset} />
+        </>
       )}
     </>
   );
 }
+
+interface RouteRow {
+  route_id: string; tour_id: string; tour_name: string | null; hub_name: string; market: string | null;
+  ordered_segment_ids: string[]; first_day: number; last_day: number; score: number | null; created_at: string;
+  version: number; superseded_at: string | null;
+}
+
+function RouteHubSection({ tourId, market }: { tourId: string | null; market: string }) {
+  const [minDays, setMinDays] = useState("");
+  const [maxDays, setMaxDays] = useState("");
+  const [hubSearch, setHubSearch] = useState("");
+  const [offset, setOffset] = useState(0);
+  useEffect(() => { setOffset(0); }, [tourId, market, minDays, maxDays, hubSearch]);
+
+  const { data, loading, error, reload } = usePlatformFetch<{ data: RouteRow[]; total: number }>(
+    "/api/admin/dashboard/routes",
+    { tour_id: tourId ?? undefined, market: market || undefined, min_days: minDays || undefined,
+      max_days: maxDays || undefined, hub_name_search: hubSearch || undefined, limit: PAGE_SIZE, offset },
+  );
+
+  return (
+    <>
+      <div style={filterBarStyle}>
+        <input style={{ ...inputStyle, width: 100 }} type="number" min={1} placeholder="Min days" value={minDays} onChange={e => setMinDays(e.target.value)} />
+        <input style={{ ...inputStyle, width: 100 }} type="number" min={1} placeholder="Max days" value={maxDays} onChange={e => setMaxDays(e.target.value)} />
+        <input style={inputStyle} placeholder="Search hub name…" value={hubSearch} onChange={e => setHubSearch(e.target.value)} />
+        {!tourId && (
+          <span style={{ fontSize: 11.5, color: A.muted2, fontStyle: "italic" }}>
+            Showing current Routes only — pick a Tour to see superseded versions too.
+          </span>
+        )}
+      </div>
+      {error ? <ErrorState message={error} onRetry={reload} /> :
+        loading ? <LoadingScreen msg="Loading Routes…" /> :
+        (!data || data.total === 0) ? <EmptyState title="No Routes match this filter" body="acp_contract.route has no rows matching the current Tour/Market/day-span/hub filter — Route detection (route_detection.py) hasn't run, or found no consecutive-day span of ranked Segments." /> : (
+        <>
+          <AuditTable rows={data.data} rowKey={r => `${r.route_id}-${r.market ?? "none"}`} columns={[
+            { key: "status", label: "Status", render: r => r.superseded_at
+              ? <Badge color="gray">superseded v{r.version}</Badge>
+              : <Badge color="green">current{r.version > 1 ? ` v${r.version}` : ""}</Badge> },
+            { key: "tour", label: "Tour", render: r => r.tour_name ?? "—" },
+            { key: "hub", label: "Hub name", render: r => r.hub_name },
+            { key: "market", label: "Market", render: r => r.market ?? "—" },
+            { key: "days", label: "Days", render: r => `${r.first_day}–${r.last_day}` },
+            { key: "segments", label: "Segments", render: r => (r.ordered_segment_ids || []).length },
+            { key: "score", label: "Score", render: r => r.score ?? "—" },
+            { key: "created", label: "Created", render: r => new Date(r.created_at).toLocaleString() },
+          ] as Col<RouteRow>[]} />
+          <PageFooter total={data.total} offset={offset} pageSize={PAGE_SIZE} onOffset={setOffset} />
+        </>
+      )}
+    </>
+  );
+}
+
+function PageFooter({ total, offset, pageSize, onOffset }: {
+  total: number; offset: number; pageSize: number; onOffset: (o: number) => void;
+}) {
+  if (total <= pageSize) return null;
+  const page = Math.floor(offset / pageSize) + 1;
+  const pages = Math.ceil(total / pageSize);
+  return (
+    <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 12, marginTop: 16 }}>
+      <Btn variant="secondary" size="sm" disabled={offset === 0} onClick={() => onOffset(Math.max(0, offset - pageSize))}>Previous</Btn>
+      <span style={{ fontSize: 12, color: A.muted, fontFamily: mono }}>Page {page} / {pages} ({total} total)</span>
+      <Btn variant="secondary" size="sm" disabled={offset + pageSize >= total} onClick={() => onOffset(offset + pageSize)}>Next</Btn>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Section 05 — Slate: UNCHANGED, still per-Tour (AA-550 A.3 — real per-tenant exception)
+// ══════════════════════════════════════════════════════════════════════════
 
 interface SlateRow {
   subject_id: string; tenant_name: string | null; channel: string; state: string; score: number | null;
@@ -614,8 +615,12 @@ const SLATE_STATE_COLOR: Record<string, "gray" | "blue" | "green" | "red"> = {
 };
 
 function SlateSection({ tourId }: { tourId: string | null }) {
-  const { data, loading, error, reload } = useTourScopedFetch<{ data: SlateRow[]; total: number; by_state: Record<string, number> }>("/api/admin/dashboard/slate", tourId);
-  if (!tourId) return <PickTourPrompt sectionLabel="Slate" />;
+  const { data, loading, error, reload } = usePlatformFetch<{ data: SlateRow[]; total: number; by_state: Record<string, number> }>(
+    "/api/admin/dashboard/slate", { tour_id: tourId ?? undefined },
+  );
+  if (!tourId) {
+    return <EmptyState title="Select a Tour" body="Slate is per-tenant, per-Tour data (acp_shared.subject.tenant_id is a real, required column — not part of AA-545's platform-wide fix) — pick one Tour above to view it." />;
+  }
   if (error) return <ErrorState message={error} onRetry={reload} />;
   if (loading) return <LoadingScreen msg="Loading Slate…" />;
   if (!data || data.total === 0) return <EmptyState title="No Slate proposals yet" body="acp_shared.subject has no rows for this tour — the Slate (AA-511) proposes a Subject once a Segment/Route clears a Channel's Bar." />;
@@ -633,159 +638,23 @@ function SlateSection({ tourId }: { tourId: string | null }) {
         { key: "score", label: "Score", render: r => r.score ?? "—" },
         { key: "kind", label: "Kind", render: r => r.route_id ? "Route" : "Segment" },
         { key: "created", label: "Proposed", render: r => new Date(r.created_at).toLocaleString() },
-      ]} />
+      ] as Col<SlateRow>[]} />
     </>
   );
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// Sections 06-07 — Write/Gate + Review (both read admin_a4.py's content-log — 2 lenses, 1 dataset)
+// Page shell — sticky header (common Tour+Market filter + stat bar) + sticky inner nav (01-05)
 // ══════════════════════════════════════════════════════════════════════════
-
-interface ContentLogRow {
-  piece_id: string; tenant_name: string | null; channel: string; status: string; held_reason: string | null;
-  gate_ledger: { gate?: string; passed?: boolean; violations?: string[] }[];
-  gate_pass_count: number; gate_total_count: number; repair_log: unknown[]; attempt_number: number;
-  content_preview: string; publish_status: string; created_at: string;
-  tour: { name: string; destination: string } | null;
-}
-
-function useContentLog(tourId: string | null) {
-  return useTourScopedFetch<{ data: ContentLogRow[]; total: number }>("/api/admin/a4/content-log", tourId);
-}
-
-const STATUS_COLOR: Record<string, "green" | "amber" | "red" | "gray"> = {
-  approved: "green", held: "amber", processing: "gray", failed: "red",
-};
-
-function WriteGateSection({ tourId }: { tourId: string | null }) {
-  const { data, loading, error, reload } = useContentLog(tourId);
-  if (!tourId) return <PickTourPrompt sectionLabel="Write/Gate" />;
-  if (error) return <ErrorState message={error} onRetry={reload} />;
-  if (loading) return <LoadingScreen msg="Loading Write/Gate…" />;
-  if (!data || data.total === 0) return <EmptyState title="No write attempts yet" body="acp_shared.content_piece has no rows for this tour — T9 write hasn't run for any Slate/angle pick here yet." />;
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      {data.data.map(p => (
-        <Card key={p.piece_id} style={{ padding: "14px 18px" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, marginBottom: 8 }}>
-            <div>
-              <span style={{ fontSize: 12, fontFamily: mono, color: A.muted2, marginRight: 8 }}>#{p.attempt_number}</span>
-              <Badge color={STATUS_COLOR[p.status] ?? "gray"}>{p.status}</Badge>{" "}
-              <Badge color="gray">{p.channel}</Badge>{" "}
-              <span style={{ fontSize: 12, color: A.muted }}>{p.tenant_name}</span>
-            </div>
-            <span style={{ fontSize: 11.5, fontFamily: mono, color: A.muted2 }}>{p.gate_pass_count}/{p.gate_total_count} gates</span>
-          </div>
-          <div style={{ fontSize: 13, color: A.body, marginBottom: 8 }}>{p.content_preview}…</div>
-          {p.held_reason && <div style={{ fontSize: 12, color: A.red, marginBottom: 6 }}>Held: {p.held_reason}</div>}
-          {p.gate_ledger.filter(g => g.passed === false).length > 0 && (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-              {p.gate_ledger.filter(g => g.passed === false).map((g, i) => (
-                <Badge key={i} color="red">{g.gate ?? "gate"}</Badge>
-              ))}
-            </div>
-          )}
-        </Card>
-      ))}
-    </div>
-  );
-}
-
-function ReviewSection({ tourId }: { tourId: string | null }) {
-  const { data, loading, error, reload } = useContentLog(tourId);
-  if (!tourId) return <PickTourPrompt sectionLabel="Review" />;
-  if (error) return <ErrorState message={error} onRetry={reload} />;
-  if (loading) return <LoadingScreen msg="Loading Review…" />;
-  if (!data || data.total === 0) return <EmptyState title="Nothing to review yet" body="No content_piece rows for this tour." />;
-  // Review = same content-log dataset as Write/Gate, a queue-status lens instead of gate-detail —
-  // "which pieces are waiting on what" rather than "why did this attempt hold" (per AA-501: AA's
-  // review need is already fully served by content-log, no separate table/query).
-  return (
-    <AuditTable rows={data.data} rowKey={r => r.piece_id} columns={[
-      { key: "tour", label: "Tour", render: r => r.tour?.name ?? "—" },
-      { key: "tenant", label: "Tenant", render: r => r.tenant_name ?? "—" },
-      { key: "channel", label: "Channel", render: r => r.channel },
-      { key: "status", label: "Gate status", render: r => <Badge color={STATUS_COLOR[r.status] ?? "gray"}>{r.status}</Badge> },
-      { key: "publish", label: "Publish status", render: r => <Badge color={r.publish_status === "published" ? "green" : r.publish_status === "pending_publish" ? "amber" : "gray"}>{r.publish_status}</Badge> },
-      { key: "created", label: "Written", render: r => new Date(r.created_at).toLocaleString() },
-    ]} />
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// Section 08 — Publish (admin_a4.py's publish-log, tour_id filter added this task)
-// ══════════════════════════════════════════════════════════════════════════
-
-interface PublishRow {
-  publish_id: string; tenant_name: string | null; channel: string; status: string;
-  external_url: string | null; last_error: string | null; published_at: string | null; created_at: string;
-}
-
-function PublishSection({ tourId }: { tourId: string | null }) {
-  const { data, loading, error, reload } = useTourScopedFetch<{ data: PublishRow[]; total: number }>("/api/admin/a4/publish-log", tourId);
-  if (!tourId) return <PickTourPrompt sectionLabel="Publish" />;
-  if (error) return <ErrorState message={error} onRetry={reload} />;
-  if (loading) return <LoadingScreen msg="Loading Publish…" />;
-  if (!data || data.total === 0) return <EmptyState title="Nothing published yet" body="acp_shared.publish_log has no rows for this tour — T11 hasn't published any piece from it yet." />;
-  return (
-    <AuditTable rows={data.data} rowKey={r => r.publish_id} columns={[
-      { key: "tenant", label: "Tenant", render: r => r.tenant_name ?? "—" },
-      { key: "channel", label: "Channel", render: r => r.channel },
-      { key: "status", label: "Status", render: r => <Badge color={r.status === "published" ? "green" : r.status === "failed" ? "red" : "gray"}>{r.status}</Badge> },
-      { key: "url", label: "URL", render: r => r.external_url ? <a href={r.external_url} target="_blank" rel="noreferrer" style={{ color: A.gold }}>Link ↗</a> : "—" },
-      { key: "error", label: "Last error", render: r => r.last_error ?? "—" },
-      { key: "when", label: "When", render: r => new Date(r.published_at ?? r.created_at).toLocaleString() },
-    ]} />
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// Page shell — header (Tour anchor) + inner sidebar (8 sections) + active panel
-// ══════════════════════════════════════════════════════════════════════════
-
-function useSectionCounts(tourId: string | null, summary: Summary | null) {
-  const [counts, setCounts] = useState<Partial<Record<SectionKey, number>>>({});
-
-  useEffect(() => {
-    const atomizeCount = tourId
-      ? summary?.by_tour.find(t => t.tour_id === tourId)?.atom_count ?? 0
-      : summary?.total_count ?? 0;
-    setCounts(prev => ({ ...prev, atomize: atomizeCount }));
-  }, [tourId, summary]);
-
-  useEffect(() => {
-    if (!tourId) {
-      setCounts(prev => ({ ...prev, segment: undefined, score: undefined, route_hub: undefined, slate: undefined, write_gate: undefined, review: undefined, publish: undefined }));
-      return;
-    }
-    let cancelled = false;
-    const specs: [SectionKey, string][] = [
-      ["segment", "/api/admin/dashboard/segments"], ["score", "/api/admin/dashboard/score"],
-      ["route_hub", "/api/admin/dashboard/routes"], ["slate", "/api/admin/dashboard/slate"],
-      ["write_gate", "/api/admin/a4/content-log"], ["review", "/api/admin/a4/content-log"],
-      ["publish", "/api/admin/a4/publish-log"],
-    ];
-    Promise.all(specs.map(([, url]) => fetchJson<{ total: number }>(`${url}?tour_id=${encodeURIComponent(tourId)}`).then(d => d.total).catch(() => undefined)))
-      .then(totals => {
-        if (cancelled) return;
-        setCounts(prev => {
-          const next = { ...prev };
-          specs.forEach(([key], i) => { next[key] = totals[i]; });
-          return next;
-        });
-      });
-    return () => { cancelled = true; };
-  }, [tourId]);
-
-  return counts;
-}
 
 export default function AtomCurationDashboardPage() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [selectedTour, setSelectedTour] = useState<string | null>(null);
+  const [selectedMarket, setSelectedMarket] = useState("");
   const [activeSection, setActiveSection] = useState<SectionKey>("atomize");
+  const [stats, setStats] = useState<DashboardSummary | null>(null);
+  const [statsLoading, setStatsLoading] = useState(true);
 
   const loadSummary = useCallback(() => {
     setSummaryLoading(true);
@@ -796,95 +665,131 @@ export default function AtomCurationDashboardPage() {
   }, []);
   useEffect(() => { loadSummary(); }, [loadSummary]);
 
-  const counts = useSectionCounts(selectedTour, summary);
-  const selectedTourMeta = useMemo(
-    () => summary?.by_tour.find(t => t.tour_id === selectedTour) ?? null,
-    [summary, selectedTour],
-  );
+  // AA-551 — header stat bar, re-fetched whenever the common Tour/Market filter changes,
+  // independent of which section tab is open (GET /admin/dashboard/summary).
+  useEffect(() => {
+    setStatsLoading(true);
+    const qs = new URLSearchParams();
+    if (selectedTour) qs.set("tour_id", selectedTour);
+    if (selectedMarket) qs.set("market", selectedMarket);
+    fetchJson<DashboardSummary>(`/api/admin/dashboard/summary?${qs}`)
+      .then(setStats)
+      .catch(() => {})
+      .finally(() => setStatsLoading(false));
+  }, [selectedTour, selectedMarket]);
+
+  const selectedTourMeta = summary?.by_tour.find(t => t.tour_id === selectedTour) ?? null;
 
   return (
     <div style={{ display: "flex", minHeight: "100vh", background: A.bg, fontFamily: sans }}>
       <style>{`
         @media (max-width: 980px) {
-          .a527-inner-sidebar { flex-direction: row !important; overflow-x: auto !important; width: 100% !important; border-right: none !important; border-bottom: 1px solid ${A.line}; }
+          .a527-inner-sidebar { flex-direction: row !important; overflow-x: auto !important; width: 100% !important; border-right: none !important; border-bottom: 1px solid ${A.line}; position: static !important; }
           .a527-inner-sidebar button { white-space: nowrap; }
           .a527-dash-body { flex-direction: column !important; }
         }
       `}</style>
       <AdminSidebar />
-      <div style={{ flex: 1, padding: "28px 32px", overflowY: "auto" }}>
-        <div style={{ marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12 }}>
-          <div>
-            <h1 style={{ fontFamily: serif, fontSize: 26, fontWeight: 500, color: A.ink, margin: 0 }}>
-              T5–T11 Content Pipeline
-            </h1>
-            <div style={{ fontSize: 12, color: A.muted, marginTop: 4 }}>
-              8-section audit dashboard — Atomize is the only section AA acts on; the other 7 show
-              what the pipeline has already produced for the selected Tour.
+      {/* AA-551 sticky fix (AA-550 A.4): header is a normal, non-scrolling flex item OUTSIDE
+          the scroll region — the original bug was a `position: sticky` header with no defined
+          scroll-container relationship, not a missing style. Only the inner section-nav below
+          still uses `sticky`, now correctly scoped to its own immediate scroll container. Both
+          verified by a real Playwright scroll test post-build (see implementation notes). */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", height: "100vh" }}>
+        <div style={{ flexShrink: 0, background: A.bg, padding: "24px 32px 16px", borderBottom: `1px solid ${A.line}` }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12, marginBottom: 16 }}>
+            <div>
+              <h1 style={{ fontFamily: serif, fontSize: 26, fontWeight: 500, color: A.ink, margin: 0 }}>
+                Master Content Pipeline (01–05)
+              </h1>
+              <div style={{ fontSize: 12, color: A.muted, marginTop: 4 }}>
+                Platform-wide monitoring — Atomize is the only section AA acts on; 02–05 show what
+                the pipeline has already produced across ALL tours, not just one. Per-tenant
+                write/review/publish activity moved to{" "}
+                <a href="/admin/tenant-activity" style={{ color: A.gold }}>Tenant Activity</a>.
+              </div>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 12, color: A.muted }}>Tour:</span>
+              <select
+                value={selectedTour ?? ""}
+                onChange={e => setSelectedTour(e.target.value || null)}
+                style={{ ...selectStyle, minWidth: 200, fontWeight: 600 }}
+              >
+                <option value="">All tours</option>
+                {(summary?.by_tour ?? []).map(t => (
+                  <option key={t.tour_id} value={t.tour_id}>{t.tour_name}</option>
+                ))}
+              </select>
+              <span style={{ fontSize: 12, color: A.muted }}>Market:</span>
+              <select value={selectedMarket} onChange={e => setSelectedMarket(e.target.value)} style={{ ...selectStyle, minWidth: 130 }}>
+                <option value="">All markets</option>
+                {MARKETS.map(m => <option key={m} value={m}>{m}</option>)}
+              </select>
+              {selectedTourMeta && selectedTourMeta.lifecycle_stage !== "active" && (
+                <Badge color={LIFECYCLE_COLOR[selectedTourMeta.lifecycle_stage]}>{selectedTourMeta.lifecycle_stage}</Badge>
+              )}
             </div>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <span style={{ fontSize: 12, color: A.muted }}>Tour:</span>
-            <select
-              value={selectedTour ?? ""}
-              onChange={e => setSelectedTour(e.target.value || null)}
-              style={{ ...selectStyle, minWidth: 220, fontWeight: 600 }}
-            >
-              <option value="">All tours (Atomize only)</option>
-              {(summary?.by_tour ?? []).map(t => (
-                <option key={t.tour_id} value={t.tour_id}>{t.tour_name}</option>
-              ))}
-            </select>
-            {selectedTourMeta && selectedTourMeta.lifecycle_stage !== "active" && (
-              <Badge color={LIFECYCLE_COLOR[selectedTourMeta.lifecycle_stage]}>{selectedTourMeta.lifecycle_stage}</Badge>
-            )}
+
+          {/* Header stat bar — AA-551, AA-550 mục F point 3/4: auto-updates with the filter above. */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 10 }}>
+            {([
+              ["Tours", stats?.tour_count],
+              ["Atoms", stats?.atom_count],
+              ["Segments", stats?.segment_count],
+              ["Score rows", stats?.score_count],
+              ["Routes", stats?.route_count],
+              ["Hubs", stats?.hub_count],
+            ] as [string, number | undefined][]).map(([label, value]) => (
+              <div key={label} style={{
+                background: A.card, border: `1px solid ${A.line}`, borderRadius: 8, padding: "8px 12px",
+              }}>
+                <div style={{ fontSize: 10.5, color: A.muted, textTransform: "uppercase", letterSpacing: "0.04em" }}>{label}</div>
+                <div style={{ fontFamily: mono, fontSize: 17, fontWeight: 600, color: A.ink }}>
+                  {statsLoading ? "…" : (value ?? "—")}
+                </div>
+              </div>
+            ))}
           </div>
         </div>
 
-        <div className="a527-dash-body" style={{ display: "flex", gap: 20, alignItems: "flex-start" }}>
-          <div className="a527-inner-sidebar" style={{
-            width: 200, flexShrink: 0, display: "flex", flexDirection: "column", gap: 2,
-            background: A.card, border: `1px solid ${A.line}`, borderRadius: 10, padding: 6,
-            position: "sticky", top: 28,
-          }}>
-            {SECTIONS.map(s => {
-              const active = activeSection === s.key;
-              const count = counts[s.key];
-              return (
-                <button key={s.key} onClick={() => setActiveSection(s.key)} style={{
-                  display: "flex", alignItems: "center", gap: 8, padding: "9px 12px", borderRadius: 7,
-                  border: "none", background: active ? A.goldTint : "transparent",
-                  color: active ? A.gold : A.body, cursor: "pointer", fontFamily: sans,
-                  fontSize: 12.5, fontWeight: active ? 700 : 500, textAlign: "left",
-                }}>
-                  {s.icon}
-                  <span style={{ flex: 1 }}>{s.label}</span>
-                  {count != null && (
-                    <span style={{
-                      fontFamily: mono, fontSize: 10.5, background: active ? A.gold : A.line2,
-                      color: active ? "#fff" : A.muted, borderRadius: 999, padding: "1px 7px",
-                    }}>{count}</span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
+        <div style={{ flex: 1, overflowY: "auto", padding: "20px 32px 32px" }}>
+          <div className="a527-dash-body" style={{ display: "flex", gap: 20, alignItems: "flex-start" }}>
+            <div className="a527-inner-sidebar" style={{
+              width: 200, flexShrink: 0, display: "flex", flexDirection: "column", gap: 2,
+              background: A.card, border: `1px solid ${A.line}`, borderRadius: 10, padding: 6,
+              position: "sticky", top: 0,
+            }}>
+              {SECTIONS.map(s => {
+                const active = activeSection === s.key;
+                return (
+                  <button key={s.key} onClick={() => setActiveSection(s.key)} style={{
+                    display: "flex", alignItems: "center", gap: 8, padding: "9px 12px", borderRadius: 7,
+                    border: "none", background: active ? A.goldTint : "transparent",
+                    color: active ? A.gold : A.body, cursor: "pointer", fontFamily: sans,
+                    fontSize: 12.5, fontWeight: active ? 700 : 500, textAlign: "left",
+                  }}>
+                    {s.icon}
+                    <span style={{ flex: 1 }}>{s.label}</span>
+                  </button>
+                );
+              })}
+            </div>
 
-          <div style={{ flex: 1, minWidth: 0 }}>
-            {activeSection === "atomize" && (
-              <AtomizeSection
-                summary={summary} summaryLoading={summaryLoading}
-                selectedTour={selectedTour} onTourChange={setSelectedTour}
-                onSummaryChange={loadSummary}
-              />
-            )}
-            {activeSection === "segment" && <SegmentSection tourId={selectedTour} />}
-            {activeSection === "score" && <ScoreSection tourId={selectedTour} />}
-            {activeSection === "route_hub" && <RouteHubSection tourId={selectedTour} />}
-            {activeSection === "slate" && <SlateSection tourId={selectedTour} />}
-            {activeSection === "write_gate" && <WriteGateSection tourId={selectedTour} />}
-            {activeSection === "review" && <ReviewSection tourId={selectedTour} />}
-            {activeSection === "publish" && <PublishSection tourId={selectedTour} />}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              {activeSection === "atomize" && (
+                <AtomizeSection
+                  summary={summary} summaryLoading={summaryLoading}
+                  selectedTour={selectedTour} onTourChange={setSelectedTour}
+                  onSummaryChange={loadSummary}
+                />
+              )}
+              {activeSection === "segment" && <SegmentSection tourId={selectedTour} market={selectedMarket} />}
+              {activeSection === "score" && <ScoreSection tourId={selectedTour} market={selectedMarket} />}
+              {activeSection === "route_hub" && <RouteHubSection tourId={selectedTour} market={selectedMarket} />}
+              {activeSection === "slate" && <SlateSection tourId={selectedTour} />}
+            </div>
           </div>
         </div>
       </div>
