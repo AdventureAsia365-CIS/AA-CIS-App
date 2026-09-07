@@ -223,13 +223,12 @@ export default function AdminSidebar() {
             <NavItem active={active("/admin/llm-usage")} accent={A.red}
               icon={<Gauge size={15} />} label="LLM Usage"
               onClick={() => router.push("/admin/llm-usage")} />
-            {/* AA-527 — replaces the removed tenant-facing T6 (AA-526): AA now decides which
-                atoms are good to use, admin-only same tier as the 3 items above. AA-551: this
-                page now covers 01-05 ONLY (platform-wide Master Content monitoring) — 06-08
-                moved to "Tenant Activity" below. */}
-            <NavItem active={active("/admin/atom-curation")} accent={A.red}
-              icon={<Puzzle size={15} />} label="Atom Curation"
-              onClick={() => router.push("/admin/atom-curation")} />
+            {/* AA-553 — "Atom Curation" moved out of this group, down into "AA Internal Content"
+                (right under Master Content) — it's Master Content pool data (Atom/Segment/Score/
+                Route/Hub/Slate), not platform config, so it didn't belong alongside Tenants/Run
+                Health/Cross-Tenant Oversight. Still admin-only (middleware.ts unchanged,
+                PROTECTED_ROUTES roles: ["admin"]) — see that NavItem below for the isAdmin guard
+                this move required now that it sits in an otherwise all-roles group. */}
             {/* AA-551 — split out of Atom Curation (AA-550's audit found the original single page
                 mixed platform-wide Master Content data with per-Tour, per-tenant activity data;
                 Nghiệp's decision was 2 separate pages, "Phương án B"). Same admin-only tier. */}
@@ -255,6 +254,20 @@ export default function AdminSidebar() {
             <NavItem key={n.href} active={active(n.href)} accent={A.gold}
               icon={n.icon} label={n.label} onClick={() => router.push(n.href)} />
           ))}
+          {/* AA-553 — moved here from "ACP v2 — Setup & Approval" (was miscategorized: this is
+              Master Content pool data — Atom/Segment/Score/Route/Hub/Slate — not platform config,
+              so it belongs right under Master Content, not next to Tenants/Run Health). Kept
+              isAdmin-gated (accent={A.red}, unlike its A.gold neighbors in this group) because
+              this group itself is NOT role-gated (renders for reviewer/content too) but
+              middleware.ts's PROTECTED_ROUTES still restricts /admin/atom-curation to
+              roles: ["admin"] — left that restriction untouched (out of this issue's scope), so a
+              non-admin NavItem here would be a dead link. Rename still pending Nghiệp's decision
+              (AA-553 Linear comment lists 3+ name options) — label kept as "Atom Curation" for now. */}
+          {isAdmin && (
+            <NavItem active={active("/admin/atom-curation")} accent={A.red}
+              icon={<Puzzle size={15} />} label="Atom Curation"
+              onClick={() => router.push("/admin/atom-curation")} />
+          )}
         </NavGroup>
 
         {/* AA-390: Legacy B2B pipeline (ACP v1) sidebar entry hidden — nobody
