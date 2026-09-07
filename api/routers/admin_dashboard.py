@@ -33,6 +33,11 @@ Cross-tenant by design (same stance as admin_a4.py, STEP0/AA-437): Route/Slate c
 touch more than one tenant's own T7 run over the same platform-shared atoms — `slate` still
 returns every tenant's rows with `tenant_name` attached; Segment/Score/Route carry no tenant
 dimension at all post-AA-545, so this doesn't apply to them anymore.
+
+AA-554 mục G (07/09/2026) — new `GET /admin/dashboard/hubs`, a real Route/Hub table split (see
+its own docstring and `list_routes`' corrected one for why `acp_contract.hub` reads 0 rows today
+and why that's accurate, not a missing wire). `dashboard_summary`'s `hub_count` now counts the
+real table too, for consistency with what this new endpoint shows.
 """
 from __future__ import annotations
 
@@ -275,11 +280,18 @@ async def list_routes(
     x_admin_secret: str = Header(None),
 ):
     """acp_contract.route rows (has its own tour_id column directly, migration 131 — no
-    join-through needed, unlike Segment above). `hub_grouping_backlog` is always true here —
-    AA-525 Phần 12 mục 8 confirmed there is no admin view yet of "which Routes got grouped into
-    the same Hub and why" (acp_contract.hub itself has 0 rows in current live data — Route
-    detection isn't wiring hub_id yet); flagged explicitly rather than silently showing an
-    always-empty Hub column.
+    join-through needed, unlike Segment above).
+
+    AA-554 mục G correction: this endpoint used to carry a `hub_grouping_backlog: true` flag and a
+    docstring claiming "Route detection isn't wiring hub_id yet" (AA-525 Phần 12 mục 8). That was
+    stale — `services/acp_contract/route_detection.py`'s `families()`/`resolved_hub` logic (lines
+    ~330-390) has created/reused real `acp_contract.hub` rows since AA-510/migration 131, whenever
+    2+ tours share enough Segments (`SHARED_ENOUGH` ratio) to form a family — "a family of one is
+    not a family" is the origin's own rule, so a single, un-shared tour's Route never gets a
+    `hub_id`. The real reason `acp_contract.hub` has 0 rows in current prod data is that no 2 tours
+    currently share enough of a route to qualify, not a missing wire. See `GET
+    /admin/dashboard/hubs` below for the now-real, separate Hub table this drives (mục G: "tách 2
+    bảng riêng").
 
     AA-532: when scoped to ONE Tour, deliberately does NOT filter `superseded_at IS NULL` the way
     every other reader of this table now does (v1_route_hub.py, slate.py, admin_atoms.py) — this
@@ -357,7 +369,84 @@ async def list_routes(
     total = rows[0]["full_count"] if rows else 0
     return {
         "data": [_safe(r, exclude=("full_count",)) for r in rows], "total": total,
-        "tour_id": tour_id, "limit": limit, "offset": offset, "hub_grouping_backlog": True,
+        "tour_id": tour_id, "limit": limit, "offset": offset,
+    }
+
+
+# ── GET /admin/dashboard/hubs — Section 04, Hub half of AA-554 mục G's table split ──────────
+
+@router.get("/hubs")
+async def list_hubs(
+    request: Request,
+    tour_id: Optional[str] = Query(None),
+    market: Optional[str] = Query(None),
+    hub_name_search: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    x_admin_secret: str = Header(None),
+):
+    """acp_contract.hub — AA-554 mục G: a genuine Hub table, split out from the single Route table
+    it used to be folded into (`list_routes` above only ever exposed `route.hub_name`, a
+    per-route denormalized placeholder, never a real `acp_contract.hub` row). A Hub row only
+    exists once `route_detection.py`'s `families()` finds 2+ tours sharing enough Segments to
+    group ("a family of one is not a family") — see `list_routes`' own docstring above for the
+    full correction. Real prod data has exactly 0 Hub rows today for that reason, which is why the
+    frontend's empty-state here reads "No Hub yet — needs 2+ tours sharing a route segment"
+    instead of implying anything is broken.
+
+    Only CURRENT routes (`superseded_at IS NULL`) count toward a Hub's `route_count`/`tour_names`
+    — same "no historical-version noise in a platform-wide view" convention `list_routes` uses in
+    "All tours" mode. `market` filters the same way `list_routes` does: through the joined
+    `atom_ranking` rows for each member Route's Segments, applied as a HAVING (it's not a Hub
+    column)."""
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+
+    conditions = ["r.superseded_at IS NULL"]
+    params: list = []
+    if tour_id:
+        params.append(tour_id)
+        conditions.append(f"r.tour_id = ${len(params)}::uuid")
+    if hub_name_search:
+        params.append(f"%{hub_name_search}%")
+        conditions.append(f"h.hub_name ILIKE ${len(params)}")
+    where = " AND ".join(conditions)
+    having = ""
+    if market:
+        params.append(market)
+        having = f"HAVING bool_or(ar.market = ${len(params)}) "
+    params.append(limit)
+    limit_idx = len(params)
+    params.append(offset)
+    offset_idx = len(params)
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT h.hub_id, h.hub_name, h.created_at, h.updated_at,
+                   array_agg(DISTINCT rt.src_name) FILTER (WHERE rt.src_name IS NOT NULL) AS tour_names,
+                   count(DISTINCT r.route_id) AS route_count,
+                   count(*) OVER() AS full_count
+            FROM acp_contract.hub h
+            JOIN acp_contract.route r ON r.hub_id = h.hub_id
+            LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = r.tour_id
+            LEFT JOIN acp_contract.atom_ranking ar
+                ON ar.tour_id = r.tour_id
+               AND ar.segment_id = ANY (SELECT jsonb_array_elements_text(r.ordered_segment_ids))
+               AND ar.excluded_reason IS NULL
+            WHERE {where}
+            GROUP BY h.hub_id, h.hub_name, h.created_at, h.updated_at
+            {having}
+            ORDER BY h.updated_at DESC
+            LIMIT ${limit_idx} OFFSET ${offset_idx}
+            """,
+            *params,
+        )
+
+    total = rows[0]["full_count"] if rows else 0
+    return {
+        "data": [_safe(r, exclude=("full_count",)) for r in rows], "total": total,
+        "tour_id": tour_id, "limit": limit, "offset": offset,
     }
 
 
@@ -428,12 +517,13 @@ async def dashboard_summary(
     a property of `atom_ranking`, computed downstream of Atom), so a market filter can't narrow it
     further; this is a real property of the data, not an oversight.
 
-    `hub_count` is `COUNT(DISTINCT route.hub_name)`, NOT a row count of `acp_contract.hub` — that
-    table has 0 rows in production (same gap `list_routes` above already flags via
-    `hub_grouping_backlog`); counting the real table would always show 0 regardless of filter,
-    which is actively misleading rather than merely incomplete. `hub_name` is the same text field
-    section 04's own table already renders, so this count stays consistent with what an admin can
-    actually see there.
+    `hub_count` — AA-554 mục G correction: now a real `COUNT(DISTINCT acp_contract.hub.hub_id)`,
+    matching what the new `GET /admin/dashboard/hubs` table actually shows. Before this build it
+    was `COUNT(DISTINCT route.hub_name)` (a per-route placeholder string, non-zero even for a
+    single, un-shared tour) on the reasoning that the real `acp_contract.hub` table was believed
+    unwired and would always read 0 — `list_routes`' own docstring above explains why that belief
+    was wrong. Reading 0 today is correct, not misleading: no 2 tours currently share enough of a
+    route to form a Hub.
 
     `route_count`/`hub_count` use CURRENT routes only (`superseded_at IS NULL`) — matches the
     default `list_routes` above uses in "All tours" mode (no historical-version noise in a
@@ -485,8 +575,9 @@ async def dashboard_summary(
                          AND ar.tour_id = r.tour_id AND ar.market = $2::text
                    ))
                 ) AS route_count,
-                (SELECT count(DISTINCT r.hub_name)
-                 FROM acp_contract.route r
+                (SELECT count(DISTINCT h.hub_id)
+                 FROM acp_contract.hub h
+                 JOIN acp_contract.route r ON r.hub_id = h.hub_id
                  WHERE r.superseded_at IS NULL
                    AND ($1::uuid IS NULL OR r.tour_id = $1::uuid)
                    AND ($2::text IS NULL OR EXISTS (
