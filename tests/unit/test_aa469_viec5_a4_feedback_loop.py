@@ -145,13 +145,24 @@ class TestGetContentLog:
             ]),
             "repair_log": json.dumps([{"round": 1, "feedback": "add a source"}]),
             "attempt_number": 2, "content_preview": "Some real content...",
-            "angle_name": "Behind the Scenes", "angle_why_it_works": "curiosity",
-            "angle_formula_fit": "AIDA", "angle_best_final_style": "warm",
             "atom_text": "Cross the bamboo bridge", "atom_activity_type": "adventure",
             "atom_emotional_hook": "awe", "atom_season_note": "dry season best",
             "tour_name": "Sapa Trek", "tour_destination": "Vietnam",
             "publish_id": None,
             "created_at": datetime(2026, 8, 30, tzinfo=timezone.utc),
+            # AA-561 3a — lineage fields.
+            "subject_id": str(uuid.uuid4()), "segment_id": "seg_abc123", "route_id": None,
+            "segment_place": "Sapa Terraces", "segment_action": "walk",
+            "route_hub_name": None, "route_first_day": None, "route_last_day": None,
+            "sibling_piece_count": 1, "request_first_piece_at": datetime(2026, 8, 30, tzinfo=timezone.utc),
+            "angles": json.dumps([
+                {"option_id": str(uuid.uuid4()), "idx": 0, "name": "Behind the Scenes",
+                 "why_it_works": "curiosity", "formula_fit": "AIDA", "best_final_style": "warm",
+                 "recommended": True, "chosen": True},
+                {"option_id": str(uuid.uuid4()), "idx": 1, "name": "The Local's View",
+                 "why_it_works": "authenticity", "formula_fit": "PAS", "best_final_style": "candid",
+                 "recommended": False, "chosen": False},
+            ]),
         }
         base.update(over)
         return base
@@ -173,15 +184,21 @@ class TestGetContentLog:
         assert item["gate_pass_count"] == 1
         assert item["gate_total_count"] == 2
         assert item["repair_log"] == [{"round": 1, "feedback": "add a source"}]
-        assert item["angle"] == {
-            "name": "Behind the Scenes", "why_it_works": "curiosity",
-            "formula_fit": "AIDA", "best_final_style": "warm",
-        }
+        # AA-561 3a — angle became a full list (was a single COALESCE'd chosen-only object).
+        assert len(item["angles"]) == 2
+        assert item["angles"][0]["name"] == "Behind the Scenes"
+        assert item["angles"][0]["chosen"] is True
+        assert item["angles"][1]["chosen"] is False
         assert item["atom"] == {
             "text": "Cross the bamboo bridge", "activity_type": "adventure",
             "emotional_hook": "awe", "season_note": "dry season best",
         }
         assert item["tour"] == {"name": "Sapa Trek", "destination": "Vietnam"}
+        assert item["source"] == {
+            "kind": "segment", "segment_id": "seg_abc123",
+            "place": "Sapa Terraces", "action": "walk",
+        }
+        assert item["is_buffer_retry"] is False
         assert item["dfs_paa_snapshot"] == {
             "relevance": "HIGH", "people_also_ask": ["q1"], "related_keywords": ["k1"],
         }
@@ -264,6 +281,66 @@ class TestGetContentLog:
         sql_filtered, *params = conn.fetch.call_args[0]
         assert "cp.tenant_id = $" in sql_filtered
         assert TENANT_ID in params
+
+    async def test_source_is_direct_atom_when_no_subject(self):
+        """AA-561 3a — the pre-existing atom-picker path (AA-449, never retired) creates a
+        request with no Subject at all. Must read as an explicit label, not a blank/broken cell."""
+        from api.routers.admin_a4 import get_content_log
+
+        row = self._full_row(
+            subject_id=None, segment_id=None, route_id=None,
+            segment_place=None, segment_action=None,
+        )
+        pool, conn = _make_pool(fetch=[row])
+        req = _make_request(pool)
+
+        result = await get_content_log(req, tenant_id=None, limit=200, x_admin_secret=_TEST_SECRET)
+        assert result["data"][0]["source"] == {"kind": "direct_atom"}
+
+    async def test_source_is_route_when_subject_points_at_a_route(self):
+        from api.routers.admin_a4 import get_content_log
+
+        row = self._full_row(
+            segment_id=None, segment_place=None, segment_action=None,
+            route_id="route_xyz", route_hub_name="Nakasendo Way", route_first_day=1, route_last_day=3,
+        )
+        pool, conn = _make_pool(fetch=[row])
+        req = _make_request(pool)
+
+        result = await get_content_log(req, tenant_id=None, limit=200, x_admin_secret=_TEST_SECRET)
+        assert result["data"][0]["source"] == {
+            "kind": "route", "route_id": "route_xyz", "hub_name": "Nakasendo Way",
+            "first_day": 1, "last_day": 3,
+        }
+
+    async def test_is_buffer_retry_true_when_later_sibling_piece(self):
+        """AA-561 3a — a buffer retry (AA-485) writes a SECOND content_piece row for the same
+        request; this row is not the request's earliest, so it must be flagged as a retry."""
+        from api.routers.admin_a4 import get_content_log
+
+        row = self._full_row(
+            sibling_piece_count=2,
+            request_first_piece_at=datetime(2026, 8, 29, tzinfo=timezone.utc),  # earlier than created_at
+        )
+        pool, conn = _make_pool(fetch=[row])
+        req = _make_request(pool)
+
+        result = await get_content_log(req, tenant_id=None, limit=200, x_admin_secret=_TEST_SECRET)
+        assert result["data"][0]["is_buffer_retry"] is True
+
+    async def test_atom_join_accepts_platform_owner_scope(self):
+        """AA-561 STEP0 finding — the old join (`ta.owner_scope = cp.tenant_id::text`) stopped
+        matching anything once AA-526 made atoms platform-wide (owner_scope='platform'). Must now
+        accept either."""
+        from api.routers.admin_a4 import get_content_log
+
+        pool, conn = _make_pool(fetch=[])
+        req = _make_request(pool)
+        await get_content_log(req, tenant_id=None, limit=200, x_admin_secret=_TEST_SECRET)
+
+        sql = conn.fetch.call_args[0][0]
+        assert "ta.owner_scope = 'platform'" in sql
+        assert "ta.owner_scope = cp.tenant_id::text" in sql
 
     async def test_empty_result_is_not_an_error(self):
         from api.routers.admin_a4 import get_content_log

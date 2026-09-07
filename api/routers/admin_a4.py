@@ -469,28 +469,60 @@ async def get_content_log(
         rows = await conn.fetch(f"""
             SELECT
                 cp.piece_id::text, cp.tenant_id::text, t.name AS tenant_name, t.slug AS tenant_slug,
-                cp.angle_gate_request_id::text, agr.atom_id, agr.goal, agr.cta,
+                cp.angle_gate_request_id::text, agr.atom_id, agr.goal, agr.cta, agr.subject_id::text,
                 agr.dfs_paa_snapshot, agr.trip_id,
                 COALESCE(cp.channel, agr.channel) AS channel,
                 cp.status, cp.held_reason, cp.gate_ledger, cp.repair_log, cp.attempt_number,
                 LEFT(cp.content_text, 280) AS content_preview, cp.created_at,
-                COALESCE(ago.name, ago_chosen.name) AS angle_name,
-                COALESCE(ago.why_it_works, ago_chosen.why_it_works) AS angle_why_it_works,
-                COALESCE(ago.formula_fit, ago_chosen.formula_fit) AS angle_formula_fit,
-                COALESCE(ago.best_final_style, ago_chosen.best_final_style) AS angle_best_final_style,
+                -- AA-561 3a — lineage: subject (Slate proposal) -> Segment OR Route it came from.
+                -- subject_id is nullable (the pre-existing atom-picker entry point, AA-449, still
+                -- creates a request with no Subject at all — NOT retired by this build, per its
+                -- own migration 133 comment) so every join below is LEFT and the frontend must
+                -- show an explicit "chosen atom directly, not via Slate" label when subject_id
+                -- IS NULL, never a blank/broken-looking cell.
+                sub.segment_id AS segment_id, sub.route_id AS route_id,
+                seg.canonical_place AS segment_place, seg.canonical_action AS segment_action,
+                rte.hub_name AS route_hub_name, rte.first_day AS route_first_day, rte.last_day AS route_last_day,
                 ta.text AS atom_text, ta.activity_type AS atom_activity_type,
                 ta.emotional_hook AS atom_emotional_hook, ta.season_note AS atom_season_note,
                 rt.src_name AS tour_name, rt.country AS tour_destination,
-                pl.publish_id AS publish_id
+                pl.publish_id AS publish_id,
+                -- AA-561 3a — retry: how many content_piece rows exist for this SAME request, and
+                -- whether THIS row is the earliest one. >1 sibling + not-earliest = a buffer retry
+                -- of an earlier held piece (AA-485's _run_buffer_retry_attempt() inserts a NEW
+                -- piece row per retry, resets attempt_number to 1 on it — there is no
+                -- previous_piece_id column by design, migration 115's own comment — so "is this a
+                -- retry" is derived here from sibling count + created_at order, not read off a
+                -- single column).
+                (SELECT count(*) FROM acp_shared.content_piece sib
+                 WHERE sib.angle_gate_request_id = cp.angle_gate_request_id) AS sibling_piece_count,
+                (SELECT min(sib2.created_at) FROM acp_shared.content_piece sib2
+                 WHERE sib2.angle_gate_request_id = cp.angle_gate_request_id) AS request_first_piece_at,
+                -- AA-561 3a — ALL 3 angles the request generated, not just the chosen one (the old
+                -- query's ago/ago_chosen COALESCE only ever surfaced 1 of 3) — ordered by idx so
+                -- the frontend can show "2 not chosen" alongside the pick.
+                (
+                    SELECT jsonb_agg(jsonb_build_object(
+                        'option_id', o.option_id::text, 'idx', o.idx, 'name', o.name,
+                        'why_it_works', o.why_it_works, 'formula_fit', o.formula_fit,
+                        'best_final_style', o.best_final_style,
+                        'recommended', o.recommended, 'chosen', o.chosen
+                    ) ORDER BY o.idx)
+                    FROM acp_shared.angle_gate_option o WHERE o.request_id = agr.request_id
+                ) AS angles
             FROM acp_shared.content_piece cp
             JOIN acp_shared.angle_gate_request agr ON agr.request_id = cp.angle_gate_request_id
             LEFT JOIN shared.tenants t ON t.tenant_id = cp.tenant_id
-            LEFT JOIN acp_shared.angle_gate_option ago ON ago.option_id = cp.angle_gate_option_id
-            LEFT JOIN acp_shared.angle_gate_option ago_chosen
-                ON ago_chosen.request_id = agr.request_id AND ago_chosen.chosen = true
-                AND cp.angle_gate_option_id IS NULL
+            LEFT JOIN acp_shared.subject sub ON sub.subject_id = agr.subject_id
+            LEFT JOIN acp_contract.atom_segment seg ON seg.segment_id = sub.segment_id
+            LEFT JOIN acp_contract.route rte ON rte.route_id = sub.route_id
+            -- AA-561 STEP0 finding: the OLD join here was `ta.owner_scope = cp.tenant_id::text`,
+            -- which stopped matching anything the moment AA-526 made atoms platform-wide
+            -- (owner_scope='platform' since then) — atom_text/activity_type/etc silently went
+            -- NULL for every post-AA-526 piece. Fixed to accept either the current platform scope
+            -- or a legacy tenant-owned atom (pre-AA-526 rows, never backfilled).
             LEFT JOIN acp_contract.tour_atoms ta
-                ON ta.atom_id = agr.atom_id AND ta.owner_scope = cp.tenant_id::text
+                ON ta.atom_id = agr.atom_id AND (ta.owner_scope = 'platform' OR ta.owner_scope = cp.tenant_id::text)
             LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = agr.trip_id
             LEFT JOIN acp_shared.publish_log pl
                 ON pl.piece_id = cp.piece_id AND pl.status = 'published'
@@ -509,6 +541,18 @@ async def get_content_log(
     def _gate_counts(gate_ledger: list) -> dict:
         passed = sum(1 for g in gate_ledger if isinstance(g, dict) and g.get("passed"))
         return {"passed": passed, "total": len(gate_ledger)}
+
+    def _content_log_source(r) -> dict:
+        """AA-561 3a — 2/12 real pieces (AA-561's own issue text, the pre-existing atom-picker
+        path) have no subject_id/Slate lineage at all — this must read as an explicit, understood
+        state, not an empty/broken-looking cell."""
+        if r["segment_id"]:
+            return {"kind": "segment", "segment_id": r["segment_id"],
+                    "place": r["segment_place"], "action": r["segment_action"]}
+        if r["route_id"]:
+            return {"kind": "route", "route_id": r["route_id"], "hub_name": r["route_hub_name"],
+                    "first_day": r["route_first_day"], "last_day": r["route_last_day"]}
+        return {"kind": "direct_atom"}
 
     data = []
     for r in rows:
@@ -532,10 +576,8 @@ async def get_content_log(
             "attempt_number": r["attempt_number"],
             "content_preview": r["content_preview"],
             "cta": r["cta"],
-            "angle": {
-                "name": r["angle_name"], "why_it_works": r["angle_why_it_works"],
-                "formula_fit": r["angle_formula_fit"], "best_final_style": r["angle_best_final_style"],
-            } if r["angle_name"] else None,
+            # AA-561 3a — every angle the request generated (idx 0-2), not just the chosen one.
+            "angles": _parse_jsonb(r["angles"], []),
             "atom": {
                 "text": r["atom_text"], "activity_type": r["atom_activity_type"],
                 "emotional_hook": r["atom_emotional_hook"], "season_note": r["atom_season_note"],
@@ -543,6 +585,19 @@ async def get_content_log(
             "tour": {
                 "name": r["tour_name"], "destination": r["tour_destination"],
             } if r["tour_name"] else None,
+            # AA-561 3a — where this request came from: a Slate Segment pick, a Slate Route pick,
+            # or (subject_id NULL) the pre-existing atom-picker entry point that never went
+            # through Slate at all (AA-449's original path, not retired) — the frontend must show
+            # this last case as an explicit label, never a blank cell.
+            "source": _content_log_source(r),
+            # AA-561 3a — a buffer retry (AA-485) writes a NEW content_piece row for the same
+            # request rather than incrementing this row's own attempt_number; derived from sibling
+            # rows since there is no previous_piece_id column (migration 115, by design).
+            "is_buffer_retry": bool(
+                r["sibling_piece_count"] and r["sibling_piece_count"] > 1
+                and r["created_at"] != r["request_first_piece_at"]
+            ),
+            "sibling_piece_count": r["sibling_piece_count"],
             "dfs_paa_snapshot": _parse_jsonb(r["dfs_paa_snapshot"], None),
             "publish_status": _publish_status(r["status"], r["publish_id"] is not None),
             "created_at": r["created_at"].isoformat() if r["created_at"] else None,
