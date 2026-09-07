@@ -180,11 +180,13 @@ class TestListScore:
 
 class TestListRoutes:
     @pytest.mark.asyncio
-    async def test_returns_routes_and_hub_backlog_flag(self):
+    async def test_returns_routes(self):
         """AA-545 — no more tenant_id/tenant_name/stored score (route is platform-wide,
         composition-only); `market`/`score` are computed columns now (AVG(total_rank) per
         market, joined in — one row per (Route version, market)). AA-551 — `tour_name`/
-        `full_count` added."""
+        `full_count` added. AA-554 mục G — `hub_grouping_backlog` (a static `True` flag
+        documenting "no real Hub view exists yet") is gone: a real Hub view now exists
+        (`GET /admin/dashboard/hubs`, see TestListHubs below), so the flag would be stale."""
         tour_id = str(uuid.uuid4())
         conn = AsyncMock()
         conn.fetch.return_value = [
@@ -199,7 +201,7 @@ class TestListRoutes:
 
         result = await admin_dashboard.list_routes(request, tour_id=tour_id, x_admin_secret=_TEST_SECRET)
         assert result["total"] == 1
-        assert result["hub_grouping_backlog"] is True
+        assert "hub_grouping_backlog" not in result
         # ordered_segment_ids comes back as a raw JSON string (no jsonb codec, same gap
         # admin_atoms.py's media handling already found) — _safe() must parse it.
         assert result["data"][0]["ordered_segment_ids"] == ["seg1", "seg2"]
@@ -271,6 +273,77 @@ class TestListRoutes:
         assert "last_day - r.first_day + 1) <= $2" in query
         assert "r.hub_name ILIKE $3" in query
         assert params[:3] == [2, 5, "%triangle%"]
+
+
+class TestListHubs:
+    """AA-554 mục G — GET /admin/dashboard/hubs, the new Hub half of the Route/Hub table split."""
+
+    @pytest.mark.asyncio
+    async def test_returns_hub_rows(self):
+        conn = AsyncMock()
+        conn.fetch.return_value = [
+            {"hub_id": str(uuid.uuid4()), "hub_name": "Nakasendo Way",
+             "created_at": "2026-09-01T00:00:00", "updated_at": "2026-09-05T00:00:00",
+             "tour_names": ["Sri Lanka Discovery", "Ceylon Highlands"], "route_count": 2,
+             "full_count": 1},
+        ]
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await admin_dashboard.list_hubs(request, x_admin_secret=_TEST_SECRET)
+        assert result["total"] == 1
+        assert result["data"][0]["hub_name"] == "Nakasendo Way"
+        assert result["data"][0]["route_count"] == 2
+        assert "full_count" not in result["data"][0]
+
+    @pytest.mark.asyncio
+    async def test_empty_result_when_no_shared_hub_exists(self):
+        """Real prod data today: acp_contract.hub has 0 rows (no 2 tours currently share enough of
+        a route to form a family) — confirms the endpoint returns a clean empty result rather than
+        erroring, matching the frontend's "No Hub yet" empty-state."""
+        conn = AsyncMock()
+        conn.fetch.return_value = []
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await admin_dashboard.list_hubs(request, x_admin_secret=_TEST_SECRET)
+        assert result["total"] == 0
+        assert result["data"] == []
+
+    @pytest.mark.asyncio
+    async def test_only_current_routes_count_toward_a_hub(self):
+        conn = AsyncMock()
+        conn.fetch.return_value = []
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        await admin_dashboard.list_hubs(
+            request, tour_id=None, market=None, hub_name_search=None,
+            limit=50, offset=0, x_admin_secret=_TEST_SECRET,
+        )
+
+        query, *_params = conn.fetch.call_args[0]
+        # Note: a plain `.split("WHERE")` would wrongly match the `FILTER (WHERE ...)` clause in
+        # the SELECT list first — checked directly against the query instead.
+        assert "\n            WHERE r.superseded_at IS NULL" in query
+
+    @pytest.mark.asyncio
+    async def test_hub_name_search_and_tour_filter(self):
+        conn = AsyncMock()
+        conn.fetch.return_value = []
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+        tour_id = str(uuid.uuid4())
+
+        await admin_dashboard.list_hubs(
+            request, tour_id=tour_id, market=None, hub_name_search="nakasendo",
+            limit=50, offset=0, x_admin_secret=_TEST_SECRET,
+        )
+
+        query, *params = conn.fetch.call_args[0]
+        assert "r.tour_id = $1" in query
+        assert "h.hub_name ILIKE $2" in query
+        assert params[:2] == [tour_id, "%nakasendo%"]
 
 
 class TestListSlate:

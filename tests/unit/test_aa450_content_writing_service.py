@@ -289,6 +289,44 @@ class TestStartWrite:
 
 
 @pytest.mark.asyncio
+class TestInsertPlaceholderPieceMarksSubjectUsed:
+    """AA-554 mục H.1 — a content_piece being created is the one signal that marks its Slate
+    proposal (if any) 'used'. Fires inside _insert_placeholder_piece(), the single INSERT call
+    site shared by start_write() (primary write) and the buffer retry (AA-485,
+    _maybe_buffer_retry_held_piece())."""
+
+    async def test_marks_linked_subject_used_from_picked(self):
+        conn = AsyncMock()
+        conn.fetchrow.return_value = _placeholder_row()
+        pool = _make_pool(conn)
+
+        await service._insert_placeholder_piece(
+            pool, tenant_id=TENANT_ID, request_id=REQUEST_ID, angle_gate_option_id=OPTION_ID,
+            channel="facebook",
+        )
+
+        conn.execute.assert_awaited_once()
+        query, *params = conn.execute.call_args[0]
+        assert "UPDATE acp_shared.subject SET state = 'used'" in query
+        assert "state = 'picked'" in query
+        assert params == [REQUEST_ID]
+
+    async def test_update_resolves_subject_via_angle_gate_request_subquery(self):
+        """Never overwrites a Subject already 'cut', still 'proposed', or belonging to a request
+        with no Subject at all (the pre-Slate atom-picker path) — the UPDATE's own `state =
+        'picked'` guard and the subquery's NULL-for-no-Subject behavior both do this without any
+        Python-side branching."""
+        conn = AsyncMock()
+        conn.fetchrow.return_value = _placeholder_row()
+        pool = _make_pool(conn)
+
+        await service._insert_placeholder_piece(pool, tenant_id=TENANT_ID, request_id=REQUEST_ID)
+
+        query, *_params = conn.execute.call_args[0]
+        assert "SELECT subject_id FROM acp_shared.angle_gate_request WHERE request_id = $1::uuid" in query
+
+
+@pytest.mark.asyncio
 class TestRunWriteBackground:
     """The write/rewrite + T10-check loop — body unchanged from pre-AA-466, now updating the
     placeholder in place. _finalize_piece() is patched directly so these tests don't need to

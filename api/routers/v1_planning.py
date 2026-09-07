@@ -58,7 +58,7 @@ from services.acp_shared.content_metrics import (PieceNotFoundError, PieceNotOwn
                                                  record_metric_snapshot, rollup_atom_weights)
 from services.acp_shared.dfs_relevance import fetch_dfs_relevance_by_tour
 from services.acp_shared.slate import (SubjectNotEligibleError, SubjectNotFoundError,
-                                        fetch_slate, pick_subject, propose_slate)
+                                        cut_subject, fetch_slate, pick_subject, propose_slate)
 
 router = APIRouter(prefix="/v1/planning", tags=["tenant-planning"])
 
@@ -95,6 +95,25 @@ async def post_pick_subject(
         result = await pick_subject(
             tenant_id, subject_id, pool, selected_by=f"tenant:{tenant_id}",
         )
+    except SubjectNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No subject {subject_id} for this tenant")
+    except SubjectNotEligibleError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return result
+
+
+@slate_router.post(
+    "/subjects/{subject_id}/cut",
+    summary="AA-554 mục H.2 — mark a Subject 'cut' (backend/API only; no tenant UI button wired to "
+            "this yet, see the AA-554 child issue for that)",
+)
+async def post_cut_subject(
+    subject_id: UUID, request: Request, tenant=Depends(get_tenant),
+):
+    tenant_id = UUID(tenant["sub"])
+    pool = request.app.state.pool
+    try:
+        result = await cut_subject(tenant_id, subject_id, pool)
     except SubjectNotFoundError:
         raise HTTPException(status_code=404, detail=f"No subject {subject_id} for this tenant")
     except SubjectNotEligibleError as exc:

@@ -563,6 +563,41 @@ async def pick_subject(tenant_id: UUID, subject_id: UUID, pool, selected_by: str
     }
 
 
+async def cut_subject(tenant_id: UUID, subject_id: UUID, pool) -> dict:
+    """AA-554 mục H.2 — flip a Subject `proposed -> cut`. Backend/API only, per Nghiệp's final
+    decision on AA-554 (Linear comment "Điều chỉnh quyết định mục H", 07/09/2026): the tenant-
+    facing "Cut" button itself is deliberately NOT built in this pass — this function and its
+    router endpoint (`POST /v1/subjects/{subject_id}/cut`, v1_planning.py) are ready
+    infrastructure, not reachable from any UI control yet. See the AA-554 child issue for building
+    that button.
+
+    Only `proposed -> cut` is legal (mirrors `pick_subject()`'s own state guard above) — a Subject
+    already `picked`/`used` has already become real tenant activity (an `angle_gate_request`, and
+    for `used`, a real `content_piece`); retracting it after the fact is a different, unbuilt
+    decision (it would need to also unwind or flag what it already spawned) and out of this
+    function's scope."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT subject_id, channel, state FROM acp_shared.subject
+            WHERE subject_id = $1::uuid AND tenant_id = $2::uuid
+        """, subject_id, tenant_id)
+        if row is None:
+            raise SubjectNotFoundError(f"subject_id={subject_id} not found for this tenant")
+        if row["state"] != "proposed":
+            raise SubjectNotEligibleError(
+                f"subject_id={subject_id} is '{row['state']}', not 'proposed'"
+            )
+        updated = await conn.fetchrow("""
+            UPDATE acp_shared.subject SET state = 'cut' WHERE subject_id = $1::uuid
+            RETURNING subject_id, channel, state
+        """, subject_id)
+
+    return {
+        "subject_id": str(updated["subject_id"]), "channel": updated["channel"],
+        "state": updated["state"],
+    }
+
+
 async def _resolve_representative_atom(
     conn, tenant_id: UUID, segment_id: str | None, route_id: str | None,
 ) -> tuple[str | None, str | None, list[str] | None]:

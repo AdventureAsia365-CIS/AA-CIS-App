@@ -330,6 +330,26 @@ async def _insert_placeholder_piece(
             tenant_id, request_id, angle_gate_option_id, channel,
             route_hub_name, route_segment_count,
         )
+        # AA-554 mục H.1 — a content_piece now genuinely exists for this request: mark the Slate
+        # proposal it came from (if any) 'used'. Fires from EVERY call site of this function
+        # (the primary write in start_write() AND AA-485's buffer retry, _maybe_buffer_retry_
+        # held_piece()) — both are real evidence this proposal "became content", not just the
+        # first attempt. Only transitions FROM 'picked' (pick_subject()'s own state,
+        # services/acp_shared/slate.py) so a future 'cut' (mục H.2, backend-only for now) is never
+        # silently overwritten by a stray write; already-'used' stays 'used' (idempotent, matches
+        # the buffer retry inserting a second content_piece for the same request_id).
+        # angle_gate_request.subject_id is NULL for the pre-Slate atom-picker path (migration
+        # 133) — the subquery then matches nothing, a safe no-op, not a special case to guard.
+        await conn.execute(
+            """
+            UPDATE acp_shared.subject SET state = 'used'
+            WHERE state = 'picked'
+              AND subject_id = (
+                  SELECT subject_id FROM acp_shared.angle_gate_request WHERE request_id = $1::uuid
+              )
+            """,
+            request_id,
+        )
     return _row_to_dict(row)
 
 

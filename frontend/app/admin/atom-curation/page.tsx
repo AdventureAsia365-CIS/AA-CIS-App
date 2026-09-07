@@ -31,10 +31,18 @@
 // segment_id with numbering + a clickable Route badge (client-side cross-filter into Route/Hub);
 // Score section gained a formula explainer, Demand tooltip, row numbering, and a link into
 // Segment (client-side `segment_id` cross-filter); a shared MARKET_NAMES legend covers Segment +
-// Score. All 8 empty-state DB-table/file/issue-number leaks AA-552 found are rewritten in plain
-// English (see this task's Linear comment for the grep before/after). Route/Hub's own redesign
-// (split Route/Hub tables) and Slate's used/cut wiring are OUT of this build — AA-554 explicitly
-// deferred those two pending a decision, see Linear.
+// Score + (now) Route/Hub. All 8 empty-state DB-table/file/issue-number leaks AA-552 found are
+// rewritten in plain English (see this task's Linear comment for the grep before/after).
+//
+// AA-554 mục G/H (07/09/2026, same-day follow-up after Nghiệp's decision) — Route/Hub is now a
+// real split: Route (1 tour's own journey, unchanged behavior) + a new Hub table (2+ tours' shared
+// journey, backed by a real `GET /api/admin/dashboard/hubs`) with a genuine empty-state ("No Hub
+// yet — needs 2+ tours sharing a route segment") rather than being folded into Route's own
+// `hub_name` column. Slate's `used`/`cut` states: `used` is now wired for real (auto-set the
+// instant a content_piece is created from that Slate proposal, services/acp_content_writing/
+// service.py); `cut` stays backend/API-only (no tenant UI button yet — POST /v1/subjects/{id}/cut
+// exists, unreachable from any control here, see the AA-554 child issue for building that
+// button) — its header badge is shown for real (not hidden) with a "coming soon" note.
 import { useState, useEffect, useCallback } from "react";
 import {
   Star, Trash2, ChevronDown, ChevronRight, Layers, Milestone, Puzzle,
@@ -750,12 +758,19 @@ interface RouteRow {
   version: number; superseded_at: string | null;
 }
 
-// AA-554 — Route/Hub's own redesign (split tables, market legend, sticky filter, member-links —
-// AA-554 mục G, items 20-22) is deferred pending Nghiệp's decision (see Linear comment). The only
-// change here is the minimal receiving end for Segment's E.12 cross-link (`focusRouteId`) and the
-// J.29 empty-state copy fix — everything else in this section is untouched by this build.
-function RouteHubSection({ tourId, market, focusRouteId, onClearFocus }: {
+interface HubRow {
+  hub_id: string; hub_name: string; tour_names: string[] | null; route_count: number;
+  created_at: string; updated_at: string;
+}
+
+// AA-554 mục G — Route/Hub tách 2 bảng riêng (Nghiệp's confirmed decision, hướng 1: split now,
+// Hub shows a real, empty table rather than being hidden — data fills in naturally as the tour
+// catalog grows). Route (1 tour's own journey) and Hub (2+ tours' shared journey, grouped by
+// route_detection.py's families()) are genuinely different things — folding Hub into Route's own
+// `hub_name` column (the pre-existing behavior) hid that distinction entirely.
+function RouteHubSection({ tourId, market, focusRouteId, onClearFocus, onNavigateToSegment }: {
   tourId: string | null; market: string; focusRouteId: string | null; onClearFocus: () => void;
+  onNavigateToSegment: (routeId: string) => void;
 }) {
   const [minDays, setMinDays] = useState("");
   const [maxDays, setMaxDays] = useState("");
@@ -763,9 +778,9 @@ function RouteHubSection({ tourId, market, focusRouteId, onClearFocus }: {
   const [offset, setOffset] = useState(0);
   useEffect(() => { setOffset(0); }, [tourId, market, minDays, maxDays, hubSearch]);
 
-  // AA-554 — same fix as Segment's identical bug (found live via this task's own Playwright
-  // verify): fetch a much larger page when a focus filter is active, so the cross-nav target
-  // isn't missed just because it falls past PAGE_SIZE on the default, unfiltered query.
+  // Same fix as Segment's identical bug (found live via this task's own Playwright verify): fetch
+  // a much larger page when a focus filter is active, so the cross-nav target isn't missed just
+  // because it falls past PAGE_SIZE on the default, unfiltered query.
   const hasFocus = !!focusRouteId;
   const { data, loading, error, reload } = usePlatformFetch<{ data: RouteRow[]; total: number }>(
     "/api/admin/dashboard/routes",
@@ -773,12 +788,23 @@ function RouteHubSection({ tourId, market, focusRouteId, onClearFocus }: {
       max_days: maxDays || undefined, hub_name_search: hubSearch || undefined,
       limit: hasFocus ? 200 : PAGE_SIZE, offset: hasFocus ? 0 : offset },
   );
+  const [hubOffset, setHubOffset] = useState(0);
+  useEffect(() => { setHubOffset(0); }, [tourId, market]);
+  const hubFetch = usePlatformFetch<{ data: HubRow[]; total: number }>(
+    "/api/admin/dashboard/hubs",
+    { tour_id: tourId ?? undefined, market: market || undefined, limit: PAGE_SIZE, offset: hubOffset },
+  );
 
   const filteredRows = focusRouteId ? (data?.data ?? []).filter(r => r.route_id === focusRouteId) : (data?.data ?? []);
 
   return (
     <>
-      <div style={filterBarStyle}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: A.body, marginBottom: 6 }}>Route</div>
+      <div style={{ fontSize: 11.5, color: A.muted2, marginBottom: 10 }}>
+        One tour's own journey — a consecutive-day span of that tour's ranked Segments.
+      </div>
+      {/* AA-554 G.20 — sticky filter row, same mechanism Segment/Score already use. */}
+      <div style={{ ...filterBarStyle, position: "sticky", top: 0, background: A.bg, zIndex: 5, paddingTop: 4, paddingBottom: 10 }}>
         <input style={{ ...inputStyle, width: 100 }} type="number" min={1} placeholder="Min days" value={minDays} onChange={e => setMinDays(e.target.value)} />
         <input style={{ ...inputStyle, width: 100 }} type="number" min={1} placeholder="Max days" value={maxDays} onChange={e => setMaxDays(e.target.value)} />
         <input style={inputStyle} placeholder="Search hub name…" value={hubSearch} onChange={e => setHubSearch(e.target.value)} />
@@ -789,6 +815,8 @@ function RouteHubSection({ tourId, market, focusRouteId, onClearFocus }: {
           </span>
         )}
       </div>
+      {/* AA-554 G.21 — shared market legend (same one Segment/Score already render). */}
+      <MarketLegend />
       {error ? <ErrorState message={error} onRetry={reload} /> :
         loading ? <LoadingScreen msg="Loading Routes…" /> :
         (!data || data.total === 0 || (focusRouteId != null && filteredRows.length === 0)) ? (
@@ -801,13 +829,49 @@ function RouteHubSection({ tourId, market, focusRouteId, onClearFocus }: {
               : <Badge color="green">current{r.version > 1 ? ` v${r.version}` : ""}</Badge> },
             { key: "tour", label: "Tour", render: r => r.tour_name ?? "—" },
             { key: "hub", label: "Hub name", render: r => r.hub_name },
-            { key: "market", label: "Market", render: r => r.market ?? "—" },
+            { key: "market", label: "Market", render: r => r.market ? <span title={marketTitle(r.market)}>{r.market}</span> : "—" },
             { key: "days", label: "Days", render: r => `${r.first_day}–${r.last_day}` },
-            { key: "segments", label: "Segments", render: r => (r.ordered_segment_ids || []).length },
+            {
+              key: "segments", label: "Segments", render: r => {
+                const n = (r.ordered_segment_ids || []).length;
+                // AA-554 G.22 — link into Segment, filtered to this Route's own ordered_segment_ids
+                // (via the same focusRouteId cross-filter SegmentSection's route_id column already
+                // narrows by — reused, not a new filter mechanism).
+                return n > 0 ? (
+                  <button onClick={() => onNavigateToSegment(r.route_id)}
+                    style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: A.gold, textAlign: "left", font: "inherit" }}
+                    title="View this Route's member Segments">
+                    {n} segment{n !== 1 ? "s" : ""} ↗
+                  </button>
+                ) : 0;
+              },
+            },
             { key: "score", label: "Score", render: r => r.score ?? "—" },
             { key: "created", label: "Created", render: r => new Date(r.created_at).toLocaleString() },
           ] as Col<RouteRow>[]} />
           {!hasFocus && <PageFooter total={data.total} offset={offset} pageSize={PAGE_SIZE} onOffset={setOffset} />}
+        </>
+      )}
+
+      <div style={{ fontSize: 13, fontWeight: 600, color: A.body, marginTop: 28, marginBottom: 6 }}>Hub</div>
+      <div style={{ fontSize: 11.5, color: A.muted2, marginBottom: 10 }}>
+        2+ tours' shared journey — grouped automatically once route detection finds enough
+        overlapping Segments between them.
+      </div>
+      {hubFetch.error ? <ErrorState message={hubFetch.error} onRetry={hubFetch.reload} /> :
+        hubFetch.loading ? <LoadingScreen msg="Loading Hubs…" /> :
+        (!hubFetch.data || hubFetch.data.total === 0) ? (
+          <EmptyState title="No Hub yet" body="No Hub yet — needs 2+ tours sharing a route segment. Route detection groups tours into a Hub automatically once that happens; nothing to trigger here." />
+        ) : (
+        <>
+          <AuditTable rows={hubFetch.data.data} rowKey={r => r.hub_id} columns={[
+            { key: "hub", label: "Hub name", render: r => r.hub_name },
+            { key: "tours", label: "Tours", render: r => (r.tour_names && r.tour_names.length > 0) ? r.tour_names.join(", ") : "—" },
+            { key: "routes", label: "Routes", render: r => r.route_count },
+            { key: "created", label: "Created", render: r => new Date(r.created_at).toLocaleString() },
+            { key: "updated", label: "Updated", render: r => new Date(r.updated_at).toLocaleString() },
+          ] as Col<HubRow>[]} />
+          <PageFooter total={hubFetch.data.total} offset={hubOffset} pageSize={PAGE_SIZE} onOffset={setHubOffset} />
         </>
       )}
     </>
@@ -842,6 +906,18 @@ const SLATE_STATE_COLOR: Record<string, "gray" | "blue" | "green" | "red"> = {
   proposed: "gray", picked: "blue", used: "green", cut: "red",
 };
 
+// AA-554 H.24 — explains all 4 states via a tooltip on each stat-bar badge. `used` text reflects
+// this build's own H.1 wiring (no longer "not yet active" — it's real now); `cut` still says so,
+// since H.2 only prepared the backend, no tenant UI button exists yet (see the AA-554 child issue).
+const SLATE_STATE_TOOLTIP: Record<string, string> = {
+  proposed: "System-proposed — this Segment/Route cleared the channel's Bar; the tenant hasn't acted on it yet.",
+  picked: "The tenant chose to write this proposal (created its T8 Angle Gate request).",
+  used: "A content_piece was successfully created from this proposal — it genuinely became content.",
+  cut: "The tenant declined this proposal. Not yet reachable from any UI — manual cut action coming soon.",
+};
+
+const SLATE_STATE_ORDER = ["proposed", "picked", "used", "cut"] as const;
+
 function SlateSection({ tourId }: { tourId: string | null }) {
   const { data, loading, error, reload } = usePlatformFetch<{ data: SlateRow[]; total: number; by_state: Record<string, number> }>(
     "/api/admin/dashboard/slate", { tour_id: tourId ?? undefined }, !!tourId,
@@ -854,14 +930,39 @@ function SlateSection({ tourId }: { tourId: string | null }) {
   if (!data || data.total === 0) return <EmptyState title="No Slate proposals yet" body="No proposals yet for this Tour — Slate proposes a Subject once a Segment/Route clears a Channel's Bar." />;
   return (
     <>
-      <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
-        {Object.entries(data.by_state).map(([state, count]) => (
-          <Badge key={state} color={SLATE_STATE_COLOR[state] ?? "gray"}>{state}: {count}</Badge>
+      {/* AA-554 H.23 — sticky header stat bar, same mechanism Segment/Score's filter rows use.
+          H.3 — CUT badge is NOT hidden (shows the real, always-0-for-now count) with a small note
+          underneath explaining why, so it doesn't read as a bug. */}
+      <div style={{ display: "flex", gap: 14, marginBottom: 14, flexWrap: "wrap", alignItems: "flex-start",
+        position: "sticky", top: 0, background: A.bg, zIndex: 5, paddingTop: 4, paddingBottom: 10 }}>
+        {SLATE_STATE_ORDER.map(state => (
+          <div key={state}>
+            <span title={SLATE_STATE_TOOLTIP[state]} style={{ cursor: "help" }}>
+              <Badge color={SLATE_STATE_COLOR[state] ?? "gray"}>{state}: {data.by_state[state] ?? 0}</Badge>
+            </span>
+            {state === "cut" && (
+              <div style={{ fontSize: 10, color: A.muted2, marginTop: 3, maxWidth: 150 }}>
+                Manual cut action coming soon
+              </div>
+            )}
+          </div>
         ))}
+      </div>
+      {/* AA-554 H.25 — Score here is copied as-is from Segment's total_rank / Route's score at
+          proposal time, never recomputed by Slate itself. */}
+      <div style={{ fontSize: 12, color: A.muted, marginBottom: 10 }}>
+        Score is copied as-is from the Segment's total rank or Route's score at proposal time —
+        Slate never recalculates it.
       </div>
       <AuditTable rows={data.data} rowKey={r => r.subject_id} columns={[
         { key: "channel", label: "Channel", render: r => r.channel },
-        { key: "state", label: "State", render: r => <Badge color={SLATE_STATE_COLOR[r.state] ?? "gray"}>{r.state}</Badge> },
+        {
+          key: "state", label: "State", render: r => (
+            <span title={SLATE_STATE_TOOLTIP[r.state]} style={{ cursor: "help" }}>
+              <Badge color={SLATE_STATE_COLOR[r.state] ?? "gray"}>{r.state}</Badge>
+            </span>
+          ),
+        },
         { key: "tenant", label: "Tenant", render: r => r.tenant_name ?? "—" },
         { key: "score", label: "Score", render: r => r.score ?? "—" },
         { key: "kind", label: "Kind", render: r => r.route_id ? "Route" : "Segment" },
@@ -1040,7 +1141,8 @@ export default function AtomCurationDashboardPage() {
               )}
               {activeSection === "route_hub" && (
                 <RouteHubSection tourId={selectedTour} market={selectedMarket}
-                  focusRouteId={focusRouteId} onClearFocus={() => setFocusRouteId(null)} />
+                  focusRouteId={focusRouteId} onClearFocus={() => setFocusRouteId(null)}
+                  onNavigateToSegment={routeId => { setFocusRouteId(routeId); setActiveSection("segment"); }} />
               )}
               {activeSection === "slate" && <SlateSection tourId={selectedTour} />}
             </div>
