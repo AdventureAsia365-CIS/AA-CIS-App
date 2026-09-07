@@ -290,6 +290,18 @@ class BrandIdentityUpdate(BaseModel):
     system_prompt: Optional[str] = None
     style_guide:   Optional[str] = None
     forbidden_words: Optional[List[str]] = None
+    # AA-557 J.23 — extended to the same full field set the Admin-only `/admin/brands` CRUD
+    # (BrandCreateRequest above) already writes, so the tenant portal's own Brand Identity page
+    # can carry the same structure Admin's `/admin/brand` page does, not just 3 of its fields.
+    brand_name:        Optional[str] = None
+    brand_type:        Optional[str] = None
+    core_idea:         Optional[str] = None
+    customer_segment:  Optional[str] = None
+    customer_mindset:  Optional[str] = None
+    tone_of_voice:     Optional[List[str]] = None
+    writing_style:     Optional[str] = None
+    good_examples:     Optional[str] = None
+    target_markets:    Optional[List[str]] = None
 
 
 class CountryUpdateRequest(BaseModel):
@@ -4127,33 +4139,57 @@ def _resolve_brand_tenant_id(
     return _AA_INTERNAL_TENANT_ID
 
 
+def _parse_brand_list(v):
+    """Shared by GET /brand-identity and history rows — `voice_examples`/`target_markets` can
+    come back as a JSON string (no jsonb codec on this connection) or already a list/None."""
+    import json as _json_br
+    if v is None:
+        return []
+    if isinstance(v, list):
+        return v
+    try:
+        parsed = _json_br.loads(v)
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
 @router.get("/brand-identity")
 async def get_brand_identity(
     request: Request, tenant_id: str = Depends(_resolve_brand_tenant_id)
 ):
-    import json as _json_br
+    # AA-557 J.23 — full field set (see BrandIdentityUpdate's own comment for why).
+    _BRAND_COLS = (
+        "system_prompt, style_guide, forbidden_words, version, updated_at, created_at, "
+        "COALESCE(brand_name, '') AS brand_name, COALESCE(brand_type, '') AS brand_type, "
+        "COALESCE(core_idea, '') AS core_idea, COALESCE(customer_segment, '') AS customer_segment, "
+        "COALESCE(customer_mindset, '') AS customer_mindset, "
+        "COALESCE(voice_examples, '[]'::jsonb) AS voice_examples, "
+        "COALESCE(good_examples, '') AS good_examples, "
+        "COALESCE(target_markets, ARRAY[]::text[]) AS target_markets"
+    )
     pool = request.app.state.pool
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            SELECT system_prompt, style_guide, forbidden_words, version, updated_at, created_at
+        row = await conn.fetchrow(f"""
+            SELECT {_BRAND_COLS}
             FROM shared.tenant_brand_rules
             WHERE tenant_id = $1 AND is_active = true
             ORDER BY version DESC LIMIT 1
         """, tenant_id)
         if not row:
-            return {"configured": False, "system_prompt": None,
-                    "style_guide": None, "forbidden_words": [], "history": []}
-        history_rows = await conn.fetch("""
-            SELECT version, is_active, system_prompt, style_guide,
-                   forbidden_words, updated_at, created_at
+            return {
+                "configured": False, "system_prompt": None, "style_guide": None,
+                "forbidden_words": [], "history": [], "brand_name": "", "brand_type": "",
+                "core_idea": "", "customer_segment": "", "customer_mindset": "",
+                "tone_of_voice": [], "good_examples": "", "target_markets": [],
+            }
+        history_rows = await conn.fetch(f"""
+            SELECT {_BRAND_COLS}, is_active
             FROM shared.tenant_brand_rules WHERE tenant_id = $1 ORDER BY version DESC
         """, tenant_id)
 
     def parse_fw(fw):
-        if fw is None: return []
-        if isinstance(fw, list): return fw
-        try: return _json_br.loads(fw)
-        except Exception: return []
+        return _parse_brand_list(fw)
 
     history = [{
         "version":         h["version"],
@@ -4161,6 +4197,9 @@ async def get_brand_identity(
         "system_prompt":   h["system_prompt"] or "",
         "style_guide":     h["style_guide"] or "",
         "forbidden_words": parse_fw(h["forbidden_words"]),
+        "brand_name":      h["brand_name"],
+        "tone_of_voice":   _parse_brand_list(h["voice_examples"]),
+        "target_markets":  list(h["target_markets"]) if h["target_markets"] else [],
         "updated_at": h["updated_at"].isoformat() if h["updated_at"] else None,
         "created_at": h["created_at"].isoformat() if h["created_at"] else None,
     } for h in history_rows]
@@ -4172,6 +4211,14 @@ async def get_brand_identity(
         "version":         row["version"],
         "updated_at":      row["updated_at"].isoformat() if row["updated_at"] else None,
         "history":         history,
+        "brand_name":       row["brand_name"],
+        "brand_type":       row["brand_type"],
+        "core_idea":        row["core_idea"],
+        "customer_segment": row["customer_segment"],
+        "customer_mindset": row["customer_mindset"],
+        "tone_of_voice":    _parse_brand_list(row["voice_examples"]),
+        "good_examples":    row["good_examples"],
+        "target_markets":   list(row["target_markets"]) if row["target_markets"] else [],
     }
 
 
@@ -4188,11 +4235,27 @@ async def update_brand_identity(
     # between. Sanitize the same way (shared.validators.prompt_sanitize, same module the Lambda
     # fix uses) before it lands in the column every future LLM call for this tenant replays.
     system_prompt = sanitize_text(body.system_prompt, MAX_SYSTEM_PROMPT_LEN)
-    style_guide = sanitize_text(body.style_guide, MAX_LONG_FIELD_LEN)
+    style_guide = sanitize_text(body.writing_style or body.style_guide, MAX_LONG_FIELD_LEN)
     forbidden_words = sanitize_list(body.forbidden_words or [], MAX_SHORT_FIELD_LEN, max_items=20)
+    # AA-557 J.23 — extended fields, same sanitize_text/sanitize_list guards as the pre-existing
+    # 3; brand_name falls back to 'default' (the single-brand-per-tenant sentinel this file
+    # already uses elsewhere, _resolve_brand_rule) when the tenant hasn't named their brand yet.
+    brand_name = sanitize_text(body.brand_name, MAX_SHORT_FIELD_LEN) or "default"
+    brand_type = sanitize_text(body.brand_type, MAX_SHORT_FIELD_LEN)
+    core_idea = sanitize_text(body.core_idea, MAX_LONG_FIELD_LEN)
+    customer_segment = sanitize_text(body.customer_segment, MAX_LONG_FIELD_LEN)
+    customer_mindset = sanitize_text(body.customer_mindset, MAX_LONG_FIELD_LEN)
+    tone_of_voice = sanitize_list(body.tone_of_voice or [], MAX_SHORT_FIELD_LEN, max_items=20)
+    good_examples = sanitize_text(body.good_examples, MAX_LONG_FIELD_LEN)
+    target_markets = sanitize_list(body.target_markets or [], MAX_SHORT_FIELD_LEN, max_items=20)
 
     pool = request.app.state.pool
     async with pool.acquire() as conn:
+        # NOT scoped by brand_name — this tenant-facing endpoint keeps its pre-existing invariant
+        # (AA-424: exactly one active row per tenant_id at a time, regardless of brand_name) so a
+        # tenant editing their own brand_name mid-flow can't leave 2 simultaneously-active rows
+        # behind for GET to pick between non-deterministically. The admin-only `/admin/brands`
+        # CRUD (BrandCreateRequest, above) is the one genuinely multi-brand-per-tenant path.
         current = await conn.fetchval("""
             SELECT COALESCE(MAX(version), 0) FROM shared.tenant_brand_rules WHERE tenant_id = $1
         """, tenant_id)
@@ -4205,13 +4268,19 @@ async def update_brand_identity(
         # (found because this is the first time POST got exercised end-to-end against a real
         # tenant_id here). 'default' matches the sentinel this same file already uses elsewhere
         # for the single-brand-per-tenant case (_resolve_brand_rule, admin_pipeline.py:328).
+        # Positional order kept: ($1 tenant_id, $2 system_prompt, $3 style_guide, $4
+        # forbidden_words, $5 version) — tests/unit/test_aa487_brand_identity_sanitize.py asserts
+        # these exact `conn.execute.call_args` positions; new J.23 fields are appended after
+        # rather than interleaved, so that pre-existing sanitization contract stays byte-stable.
         await conn.execute("""
             INSERT INTO shared.tenant_brand_rules
-                (tenant_id, brand_name, system_prompt, style_guide, forbidden_words, version,
-                 is_active, updated_at)
-            VALUES ($1, 'default', $2, $3, $4::jsonb, $5, true, NOW())
-        """, tenant_id, system_prompt, style_guide,
-            _json.dumps(forbidden_words), current + 1)
+                (tenant_id, system_prompt, style_guide, forbidden_words, version, is_active,
+                 updated_at, brand_name, brand_type, core_idea, customer_segment,
+                 customer_mindset, voice_examples, good_examples, target_markets)
+            VALUES ($1, $2, $3, $4::jsonb, $5, true, NOW(), $6, $7, $8, $9, $10, $11::jsonb, $12, $13)
+        """, tenant_id, system_prompt, style_guide, _json.dumps(forbidden_words), current + 1,
+            brand_name, brand_type, core_idea, customer_segment, customer_mindset,
+            _json.dumps(tone_of_voice), good_examples, target_markets)
     return {"status": "updated", "version": current + 1}
 
 
