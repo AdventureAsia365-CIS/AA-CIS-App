@@ -1019,18 +1019,37 @@ const SLATE_STATE_TOOLTIP: Record<string, string> = {
 
 const SLATE_STATE_ORDER = ["proposed", "picked", "used", "cut"] as const;
 
+// AA-557 G.14 — answers Nghiệp's direct question ("trang Slate này hiển thị gì, tenant thấy nó ở
+// đâu"), confirmed against AA-555 (Done): tenant portal already has its own real `/portal/slate`
+// page. Rendered UNCONDITIONALLY (same lesson `CrossLinkNote` in auditPanels.tsx already
+// documents — an earlier draft only showed it once real Slate rows existed, which meant it never
+// appeared for the common "0 proposals yet" case, exactly when a confused admin most needs it;
+// found live during this task's own post-deploy verify, fixed before reporting done).
+function SlateExplainerNote() {
+  return (
+    <div style={{ fontSize: 12, color: A.muted, marginBottom: 6 }}>
+      Read-only platform-wide view of every tenant&apos;s Slate — the actual per-tenant Slate
+      tenants use to pick topics lives in their portal at Workspace → Slate (tenant-facing
+      route: <code style={{ fontFamily: mono }}>/portal/slate</code>).
+    </div>
+  );
+}
+
 function SlateSection({ tourId }: { tourId: string | null }) {
   const { data, loading, error, reload } = usePlatformFetch<{ data: SlateRow[]; total: number; by_state: Record<string, number> }>(
     "/api/admin/dashboard/slate", { tour_id: tourId ?? undefined }, !!tourId,
   );
   if (!tourId) {
-    return <EmptyState title="Select a Tour" body="Slate is tenant-specific — pick a Tour above to see it." />;
+    return <><SlateExplainerNote /><EmptyState title="Select a Tour" body="Slate is tenant-specific — pick a Tour above to see it." /></>;
   }
-  if (error) return <ErrorState message={error} onRetry={reload} />;
-  if (loading) return <LoadingScreen msg="Loading Slate…" />;
-  if (!data || data.total === 0) return <EmptyState title="No Slate proposals yet" body="No proposals yet for this Tour — Slate proposes a Subject once a Segment/Route clears a Channel's Bar." />;
+  if (error) return <><SlateExplainerNote /><ErrorState message={error} onRetry={reload} /></>;
+  if (loading) return <><SlateExplainerNote /><LoadingScreen msg="Loading Slate…" /></>;
+  if (!data || data.total === 0) {
+    return <><SlateExplainerNote /><EmptyState title="No Slate proposals yet" body="No proposals yet for this Tour — Slate proposes a Subject once a Segment/Route clears a Channel's Bar." /></>;
+  }
   return (
     <>
+      <SlateExplainerNote />
       {/* AA-554 H.23 — sticky header stat bar, same mechanism Segment/Score's filter rows use.
           H.3 — CUT badge is NOT hidden (shows the real, always-0-for-now count) with a small note
           underneath explaining why, so it doesn't read as a bug. */}
@@ -1048,14 +1067,6 @@ function SlateSection({ tourId }: { tourId: string | null }) {
             )}
           </div>
         ))}
-      </div>
-      {/* AA-557 G.14 — answers Nghiệp's direct question ("trang Slate này hiển thị gì, tenant
-          thấy nó ở đâu"), confirmed against AA-555 (Done): tenant portal already has its own real
-          `/portal/slate` page. */}
-      <div style={{ fontSize: 12, color: A.muted, marginBottom: 6 }}>
-        Read-only platform-wide view of every tenant&apos;s Slate — the actual per-tenant Slate
-        tenants use to pick topics lives in their portal at Workspace → Slate (tenant-facing
-        route: <code style={{ fontFamily: mono }}>/portal/slate</code>).
       </div>
       {/* AA-554 H.25 — Score here is copied as-is from Segment's total_rank / Route's score at
           proposal time, never recomputed by Slate itself. */}
