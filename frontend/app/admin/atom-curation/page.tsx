@@ -408,7 +408,15 @@ function SegmentGroup({ place, action, atoms, score, routeHubName, showTour, col
 // common Tour+Market filter + own extra filter row each.
 // ══════════════════════════════════════════════════════════════════════════
 
-function usePlatformFetch<T>(endpoint: string, params: Record<string, string | number | undefined>) {
+// `enabled` (default true) guards the actual fetch — Segment/Score/Route pass no guard (they
+// support `tour_id` omitted, "All tours" mode, AA-551's whole point); Slate passes
+// `enabled: !!tourId` since its backend endpoint still hard-requires `tour_id` (AA-550 A.3, real
+// per-tenant exception, not touched by this task) — without this guard, deselecting the Tour
+// filter would fire a request Slate's own API 422s on (found live during this task's own
+// Playwright verify, fixed before merge).
+function usePlatformFetch<T>(
+  endpoint: string, params: Record<string, string | number | undefined>, enabled = true,
+) {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -416,6 +424,7 @@ function usePlatformFetch<T>(endpoint: string, params: Record<string, string | n
   const key = JSON.stringify(params);
 
   const load = useCallback(() => {
+    if (!enabled) { setData(null); setLoading(false); setError(null); return; }
     setLoading(true); setError(null);
     const qs = new URLSearchParams();
     Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== "") qs.set(k, String(v)); });
@@ -424,7 +433,7 @@ function usePlatformFetch<T>(endpoint: string, params: Record<string, string | n
       .catch(e => setError(String(e.message || e)))
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [endpoint, key]);
+  }, [endpoint, key, enabled]);
 
   useEffect(() => { load(); }, [load]);
   return { data, loading, error, reload: load };
@@ -616,7 +625,7 @@ const SLATE_STATE_COLOR: Record<string, "gray" | "blue" | "green" | "red"> = {
 
 function SlateSection({ tourId }: { tourId: string | null }) {
   const { data, loading, error, reload } = usePlatformFetch<{ data: SlateRow[]; total: number; by_state: Record<string, number> }>(
-    "/api/admin/dashboard/slate", { tour_id: tourId ?? undefined },
+    "/api/admin/dashboard/slate", { tour_id: tourId ?? undefined }, !!tourId,
   );
   if (!tourId) {
     return <EmptyState title="Select a Tour" body="Slate is per-tenant, per-Tour data (acp_shared.subject.tenant_id is a real, required column — not part of AA-545's platform-wide fix) — pick one Tour above to view it." />;
