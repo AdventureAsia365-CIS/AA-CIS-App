@@ -7,7 +7,7 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   Users, Plus, Key, RefreshCw, ChevronDown, ChevronUp,
-  AlertCircle, Loader2, CheckCircle, CheckCircle2, Eye, EyeOff, Copy, X, Trash2, Globe,
+  AlertCircle, Loader2, CheckCircle, Eye, EyeOff, Copy, X, Trash2, Globe,
 } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
 import {
@@ -254,7 +254,14 @@ interface TenantDetails {
   rewritten_tours: RewrittenTour[];
   pipeline_runs: PipelineRun[];
   api_usage: { total_calls: number; quota_used: number; quota_total: number; rate_limit_per_min: number };
-  brand_rules: { system_prompt: string | null; style_guide: string | null; forbidden_words: string[]; version_count: number; last_updated: string | null };
+  brand_rules: {
+    system_prompt: string | null; style_guide: string | null; forbidden_words: string[];
+    version_count: number; last_updated: string | null;
+    // AA-557 J.24 — full field set, same table Tenant Portal's own Brand Identity page reads/writes.
+    brand_name: string; brand_type: string; core_idea: string;
+    customer_segment: string; customer_mindset: string;
+    voice_examples: string[]; good_examples: string; target_markets: string[];
+  };
 }
 
 const SCORE_COLOR = (s: number | null) =>
@@ -376,162 +383,179 @@ function ApiTabContent({ usage }: { usage: TenantDetails["api_usage"] }) {
 }
 
 
-// ─── Planning tab (AA-323 Gap 3: N4-N6 markets/channels/capacity) ─────────────
-
-interface TenantPlanningConfig {
-  markets: string[];
-  channels: string[];
-  posts_per_week: number;
-}
-
-// AA-449 — extended from 4 to 8 values (kept "blog" for backward compat, even though it has no
-// row in T8's Bang-2 channel-style table). Must stay in sync with services/acp_planning/
-// models.py's Channel Literal and api/routers/admin.py's _VALID_CHANNELS.
-const ALL_CHANNELS = [
-  "blog", "facebook", "tiktok", "email", "linkedin", "instagram", "landing_page", "ads",
-];
-
-function PlanningTabContent({ tenantId }: { tenantId: string }) {
-  const [config, setConfig] = useState<TenantPlanningConfig | null>(null);
-  const [marketsInput, setMarketsInput] = useState("");
-  const [channels, setChannels] = useState<string[]>([]);
-  const [postsPerWeek, setPostsPerWeek] = useState("1");
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [error, setError] = useState("");
-
-  const load = useCallback(() => {
-    setLoading(true); setError("");
-    fetch(`/api/admin/tenants/${tenantId}/config`)
-      .then(r => (r.ok ? r.json() : Promise.reject()))
-      .then((d: TenantPlanningConfig) => {
-        setConfig(d);
-        setMarketsInput(d.markets.join(", "));
-        setChannels(d.channels);
-        setPostsPerWeek(String(d.posts_per_week));
-      })
-      .catch(() => setError("Failed to load planning config"))
-      .finally(() => setLoading(false));
-  }, [tenantId]);
-
-  useEffect(() => { load(); }, [load]);
-
-  function toggleChannel(ch: string) {
-    setChannels(cs => (cs.includes(ch) ? cs.filter(c => c !== ch) : [...cs, ch]));
-  }
-
-  async function save() {
-    const markets = marketsInput.split(",").map(m => m.trim().toUpperCase()).filter(Boolean);
-    const ppw = Number(postsPerWeek);
-    if (markets.length === 0) { setError("At least one market is required"); return; }
-    if (channels.length === 0) { setError("At least one channel is required"); return; }
-    if (!Number.isInteger(ppw) || ppw < 1 || ppw > 14) {
-      setError("Posts/week must be an integer from 1 to 14"); return;
-    }
-    setSaving(true); setError(""); setSaved(false);
-    try {
-      const res = await fetch(`/api/admin/tenants/${tenantId}/config`, {
-        method: "PUT", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ markets, channels, posts_per_week: ppw }),
-      });
-      const data = await res.json();
-      if (!res.ok) { setError(data.detail ?? "Failed to save planning config"); return; }
-      setConfig(data);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
-    } catch { setError("Connection error"); } finally { setSaving(false); }
-  }
-
-  if (loading) return <div style={{ padding: "12px 0", fontSize: 12, color: A.muted }}>Loading…</div>;
-
+// AA-557 J.24 — was read-only, now editable: Admin can view AND overwrite the exact same
+// shared.tenant_brand_rules row Tenant Portal's own BrandTab.tsx (J.23) reads/writes, via a new
+// admin-scoped write path (PUT /admin/tenants/{id}/brand-identity — see api/routers/admin.py's
+// own comment on why the tenant-facing endpoint couldn't just be reused for this).
+const brandFieldStyle: React.CSSProperties = {
+  width: "100%", padding: "9px 12px", background: "#fff", border: `1px solid ${A.line}`,
+  borderRadius: 8, color: A.body, fontSize: 12.5, fontFamily: sans, outline: "none", boxSizing: "border-box",
+};
+function BrandField({ label, value, onChange, rows }: {
+  label: string; value: string; onChange: (v: string) => void; rows?: number;
+}) {
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 460 }}>
-      <p style={{ fontSize: 11.5, color: A.muted2, margin: 0 }}>
-        Markets/channels/capacity used by N4 (Runway Map), N5 (Quarter Plan), and N6 (Slot
-        Allocator) for this tenant. Applies the next time a quarter plan is previewed or created.
-      </p>
-      <div>
-        <label style={{ fontSize: 11, fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.1em", display: "block", marginBottom: 6 }}>
-          Markets (comma-separated)
-        </label>
-        <input value={marketsInput} onChange={e => setMarketsInput(e.target.value)} placeholder="US, UK"
-          style={{ width: "100%", padding: "9px 12px", background: "#fff", border: `1px solid ${A.line}`, borderRadius: 8, color: A.body, fontSize: 13, outline: "none", boxSizing: "border-box", fontFamily: sans }} />
-      </div>
-      <div>
-        <label style={{ fontSize: 11, fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.1em", display: "block", marginBottom: 8 }}>
-          Channels
-        </label>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {ALL_CHANNELS.map(ch => (
-            <button key={ch} onClick={() => toggleChannel(ch)} style={{
-              padding: "7px 12px", borderRadius: 8, cursor: "pointer", fontFamily: sans,
-              border: `1px solid ${channels.includes(ch) ? A.red : A.line}`,
-              background: channels.includes(ch) ? A.redTint : "#fff",
-              color: channels.includes(ch) ? A.red : A.muted,
-              fontSize: 12.5, fontWeight: channels.includes(ch) ? 700 : 400,
-            }}>{ch}</button>
-          ))}
-        </div>
-      </div>
-      <div>
-        <label style={{ fontSize: 11, fontWeight: 600, color: A.muted, textTransform: "uppercase", letterSpacing: "0.1em", display: "block", marginBottom: 6 }}>
-          Posts/week (capacity)
-        </label>
-        <input type="number" min={1} max={14} value={postsPerWeek} onChange={e => setPostsPerWeek(e.target.value)}
-          style={{ width: 100, padding: "9px 12px", background: "#fff", border: `1px solid ${A.line}`, borderRadius: 8, color: A.body, fontSize: 13, outline: "none", fontFamily: sans }} />
-        <p style={{ fontSize: 11, color: A.muted2, margin: "6px 0 0" }}>
-          Same value shown on the Mirror tab — editing it here updates shared.tenants.posts_per_week.
-        </p>
-      </div>
-      {error && (
-        <div style={{ padding: "9px 12px", background: A.redSoft, border: `1px solid ${A.redBorder}`, borderRadius: 8, fontSize: 12, color: A.red }}>
-          {error}
-        </div>
+    <div>
+      <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: A.muted, marginBottom: 6 }}>{label}</div>
+      {rows ? (
+        <textarea value={value} onChange={e => onChange(e.target.value)} rows={rows} style={{ ...brandFieldStyle, resize: "vertical", lineHeight: 1.5 }} />
+      ) : (
+        <input value={value} onChange={e => onChange(e.target.value)} style={brandFieldStyle} />
       )}
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <Btn variant="primary" size="sm" disabled={saving} onClick={save}>
-          {saving ? <><Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} /> Saving…</> : "Save"}
-        </Btn>
-        {saved && <span style={{ fontSize: 12, color: "#22C55E", display: "flex", alignItems: "center", gap: 4 }}><CheckCircle2 size={13} /> Saved</span>}
-        {config && !saved && (
-          <span style={{ fontSize: 11, color: A.muted2 }}>
-            Current: {config.markets.join(",")} / {config.channels.join(",")} / {config.posts_per_week}/wk
-          </span>
-        )}
-      </div>
     </div>
   );
 }
 
-function BrandTabContent({ rules }: { rules: TenantDetails["brand_rules"] }) {
-  if (!rules.system_prompt && !rules.style_guide && rules.forbidden_words.length === 0) {
-    return <div style={{ padding: "20px 0", textAlign: "center", fontSize: 12, color: A.muted }}>No brand rules configured</div>;
+function BrandTabContent({ rules, tenantId }: { rules: TenantDetails["brand_rules"]; tenantId: string }) {
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState("");
+  const [sp, setSp] = useState(rules.system_prompt ?? "");
+  const [sg, setSg] = useState(rules.style_guide ?? "");
+  const [fw, setFw] = useState(rules.forbidden_words.join(", "));
+  const [brandName, setBrandName] = useState(rules.brand_name);
+  const [brandType, setBrandType] = useState(rules.brand_type);
+  const [coreIdea, setCoreIdea] = useState(rules.core_idea);
+  const [targetMarkets, setTargetMarkets] = useState(rules.target_markets.join(", "));
+  const [customerSegment, setCustomerSegment] = useState(rules.customer_segment);
+  const [customerMindset, setCustomerMindset] = useState(rules.customer_mindset);
+  const [toneOfVoice, setToneOfVoice] = useState(rules.voice_examples.join(", "));
+  const [goodExamples, setGoodExamples] = useState(rules.good_examples);
+
+  const hasAnyData = !!(rules.system_prompt || rules.style_guide || rules.forbidden_words.length > 0
+    || rules.brand_name || rules.core_idea);
+
+  async function save() {
+    setSaving(true); setError(""); setSaved(false);
+    try {
+      const res = await fetch(`/api/admin/tenants/${tenantId}/brand-identity`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          system_prompt: sp, style_guide: sg,
+          forbidden_words: fw.split(",").map(w => w.trim()).filter(Boolean),
+          brand_name: brandName, brand_type: brandType, core_idea: coreIdea,
+          target_markets: targetMarkets.split(",").map(w => w.trim()).filter(Boolean),
+          customer_segment: customerSegment, customer_mindset: customerMindset,
+          tone_of_voice: toneOfVoice.split(",").map(w => w.trim()).filter(Boolean),
+          good_examples: goodExamples,
+        }),
+      });
+      if (!res.ok) { const d = await res.json().catch(() => ({})); setError(d.detail ?? "Failed to save"); return; }
+      setSaved(true); setEditing(false);
+      setTimeout(() => setSaved(false), 2500);
+    } catch { setError("Connection error"); } finally { setSaving(false); }
   }
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <div style={{ display: "flex", gap: 16, fontSize: 11, color: A.muted2 }}>
-        <span>{rules.version_count} version{rules.version_count !== 1 ? "s" : ""}</span>
-        {rules.last_updated && <span>Last updated: {fmtD(rules.last_updated)}</span>}
+
+  if (!editing) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 16, fontSize: 11, color: A.muted2 }}>
+            <span>{rules.version_count} version{rules.version_count !== 1 ? "s" : ""}</span>
+            {rules.last_updated && <span>Last updated: {fmtD(rules.last_updated)}</span>}
+          </div>
+          <Btn variant="secondary" size="sm" onClick={() => setEditing(true)}>Edit</Btn>
+        </div>
+        {saved && <span style={{ fontSize: 12, color: "#22C55E" }}>Saved</span>}
+        {!hasAnyData ? (
+          <div style={{ padding: "20px 0", textAlign: "center", fontSize: 12, color: A.muted }}>No brand rules configured — click Edit to set them up.</div>
+        ) : (
+          <>
+            {rules.brand_name && <div><span style={{ fontSize: 10, fontWeight: 700, color: A.muted }}>BRAND NAME </span><span style={{ fontSize: 13, color: A.ink, fontWeight: 600 }}>{rules.brand_name}</span></div>}
+            {rules.brand_type && <div><span style={{ fontSize: 10, fontWeight: 700, color: A.muted }}>BRAND TYPE </span><span style={{ fontSize: 12.5, color: A.body }}>{rules.brand_type}</span></div>}
+            {rules.core_idea && (
+              <div>
+                <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: A.muted, marginBottom: 6 }}>Core Idea</div>
+                <div style={{ fontSize: 12.5, color: A.body }}>{rules.core_idea}</div>
+              </div>
+            )}
+            {rules.target_markets.length > 0 && (
+              <div>
+                <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: A.muted, marginBottom: 6 }}>Target Markets</div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {rules.target_markets.map((m, i) => <span key={i} style={{ fontSize: 11, padding: "2px 8px", background: A.line2, color: A.body, borderRadius: 20 }}>{m}</span>)}
+                </div>
+              </div>
+            )}
+            {rules.customer_segment && (
+              <div>
+                <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: A.muted, marginBottom: 6 }}>Customer Segment</div>
+                <div style={{ fontSize: 12.5, color: A.body }}>{rules.customer_segment}</div>
+              </div>
+            )}
+            {rules.customer_mindset && (
+              <div>
+                <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: A.muted, marginBottom: 6 }}>Customer Mindset</div>
+                <div style={{ fontSize: 12.5, color: A.body }}>{rules.customer_mindset}</div>
+              </div>
+            )}
+            {rules.voice_examples.length > 0 && (
+              <div>
+                <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: A.muted, marginBottom: 6 }}>Tone of Voice</div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {rules.voice_examples.map((t, i) => <span key={i} style={{ fontSize: 11, padding: "2px 8px", background: A.goldTint, color: A.gold, borderRadius: 20 }}>{t}</span>)}
+                </div>
+              </div>
+            )}
+            {rules.style_guide && (
+              <div>
+                <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: A.muted, marginBottom: 6 }}>Writing Style</div>
+                <div style={{ padding: "10px 12px", background: "#fff", border: `1px solid ${A.line}`, borderRadius: 8, fontSize: 12, color: A.body, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{rules.style_guide}</div>
+              </div>
+            )}
+            {rules.good_examples && (
+              <div>
+                <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: A.muted, marginBottom: 6 }}>Good Examples</div>
+                <div style={{ padding: "10px 12px", background: "#fff", border: `1px solid ${A.line}`, borderRadius: 8, fontSize: 12, color: A.body, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{rules.good_examples}</div>
+              </div>
+            )}
+            {rules.system_prompt && (
+              <div>
+                <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: A.muted, marginBottom: 6 }}>Should Write (System Prompt)</div>
+                <div style={{ padding: "10px 12px", background: "#fff", border: `1px solid ${A.line}`, borderRadius: 8, fontSize: 12, color: A.body, fontFamily: mono, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
+                  {rules.system_prompt.slice(0, 400)}{rules.system_prompt.length > 400 ? "…" : ""}
+                </div>
+              </div>
+            )}
+            {rules.forbidden_words.length > 0 && (
+              <div>
+                <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: A.muted, marginBottom: 6 }}>Forbidden Words ({rules.forbidden_words.length})</div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {rules.forbidden_words.map((w, i) => (
+                    <span key={i} style={{ fontSize: 11, padding: "2px 8px", background: A.redSoft, color: A.red, borderRadius: 20, fontWeight: 600 }}>{w}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
       </div>
-      {rules.system_prompt && (
-        <div>
-          <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: A.muted, marginBottom: 6 }}>System Prompt</div>
-          <div style={{ padding: "10px 12px", background: "#fff", border: `1px solid ${A.line}`, borderRadius: 8, fontSize: 12, color: A.body, fontFamily: mono, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
-            {rules.system_prompt.slice(0, 200)}{rules.system_prompt.length > 200 ? "…" : ""}
-          </div>
-        </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14, maxWidth: 560 }}>
+      <BrandField label="Brand Name" value={brandName} onChange={setBrandName} />
+      <BrandField label="Brand Type" value={brandType} onChange={setBrandType} />
+      <BrandField label="Core Idea" value={coreIdea} onChange={setCoreIdea} rows={2} />
+      <BrandField label="Target Markets (comma-separated)" value={targetMarkets} onChange={setTargetMarkets} />
+      <BrandField label="Customer Segment" value={customerSegment} onChange={setCustomerSegment} rows={2} />
+      <BrandField label="Customer Mindset" value={customerMindset} onChange={setCustomerMindset} rows={2} />
+      <BrandField label="Tone of Voice (comma-separated)" value={toneOfVoice} onChange={setToneOfVoice} />
+      <BrandField label="Writing Style" value={sg} onChange={setSg} rows={4} />
+      <BrandField label="Good Examples" value={goodExamples} onChange={setGoodExamples} rows={3} />
+      <BrandField label="Should Write (System Prompt)" value={sp} onChange={setSp} rows={5} />
+      <BrandField label="Forbidden Words (comma-separated)" value={fw} onChange={setFw} />
+      {error && (
+        <div style={{ padding: "9px 12px", background: A.redSoft, border: `1px solid ${A.redBorder}`, borderRadius: 8, fontSize: 12, color: A.red }}>{error}</div>
       )}
-      {rules.forbidden_words.length > 0 && (
-        <div>
-          <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: A.muted, marginBottom: 6 }}>Forbidden Words ({rules.forbidden_words.length})</div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-            {rules.forbidden_words.map((w, i) => (
-              <span key={i} style={{ fontSize: 11, padding: "2px 8px", background: A.redSoft, color: A.red, borderRadius: 20, fontWeight: 600 }}>{w}</span>
-            ))}
-          </div>
-        </div>
-      )}
+      <div style={{ display: "flex", gap: 10 }}>
+        <Btn variant="primary" size="sm" disabled={saving} onClick={save}>
+          {saving ? <><Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} /> Saving…</> : "Save"}
+        </Btn>
+        <Btn variant="secondary" size="sm" onClick={() => setEditing(false)}>Cancel</Btn>
+      </div>
     </div>
   );
 }
@@ -573,9 +597,61 @@ function ActivityTabContent({ items }: { items: RewriteActivityItem[] }) {
   );
 }
 
+// ─── Social Content tab (AA-557 I.22) ──────────────────────────────────────────
+// Skeleton only, per the issue's own scope: the full "detailed per-tenant Atom/Segment/Route/
+// Slate usage" breakdown is blocked on AA-558 (INVESTIGATE — the 06/07/08 merge decision), so
+// this tab intentionally shows only 2 real, already-cross-tenant-filterable counts (content-log/
+// publish-log both already accept a real `tenant_id` query param, admin_a4.py — no new backend
+// endpoint needed for the skeleton) rather than fabricating the detailed view ahead of that
+// decision.
+interface SocialContentSummary { pieces_written: number; pieces_published: number; }
+
+function SocialContentTabContent({ tenantId }: { tenantId: string }) {
+  const [data, setData] = useState<SocialContentSummary | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    setLoading(true); setError("");
+    Promise.all([
+      fetch(`/api/admin/a4/content-log?tenant_id=${tenantId}&limit=500`).then(r => r.ok ? r.json() : Promise.reject()),
+      fetch(`/api/admin/a4/publish-log?tenant_id=${tenantId}&limit=500`).then(r => r.ok ? r.json() : Promise.reject()),
+    ])
+      .then(([content, publish]) => setData({
+        pieces_written: content.total ?? 0,
+        pieces_published: publish.total ?? 0,
+      }))
+      .catch(() => setError("Failed to load Social Content summary"))
+      .finally(() => setLoading(false));
+  }, [tenantId]);
+
+  if (loading) return <div style={{ padding: "12px 0", fontSize: 12, color: A.muted }}>Loading…</div>;
+  if (error || !data) return <div style={{ padding: "12px 0", fontSize: 12, color: A.red }}>{error || "Failed to load"}</div>;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ display: "flex", gap: 14 }}>
+        {([["Content pieces written", data.pieces_written], ["Published", data.pieces_published]] as [string, number][]).map(([l, v]) => (
+          <div key={l} style={{ padding: "10px 14px", background: "#fff", border: `1px solid ${A.line}`, borderRadius: 8, minWidth: 140 }}>
+            <div style={{ fontSize: 10, color: A.muted2, marginBottom: 3 }}>{l}</div>
+            <div style={{ fontFamily: serif, fontSize: 18, fontWeight: 500, color: A.ink }}>{v}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize: 11.5, color: A.muted2, fontStyle: "italic" }}>
+        Detailed per-piece Atom/Segment/Route/Slate usage breakdown is pending the 06/07/08 merge
+        decision (see AA-558) — this tab will grow once that&apos;s resolved. In the meantime, see{" "}
+        <a href="/admin/tenant-activity" style={{ color: A.gold }}>Tenant Activity</a> for the
+        full Write/Gate → Review → Publish detail (filterable by Tour, not yet by this Tenant
+        directly from there).
+      </div>
+    </div>
+  );
+}
+
 // ─── Tenant Detail Panel ──────────────────────────────────────────────────────
 
-type DTab = "tours" | "pipeline" | "activity" | "planning" | "api" | "brand";
+type DTab = "tours" | "pipeline" | "activity" | "api" | "brand" | "social_content";
 
 function TenantDetail({ tenantId, planTier }: {
   tenantId: string; planTier: string;
@@ -614,15 +690,18 @@ function TenantDetail({ tenantId, planTier }: {
   if (!data)   return <div style={{ padding: "12px 0", fontSize: 12, color: A.red }}>Failed to load details</div>;
 
   const s = data.summary;
+  // AA-557 I.17 — "Planning" tab removed entirely (Nghiệp confirmed: tenants no longer self-
+  // serve Quarter-Plan, replaced by Slate since AA-511/519 — the tab had no meaning left).
   const TABS: { key: DTab; label: string }[] = [
     { key: "tours",   label: `Tours (${data.rewritten_tours.length})` },
     ...(isInternal
       ? [{ key: "pipeline" as DTab, label: `Pipeline (${data.pipeline_runs.length})` }]
       : [{ key: "activity" as DTab, label: `Activity (${activity.length})` }]
     ),
-    { key: "planning", label: "Planning" },
     { key: "api",   label: "API Usage" },
     { key: "brand", label: "Brand" },
+    // AA-557 I.22 — skeleton tab only, see SocialContentTabContent's own comment for why.
+    { key: "social_content", label: "Social Content" },
   ];
 
   return (
@@ -633,6 +712,10 @@ function TenantDetail({ tenantId, planTier }: {
           ["LLM Cost",       `$${s.total_llm_cost_usd.toFixed(3)}`, A.body],
           ["API Calls (Mo)", s.api_calls_this_month.toLocaleString(), A.body],
           ["Quota",          `${s.quota_pct}%`,                     s.quota_pct > 80 ? A.red : A.body],
+          // AA-557 I.19 — real data, already fetched (`shared.tenants.rate_limit_rpm` via
+          // `api_usage.rate_limit_per_min`, same value the API Usage tab below already showed) —
+          // just also surfaced at header level so an admin doesn't need to open that tab for it.
+          ["Rate Limit",     `${data.api_usage.rate_limit_per_min}/min`, A.body],
           ["Plan",           s.plan_name,                           A.body],
           ["Member Since",   s.member_since,                        A.muted],
         ] as [string, string, string][]).map(([l, v, c]) => (
@@ -655,9 +738,9 @@ function TenantDetail({ tenantId, planTier }: {
       {tab === "tours"    && <ToursTabContent    tours={data.rewritten_tours} toursView={data.summary.tours_view} />}
       {tab === "pipeline" && <PipelineTabContent runs={data.pipeline_runs}    pipelineNote={data.summary.pipeline_note} />}
       {tab === "activity" && <ActivityTabContent items={activity} />}
-      {tab === "planning" && <PlanningTabContent tenantId={tenantId} />}
       {tab === "api"      && <ApiTabContent      usage={data.api_usage} />}
-      {tab === "brand"    && <BrandTabContent    rules={data.brand_rules} />}
+      {tab === "brand"    && <BrandTabContent    rules={data.brand_rules} tenantId={tenantId} />}
+      {tab === "social_content" && <SocialContentTabContent tenantId={tenantId} />}
     </div>
   );
 }
