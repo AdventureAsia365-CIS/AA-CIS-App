@@ -3,7 +3,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Eye, Gauge, Puzzle, Radio } from "lucide-react";
+import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Eye, Gauge, Puzzle } from "lucide-react";
 import { A, serif, sans, SIDEBAR_WIDTH } from "./adminUi";
 
 interface Notif {
@@ -229,12 +229,11 @@ export default function AdminSidebar() {
                 Health/Cross-Tenant Oversight. Still admin-only (middleware.ts unchanged,
                 PROTECTED_ROUTES roles: ["admin"]) — see that NavItem below for the isAdmin guard
                 this move required now that it sits in an otherwise all-roles group. */}
-            {/* AA-551 — split out of Atom Curation (AA-550's audit found the original single page
-                mixed platform-wide Master Content data with per-Tour, per-tenant activity data;
-                Nghiệp's decision was 2 separate pages, "Phương án B"). Same admin-only tier. */}
-            <NavItem active={active("/admin/tenant-activity")} accent={A.red}
-              icon={<Radio size={15} />} label="Tenant Activity"
-              onClick={() => router.push("/admin/tenant-activity")} />
+            {/* AA-557 H.15 — "Tenant Activity" (was here, AA-551) removed as its OWN top-level
+                entry: Nghiệp confirmed it's really Write/Gate→Review→Publish per-tenant CONTENT
+                activity, genuinely part of the same Social Content flow (01-05) below, not general
+                tenant account activity — now reachable as a "06-08" item inside Social Content's
+                own inner tab-group instead (atom-curation/page.tsx). Route itself unchanged. */}
           </NavGroup>
         )}
 
