@@ -49,7 +49,7 @@ import {
   TrendingUp, GitBranch, FileStack, Radio,
 } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
-import { A, serif, mono, sans, Card, Badge, Btn, LoadingScreen } from "../_components/adminUi";
+import { A, serif, mono, sans, Card, Badge, Btn, LoadingScreen, TH, TD } from "../_components/adminUi";
 import { fetchJson, EmptyState, ErrorState, AuditTable, Col } from "../_components/auditPanels";
 
 const MARKETS = ["US", "UK", "AU", "DE", "FR", "NL"];
@@ -630,52 +630,71 @@ function SegmentSection({ tourId, market, focusRouteId, focusSegmentId, onClearF
       </div>
       {/* AA-554 E.13 — shared market legend. */}
       <MarketLegend />
+      {/* AA-561 1d — investigated (segments.py origin + ported segment_matching.py + real DB
+          query): a Segment is grouped by place+verb ACROSS THE WHOLE PLATFORM (AA-545, migration
+          146 — no tour_id/tenant_id folded into segment_id at all), so it genuinely CAN span
+          multiple tours (and multiple tenants' rewrites) once 2 tours describe the same
+          real-world moment — confirmed live in admin_dashboard.py's own list_segments query and
+          docstring ("a Segment can span multiple tours"). Real data today (23 Segments, 7 tours,
+          none yet overlapping) shows 0 multi-tour Segments — a fact about this catalog's current
+          size, not the design. So this table renders ONE single table (header once), with
+          Segment/Route-Hub cells merged (rowSpan) across a Segment's rows, but Tour is its OWN
+          per-row column, never merged into the Segment cell — the moment 2 tours share a
+          Segment, each becomes its own row here rather than being hidden by a merge that assumes
+          1 Segment = 1 Tour. See docs/implementation-notes/AA-561.md for the full trace. */}
       {error ? <ErrorState message={error} onRetry={reload} /> :
         loading ? <LoadingScreen msg="Loading Segments…" /> :
         (!data || data.total === 0 || groups.length === 0) ? (
           <EmptyState title="No Segments match this filter" body="No Segment detected yet for this filter." />
         ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {groups.map((g, i) => (
-            <div key={g.segmentId} style={{ border: `1px solid ${A.line}`, borderRadius: 10, overflow: "hidden" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", background: A.card, flexWrap: "wrap" }}>
-                {/* AA-557 D.5 — offset-relative, not page-local (was always `i + 1`, resetting
-                    to #1 every page — real bug, Nghiệp-confirmed). `offset` is row-based; groups
-                    are fewer than rows, so this is monotonically increasing and never repeats
-                    across pages but isn't a mathematically exact "distinct segment index" — same
-                    tradeoff Score's own row numbering (F.18) already accepted for the same reason. */}
-                <span style={{ fontFamily: mono, fontSize: 11, color: A.muted2 }}>#{offset + i + 1}</span>
-                <span style={{ fontSize: 13, fontWeight: 600, color: A.body, fontFamily: sans }}>
-                  {g.place}{g.action ? ` — ${g.action}` : ""}
-                </span>
-                {/* AA-554 E.12 — was a static Badge, now navigates to Route/Hub filtered by route_id. */}
-                {g.routeHubName && g.routeId && (
-                  <button onClick={() => onNavigateToRoute(g.routeId!)}
-                    style={{ background: "none", border: "none", padding: 0, cursor: "pointer" }}
-                    title="View this Route in Route/Hub">
-                    <Badge color="gold"><Milestone size={11} style={{ verticalAlign: -2, marginRight: 3 }} />{g.routeHubName}</Badge>
-                  </button>
-                )}
-                {/* AA-557 D.4 — was "N tour/market rows"; real relationship is market-first (each
-                    Segment spans several markets, each market maps to exactly 1 tour). */}
-                <span style={{ fontSize: 11, color: A.muted2, marginLeft: "auto" }}>
-                  {g.rows.length} market/tour row{g.rows.length !== 1 ? "s" : ""}
-                </span>
-              </div>
-              {/* AA-557 D.6 — real table: sortable + per-column filter (client-side, over this
-                  group's own already-fetched rows). */}
-              <AuditTable sortable rows={g.rows} rowKey={r => `${r.tour_id}-${r.market ?? "none"}`} columns={[
-                { key: "tour", label: "Tour", render: r => r.tour_name ?? "—",
-                  sortValue: r => r.tour_name ?? "", filterValue: r => r.tour_name ?? "" },
-                { key: "market", label: "Market", render: r => r.market ? <span title={marketTitle(r.market)}>{r.market}</span> : "—",
-                  sortValue: r => r.market ?? "", filterValue: r => r.market ?? "" },
-                { key: "members", label: "Atoms", render: r => r.member_count, sortValue: r => r.member_count },
-                { key: "rank", label: "Total rank", render: r => r.excluded_reason ? <Badge color="gray">{r.excluded_reason}</Badge> : (r.total_rank ?? "—"),
-                  sortValue: r => r.total_rank ?? (r.excluded_reason ? Number.MAX_SAFE_INTEGER : null) },
-                { key: "recurrence", label: "Recurrence", render: r => r.recurrence ?? "—", sortValue: r => r.recurrence ?? 0 },
-              ] as Col<SegmentRow>[]} />
-            </div>
-          ))}
+          <div style={{ overflowX: "auto", border: `1px solid ${A.line}`, borderRadius: 10 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: sans }}>
+              <thead>
+                <tr>
+                  {["#", "Segment", "Route/Hub", "Tour", "Market", "Atoms", "Total rank", "Recurrence"].map(label => (
+                    <th key={label} style={TH}>{label}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {groups.map((g, i) => g.rows.map((r, j) => (
+                  <tr key={`${g.segmentId}-${r.tour_id}-${r.market ?? "none"}`}
+                    style={{ borderTop: j === 0 ? `1px solid ${A.line}` : "none" }}>
+                    {j === 0 && (
+                      <>
+                        <td style={{ ...TD, verticalAlign: "top" }} rowSpan={g.rows.length}>
+                          <span style={{ fontFamily: mono, fontSize: 11, color: A.muted2 }}>{offset + i + 1}</span>
+                        </td>
+                        <td style={{ ...TD, verticalAlign: "top" }} rowSpan={g.rows.length}>
+                          <span style={{ fontSize: 13, fontWeight: 600, color: A.body }}>
+                            {g.place}{g.action ? ` — ${g.action}` : ""}
+                          </span>
+                          <div style={{ fontSize: 10.5, color: A.muted2, marginTop: 3 }}>
+                            {g.rows.length} market/tour row{g.rows.length !== 1 ? "s" : ""}
+                          </div>
+                        </td>
+                        <td style={{ ...TD, verticalAlign: "top" }} rowSpan={g.rows.length}>
+                          {g.routeHubName && g.routeId ? (
+                            <button onClick={() => onNavigateToRoute(g.routeId!)}
+                              style={{ background: "none", border: "none", padding: 0, cursor: "pointer" }}
+                              title="View this Route in Route/Hub">
+                              <Badge color="gold"><Milestone size={11} style={{ verticalAlign: -2, marginRight: 3 }} />{g.routeHubName}</Badge>
+                            </button>
+                          ) : "—"}
+                        </td>
+                      </>
+                    )}
+                    <td style={TD}>{r.tour_name ?? "—"}</td>
+                    <td style={TD}>{r.market ? <span title={marketTitle(r.market)}>{r.market}</span> : "—"}</td>
+                    <td style={TD}>{r.member_count}</td>
+                    <td style={TD}>{r.excluded_reason ? <Badge color="gray">{r.excluded_reason}</Badge> : (r.total_rank ?? "—")}</td>
+                    <td style={TD}>{r.recurrence ?? "—"}</td>
+                  </tr>
+                )))}
+              </tbody>
+            </table>
+          </div>
           {!hasFocus && <PageFooter total={data.total} offset={offset} pageSize={PAGE_SIZE} onOffset={setOffset} />}
         </div>
       )}
@@ -1019,19 +1038,32 @@ const SLATE_STATE_TOOLTIP: Record<string, string> = {
 
 const SLATE_STATE_ORDER = ["proposed", "picked", "used", "cut"] as const;
 
-// AA-557 G.14 — answers Nghiệp's direct question ("trang Slate này hiển thị gì, tenant thấy nó ở
-// đâu"), confirmed against AA-555 (Done): tenant portal already has its own real `/portal/slate`
-// page. Rendered UNCONDITIONALLY (same lesson `CrossLinkNote` in auditPanels.tsx already
-// documents — an earlier draft only showed it once real Slate rows existed, which meant it never
-// appeared for the common "0 proposals yet" case, exactly when a confused admin most needs it;
-// found live during this task's own post-deploy verify, fixed before reporting done).
+// AA-561 1e — Nghiệp confirmed the AA-557 G.14 one-liner + column-header tooltips (below) were
+// still too technical for a non-code reader ("Kind: Segment" with no explanation). Replaced with
+// a plain-language intro block (what Slate IS, in one paragraph) + a full legend for the 4 states
+// and 2 Kind values, always visible above the table — not a hover-only tooltip, so it reads
+// without the reader needing to know to hover. Keeps the AA-557 G.14 tenant-portal pointer too.
 function SlateExplainerNote() {
   return (
-    <div style={{ fontSize: 12, color: A.muted, marginBottom: 6 }}>
-      Read-only platform-wide view of every tenant&apos;s Slate — the actual per-tenant Slate
-      tenants use to pick topics lives in their portal at Workspace → Slate (tenant-facing
-      route: <code style={{ fontFamily: mono }}>/portal/slate</code>).
-    </div>
+    <Card style={{ padding: "14px 18px", marginBottom: 14, background: A.card }}>
+      <div style={{ fontSize: 13, color: A.body, lineHeight: 1.55, marginBottom: 10 }}>
+        <strong>What is Slate?</strong> It&apos;s the list of topic ideas the pipeline has proposed
+        for a tenant to write about — each one already scored and checked against that Channel&apos;s
+        minimum bar. This page is a read-only, platform-wide view across every tenant; a tenant only
+        ever sees their own, in their portal at Workspace → Slate
+        (<code style={{ fontFamily: mono }}>/portal/slate</code>).
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 18px", fontSize: 11.5, color: A.muted }}>
+        <span><strong>proposed</strong> = the system suggested it, tenant hasn&apos;t acted yet</span>
+        <span><strong>picked</strong> = tenant chose to write it</span>
+        <span><strong>used</strong> = it actually became a written piece</span>
+        <span><strong>cut</strong> = tenant declined it</span>
+        <span style={{ borderLeft: `1px solid ${A.line}`, paddingLeft: 18 }}>
+          <strong>Kind — Segment</strong> = idea about one specific place/moment
+        </span>
+        <span><strong>Kind — Route</strong> = idea about a whole multi-day journey</span>
+      </div>
+    </Card>
   );
 }
 
@@ -1089,8 +1121,17 @@ function SlateSection({ tourId }: { tourId: string | null }) {
         { key: "tenant", label: "Tenant", render: r => r.tenant_name ?? "—",
           sortValue: r => r.tenant_name ?? "", filterValue: r => r.tenant_name ?? "" },
         { key: "score", label: "Score", render: r => r.score ?? "—", sortValue: r => r.score },
-        { key: "kind", label: "Kind", render: r => r.route_id ? "Route" : "Segment",
-          sortValue: r => r.route_id ? "Route" : "Segment", filterValue: r => r.route_id ? "Route" : "Segment" },
+        {
+          key: "kind", label: "Idea from", render: r => (
+            <span title={r.route_id
+              ? "This idea covers a whole multi-day Route (a journey), not just one place."
+              : "This idea is about one specific place/moment (a Segment)."}
+              style={{ cursor: "help" }}>
+              {r.route_id ? "Whole journey (Route)" : "One place (Segment)"}
+            </span>
+          ),
+          sortValue: r => r.route_id ? "Route" : "Segment", filterValue: r => r.route_id ? "Route" : "Segment",
+        },
         { key: "created", label: "Proposed", render: r => new Date(r.created_at).toLocaleString(),
           sortValue: r => r.created_at },
       ] as Col<SlateRow>[]} />

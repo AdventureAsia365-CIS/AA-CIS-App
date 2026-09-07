@@ -190,12 +190,35 @@ export function useTourScopedFetch<T>(endpoint: string, tourId: string | null) {
 // Sections 06-07 — Write/Gate + Review (both read admin_a4.py's content-log — 2 lenses, 1 dataset)
 // ══════════════════════════════════════════════════════════════════════════
 
+// AA-561 3a — angle_gate_option row, ALL 3 per request (not just the chosen one).
+export interface AngleOption {
+  option_id: string; idx: number; name: string; why_it_works: string; formula_fit: string;
+  best_final_style: string; recommended: boolean; chosen: boolean;
+}
+
+// AA-561 3a — where a request's content came from: a Slate Segment pick, a Slate Route pick, or
+// (kind === "direct_atom") the pre-existing atom-picker entry point that never went through
+// Slate at all (AA-449's original path — still real, not retired; ~2/12 real pieces today).
+export type ContentSource =
+  | { kind: "segment"; segment_id: string; place: string | null; action: string | null }
+  | { kind: "route"; route_id: string; hub_name: string | null; first_day: number | null; last_day: number | null }
+  | { kind: "direct_atom" };
+
 export interface ContentLogRow {
   piece_id: string; tenant_name: string | null; channel: string; status: string; held_reason: string | null;
   gate_ledger: { gate?: string; passed?: boolean; violations?: string[] }[];
   gate_pass_count: number; gate_total_count: number; repair_log: unknown[]; attempt_number: number;
-  content_preview: string; publish_status: string; created_at: string;
+  content_preview: string; publish_status: string; created_at: string; goal: string | null;
   tour: { name: string; destination: string } | null;
+  angles: AngleOption[]; source: ContentSource; is_buffer_retry: boolean; sibling_piece_count: number;
+}
+
+// AA-561 3a/3b — one line describing where a Piece's content came from, shared by the list card
+// and the Review table's Source column.
+export function sourceLabel(source: ContentSource): string {
+  if (source.kind === "segment") return `Segment — ${source.place ?? "?"}${source.action ? ` (${source.action})` : ""}`;
+  if (source.kind === "route") return `Route — ${source.hub_name ?? "?"} (Day ${source.first_day}-${source.last_day})`;
+  return "Chosen atom directly (not via Slate)";
 }
 
 export function useContentLog(tourId: string | null) {
@@ -206,8 +229,97 @@ export const STATUS_COLOR: Record<string, "green" | "amber" | "red" | "gray"> = 
   approved: "green", held: "amber", processing: "gray", failed: "red",
 };
 
+// AA-561 3b — full lineage per Piece, click-to-expand: source (Segment/Route/direct-atom) -> Goal
+// -> all 3 Angles (chosen one marked) -> retry history -> gate/error detail -> publish status.
+// Answers Nghiệp's own spec verbatim ("xuất phát từ tour/atom/segment/route-hub nào, goal gì, 3
+// angle được sinh ra là gì, angle nào được chọn, trạng thái sau đó thế nào, retry mấy lần, gate/
+// lỗi nào mắc phải nhiều nhất") from ONE already-fetched row — no second per-piece fetch.
+function PieceLineageCard({ p, expanded, onToggle }: { p: ContentLogRow; expanded: boolean; onToggle: () => void }) {
+  const failedGates = p.gate_ledger.filter(g => g.passed === false);
+  return (
+    <Card style={{ padding: "14px 18px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, marginBottom: 8, cursor: "pointer" }}
+        onClick={onToggle}>
+        <div>
+          <span style={{ fontSize: 12, fontFamily: "monospace", color: A.muted2, marginRight: 8 }}>#{p.attempt_number}</span>
+          <Badge color={STATUS_COLOR[p.status] ?? "gray"}>{p.status}</Badge>{" "}
+          <Badge color="gray">{p.channel}</Badge>{" "}
+          {p.is_buffer_retry && <Badge color="amber">retry of an earlier hold</Badge>}{" "}
+          <span style={{ fontSize: 12, color: A.muted }}>{p.tenant_name}</span>
+        </div>
+        <span style={{ fontSize: 11.5, fontFamily: "monospace", color: A.muted2 }}>{p.gate_pass_count}/{p.gate_total_count} gates</span>
+      </div>
+      {/* Source lineage — always visible, one line, never blank. */}
+      <div style={{ fontSize: 12, color: A.muted, marginBottom: 4 }}>
+        <strong style={{ color: A.body }}>From:</strong> {p.tour?.name ?? "—"} → {sourceLabel(p.source)}
+        {p.goal && <> → Goal: <strong style={{ color: A.body }}>{p.goal}</strong></>}
+      </div>
+      <div style={{ fontSize: 13, color: A.body, marginBottom: 8 }}>{p.content_preview}…</div>
+      {p.held_reason && <div style={{ fontSize: 12, color: A.red, marginBottom: 6 }}>Held: {p.held_reason}</div>}
+      {failedGates.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+          {failedGates.map((g, i) => <Badge key={i} color="red">{g.gate ?? "gate"}</Badge>)}
+        </div>
+      )}
+      <button onClick={onToggle} style={{
+        background: "none", border: "none", padding: 0, cursor: "pointer", color: A.gold,
+        fontSize: 11.5, fontFamily: sans,
+      }}>
+        {expanded ? "▲ Hide angles/detail" : `▼ Show ${p.angles.length} angle${p.angles.length !== 1 ? "s" : ""} + full detail`}
+      </button>
+      {expanded && (
+        <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${A.line}`, display: "flex", flexDirection: "column", gap: 10 }}>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: A.ink3, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 6 }}>
+              Angles generated ({p.angles.length}) — the one used is marked
+            </div>
+            {p.angles.length === 0 ? (
+              <div style={{ fontSize: 12, color: A.muted2 }}>No angle options on record for this request.</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {p.angles.map(a => (
+                  <div key={a.option_id} style={{
+                    border: `1px solid ${a.chosen ? A.gold : A.line}`, borderRadius: 8, padding: "8px 10px",
+                    background: a.chosen ? A.goldTint : "transparent",
+                  }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 600, color: A.body, marginBottom: 2 }}>
+                      {a.name}{a.chosen && <Badge color="gold">chosen</Badge>}{a.recommended && !a.chosen && <Badge color="gray">recommended</Badge>}
+                    </div>
+                    <div style={{ fontSize: 11.5, color: A.muted }}>{a.why_it_works}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          {p.sibling_piece_count > 1 && (
+            <div style={{ fontSize: 12, color: A.muted }}>
+              This request has {p.sibling_piece_count} write attempts total (buffer-retry included).
+            </div>
+          )}
+          {p.gate_ledger.length > 0 && (
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 600, color: A.ink3, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 6 }}>
+                Full gate ledger ({p.gate_pass_count}/{p.gate_total_count} passed)
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {p.gate_ledger.map((g, i) => (
+                  <Badge key={i} color={g.passed ? "green" : "red"}>{g.gate ?? "gate"}</Badge>
+                ))}
+              </div>
+            </div>
+          )}
+          <div style={{ fontSize: 12, color: A.muted }}>
+            Publish: <Badge color={p.publish_status === "published" ? "green" : p.publish_status === "pending_publish" ? "amber" : "gray"}>{p.publish_status}</Badge>
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 export function WriteGateSection({ tourId }: { tourId: string | null }) {
   const { data, loading, error, reload } = useContentLog(tourId);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   if (!tourId) return <PickTourPrompt sectionLabel="Write/Gate" />;
   if (error) return <ErrorState message={error} onRetry={reload} />;
   if (loading) return <LoadingScreen msg="Loading Write/Gate…" />;
@@ -215,26 +327,8 @@ export function WriteGateSection({ tourId }: { tourId: string | null }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       {data.data.map(p => (
-        <Card key={p.piece_id} style={{ padding: "14px 18px" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, marginBottom: 8 }}>
-            <div>
-              <span style={{ fontSize: 12, fontFamily: "monospace", color: A.muted2, marginRight: 8 }}>#{p.attempt_number}</span>
-              <Badge color={STATUS_COLOR[p.status] ?? "gray"}>{p.status}</Badge>{" "}
-              <Badge color="gray">{p.channel}</Badge>{" "}
-              <span style={{ fontSize: 12, color: A.muted }}>{p.tenant_name}</span>
-            </div>
-            <span style={{ fontSize: 11.5, fontFamily: "monospace", color: A.muted2 }}>{p.gate_pass_count}/{p.gate_total_count} gates</span>
-          </div>
-          <div style={{ fontSize: 13, color: A.body, marginBottom: 8 }}>{p.content_preview}…</div>
-          {p.held_reason && <div style={{ fontSize: 12, color: A.red, marginBottom: 6 }}>Held: {p.held_reason}</div>}
-          {p.gate_ledger.filter(g => g.passed === false).length > 0 && (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-              {p.gate_ledger.filter(g => g.passed === false).map((g, i) => (
-                <Badge key={i} color="red">{g.gate ?? "gate"}</Badge>
-              ))}
-            </div>
-          )}
-        </Card>
+        <PieceLineageCard key={p.piece_id} p={p} expanded={expandedId === p.piece_id}
+          onToggle={() => setExpandedId(prev => prev === p.piece_id ? null : p.piece_id)} />
       ))}
     </div>
   );
@@ -273,7 +367,12 @@ export function ReviewSection({ tourId }: { tourId: string | null }) {
       { key: "tour", label: "Tour", render: r => r.tour?.name ?? "—" },
       { key: "tenant", label: "Tenant", render: r => r.tenant_name ?? "—" },
       { key: "channel", label: "Channel", render: r => r.channel },
+      // AA-561 3b — same lineage the Write/Gate tab's expanded card shows, one line here so
+      // Review doesn't require flipping tabs just to see where a Piece came from.
+      { key: "source", label: "Source", render: r => <span style={{ fontSize: 12 }}>{sourceLabel(r.source)}</span> },
+      { key: "goal", label: "Goal", render: r => r.goal ?? "—" },
       { key: "status", label: "Gate status", render: r => <Badge color={STATUS_COLOR[r.status] ?? "gray"}>{r.status}</Badge> },
+      { key: "retry", label: "Retry", render: r => r.is_buffer_retry ? <Badge color="amber">retry</Badge> : "—" },
       { key: "publish", label: "Publish status", render: r => <Badge color={r.publish_status === "published" ? "green" : r.publish_status === "pending_publish" ? "amber" : "gray"}>{r.publish_status}</Badge> },
       { key: "created", label: "Written", render: r => new Date(r.created_at).toLocaleString() },
       ]} />
