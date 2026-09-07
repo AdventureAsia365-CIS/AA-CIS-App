@@ -7,24 +7,30 @@ this exact boundary from having no single written glossary. Other subsystems (Ex
 LLM/model routing, marketplace/billing, legacy N0-N8) are out of scope for this file — split into
 their own `CONTEXT.md` under a `CONTEXT-MAP.md` if/when they need one.
 
-## ⚠️ Known tech debt — read before building anything Segment/Score/Route/Hub-related
+## ✅ Segment/Score/Route/Hub are now platform-wide (AA-545, shipped 06/09/2026)
 
-Segment, Score (Atom Ranking), Route, and Hub are implemented **per-tenant** in code and schema
-today (see their definitions below and the ownership table). **This is tech debt that needs
-fixing — it is NOT a deliberate, re-validated design decision that should stay as-is** (corrected
-AA-542, 06/09/2026; full history in `docs/adr/0001-*.md`, the fix decision in
-`docs/adr/0003-*.md`).
+**Update (AA-551, 07/09/2026): this used to be an open tech-debt warning here — it is DONE, not
+pending.** AA-542 (same day, commit `43c18c0`) flagged Segment/Score/Route/Hub's then-per-tenant
+schema as tech debt requiring a redesign; AA-545 (commit `15743a9`, merged later THE SAME DAY)
+shipped that redesign — migration `146_segment_score_route_hub_platform_wide.sql` drops
+`tenant_id` from `acp_contract.atom_segment`/`atom_ranking`/`route`/`hub` outright. A reader
+landing on the older wording (still present verbatim in this file's git history, and in the
+Ownership table row text further down) would wrongly re-block new work behind a freeze that no
+longer applies — confirmed directly from `api/routers/admin_dashboard.py`'s own already-updated
+SQL/docstrings (no `tenant_id` anywhere in any of the 4 queries) while building AA-551's
+platform-wide `/admin/atom-curation` page against this exact data.
 
-The layering principle that actually governs this, decided by Nghiệp: **any step that does NOT
-read a tenant's own brand voice or a tenant-specific DFS/keyword signal should NOT be per-tenant,
-regardless of what the current code does.** Segment/Score/Route/Hub read neither — they operate
-purely on Atom (platform-wide, A3) and Search Demand (platform-wide cache) inputs — so per-tenant
-here fails that principle. They should be platform-wide, computed once for the whole Master
-Content pool, the same model Atom and Search Demand already use.
+The layering principle that motivated the fix, decided by Nghiệp: **any step that does NOT read a
+tenant's own brand voice or a tenant-specific DFS/keyword signal should NOT be per-tenant.**
+Segment/Score/Route/Hub read neither — they operate purely on Atom (platform-wide, A3) and Search
+Demand (platform-wide cache) inputs. They are now computed once for the whole Master Content pool,
+still scoped by `tour_id` (a Route is inherently a day-span within ONE tour's itinerary — dropping
+`tenant_id` did not make these tour-agnostic, just tenant-agnostic) — see the Ownership table
+further down, which still needs a follow-up correction pass of its own (out of AA-551's scope;
+flagged, not fixed here).
 
-**Do not build any new Admin or Tenant UI/feature that assumes Segment/Score/Route/Hub is
-per-tenant** until a separate design/build issue redesigns them platform-wide. If you are about
-to touch T7/Planning, Slate, Route, or Hub work, re-read this warning first.
+**Still true and unchanged by AA-545**: Slate (`acp_shared.subject`) is a genuine, deliberate
+per-tenant exception — a Subject is one specific tenant's proposal, never shared.
 
 ## Language
 

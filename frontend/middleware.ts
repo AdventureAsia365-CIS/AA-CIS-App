@@ -71,6 +71,10 @@ const PROTECTED_ROUTES: { prefix: string; roles: string[] }[] = [
   // atoms are good to use, same admin-only tier as a4-oversight/llm-usage above (Nghiệp's
   // explicit choice among 2 options presented, 05/09/2026), not the broader content-team tier.
   { prefix: "/admin/atom-curation", roles: ["admin"] },
+  // AA-551 — split out of Atom Curation (06-08, per-Tour tenant activity, moved to its own page/
+  // URL so the Admin/Tenant boundary AA-550 flagged is visible in the nav, not just a comment).
+  // Same admin-only tier.
+  { prefix: "/admin/tenant-activity", roles: ["admin"] },
   // Internal staff pages (was INTERNAL_PATHS) — admin/reviewer get real JWT
   // verification; content is the known-limitation carve-out described above.
   { prefix: "/admin/dashboard", roles: ["admin", "reviewer", "content"] },

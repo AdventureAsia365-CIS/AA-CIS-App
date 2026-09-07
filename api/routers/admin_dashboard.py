@@ -1,23 +1,38 @@
 """
-api/routers/admin_dashboard.py — AA-527 (bổ sung, 05/09/2026) — the 4 audit-view panels of the
-T5-T11 dashboard (Phương án C) that had no admin read-path at all before this: Segment, Score,
-Route/Hub, Slate. The other 3 non-Atomize panels (Write-Gate, Review, Publish) reuse the
-EXISTING `admin_a4.py` `content-log`/`publish-log` endpoints (extended with an optional
-`tour_id` filter, same PR) rather than duplicating a query here — see that file's own docstrings.
+api/routers/admin_dashboard.py — AA-527 (bổ sung, 05/09/2026), reworked AA-551 (07/09/2026).
 
-All 4 endpoints below are read-only, x-admin-secret only (same `verify_admin_secret` convention
-as `admin_atoms.py`/`admin_a4.py` — this dashboard is admin-only, per Nghiệp's explicit choice
-already recorded on the Atomize section, AA-527's first build), and REQUIRE `tour_id` — the
-dashboard's header anchor. There is deliberately no "all tours" mode for these 4: Segment/Score
-are Tour-scoped by schema already (acp_contract.atom_ranking.tour_id), and Route/Slate are cheap
-to scope down to one tour but expensive/meaningless to page across every tenant's every tour at
-once for a first cut (no existing precedent list-endpoint to mirror, unlike content-log/
-publish-log which already supported an optional cross-tenant listing before this task).
+AA-551 STEP0 finding (docs/investigation/AA-550-admin-ui-real-audit.md): `tour_id` was hard-
+required (`Query(...)`) on all 4 endpoints below, which meant Segment/Score/Route could never
+show anything in "All tours" mode — directly contradicting AA-545's own platform-wide redesign
+(these 3 tables dropped `tenant_id` entirely that same day, but stayed hard-scoped to one Tour at
+the API layer regardless). `tour_id` is now OPTIONAL on `segments`/`score`/`routes` — omitting it
+returns every tour's matching rows (each tagged with its own `tour_id`/`tour_name`, paginated),
+which is what `/admin/atom-curation`'s rebuilt 01-05 platform-wide page actually calls when no
+Tour is picked. `slate` keeps `tour_id` required, unchanged — acp_shared.subject is genuinely
+per-tenant (AA-550 A.3), not part of this platform-wide fix.
 
-Cross-tenant by design (same stance as admin_a4.py, STEP0/AA-437): a Tour's Segment/Score/Route/
-Slate data can in principle exist under more than one tenant (multiple tenants can each run T7
-over the same platform-shared atoms for the same tour) — every endpoint here returns EVERY
-tenant's rows for the given tour_id, with tenant_name attached, not scoped to one tenant.
+New optional filters, shared by `segments`/`score`/`routes`: `market` (one of the 6 real markets;
+Score/Route rows all carry a `market` column post-AA-545, Segment's join to `atom_ranking` does
+too). Section-specific filters: `place_search` (Segment — ILIKE canonical_place OR
+canonical_action), `min_recurrence` (Segment), `min_total_rank`/`max_total_rank` (Score),
+`min_days`/`max_days`/`hub_name_search` (Route). `limit`/`offset` pagination added to all 3 (same
+50-row-page convention `admin_atoms.py`'s `GET /atoms` already uses) — a platform-wide, unfiltered
+query can return far more rows than any single tour ever could.
+
+New `GET /admin/dashboard/summary` — the header stat bar's single data source (Tour/Atom/Segment/
+Score row/Route/Hub counts, all re-filtered by the same `tour_id`/`market` the page's common
+filter currently has selected). See its own docstring for why "Hub" is a derived count, not a
+real `acp_contract.hub` row count.
+
+All endpoints below are read-only, x-admin-secret only (same `verify_admin_secret` convention as
+`admin_atoms.py`/`admin_a4.py`). The other 3 non-Atomize panels (Write-Gate, Review, Publish) live
+on the separate `/admin/tenant-activity` page now (AA-551) but are still served by the EXISTING
+`admin_a4.py` `content-log`/`publish-log` endpoints, untouched by this file.
+
+Cross-tenant by design (same stance as admin_a4.py, STEP0/AA-437): Route/Slate can in principle
+touch more than one tenant's own T7 run over the same platform-shared atoms — `slate` still
+returns every tenant's rows with `tenant_name` attached; Segment/Score/Route carry no tenant
+dimension at all post-AA-545, so this doesn't apply to them anymore.
 """
 from __future__ import annotations
 
@@ -29,19 +44,29 @@ from api.routers.admin import verify_admin_secret
 
 router = APIRouter(prefix="/admin/dashboard", tags=["admin-dashboard"])
 
+# AA-551 — the 6 real markets DataForSEO/Search Demand cover today (Score/Route panels already
+# rendered these as free text; kept as a plain list, not a DB enum, so a new market doesn't need a
+# migration to become filterable here — same "no server-side enum" choice AA-527's own Atomize
+# filters made for owner_scope/lifecycle_stage).
+MARKETS = ["US", "UK", "AU", "DE", "FR", "NL"]
 
-def _safe(row) -> dict:
+
+def _safe(row, exclude: tuple = ()) -> dict:
     """Same local-safe()-per-router convention as admin_atoms.py/v1_tours.py (no shared
     api/utils.safe() exists in this repo) — UUID/Decimal/datetime -> JSON-safe, plus JSONB
     columns that come back as a raw string (no jsonb codec registered on this app's asyncpg
-    connections, same gap AA-314/admin_atoms.py already found for `media`)."""
+    connections, same gap AA-314/admin_atoms.py already found for `media`).
+
+    AA-551 — `exclude` drops window-function bookkeeping columns (e.g. `full_count`, used to get
+    a total alongside a paginated page in one query) that were only ever meant for this function's
+    own callers, never the JSON response itself."""
     import json
     from decimal import Decimal
     from uuid import UUID
 
     if not row:
         return {}
-    d = dict(row)
+    d = {k: v for k, v in dict(row).items() if k not in exclude}
     for k, v in d.items():
         if isinstance(v, UUID):
             d[k] = str(v)
@@ -62,33 +87,71 @@ def _safe(row) -> dict:
 @router.get("/segments")
 async def list_segments(
     request: Request,
-    tour_id: str = Query(...),
+    tour_id: Optional[str] = Query(None),
+    market: Optional[str] = Query(None),
+    place_search: Optional[str] = Query(None),
+    min_recurrence: Optional[int] = Query(None, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     x_admin_secret: str = Header(None),
 ):
-    """acp_contract.atom_segment for this tour — a Segment has no tour_id column of its own
-    (it's grouped by place/action across the WHOLE platform atom pool, AA-509/AA-545), so this
-    reaches it through atom_segment_member -> tour_atoms.tour_id, one row per (Segment, market)
-    that has >=1 member atom on this tour. total_rank/recurrence/route linkage joined in (same
-    LATERAL Route lookup admin_atoms.py's GET /atoms already uses) so this one panel shows
-    Segment + its Score + its Route membership together, rather than 3 separate near-empty
-    tables.
+    """acp_contract.atom_segment — a Segment has no tour_id column of its own (it's grouped by
+    place/action across the WHOLE platform atom pool, AA-509/AA-545), so this reaches it through
+    atom_segment_member -> tour_atoms.tour_id, one row per (Segment, Tour, market) that has >=1
+    member atom on that tour. total_rank/recurrence/route linkage joined in (same LATERAL Route
+    lookup admin_atoms.py's GET /atoms already uses) so this one panel shows Segment + its Score +
+    its Route membership together, rather than 3 separate near-empty tables.
 
     AA-545 — no more `tenant_id`/`tenant_name` (`atom_segment` is platform-wide now); `ar.market`
     is surfaced instead of collapsed, one row per (Segment, market) the way `atom_ranking` itself
-    is now shaped — an audit view should show the real per-market breakdown, not hide it."""
+    is now shaped — an audit view should show the real per-market breakdown, not hide it.
+
+    AA-551 — `tour_id` is now OPTIONAL (was hard-required, the exact gap AA-550 found: this made
+    "All tours" mode show nothing for Segment/Score/Route/Slate despite AA-545 having already made
+    3 of those 4 genuinely platform-wide). Omitting it returns every tour's matching rows —
+    `tour_id`/`tour_name` added to the SELECT/GROUP BY so a platform-wide row can still say which
+    tour it came from. `market`/`place_search`/`min_recurrence` are new filters; `limit`/`offset`
+    pagination (50/page, same convention as `admin_atoms.py`) since an unfiltered platform query
+    can return far more rows than any single tour ever could. `member_count` is now counted
+    per-tour (not globally per-Segment) since a Segment can span multiple tours and this is an
+    audit-per-row count, not the Segment's own cross-tour recurrence (that's `recurrence` below,
+    unchanged — `atom_ranking.recurrence` already counts distinct tours platform-wide)."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
 
+    conditions = ["NOT ta.deleted", "NOT ta.is_empty_marker"]
+    params: list = []
+    if tour_id:
+        params.append(tour_id)
+        conditions.append(f"ta.tour_id = ${len(params)}::uuid")
+    if market:
+        params.append(market)
+        conditions.append(f"ar.market = ${len(params)}")
+    if place_search:
+        params.append(f"%{place_search}%")
+        conditions.append(f"(asg.canonical_place ILIKE ${len(params)} OR asg.canonical_action ILIKE ${len(params)})")
+    if min_recurrence is not None:
+        params.append(min_recurrence)
+        conditions.append(f"ar.recurrence >= ${len(params)}")
+    where = " AND ".join(conditions)
+    params.append(limit)
+    limit_idx = len(params)
+    params.append(offset)
+    offset_idx = len(params)
+
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """
-            SELECT asg.segment_id, asg.canonical_place, asg.canonical_action,
+            f"""
+            SELECT ta.tour_id, rt.src_name AS tour_name,
+                   asg.segment_id, asg.canonical_place, asg.canonical_action,
                    count(DISTINCT asm.atom_id) AS member_count,
                    ar.market, ar.total_rank, ar.recurrence, ar.excluded_reason,
-                   rte.route_id, rte.hub_name AS route_hub_name
+                   rte.route_id, rte.hub_name AS route_hub_name,
+                   count(*) OVER() AS full_count
             FROM acp_contract.atom_segment_member asm
             JOIN acp_contract.tour_atoms ta ON ta.atom_id = asm.atom_id
             JOIN acp_contract.atom_segment asg ON asg.segment_id = asm.segment_id
+            LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = ta.tour_id
             LEFT JOIN acp_contract.atom_ranking ar
                 ON ar.segment_id = asm.segment_id AND ar.tour_id = ta.tour_id
             LEFT JOIN LATERAL (
@@ -101,16 +164,21 @@ async def list_segments(
                   AND r.ordered_segment_ids @> jsonb_build_array(asm.segment_id)
                 LIMIT 1
             ) rte ON true
-            WHERE ta.tour_id = $1::uuid AND NOT ta.deleted AND NOT ta.is_empty_marker
-            GROUP BY asg.segment_id, asg.canonical_place, asg.canonical_action,
-                     ar.market, ar.total_rank, ar.recurrence, ar.excluded_reason,
-                     rte.route_id, rte.hub_name
-            ORDER BY asg.canonical_place, ar.market, ar.total_rank ASC NULLS LAST
+            WHERE {where}
+            GROUP BY ta.tour_id, rt.src_name, asg.segment_id, asg.canonical_place,
+                     asg.canonical_action, ar.market, ar.total_rank, ar.recurrence,
+                     ar.excluded_reason, rte.route_id, rte.hub_name
+            ORDER BY rt.src_name, asg.canonical_place, ar.market, ar.total_rank ASC NULLS LAST
+            LIMIT ${limit_idx} OFFSET ${offset_idx}
             """,
-            tour_id,
+            *params,
         )
 
-    return {"data": [_safe(r) for r in rows], "total": len(rows), "tour_id": tour_id}
+    total = rows[0]["full_count"] if rows else 0
+    return {
+        "data": [_safe(r, exclude=("full_count",)) for r in rows], "total": total,
+        "tour_id": tour_id, "limit": limit, "offset": offset,
+    }
 
 
 # ── GET /admin/dashboard/score — Section 03, audit view ─────────────────────
@@ -118,42 +186,78 @@ async def list_segments(
 @router.get("/score")
 async def list_score(
     request: Request,
-    tour_id: str = Query(...),
+    tour_id: Optional[str] = Query(None),
+    market: Optional[str] = Query(None),
+    min_total_rank: Optional[int] = Query(None),
+    max_total_rank: Optional[int] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     x_admin_secret: str = Header(None),
 ):
-    """acp_contract.atom_ranking rows for this tour, in rank order (lower total_rank = better,
-    same convention Route's read-time score computation now uses, AA-545 Q3) — the ranked list
-    feeding Route detection, distinct from the Segment panel above (which shows grouping, not the
-    demand/recurrence/questions/said breakdown a rank is actually made of). A row with
-    excluded_reason set (transit/unnamed_place) is real output too (AA-515: "an exclusion is
-    arguable rather than a silent absence"), sorted after every ranked row rather than hidden.
+    """acp_contract.atom_ranking rows, in rank order (lower total_rank = better, same convention
+    Route's read-time score computation now uses, AA-545 Q3) — the ranked list feeding Route
+    detection, distinct from the Segment panel above (which shows grouping, not the demand/
+    recurrence/questions/said breakdown a rank is actually made of). A row with excluded_reason
+    set (transit/unnamed_place) is real output too (AA-515: "an exclusion is arguable rather than
+    a silent absence"), sorted after every ranked row rather than hidden.
 
     AA-545 — no more `tenant_id`/`tenant_name` (`atom_ranking` is platform-wide, PK
     `(market, tour_id, segment_id)` now); `ar.market` (the row's own PK column, which market this
     ranking pass was computed for) is shown alongside `ar.demand_market` — the two are now always
     equal (the old best-of-N-market pick this column used to record is gone, `rank_segments()` is
     called once per market), kept as a harmless redundant column rather than dropped mid-build,
-    out of this endpoint's own audit-view scope."""
+    out of this endpoint's own audit-view scope.
+
+    AA-551 — `tour_id` optional (see `list_segments` above for the full reasoning); omitting it
+    returns every tour's ranking rows with `tour_id`/`tour_name` attached. `market`/
+    `min_total_rank`/`max_total_rank` new filters, `limit`/`offset` pagination added."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
 
+    conditions = ["1 = 1"]
+    params: list = []
+    if tour_id:
+        params.append(tour_id)
+        conditions.append(f"ar.tour_id = ${len(params)}::uuid")
+    if market:
+        params.append(market)
+        conditions.append(f"ar.market = ${len(params)}")
+    if min_total_rank is not None:
+        params.append(min_total_rank)
+        conditions.append(f"ar.total_rank >= ${len(params)}")
+    if max_total_rank is not None:
+        params.append(max_total_rank)
+        conditions.append(f"ar.total_rank <= ${len(params)}")
+    where = " AND ".join(conditions)
+    params.append(limit)
+    limit_idx = len(params)
+    params.append(offset)
+    offset_idx = len(params)
+
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """
-            SELECT ar.market, ar.segment_id,
+            f"""
+            SELECT ar.tour_id, rt.src_name AS tour_name, ar.market, ar.segment_id,
                    asg.canonical_place, asg.canonical_action,
                    ar.demand_rank, ar.recurrence_rank, ar.questions_rank, ar.said_rank,
                    ar.total_rank, ar.demand_market, ar.demand_volume,
-                   ar.recurrence, ar.questions, ar.said, ar.excluded_reason, ar.computed_at
+                   ar.recurrence, ar.questions, ar.said, ar.excluded_reason, ar.computed_at,
+                   count(*) OVER() AS full_count
             FROM acp_contract.atom_ranking ar
             LEFT JOIN acp_contract.atom_segment asg ON asg.segment_id = ar.segment_id
-            WHERE ar.tour_id = $1::uuid
-            ORDER BY ar.market, (ar.excluded_reason IS NOT NULL), ar.total_rank ASC NULLS LAST
+            LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = ar.tour_id
+            WHERE {where}
+            ORDER BY rt.src_name, ar.market, (ar.excluded_reason IS NOT NULL), ar.total_rank ASC NULLS LAST
+            LIMIT ${limit_idx} OFFSET ${offset_idx}
             """,
-            tour_id,
+            *params,
         )
 
-    return {"data": [_safe(r) for r in rows], "total": len(rows), "tour_id": tour_id}
+    total = rows[0]["full_count"] if rows else 0
+    return {
+        "data": [_safe(r, exclude=("full_count",)) for r in rows], "total": total,
+        "tour_id": tour_id, "limit": limit, "offset": offset,
+    }
 
 
 # ── GET /admin/dashboard/routes — Section 04, audit view ────────────────────
@@ -161,53 +265,99 @@ async def list_score(
 @router.get("/routes")
 async def list_routes(
     request: Request,
-    tour_id: str = Query(...),
+    tour_id: Optional[str] = Query(None),
+    market: Optional[str] = Query(None),
+    min_days: Optional[int] = Query(None, ge=1),
+    max_days: Optional[int] = Query(None, ge=1),
+    hub_name_search: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     x_admin_secret: str = Header(None),
 ):
-    """acp_contract.route rows for this tour (has its own tour_id column directly, migration
-    131 — no join-through needed, unlike Segment above). `hub_grouping_backlog` is always true
-    here — AA-525 Phần 12 mục 8 confirmed there is no admin view yet of "which Routes got grouped
-    into the same Hub and why" (acp_contract.hub itself has 0 rows in current live data — Route
+    """acp_contract.route rows (has its own tour_id column directly, migration 131 — no
+    join-through needed, unlike Segment above). `hub_grouping_backlog` is always true here —
+    AA-525 Phần 12 mục 8 confirmed there is no admin view yet of "which Routes got grouped into
+    the same Hub and why" (acp_contract.hub itself has 0 rows in current live data — Route
     detection isn't wiring hub_id yet); flagged explicitly rather than silently showing an
     always-empty Hub column.
 
-    AA-532: deliberately does NOT filter `superseded_at IS NULL` the way every other reader of
-    this table now does (v1_route_hub.py, slate.py, admin_atoms.py) — this IS the audit view, the
-    one place seeing a Route's version history (current AND superseded) is the actual point, not
-    a bug. `version`/`superseded_at` are exposed so the panel can show that history rather than
-    just the current snapshot; current rows sort first (`superseded_at IS NULL` ordered before
-    any timestamp), then best score.
+    AA-532: when scoped to ONE Tour, deliberately does NOT filter `superseded_at IS NULL` the way
+    every other reader of this table now does (v1_route_hub.py, slate.py, admin_atoms.py) — this
+    IS the audit view, the one place seeing a Route's version history (current AND superseded) is
+    the actual point, not a bug. AA-551: in "All tours" mode (no `tour_id`), DOES filter to
+    current-only — a platform-wide table listing every historical version of every tour's routes
+    at once would be noisy with no UI ask for it; the per-tour full-history view is unchanged.
+    `version`/`superseded_at` are still exposed either way so a single-tour view can show history;
+    current rows sort first, then best score.
 
     AA-545 — no more `tenant_id`/`tenant_name`/stored `score` (`route` is platform-wide,
     composition-only now). `score` here is computed per market (`AVG(total_rank)` over the
     Route's member Segments, same formula `services/acp_shared/slate.py::
     _fetch_route_candidates()` uses at read time for a real tenant) — one row per (Route version,
-    market), same per-market-breakdown treatment the Segment/Score panels above already apply."""
+    market), same per-market-breakdown treatment the Segment/Score panels above already apply.
+
+    AA-551 — `tour_id` optional, `market`/`min_days`/`max_days`/`hub_name_search` new filters,
+    `limit`/`offset` pagination, `tour_id`/`tour_name` added to output for the platform-wide
+    view."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
 
+    conditions = []
+    params: list = []
+    if tour_id:
+        params.append(tour_id)
+        conditions.append(f"r.tour_id = ${len(params)}::uuid")
+    else:
+        conditions.append("r.superseded_at IS NULL")  # AA-551 — platform view: current only
+    if min_days is not None:
+        params.append(min_days)
+        conditions.append(f"(r.last_day - r.first_day + 1) >= ${len(params)}")
+    if max_days is not None:
+        params.append(max_days)
+        conditions.append(f"(r.last_day - r.first_day + 1) <= ${len(params)}")
+    if hub_name_search:
+        params.append(f"%{hub_name_search}%")
+        conditions.append(f"r.hub_name ILIKE ${len(params)}")
+    where = " AND ".join(conditions) if conditions else "1 = 1"
+    # market filters the joined atom_ranking, applied after GROUP BY (it's not a route column) —
+    # HAVING, not WHERE.
+    having = ""
+    if market:
+        params.append(market)
+        having = f"HAVING bool_or(ar.market = ${len(params)}) "
+    params.append(limit)
+    limit_idx = len(params)
+    params.append(offset)
+    offset_idx = len(params)
+
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """
-            SELECT r.route_id, r.hub_id, r.hub_name,
+            f"""
+            SELECT r.route_id, r.tour_id, rt.src_name AS tour_name, r.hub_id, r.hub_name,
                    r.ordered_segment_ids, r.first_day, r.last_day, r.created_at,
-                   r.version, r.superseded_at, ar.market, AVG(ar.total_rank) AS score
+                   r.version, r.superseded_at, ar.market, AVG(ar.total_rank) AS score,
+                   count(*) OVER() AS full_count
             FROM acp_contract.route r
+            LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = r.tour_id
             LEFT JOIN acp_contract.atom_ranking ar
                 ON ar.tour_id = r.tour_id
                AND ar.segment_id = ANY (SELECT jsonb_array_elements_text(r.ordered_segment_ids))
                AND ar.excluded_reason IS NULL
-            WHERE r.tour_id = $1::uuid
-            GROUP BY r.route_id, r.hub_id, r.hub_name, r.ordered_segment_ids,
-                     r.first_day, r.last_day, r.created_at, r.version, r.superseded_at, ar.market
-            ORDER BY (r.superseded_at IS NOT NULL), ar.market, score ASC NULLS LAST
+            WHERE {where}
+            GROUP BY r.route_id, r.tour_id, rt.src_name, r.hub_id, r.hub_name,
+                     r.ordered_segment_ids, r.first_day, r.last_day, r.created_at, r.version,
+                     r.superseded_at, ar.market
+            {having}
+            ORDER BY rt.src_name, (r.superseded_at IS NOT NULL), ar.market, score ASC NULLS LAST
+            LIMIT ${limit_idx} OFFSET ${offset_idx}
             """,
-            tour_id,
+            *params,
         )
 
+    total = rows[0]["full_count"] if rows else 0
     return {
-        "data": [_safe(r) for r in rows], "total": len(rows), "tour_id": tour_id,
-        "hub_grouping_backlog": True,
+        "data": [_safe(r, exclude=("full_count",)) for r in rows], "total": total,
+        "tour_id": tour_id, "limit": limit, "offset": offset, "hub_grouping_backlog": True,
     }
 
 
@@ -257,4 +407,101 @@ async def list_slate(
     return {
         "data": [_safe(r) for r in rows], "total": len(rows), "tour_id": tour_id,
         "by_state": by_state,
+    }
+
+
+# ── GET /admin/dashboard/summary — AA-551, header stat bar for the platform-wide page ───────
+
+@router.get("/summary")
+async def dashboard_summary(
+    request: Request,
+    tour_id: Optional[str] = Query(None),
+    market: Optional[str] = Query(None),
+    x_admin_secret: str = Header(None),
+):
+    """AA-551 — the rebuilt platform-wide page's header stat bar: Tour/Atom/Segment/Score-row/
+    Route/Hub counts, each re-filtered by the same `tour_id`/`market` the page's common filter
+    currently has selected (AA-550 mục F point 4 — "tự cập nhật theo bộ lọc", not a fixed
+    platform-wide total).
+
+    `atom_count` only ever responds to `tour_id` — atoms have no `market` column at all (market is
+    a property of `atom_ranking`, computed downstream of Atom), so a market filter can't narrow it
+    further; this is a real property of the data, not an oversight.
+
+    `hub_count` is `COUNT(DISTINCT route.hub_name)`, NOT a row count of `acp_contract.hub` — that
+    table has 0 rows in production (same gap `list_routes` above already flags via
+    `hub_grouping_backlog`); counting the real table would always show 0 regardless of filter,
+    which is actively misleading rather than merely incomplete. `hub_name` is the same text field
+    section 04's own table already renders, so this count stays consistent with what an admin can
+    actually see there.
+
+    `route_count`/`hub_count` use CURRENT routes only (`superseded_at IS NULL`) — matches the
+    default `list_routes` above uses in "All tours" mode (no historical-version noise in a
+    platform-wide total)."""
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                (SELECT count(DISTINCT ta.tour_id)
+                 FROM acp_contract.tour_atoms ta
+                 WHERE NOT ta.deleted AND NOT ta.is_empty_marker
+                   AND ($1::uuid IS NULL OR ta.tour_id = $1::uuid)
+                   AND ($2::text IS NULL OR EXISTS (
+                       SELECT 1 FROM acp_contract.atom_ranking ar
+                       WHERE ar.tour_id = ta.tour_id AND ar.market = $2::text
+                   ))
+                ) AS tour_count,
+                (SELECT count(*)
+                 FROM acp_contract.tour_atoms ta
+                 WHERE NOT ta.deleted AND NOT ta.is_empty_marker
+                   AND ($1::uuid IS NULL OR ta.tour_id = $1::uuid)
+                ) AS atom_count,
+                (SELECT count(DISTINCT asm.segment_id)
+                 FROM acp_contract.atom_segment_member asm
+                 JOIN acp_contract.tour_atoms ta ON ta.atom_id = asm.atom_id
+                 WHERE NOT ta.deleted AND NOT ta.is_empty_marker
+                   AND ($1::uuid IS NULL OR ta.tour_id = $1::uuid)
+                   AND ($2::text IS NULL OR EXISTS (
+                       SELECT 1 FROM acp_contract.atom_ranking ar
+                       WHERE ar.segment_id = asm.segment_id AND ar.tour_id = ta.tour_id
+                         AND ar.market = $2::text
+                   ))
+                ) AS segment_count,
+                (SELECT count(*)
+                 FROM acp_contract.atom_ranking ar
+                 WHERE ($1::uuid IS NULL OR ar.tour_id = $1::uuid)
+                   AND ($2::text IS NULL OR ar.market = $2::text)
+                ) AS score_count,
+                (SELECT count(*)
+                 FROM acp_contract.route r
+                 WHERE r.superseded_at IS NULL
+                   AND ($1::uuid IS NULL OR r.tour_id = $1::uuid)
+                   AND ($2::text IS NULL OR EXISTS (
+                       SELECT 1 FROM acp_contract.atom_ranking ar
+                       WHERE ar.segment_id = ANY (SELECT jsonb_array_elements_text(r.ordered_segment_ids))
+                         AND ar.tour_id = r.tour_id AND ar.market = $2::text
+                   ))
+                ) AS route_count,
+                (SELECT count(DISTINCT r.hub_name)
+                 FROM acp_contract.route r
+                 WHERE r.superseded_at IS NULL
+                   AND ($1::uuid IS NULL OR r.tour_id = $1::uuid)
+                   AND ($2::text IS NULL OR EXISTS (
+                       SELECT 1 FROM acp_contract.atom_ranking ar
+                       WHERE ar.segment_id = ANY (SELECT jsonb_array_elements_text(r.ordered_segment_ids))
+                         AND ar.tour_id = r.tour_id AND ar.market = $2::text
+                   ))
+                ) AS hub_count
+            """,
+            tour_id, market,
+        )
+
+    return {
+        "tour_count": row["tour_count"], "atom_count": row["atom_count"],
+        "segment_count": row["segment_count"], "score_count": row["score_count"],
+        "route_count": row["route_count"], "hub_count": row["hub_count"],
+        "tour_id": tour_id, "market": market,
     }

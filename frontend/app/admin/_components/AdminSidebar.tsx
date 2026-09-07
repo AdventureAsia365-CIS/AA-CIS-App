@@ -3,7 +3,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Eye, Gauge, Puzzle } from "lucide-react";
+import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Eye, Gauge, Puzzle, Radio } from "lucide-react";
 import { A, serif, sans, SIDEBAR_WIDTH } from "./adminUi";
 
 interface Notif {
@@ -224,10 +224,18 @@ export default function AdminSidebar() {
               icon={<Gauge size={15} />} label="LLM Usage"
               onClick={() => router.push("/admin/llm-usage")} />
             {/* AA-527 — replaces the removed tenant-facing T6 (AA-526): AA now decides which
-                atoms are good to use, admin-only same tier as the 3 items above. */}
+                atoms are good to use, admin-only same tier as the 3 items above. AA-551: this
+                page now covers 01-05 ONLY (platform-wide Master Content monitoring) — 06-08
+                moved to "Tenant Activity" below. */}
             <NavItem active={active("/admin/atom-curation")} accent={A.red}
               icon={<Puzzle size={15} />} label="Atom Curation"
               onClick={() => router.push("/admin/atom-curation")} />
+            {/* AA-551 — split out of Atom Curation (AA-550's audit found the original single page
+                mixed platform-wide Master Content data with per-Tour, per-tenant activity data;
+                Nghiệp's decision was 2 separate pages, "Phương án B"). Same admin-only tier. */}
+            <NavItem active={active("/admin/tenant-activity")} accent={A.red}
+              icon={<Radio size={15} />} label="Tenant Activity"
+              onClick={() => router.push("/admin/tenant-activity")} />
           </NavGroup>
         )}
 
