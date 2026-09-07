@@ -7,13 +7,16 @@ import os
 import secrets
 from datetime import datetime, timezone
 from uuid import UUID
-from typing import Optional
+from typing import List, Optional
 import asyncpg
 import boto3
 from fastapi import APIRouter, File, Header, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from services.notifications import NotificationService, EventType
+from shared.validators.prompt_sanitize import (
+    sanitize_text, sanitize_list, MAX_LONG_FIELD_LEN, MAX_SHORT_FIELD_LEN, MAX_SYSTEM_PROMPT_LEN,
+)
 from services.acp_planning.tenant_config import (
     TenantNotFoundError,
     fetch_tenant_planning_config,
@@ -496,11 +499,13 @@ async def get_tenant_details(
         brand_rows = await conn.fetch("""
             SELECT
                 system_prompt, style_guide, forbidden_words, version, updated_at,
+                COALESCE(brand_name, '')         AS brand_name,
                 COALESCE(brand_type, '')         AS brand_type,
                 COALESCE(core_idea, '')          AS core_idea,
                 COALESCE(customer_segment, '')   AS customer_segment,
                 COALESCE(customer_mindset, '')   AS customer_mindset,
-                COALESCE(voice_examples, '{}'::jsonb) AS voice_examples,
+                COALESCE(voice_examples, '[]'::jsonb) AS voice_examples,
+                COALESCE(good_examples, '')      AS good_examples,
                 COALESCE(rewrite_language, 'en') AS rewrite_language,
                 COALESCE(target_markets, ARRAY[]::text[]) AS target_markets
             FROM shared.tenant_brand_rules
@@ -517,20 +522,24 @@ async def get_tenant_details(
     if brand and brand["updated_at"]:
         last_updated = brand["updated_at"].isoformat()
 
-    def _parse_jsonb(value) -> dict:
-        """Parse JSONB field — asyncpg may return dict or JSON string."""
+    def _parse_jsonb_list(value) -> list:
+        """Parse a JSONB LIST field (asyncpg may return list or JSON string, no jsonb codec
+        registered on this connection). `voice_examples` stores `tone_of_voice` as a JSON array
+        (admin_pipeline.py's BrandCreateRequest/update_brand_identity, both `json.dumps(list)`) —
+        AA-557 J.24 fix: this helper used to parse-as-dict and silently return `{}` for that real
+        list value, so "Tone of Voice" always rendered empty here even with real saved data."""
         if not value:
-            return {}
-        if isinstance(value, dict):
+            return []
+        if isinstance(value, list):
             return value
         if isinstance(value, str):
             import json as _j
             try:
                 parsed = _j.loads(value)
-                return parsed if isinstance(parsed, dict) else {}
+                return parsed if isinstance(parsed, list) else []
             except Exception:
-                return {}
-        return {}
+                return []
+        return []
 
     return {
         "summary": {
@@ -581,15 +590,94 @@ async def get_tenant_details(
             "forbidden_words":  _parse_fw(brand["forbidden_words"]) if brand else [],
             "version_count":    len(brand_rows),
             "last_updated":     last_updated,
+            "brand_name":       brand["brand_name"]       if brand else "",
             "brand_type":       brand["brand_type"]       if brand else "",
             "core_idea":        brand["core_idea"]        if brand else "",
             "customer_segment": brand["customer_segment"] if brand else "",
             "customer_mindset": brand["customer_mindset"] if brand else "",
-            "voice_examples":   _parse_jsonb(brand["voice_examples"]) if brand else {},
+            "voice_examples":   _parse_jsonb_list(brand["voice_examples"]) if brand else [],
+            "good_examples":    brand["good_examples"]    if brand else "",
             "rewrite_language": brand["rewrite_language"] if brand else "en",
             "target_markets":   list(brand["target_markets"]) if brand else [],
         },
     }
+
+
+class TenantBrandIdentityUpdate(BaseModel):
+    """AA-557 J.24 — same field set as the tenant-facing `POST /admin/brand-identity`
+    (admin_pipeline.py's `BrandIdentityUpdate`), duplicated here rather than imported: that
+    endpoint resolves its own tenant_id from a tenant JWT-or-AA-internal-fallback
+    (`_resolve_brand_tenant_id`) with no path for "admin editing an EXPLICIT other tenant's
+    brand" — this endpoint exists specifically to give Admin's Tenant→Brand tab that write path
+    onto the exact same `shared.tenant_brand_rules` row (2 UIs, 1 data source, per the issue's
+    own requirement), not a second copy of the schema."""
+    system_prompt:     Optional[str] = None
+    style_guide:        Optional[str] = None
+    forbidden_words:    Optional[List[str]] = None
+    brand_name:         Optional[str] = None
+    brand_type:         Optional[str] = None
+    core_idea:          Optional[str] = None
+    customer_segment:   Optional[str] = None
+    customer_mindset:   Optional[str] = None
+    tone_of_voice:      Optional[List[str]] = None
+    writing_style:      Optional[str] = None
+    good_examples:      Optional[str] = None
+    target_markets:     Optional[List[str]] = None
+
+
+@router.put("/tenants/{tenant_id}/brand-identity")
+async def update_tenant_brand_identity(
+    tenant_id: UUID,
+    body: TenantBrandIdentityUpdate,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    """Admin-side write for a SPECIFIC tenant's brand identity (AA-557 J.24) — same table, same
+    columns, same NOT-scoped-by-brand_name "1 active row per tenant" invariant as
+    admin_pipeline.py's tenant-facing `update_brand_identity()` (kept identical deliberately, see
+    that function's own comment for why: avoids 2 simultaneously-active rows if brand_name
+    changes mid-flow). Prompt-injection sanitized the same way (AA-487's `shared.validators.
+    prompt_sanitize`) since these free-text fields feed straight into every future rewrite for
+    this tenant, same as the tenant's own self-service path."""
+    verify_admin_secret(x_admin_secret)
+    tenant_id_s = str(tenant_id)
+
+    system_prompt = sanitize_text(body.system_prompt, MAX_SYSTEM_PROMPT_LEN)
+    style_guide = sanitize_text(body.writing_style or body.style_guide, MAX_LONG_FIELD_LEN)
+    forbidden_words = sanitize_list(body.forbidden_words or [], MAX_SHORT_FIELD_LEN, max_items=20)
+    brand_name = sanitize_text(body.brand_name, MAX_SHORT_FIELD_LEN) or "default"
+    brand_type = sanitize_text(body.brand_type, MAX_SHORT_FIELD_LEN)
+    core_idea = sanitize_text(body.core_idea, MAX_LONG_FIELD_LEN)
+    customer_segment = sanitize_text(body.customer_segment, MAX_LONG_FIELD_LEN)
+    customer_mindset = sanitize_text(body.customer_mindset, MAX_LONG_FIELD_LEN)
+    tone_of_voice = sanitize_list(body.tone_of_voice or [], MAX_SHORT_FIELD_LEN, max_items=20)
+    good_examples = sanitize_text(body.good_examples, MAX_LONG_FIELD_LEN)
+    target_markets = sanitize_list(body.target_markets or [], MAX_SHORT_FIELD_LEN, max_items=20)
+
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        tenant_exists = await conn.fetchval(
+            "SELECT 1 FROM shared.tenants WHERE tenant_id = $1", tenant_id_s
+        )
+        if not tenant_exists:
+            raise HTTPException(status_code=404, detail="Tenant not found")
+        current = await conn.fetchval(
+            "SELECT COALESCE(MAX(version), 0) FROM shared.tenant_brand_rules WHERE tenant_id = $1",
+            tenant_id_s,
+        )
+        await conn.execute(
+            "UPDATE shared.tenant_brand_rules SET is_active = false WHERE tenant_id = $1", tenant_id_s
+        )
+        await conn.execute("""
+            INSERT INTO shared.tenant_brand_rules
+                (tenant_id, brand_name, brand_type, core_idea, customer_segment,
+                 customer_mindset, voice_examples, style_guide, good_examples, system_prompt,
+                 forbidden_words, target_markets, version, is_active, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11::jsonb, $12, $13, true, NOW())
+        """, tenant_id_s, brand_name, brand_type, core_idea, customer_segment, customer_mindset,
+            json.dumps(tone_of_voice), style_guide, good_examples, system_prompt,
+            json.dumps(forbidden_words), target_markets, current + 1)
+    return {"status": "updated", "version": current + 1}
 
 
 # ── GET /admin/tenants/{id}/rewrite-activity ─────────────────────────────────
