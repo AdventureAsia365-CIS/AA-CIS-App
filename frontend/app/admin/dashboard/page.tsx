@@ -81,7 +81,7 @@ function OverviewTab({ data }: { data: any }) {
         <MetricCard
           label="Content Versions"
           value={data.llm_calls ?? 0}
-          sub="1 row per generated tour version, not per LLM call — see AA-476"
+          sub="1 row per generated tour version, not per LLM call"
           src="↳ generated_content · all runs"
           color={A.muted}
         />
@@ -165,9 +165,9 @@ function OverviewTab({ data }: { data: any }) {
         <Card>
           <SLabel>Model Usage</SLabel>
           <div style={{ fontSize: 11, color: A.muted2, marginBottom: 8 }}>
-            &ldquo;Versions&rdquo; = generated_content rows per model, not individual LLM
+            &ldquo;Versions&rdquo; = generated content rows per model, not individual LLM
             invocations — one version can involve multiple real calls (retries, judge,
-            brand audit, repair). See AA-476.
+            brand audit, repair).
           </div>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>

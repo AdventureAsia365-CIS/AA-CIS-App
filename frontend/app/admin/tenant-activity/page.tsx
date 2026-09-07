@@ -122,7 +122,7 @@ export default function TenantActivityPage() {
                 Per-Tour, per-tenant monitoring — every row below belongs to a specific tenant&apos;s
                 own write/review/publish activity on the selected Tour. Platform-wide Master
                 Content data (Atomize/Segment/Score/Route/Slate) moved to{" "}
-                <a href="/admin/atom-curation" style={{ color: A.gold }}>Atom Curation</a>.
+                <a href="/admin/atom-curation" style={{ color: A.gold }}>Social Content</a>.
               </div>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>

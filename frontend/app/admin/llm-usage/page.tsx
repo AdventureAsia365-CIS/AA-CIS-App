@@ -187,7 +187,7 @@ export default function LlmUsagePage() {
               LLM Usage
             </h1>
             <div style={{ fontSize: 11.5, color: A.muted2, marginTop: 2 }}>
-              Cost + chất lượng mỗi lượt gọi LLM thật, theo Tenant → Model → Stage (AA-505)
+              Cost + chất lượng mỗi lượt gọi LLM thật, theo Tenant → Model → Stage
             </div>
           </div>
           <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
