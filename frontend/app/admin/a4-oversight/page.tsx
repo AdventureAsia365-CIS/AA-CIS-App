@@ -832,9 +832,9 @@ function TrustRampSection() {
 
 export default function A4OversightPage() {
   return (
-    <div style={{ display: "flex", minHeight: "100vh", background: A.bg, fontFamily: sans }}>
+    <div style={{ display: "flex", height: "100vh", background: A.bg, fontFamily: sans }}>
       <AdminSidebar />
-      <div style={{ flex: 1, padding: "32px 36px", overflowY: "auto" }}>
+      <div style={{ flex: 1, minHeight: 0, padding: "32px 36px", overflowY: "auto" }}>
         <div style={{ marginBottom: 24 }}>
           <h1 style={{ fontFamily: serif, fontSize: 26, fontWeight: 500, color: A.ink, margin: 0 }}>
             Cross-Tenant Oversight

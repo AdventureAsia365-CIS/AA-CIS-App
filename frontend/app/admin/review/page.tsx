@@ -697,10 +697,10 @@ export default function AdminReviewPage() {
   };
 
   return (
-    <div style={{ display: "flex", minHeight: "100vh", fontFamily: sans, background: A.bg }}>
+    <div style={{ display: "flex", height: "100vh", fontFamily: sans, background: A.bg }}>
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}.spin{animation:spin .8s linear infinite}`}</style>
       <AdminSidebar />
-      <main style={{ flex: 1, overflowY: "auto", padding: "32px 36px 56px" }}>
+      <main style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "32px 36px 56px" }}>
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 24 }}>
           <div>
             <div style={{ fontFamily: serif, fontSize: 26, fontWeight: 500, color: A.ink, letterSpacing: "-0.02em" }}>Review Queue</div>

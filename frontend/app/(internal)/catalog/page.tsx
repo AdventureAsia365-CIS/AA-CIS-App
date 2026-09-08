@@ -285,7 +285,7 @@ function ReviewPanel({ tour, onClose }: { tour: Tour; onClose: () => void }) {
     }} onClick={onClose}>
       <div onClick={e => e.stopPropagation()} style={{
         width: "min(1100px, 92vw)", background: A.card, display: "flex", flexDirection: "column",
-        boxShadow: "-8px 0 40px rgba(0,0,0,0.18)", overflowY: "auto",
+        boxShadow: "-8px 0 40px rgba(0,0,0,0.18)", overflowY: "auto", minHeight: 0,
       }}>
         {/* Header */}
         <div style={{
@@ -603,9 +603,9 @@ export default function CatalogPage() {
   return (
     <div style={{ display: "flex", minHeight: "100vh", fontFamily: sans, background: A.bg }}>
       <InternalSidebar isAdmin={isAdmin} userName={userName} />
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, height: "100vh" }}>
         <TopBar breadcrumb={["Content", "Catalog"]} />
-        <main style={{ flex: 1, overflowY: "auto", padding: "28px 36px 56px" }}>
+        <main style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "28px 36px 56px" }}>
           {/* Header */}
           <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 24 }}>
             <div>

@@ -524,7 +524,7 @@ export default function AdminBrandPage() {
   return (
     <div style={{ display: "flex", minHeight: "100vh", fontFamily: sans, background: A.bg }}>
       <AdminSidebar />
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, height: "100vh" }}>
         <header style={{ height: 56, background: "#fff", borderBottom: `1px solid ${A.line}`, display: "flex", alignItems: "center", padding: "0 32px", gap: 8, position: "sticky", top: 0, zIndex: 10 }}>
           <span style={{ fontSize: 12, color: A.muted2 }}>Admin /</span>
           <span style={{ fontSize: 12, fontWeight: 500, color: A.body }}>Brand Identity</span>
@@ -562,7 +562,7 @@ export default function AdminBrandPage() {
               </div>
             </div>
 
-            <div style={{ flex: 1, overflowY: "auto" }}>
+            <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
               {loading ? (
                 <div style={{ padding: 20, fontSize: 12, color: A.muted }}>Loading…</div>
               ) : brands.length === 0 ? (
@@ -590,7 +590,7 @@ export default function AdminBrandPage() {
           </div>
 
           {/* Right panel — form */}
-          <div style={{ flex: 1, overflowY: "auto", padding: "28px 36px 56px" }}>
+          <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "28px 36px 56px" }}>
             {!isNew && !selected ? (
               <div style={{ paddingTop: 60, textAlign: "center", color: A.muted, fontSize: 14 }}>
                 Select a brand from the left, or click <strong>New</strong> to create one.

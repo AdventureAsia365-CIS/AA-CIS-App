@@ -329,10 +329,10 @@ export default function RunHealthPage() {
     n + Object.values(r.gate_statuses).filter(g => g?.breached).length, 0);
 
   return (
-    <div style={{ display: "flex", minHeight: "100vh", background: A.bg, fontFamily: sans }}>
+    <div style={{ display: "flex", height: "100vh", background: A.bg, fontFamily: sans }}>
       <AdminSidebar />
 
-      <div style={{ flex: 1, padding: "32px 36px", overflowY: "auto" }}>
+      <div style={{ flex: 1, minHeight: 0, padding: "32px 36px", overflowY: "auto" }}>
         {/* Header */}
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 24 }}>
           <div>

@@ -402,9 +402,9 @@ export default function S4BlogPage() {
   const approvedCount = drafts.filter(d => d.hitl_gate3_status === "msthy_approved").length;
 
   return (
-    <div style={{ display: "flex", minHeight: "100vh", background: A.bg, fontFamily: sans }}>
+    <div style={{ display: "flex", height: "100vh", background: A.bg, fontFamily: sans }}>
       <AdminSidebar />
-      <main style={{ flex: 1, padding: "32px 36px", overflowY: "auto" }}>
+      <main style={{ flex: 1, minHeight: 0, padding: "32px 36px", overflowY: "auto" }}>
 
         {/* Header + run selector */}
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 24, flexWrap: "wrap", gap: 16 }}>

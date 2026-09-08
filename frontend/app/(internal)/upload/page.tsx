@@ -248,9 +248,9 @@ export default function UploadPage() {
   return (
     <div style={{ display: "flex", minHeight: "100vh", fontFamily: sans, background: A.bg }}>
       <InternalSidebar isAdmin={isAdmin} userName={userName} />
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, height: "100vh" }}>
         <TopBar breadcrumb={["Content", "Upload"]} />
-        <main style={{ flex: 1, overflowY: "auto", padding: "28px 36px 56px" }}>
+        <main style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "28px 36px 56px" }}>
           <div style={{ marginBottom: 24 }}>
             <h1 style={{ fontFamily: serif, fontSize: 24, fontWeight: 500, color: A.ink, margin: "0 0 6px", letterSpacing: "-0.01em" }}>
               Upload Tour Content

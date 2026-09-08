@@ -1596,7 +1596,7 @@ export default function UploadPage() {
   return (
     <div style={{ display: "flex", minHeight: "100vh", background: A.bg, fontFamily: sans }}>
       <AdminSidebar />
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, height: "100vh" }}>
         <header style={{
           height: 56, background: "#fff", borderBottom: `1px solid ${A.line}`,
           display: "flex", alignItems: "center", padding: "0 32px", gap: 8,
@@ -1605,7 +1605,7 @@ export default function UploadPage() {
           <span style={{ fontSize: 12, color: A.muted2 }}>Admin /</span>
           <span style={{ fontSize: 12, fontWeight: 500, color: A.body }}>Upload (S0)</span>
         </header>
-        <main style={{ flex: 1, padding: "28px 36px 56px", overflowY: "auto" }}>
+        <main style={{ flex: 1, minHeight: 0, padding: "28px 36px 56px", overflowY: "auto" }}>
           <div style={{ marginBottom: 20 }}>
             <h1 style={{ fontFamily: serif, fontSize: 24, fontWeight: 500, color: A.ink,
               margin: "0 0 6px", letterSpacing: "-0.01em" }}>Upload (S0)</h1>

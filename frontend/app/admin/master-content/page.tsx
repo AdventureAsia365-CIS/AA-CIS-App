@@ -573,7 +573,7 @@ function VersionCompareModal({ tourId, tourName, versionNums, onClose }: {
               display: "flex", flexDirection: "column", overflow: "hidden",
               borderRight: idx < n - 1 ? `1px solid ${A.line}` : undefined,
             }}>
-              <div style={{ overflowY: "auto", flex: 1 }}>
+              <div style={{ overflowY: "auto", flex: 1, minHeight: 0 }}>
                 {/* Sticky column header */}
                 <div style={{ padding: "12px 20px", background: panelBg, position: "sticky", top: 0, zIndex: 5, borderBottom: `1px solid ${A.line}` }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
@@ -1206,7 +1206,7 @@ export default function MasterContentPage() {
           </div>
 
           {/* Scrollable table area */}
-          <div style={{ flex: 1, overflowY: "auto" }}>
+          <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
             {filtered.length === 0 ? (
               <div style={{ padding: 40, textAlign: "center" as const, color: A.muted, fontSize: 13 }}>
                 {search || statusFilter || countryFilter || scoreFilter || versionFilter
@@ -1482,7 +1482,7 @@ export default function MasterContentPage() {
           {runs.length === 0 ? (
             <div style={{ padding: "16px 32px", fontSize: 12, color: A.muted }}>No pipeline runs found.</div>
           ) : (
-            <div style={{ flex: 1, overflowY: "auto" }}>
+            <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                 <thead style={{ position: "sticky", top: 0, background: A.bg, zIndex: 2 }}>
                   <tr>

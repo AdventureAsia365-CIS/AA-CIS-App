@@ -596,7 +596,7 @@ export function TourDetailPanelV2({ tourId, tourName, rewriteCount = 0, onClose 
         </div>
 
         {/* Body */}
-        <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "20px 24px" }}>
           {loading ? (
             <div style={{ textAlign: "center", padding: 40, color: A.muted }}>Loading…</div>
           ) : !detail ? (

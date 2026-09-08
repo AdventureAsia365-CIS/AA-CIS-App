@@ -453,7 +453,7 @@ export default function DashboardPage() {
   return (
     <div style={{ display: "flex", minHeight: "100vh", fontFamily: sans, background: A.bg }}>
       <AdminSidebar />
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, height: "100vh" }}>
         <header style={{
           height: 56, background: "#fff", borderBottom: `1px solid ${A.line}`,
           display: "flex", alignItems: "center", padding: "0 32px", gap: 8,
@@ -463,7 +463,7 @@ export default function DashboardPage() {
           <span style={{ fontSize: 12, fontWeight: 500, color: A.body }}>Dashboard</span>
         </header>
 
-        <main style={{ flex: 1, overflowY: "auto", padding: "28px 36px 56px" }}>
+        <main style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "28px 36px 56px" }}>
           <div style={{ marginBottom: 24 }}>
             <h1 style={{
               fontFamily: serif, fontSize: 24, fontWeight: 500,

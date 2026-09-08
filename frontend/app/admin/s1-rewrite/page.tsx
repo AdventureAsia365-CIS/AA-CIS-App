@@ -521,7 +521,7 @@ export default function S1RewritePage() {
   }
 
   return (
-    <div style={{ display: "flex", minHeight: "100vh", background: A.bg, fontFamily: sans }}>
+    <div style={{ display: "flex", height: "100vh", background: A.bg, fontFamily: sans }}>
       <AdminSidebar />
 
       {/* Right column: sticky config + scrollable main */}
@@ -614,7 +614,7 @@ export default function S1RewritePage() {
         </div>
 
         {/* ── Scrollable Content ──────────────────────────────────────────── */}
-        <main style={{ flex: 1, padding: "24px 36px 56px", overflowY: "auto" }}>
+        <main style={{ flex: 1, minHeight: 0, padding: "24px 36px 56px", overflowY: "auto" }}>
 
           {/* Header */}
           <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 20 }}>
