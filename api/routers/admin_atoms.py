@@ -28,11 +28,13 @@ deleted along with /admin/curation + /admin/curation/preview (their only
 callers, STEP0-confirmed no owner_scope/JWT path ever reached them from T6) —
 see docs/claude_audit/AA-475-step0-atomize-curation-teardown.md.
 """
+import asyncio
 import json
 from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
+import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
@@ -42,6 +44,12 @@ from api.routers.auth import verify_jwt
 from services.acp_shared.atom_constants import THIN_TRIP_ATOM_MIN
 
 router = APIRouter(prefix="/admin", tags=["admin-atoms"])
+
+# AA-564 3.1 — strong refs for the delete-triggered recompute background task, same GC-safety
+# pattern as services/export/handler.py's own module-level `_background_tasks` set (a bare
+# asyncio.create_task() with no reference can be garbage-collected mid-flight).
+_recompute_tasks: set = set()
+_recompute_logger = structlog.get_logger()
 
 
 # ── AA-431 — tenant-JWT auth + owner_scope filter for list/summary/patch ────────
@@ -475,4 +483,145 @@ async def patch_atom(
 
     if not row:
         raise HTTPException(status_code=404, detail=f"Atom {atom_id} not found (or is an empty-marker row)")
+
+    # AA-564 3.1 (decision 2, AA-563) — `deleted` is the only atom-curation flag that actually
+    # affects Segment eligibility (`WHERE NOT ta.deleted`, segment_matching.py); `starred` never
+    # does (confirmed AA-552/563), so bulk-star correctly stays untouched. Before this, curating
+    # an atom's `deleted` flag never recomputed Segment/Score/Route at all — a real staleness gap
+    # AA-563's investigation confirmed matches Nghiệp's own suspicion. Fire-and-forget, same
+    # pattern as `_run_a3_atomize_background()` (own connection via the request's pool, best-effort
+    # — a recompute failure must never surface as this PATCH having failed, the star/delete itself
+    # already committed above).
+    if body.deleted is not None:
+        from services.export.handler import recompute_segment_score_route
+
+        async def _recompute():
+            try:
+                await recompute_segment_score_route(str(row["tour_id"]), pool, log_tour_id=atom_id)
+            except Exception:
+                _recompute_logger.warning("atom_delete_recompute_failed", atom_id=atom_id, exc_info=True)
+
+        _task = asyncio.create_task(_recompute())
+        _recompute_tasks.add(_task)
+        _task.add_done_callback(_recompute_tasks.discard)
+
     return _safe(row)
+
+
+# ── GET /admin/atoms/unatomized-tours + POST /admin/atoms/atomize ──────────────
+# AA-564 3.1/3.2 (decision 1, AA-563) — a manual backfill trigger. Per AA-563's investigation,
+# atomize has exactly ONE automatic trigger point (services/export/handler.py::process_export(),
+# fired the instant a tour is admin-approved/published) and NO backfill ever existed — any tour
+# that entered Master Content before that mechanism went live (~04-05/09/2026), or by any other
+# path than a fresh publish, never gets atomized on its own. These two endpoints are admin-only
+# (x-admin-secret, no tenant-JWT path — matches AA-526's decision that tenants never trigger
+# atomize directly anymore).
+
+_MASTER_TENANT_ID = "00000000-0000-0000-0000-000000000001"  # api/routers/admin_pipeline.py's own constant
+
+
+@router.get("/atoms/unatomized-tours")
+async def list_unatomized_tours(
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    """Master Content tours (gold_aa_internal.published_tours, the aa_internal sentinel tenant)
+    with zero real atoms yet — the FE's "N tours not yet atomized" warning + picker, and also the
+    poll target while a manual atomize run is in flight (a tour drops off this list once its
+    atoms actually land)."""
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT pt.tour_id, pt.aa_name AS tour_name
+            FROM gold_aa_internal.published_tours pt
+            WHERE pt.tenant_id = $1::uuid
+              AND NOT EXISTS (
+                  SELECT 1 FROM acp_contract.tour_atoms ta
+                  WHERE ta.tour_id = pt.tour_id AND NOT ta.is_empty_marker
+              )
+            ORDER BY pt.aa_name
+            """,
+            _MASTER_TENANT_ID,
+        )
+    return {
+        "total": len(rows),
+        "tours": [{"tour_id": str(r["tour_id"]), "tour_name": r["tour_name"]} for r in rows],
+    }
+
+
+class AtomizeTriggerRequest(BaseModel):
+    tour_id: Optional[str] = None
+    all: bool = False
+
+
+@router.post("/atoms/atomize")
+async def trigger_atomize(
+    body: AtomizeTriggerRequest,
+    request: Request,
+    x_admin_secret: str = Header(None),
+):
+    """Manually fires the same atomize + Segment/Score/Route recompute chain
+    (services/export/handler.py::_run_a3_atomize_background()) that a fresh publish triggers
+    automatically — for a Master Content tour that never went through that path. Body is either
+    `{"tour_id": "..."}` (one tour) or `{"all": true}` (every currently un-atomized tour).
+
+    Runs the tours SEQUENTIALLY in one background task, not N parallel tasks — `run_t5_atomize()`
+    can issue several Bedrock calls per tour (one per itinerary day), and this endpoint has no
+    cap on how many tours "all" might mean; sequential avoids a burst of concurrent LLM calls
+    against the account's rate limit. Fire-and-forget, same 202-style contract as
+    `run_write_background()` (T9) — no separate job/status row is created; the client polls
+    `GET /admin/atoms/unatomized-tours` (or `/admin/atoms/summary`) until the tour(s) drop off /
+    gain a real atom_count, the same "poll the resulting resource" pattern T9 already uses rather
+    than a dedicated job-status table."""
+    verify_admin_secret(x_admin_secret)
+    if not body.tour_id and not body.all:
+        raise HTTPException(status_code=400, detail="must specify tour_id or all=true")
+
+    pool = request.app.state.pool
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT pt.tour_id, pt.generated_content_id, pt.aa_name, pt.aa_summary,
+                   pt.aa_highlights, pt.aa_itineraries, rt.country
+            FROM gold_aa_internal.published_tours pt
+            JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
+            WHERE pt.tenant_id = $1::uuid
+              AND NOT EXISTS (
+                  SELECT 1 FROM acp_contract.tour_atoms ta
+                  WHERE ta.tour_id = pt.tour_id AND NOT ta.is_empty_marker
+              )
+              AND ($2::uuid IS NULL OR pt.tour_id = $2::uuid)
+            """,
+            _MASTER_TENANT_ID, None if body.all else body.tour_id,
+        )
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="No un-atomized Master Content tour matches this request")
+
+    from services.export.handler import _run_a3_atomize_background
+
+    async def _run_all():
+        for r in rows:
+            try:
+                await _run_a3_atomize_background(
+                    tour_id=str(r["tour_id"]),
+                    rewritten={
+                        "name": r["aa_name"], "summary": r["aa_summary"],
+                        "highlights": r["aa_highlights"], "itineraries": r["aa_itineraries"],
+                    },
+                    country=r["country"] or "",
+                    version_id=str(r["generated_content_id"]),
+                )
+            except Exception:
+                _recompute_logger.error("manual_atomize_failed", tour_id=str(r["tour_id"]), exc_info=True)
+
+    _task = asyncio.create_task(_run_all())
+    _recompute_tasks.add(_task)
+    _task.add_done_callback(_recompute_tasks.discard)
+
+    return {
+        "accepted": True, "tour_count": len(rows),
+        "tour_ids": [str(r["tour_id"]) for r in rows],
+    }

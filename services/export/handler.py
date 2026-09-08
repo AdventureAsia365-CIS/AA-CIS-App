@@ -41,6 +41,35 @@ class _SingleConnAsPool:
         return False
 
 
+async def recompute_segment_score_route(tour_id: str, pool, *, log_tour_id: str | None = None) -> dict:
+    """AA-564 3.1 — extracted out of `_run_a3_atomize_background()` below (which still calls this
+    right after atomize, unchanged) so it can ALSO be fired on its own, from
+    `api/routers/admin_atoms.py::patch_atom()`, whenever an atom's `deleted` flag changes. Before
+    AA-564, curating an atom (star or soft-delete) never recomputed Segment/Score/Route at all —
+    AA-563's investigation confirmed this was a real staleness gap, not a misunderstanding: only
+    `deleted` actually affects Segment eligibility (`WHERE NOT ta.deleted`, segment_matching.py),
+    `starred` never does, so this is deliberately NOT wired to the star action too.
+
+    Platform-wide (AA-545) — `run_route_detection()` recomputes ALL tours' Routes, not just this
+    one, same as `_run_a3_atomize_background()` already did; `run_segment_matching(tour_id, ...)`
+    itself is incremental and does stay scoped to this one tour."""
+    from services.acp_contract.segment_matching import run_segment_matching
+    segment_result = await run_segment_matching(tour_id, pool)
+    logger.info("segment_matching_done", tour_id=log_tour_id or tour_id, result=segment_result)
+
+    from services.acp_contract.atom_ranking import run_atom_ranking
+    from services.seo_intelligence.seed_builder import DFS_LOCATION_MAP
+    ranking_results = {}
+    for market_code in DFS_LOCATION_MAP:
+        ranking_results[market_code] = await run_atom_ranking(market_code, pool)
+    logger.info("ranking_done", tour_id=log_tour_id or tour_id, result=ranking_results)
+
+    from services.acp_contract.route_detection import run_route_detection
+    route_result = await run_route_detection(pool)
+    logger.info("route_detection_done", tour_id=log_tour_id or tour_id, result=route_result)
+    return {"segment": segment_result, "ranking": ranking_results, "route": route_result}
+
+
 async def _run_a3_atomize_background(tour_id: str, rewritten: dict, country: str, version_id: str) -> None:
     """AA-526 — the actual A3 atomize call, launched fire-and-forget from process_export() so a
     slow multi-day LLM atomize run (services.acp_produce.tenant_pipeline.run_t5_atomize(), up to
@@ -78,20 +107,7 @@ async def _run_a3_atomize_background(tour_id: str, rewritten: dict, country: str
         # superseded by AA-545; Segment/Score/Route are that single global set now, Slate/Subject
         # (T7) remain the per-tenant layer on top (unchanged, out of AA-545's scope).
         try:
-            from services.acp_contract.segment_matching import run_segment_matching
-            segment_result = await run_segment_matching(tour_id, pool)
-            logger.info("a3_segment_matching_done", tour_id=tour_id, result=segment_result)
-
-            from services.acp_contract.atom_ranking import run_atom_ranking
-            from services.seo_intelligence.seed_builder import DFS_LOCATION_MAP
-            ranking_results = {}
-            for market_code in DFS_LOCATION_MAP:
-                ranking_results[market_code] = await run_atom_ranking(market_code, pool)
-            logger.info("a3_ranking_done", tour_id=tour_id, result=ranking_results)
-
-            from services.acp_contract.route_detection import run_route_detection
-            route_result = await run_route_detection(pool)
-            logger.info("a3_route_detection_done", tour_id=tour_id, result=route_result)
+            await recompute_segment_score_route(tour_id, pool, log_tour_id=tour_id)
         except Exception:
             # Best-effort, same precedent as every other step in this function — a Segment/Score/
             # Route failure must never be mistaken for atomize (already logged done above) or the

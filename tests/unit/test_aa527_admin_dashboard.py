@@ -4,8 +4,12 @@ Reworked AA-551 (07/09/2026): `tour_id` is now optional on segments/score/routes
 platform-wide mode — see that file's own module docstring for the full reasoning), each gained a
 `market` filter + pagination (`limit`/`offset` + a `full_count` window-function column consumed by
 `_safe(..., exclude=("full_count",))`), and a new `GET /admin/dashboard/summary` endpoint feeds the
-rebuilt `/admin/atom-curation` page's header stat bar. `slate` is unchanged (still requires
-`tour_id`, real per-tenant exception, not touched by this task).
+rebuilt `/admin/atom-curation` page's header stat bar. `slate` was changed again by AA-564 (per
+AA-563's investigation): now requires `tenant_id` instead of `tour_id` (Slate genuinely is
+per-tenant, ADR-0003 — the old `tour_id` scoping was itself the bug, not a design choice), gained
+an optional `channel` filter, and each row now carries its real topic name (`canonical_place`/
+`canonical_action`/`hub_name`/`tour_name`/`segment_count`) via the same LEFT JOINs the Tenant
+Portal's `fetch_slate()` already runs — see `TestListSlate` below.
 
 Mocks the asyncpg pool — no live DB. Same x-admin-secret convention/helpers as
 test_aa300_admin_atoms.py (monkeypatch api.routers.admin.ADMIN_SECRET, a real fake pool/request).
@@ -347,6 +351,8 @@ class TestListHubs:
 
 
 class TestListSlate:
+    """AA-564 2.1/2.2 — tenant_id-scoped (not tour_id), real topic name joined in."""
+
     @pytest.mark.asyncio
     async def test_returns_subjects_and_state_breakdown(self):
         conn = AsyncMock()
@@ -354,20 +360,74 @@ class TestListSlate:
             {"subject_id": uuid.uuid4(), "tenant_id": uuid.uuid4(), "tenant_name": "WanderLux",
              "channel": "instagram", "state": "picked", "score": 12.5,
              "segment_id": "seg1", "route_id": None, "cleared_bar_reason": '{"needs_demand": true}',
-             "created_at": "2026-09-01T00:00:00"},
+             "created_at": "2026-09-01T00:00:00",
+             "canonical_place": "Bolaven Plateau", "canonical_action": "visit coffee and tea plantation",
+             "hub_name": None, "route_tour_name": None, "route_segment_count": None,
+             "segment_tour_names": ["Southern Laos Explorer"]},
             {"subject_id": uuid.uuid4(), "tenant_id": uuid.uuid4(), "tenant_name": "WanderLux",
-             "channel": "blog", "state": "cut", "score": None,
+             "channel": "blog", "state": "proposed", "score": None,
              "segment_id": None, "route_id": "r1", "cleared_bar_reason": '{}',
-             "created_at": "2026-09-01T00:00:00"},
+             "created_at": "2026-09-01T00:00:00",
+             "canonical_place": None, "canonical_action": None,
+             "hub_name": "Vat Phou Loop", "route_tour_name": "4000 Islands Adventure",
+             "route_segment_count": 3, "segment_tour_names": None},
         ]
         pool = _make_pool(conn)
         request = _make_request(pool)
 
-        result = await admin_dashboard.list_slate(request, tour_id=str(uuid.uuid4()), x_admin_secret=_TEST_SECRET)
+        result = await admin_dashboard.list_slate(
+            request, tenant_id=str(uuid.uuid4()), channel=None, x_admin_secret=_TEST_SECRET,
+        )
         assert result["total"] == 2
         assert result["by_state"]["picked"] == 1
-        assert result["by_state"]["cut"] == 1
-        assert result["by_state"]["proposed"] == 0
+        assert result["by_state"]["proposed"] == 1
+        assert result["by_state"]["cut"] == 0
+
+        segment_row, route_row = result["data"]
+        # Segment-based row: topic comes from canonical_place/action, tour_name from the
+        # (possibly multi-tour) aggregate, no segment_count.
+        assert segment_row["canonical_place"] == "Bolaven Plateau"
+        assert segment_row["tour_name"] == "Southern Laos Explorer"
+        assert segment_row["segment_count"] is None
+        # Route-based row: topic comes from hub_name, tour_name/segment_count from the Route join.
+        assert route_row["hub_name"] == "Vat Phou Loop"
+        assert route_row["tour_name"] == "4000 Islands Adventure"
+        assert route_row["segment_count"] == 3
+        # Internal join-only columns must not leak into the response.
+        for row in result["data"]:
+            assert "route_tour_name" not in row
+            assert "route_segment_count" not in row
+            assert "segment_tour_names" not in row
+
+    @pytest.mark.asyncio
+    async def test_scoped_by_tenant_id_not_tour_id(self):
+        tenant_id = str(uuid.uuid4())
+        conn = AsyncMock()
+        conn.fetch.return_value = []
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await admin_dashboard.list_slate(
+            request, tenant_id=tenant_id, channel=None, x_admin_secret=_TEST_SECRET,
+        )
+        assert result["tenant_id"] == tenant_id
+        query, *params = conn.fetch.call_args[0]
+        assert "s.tenant_id = $1" in query
+        assert params[0] == tenant_id
+
+    @pytest.mark.asyncio
+    async def test_channel_filter_passed_through(self):
+        conn = AsyncMock()
+        conn.fetch.return_value = []
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        await admin_dashboard.list_slate(
+            request, tenant_id=str(uuid.uuid4()), channel="blog", x_admin_secret=_TEST_SECRET,
+        )
+        query, *params = conn.fetch.call_args[0]
+        assert "s.channel = $2" in query
+        assert params[1] == "blog"
 
 
 class TestDashboardSummary:
