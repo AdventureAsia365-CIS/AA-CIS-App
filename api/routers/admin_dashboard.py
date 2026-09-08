@@ -8,8 +8,13 @@ show anything in "All tours" mode — directly contradicting AA-545's own platfo
 the API layer regardless). `tour_id` is now OPTIONAL on `segments`/`score`/`routes` — omitting it
 returns every tour's matching rows (each tagged with its own `tour_id`/`tour_name`, paginated),
 which is what `/admin/atom-curation`'s rebuilt 01-05 platform-wide page actually calls when no
-Tour is picked. `slate` keeps `tour_id` required, unchanged — acp_shared.subject is genuinely
-per-tenant (AA-550 A.3), not part of this platform-wide fix.
+Tour is picked. `slate` is the one deliberate exception in the other direction (AA-564 2.2,
+AA-563's investigation): acp_shared.subject really is per-tenant (ADR-0003 confirms this is
+correct, not tech debt), so `slate` requires `tenant_id` instead of `tour_id` — the OPPOSITE of
+what it required before AA-564 (which wrongly scoped it by Tour, contradicting the page's own
+"Slate is tenant-specific" copy). Each row also now carries its originating topic name (`place`/
+`action`/`hub_name`/`tour_name`), joined the same way the Tenant Portal's `fetch_slate()` already
+does, instead of a raw `segment_id`/`route_id` the FE could only label generically.
 
 New optional filters, shared by `segments`/`score`/`routes`: `market` (one of the 6 real markets;
 Score/Route rows all carry a `market` column post-AA-545, Segment's join to `atom_ranking` does
@@ -527,16 +532,21 @@ async def list_hubs(
 @router.get("/slate")
 async def list_slate(
     request: Request,
-    tour_id: str = Query(...),
+    tenant_id: str = Query(...),
+    channel: Optional[str] = Query(None),
     x_admin_secret: str = Header(None),
 ):
-    """acp_shared.subject (the Slate proposal, AA-511) for this tour. subject has no tour_id of
-    its own either (it's keyed to a Segment-or-Route, migration 133's own CHECK constraint) — so
-    this reaches it through whichever of the two the Subject actually carries: `route_id` joins
-    straight to acp_contract.route.tour_id, `segment_id` joins through atom_segment_member the
-    same way the Segment panel above does. A Subject matches this tour if EITHER path resolves to
-    it (never both — the CHECK constraint above guarantees segment_id/route_id are mutually
-    exclusive on one row)."""
+    """acp_shared.subject (the Slate proposal, AA-511) for this tenant — AA-564 2.2 (per AA-563's
+    investigation): Slate is genuinely per-tenant by design (ADR-0003 confirms this is correct,
+    not tech debt — a Subject is one specific tenant's own proposal/decision, never shared), so
+    this endpoint is scoped by `tenant_id` directly, same as the Tenant Portal's own
+    `services/acp_shared/slate.py::fetch_slate()`. It used to be scoped by `tour_id` instead (a
+    real bug — subject has no tour_id column of its own, so that required an awkward OR-based
+    lookup through Segment/Route, AND made Admin pick a Tour first even though the UI's own copy
+    said "Slate is tenant-specific"). Each row now also carries the ORIGINATING topic name
+    (`place`/`action`/`hub_name`, `tour_name`) via the same LEFT JOINs `fetch_slate()` already
+    runs in production (AA-564 2.1) — previously this endpoint returned only raw `segment_id`/
+    `route_id`, which the FE could only render as a generic "Segment"/"Route" label."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
 
@@ -544,29 +554,50 @@ async def list_slate(
         rows = await conn.fetch(
             """
             SELECT s.subject_id, s.tenant_id, t.name AS tenant_name, s.channel, s.state,
-                   s.score, s.segment_id, s.route_id, s.cleared_bar_reason, s.created_at
+                   s.score, s.segment_id, s.route_id, s.cleared_bar_reason, s.created_at,
+                   asg.canonical_place, asg.canonical_action,
+                   r.hub_name, rt_route.src_name AS route_tour_name,
+                   CASE WHEN r.ordered_segment_ids IS NOT NULL
+                        THEN jsonb_array_length(r.ordered_segment_ids) END AS route_segment_count,
+                   seg_tours.tour_names AS segment_tour_names
             FROM acp_shared.subject s
             LEFT JOIN shared.tenants t ON t.tenant_id = s.tenant_id
-            WHERE
-                s.route_id IN (SELECT route_id FROM acp_contract.route WHERE tour_id = $1::uuid)
-                OR s.segment_id IN (
-                    SELECT DISTINCT asm.segment_id
-                    FROM acp_contract.atom_segment_member asm
-                    JOIN acp_contract.tour_atoms ta ON ta.atom_id = asm.atom_id
-                    WHERE ta.tour_id = $1::uuid AND NOT ta.deleted AND NOT ta.is_empty_marker
-                )
-            ORDER BY s.created_at DESC
+            LEFT JOIN acp_contract.atom_segment asg ON asg.segment_id = s.segment_id
+            LEFT JOIN acp_contract.route r ON r.route_id = s.route_id
+            LEFT JOIN silver_aa_internal.raw_tours rt_route ON rt_route.tour_id = r.tour_id
+            -- A Segment's own definition (CONTEXT.md) is "usually from different tours" — unlike
+            -- a Route (inherently one tour's day-span), a Segment-based Subject can legitimately
+            -- point at more than one tour, so this aggregates rather than assuming a single one.
+            LEFT JOIN LATERAL (
+                SELECT array_agg(DISTINCT rt2.src_name) AS tour_names
+                FROM acp_contract.atom_segment_member asm2
+                JOIN acp_contract.tour_atoms ta2 ON ta2.atom_id = asm2.atom_id
+                LEFT JOIN silver_aa_internal.raw_tours rt2 ON rt2.tour_id = ta2.tour_id
+                WHERE asm2.segment_id = s.segment_id AND NOT ta2.deleted AND NOT ta2.is_empty_marker
+            ) seg_tours ON s.segment_id IS NOT NULL
+            WHERE s.tenant_id = $1::uuid AND s.state != 'cut'
+              AND ($2::text IS NULL OR s.channel = $2::text)
+            ORDER BY s.channel, s.score ASC NULLS LAST, s.created_at DESC
             """,
-            tour_id,
+            tenant_id, channel,
         )
 
     by_state = {"proposed": 0, "picked": 0, "used": 0, "cut": 0}
+    data = []
     for r in rows:
         if r["state"] in by_state:
             by_state[r["state"]] += 1
+        row = _safe(r, exclude=("route_tour_name", "route_segment_count", "segment_tour_names"))
+        if r["route_id"]:
+            row["tour_name"] = r["route_tour_name"]
+            row["segment_count"] = r["route_segment_count"]
+        else:
+            row["tour_name"] = ", ".join(r["segment_tour_names"] or [])
+            row["segment_count"] = None
+        data.append(row)
 
     return {
-        "data": [_safe(r) for r in rows], "total": len(rows), "tour_id": tour_id,
+        "data": data, "total": len(rows), "tenant_id": tenant_id,
         "by_state": by_state,
     }
 

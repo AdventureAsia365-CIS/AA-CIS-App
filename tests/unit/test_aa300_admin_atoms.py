@@ -27,9 +27,10 @@ admin_atoms.py via `from api.routers.admin import verify_admin_secret`).
 monkeypatch.setenv() after import has no effect on it; every test here uses
 monkeypatch.setattr("api.routers.admin.ADMIN_SECRET", ...) instead.
 """
+import asyncio
 import json
 import uuid
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import jwt
 import pytest
@@ -403,10 +404,15 @@ class TestPatchAtom:
         pool = _make_pool(conn)
         request = _make_request(pool)
 
-        body = admin_atoms.AtomPatchRequest(deleted=True)
-        result = await admin_atoms.patch_atom(
-            "atom_abc1234567", body, request, owner_scope=None)
-        assert result["deleted"] is True
+        # AA-564 3.1 — deleted=True now also fires a fire-and-forget recompute task; mocked here
+        # so this test stays about the PATCH response, not the recompute (see
+        # TestDeleteTriggersRecompute below for that).
+        with patch("services.export.handler.recompute_segment_score_route", AsyncMock()):
+            body = admin_atoms.AtomPatchRequest(deleted=True)
+            result = await admin_atoms.patch_atom(
+                "atom_abc1234567", body, request, owner_scope=None)
+            assert result["deleted"] is True
+            await asyncio.sleep(0)  # let the fire-and-forget task run to completion
 
     @pytest.mark.asyncio
     async def test_edit_text(self):
@@ -640,3 +646,192 @@ class TestAtomsSummary:
         assert "owner_scope = $1" in breakdown_query and tenant_id in breakdown_params
         assert "owner_scope = $1" in by_tour_query and tenant_id in by_tour_params
         assert "owner_scope = $1" in totals_query and tenant_id in totals_params
+
+
+class TestDeleteTriggersRecompute:
+    """AA-564 3.1 (decision 2, AA-563) — curating `deleted` fires Segment/Score/Route recompute
+    for that atom's tour; `starred`-only never does (confirmed AA-552/563: starred doesn't affect
+    Segment eligibility)."""
+
+    @pytest.mark.asyncio
+    async def test_deleted_true_fires_recompute_for_that_tour(self):
+        tour_id = uuid.uuid4()
+        conn = AsyncMock()
+        conn.fetchrow.return_value = _atom_row(deleted=True, tour_id=tour_id)
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        with patch("services.export.handler.recompute_segment_score_route", AsyncMock()) as m_recompute:
+            body = admin_atoms.AtomPatchRequest(deleted=True)
+            await admin_atoms.patch_atom("atom_abc1234567", body, request, owner_scope=None)
+            await asyncio.sleep(0)
+
+        m_recompute.assert_awaited_once()
+        args, kwargs = m_recompute.call_args
+        assert args[0] == str(tour_id)
+        assert args[1] is pool
+
+    @pytest.mark.asyncio
+    async def test_deleted_false_also_fires_recompute_undelete_restores_eligibility(self):
+        # Explicitly setting deleted=False (restoring an atom) also changes Segment eligibility
+        # (WHERE NOT ta.deleted) — the trigger is "deleted was included in the patch", not
+        # "deleted was set to true" specifically.
+        conn = AsyncMock()
+        conn.fetchrow.return_value = _atom_row(deleted=False)
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        with patch("services.export.handler.recompute_segment_score_route", AsyncMock()) as m_recompute:
+            body = admin_atoms.AtomPatchRequest(deleted=False)
+            await admin_atoms.patch_atom("atom_abc1234567", body, request, owner_scope=None)
+            await asyncio.sleep(0)
+
+        m_recompute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_starred_only_does_not_fire_recompute(self):
+        conn = AsyncMock()
+        conn.fetchrow.return_value = _atom_row(starred=True)
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        with patch("services.export.handler.recompute_segment_score_route", AsyncMock()) as m_recompute:
+            body = admin_atoms.AtomPatchRequest(starred=True)
+            await admin_atoms.patch_atom("atom_abc1234567", body, request, owner_scope=None)
+            await asyncio.sleep(0)
+
+        m_recompute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_recompute_failure_does_not_surface_as_patch_failure(self):
+        conn = AsyncMock()
+        conn.fetchrow.return_value = _atom_row(deleted=True)
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        with patch("services.export.handler.recompute_segment_score_route",
+                   AsyncMock(side_effect=RuntimeError("boom"))):
+            body = admin_atoms.AtomPatchRequest(deleted=True)
+            result = await admin_atoms.patch_atom("atom_abc1234567", body, request, owner_scope=None)
+            await asyncio.sleep(0)
+
+        assert result["deleted"] is True
+
+
+class TestUnatomizedToursAndManualTrigger:
+    """AA-564 3.1/3.2 (decision 1, AA-563) — manual atomize backfill for Master Content tours that
+    never went through the one automatic trigger (process_export(), AA-526)."""
+
+    @pytest.mark.asyncio
+    async def test_list_unatomized_tours(self):
+        tour_id = uuid.uuid4()
+        conn = AsyncMock()
+        conn.fetch.return_value = [{"tour_id": tour_id, "tour_name": "Sapa Valley Trek"}]
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await admin_atoms.list_unatomized_tours(request, x_admin_secret=_TEST_SECRET)
+        assert result["total"] == 1
+        assert result["tours"][0]["tour_id"] == str(tour_id)
+        query, *params = conn.fetch.call_args[0]
+        assert "NOT EXISTS" in query
+        assert params == [admin_atoms._MASTER_TENANT_ID]
+
+    @pytest.mark.asyncio
+    async def test_trigger_atomize_rejects_when_neither_tour_id_nor_all(self):
+        pool = _make_pool(AsyncMock())
+        request = _make_request(pool)
+        body = admin_atoms.AtomizeTriggerRequest()
+        with pytest.raises(HTTPException) as exc:
+            await admin_atoms.trigger_atomize(body, request, x_admin_secret=_TEST_SECRET)
+        assert exc.value.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_trigger_atomize_404_when_no_matching_tour(self):
+        conn = AsyncMock()
+        conn.fetch.return_value = []
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+        body = admin_atoms.AtomizeTriggerRequest(tour_id=str(uuid.uuid4()))
+        with pytest.raises(HTTPException) as exc:
+            await admin_atoms.trigger_atomize(body, request, x_admin_secret=_TEST_SECRET)
+        assert exc.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_trigger_atomize_one_tour_fires_background_atomize(self):
+        tour_id = uuid.uuid4()
+        gen_content_id = uuid.uuid4()
+        conn = AsyncMock()
+        conn.fetch.return_value = [{
+            "tour_id": tour_id, "generated_content_id": gen_content_id,
+            "aa_name": "Sapa Valley Trek", "aa_summary": "A trek.",
+            "aa_highlights": "[]", "aa_itineraries": "Day 1...", "country": "Vietnam",
+        }]
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        with patch("services.export.handler._run_a3_atomize_background", AsyncMock()) as m_atomize:
+            body = admin_atoms.AtomizeTriggerRequest(tour_id=str(tour_id))
+            result = await admin_atoms.trigger_atomize(body, request, x_admin_secret=_TEST_SECRET)
+            await asyncio.sleep(0)
+
+        assert result["accepted"] is True
+        assert result["tour_count"] == 1
+        assert result["tour_ids"] == [str(tour_id)]
+        m_atomize.assert_awaited_once()
+        _args, kwargs = m_atomize.call_args
+        assert kwargs["tour_id"] == str(tour_id)
+        assert kwargs["version_id"] == str(gen_content_id)
+        assert kwargs["country"] == "Vietnam"
+        assert kwargs["rewritten"]["name"] == "Sapa Valley Trek"
+
+    @pytest.mark.asyncio
+    async def test_trigger_atomize_all_runs_every_tour_sequentially(self):
+        tours = [
+            {"tour_id": uuid.uuid4(), "generated_content_id": uuid.uuid4(),
+             "aa_name": f"Tour {i}", "aa_summary": "", "aa_highlights": "[]",
+             "aa_itineraries": "", "country": "Vietnam"}
+            for i in range(3)
+        ]
+        conn = AsyncMock()
+        conn.fetch.return_value = tours
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        with patch("services.export.handler._run_a3_atomize_background", AsyncMock()) as m_atomize:
+            body = admin_atoms.AtomizeTriggerRequest(all=True)
+            result = await admin_atoms.trigger_atomize(body, request, x_admin_secret=_TEST_SECRET)
+            await asyncio.sleep(0)
+
+        assert result["tour_count"] == 3
+        assert m_atomize.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_trigger_atomize_one_failure_does_not_stop_the_rest(self):
+        tours = [
+            {"tour_id": uuid.uuid4(), "generated_content_id": uuid.uuid4(),
+             "aa_name": f"Tour {i}", "aa_summary": "", "aa_highlights": "[]",
+             "aa_itineraries": "", "country": "Vietnam"}
+            for i in range(2)
+        ]
+        conn = AsyncMock()
+        conn.fetch.return_value = tours
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        with patch("services.export.handler._run_a3_atomize_background",
+                   AsyncMock(side_effect=[RuntimeError("boom"), None])) as m_atomize:
+            body = admin_atoms.AtomizeTriggerRequest(all=True)
+            await admin_atoms.trigger_atomize(body, request, x_admin_secret=_TEST_SECRET)
+            await asyncio.sleep(0)
+
+        assert m_atomize.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_wrong_admin_secret_rejected(self):
+        pool = _make_pool(AsyncMock())
+        request = _make_request(pool)
+        body = admin_atoms.AtomizeTriggerRequest(all=True)
+        with pytest.raises(HTTPException) as exc:
+            await admin_atoms.trigger_atomize(body, request, x_admin_secret="wrong-secret")
+        assert exc.value.status_code == 403

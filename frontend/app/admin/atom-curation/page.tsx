@@ -181,6 +181,54 @@ function AtomizeSection({ summary, summaryLoading, selectedTour, onTourChange, o
   // AA-554 D.9 — bulk-star selection, cleared whenever the atom list itself reloads.
   const [selectedAtomIds, setSelectedAtomIds] = useState<Set<string>>(new Set());
   const [bulkStarring, setBulkStarring] = useState(false);
+  // AA-564 3.2 — manual atomize backfill (decision 1, AA-563: atomize has exactly ONE automatic
+  // trigger, a fresh publish — any tour that entered Master Content another way, or before that
+  // trigger existed, never gets atomized on its own).
+  const [unatomizedTours, setUnatomizedTours] = useState<{ tour_id: string; tour_name: string }[]>([]);
+  const [atomizeRunning, setAtomizeRunning] = useState<string | null>(null); // status line while polling
+  const [atomizeTriggering, setAtomizeTriggering] = useState(false);
+
+  const loadUnatomized = useCallback(() => {
+    fetchJson<{ total: number; tours: { tour_id: string; tour_name: string }[] }>("/api/admin/atoms/unatomized-tours")
+      .then(d => setUnatomizedTours(d.tours))
+      .catch(() => {});
+  }, []);
+  useEffect(() => { loadUnatomized(); }, [loadUnatomized]);
+
+  async function triggerAtomize(target: { tour_id: string } | { all: true }) {
+    setAtomizeTriggering(true);
+    try {
+      const res = await fetch("/api/admin/atoms/atomize", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(target),
+      });
+      if (!res.ok) { setAtomizeTriggering(false); return; }
+      const body: { tour_ids: string[] } = await res.json();
+      setAtomizeRunning(
+        "all" in target ? `Atomizing ${body.tour_ids.length} tours…` : "Atomizing…",
+      );
+      // Poll until every accepted tour has dropped off the unatomized list (or ~10 min elapses —
+      // run_t5_atomize() can take a while, up to one Bedrock call per itinerary day, per tour).
+      const pending = new Set(body.tour_ids);
+      let attempts = 0;
+      const poll = setInterval(async () => {
+        attempts += 1;
+        const d = await fetchJson<{ tours: { tour_id: string; tour_name: string }[] }>("/api/admin/atoms/unatomized-tours").catch(() => null);
+        if (d) {
+          const stillPending = new Set(d.tours.map(t => t.tour_id));
+          for (const id of Array.from(pending)) if (!stillPending.has(id)) pending.delete(id);
+          setUnatomizedTours(d.tours);
+        }
+        if (pending.size === 0 || attempts >= 120) {
+          clearInterval(poll);
+          setAtomizeRunning(null);
+          onSummaryChange();
+        }
+      }, 5000);
+    } finally {
+      setAtomizeTriggering(false);
+    }
+  }
 
   const loadAtoms = useCallback((offset: number, append: boolean) => {
     if (append) setLoadingMore(true); else setAtomsLoading(true);
@@ -243,15 +291,27 @@ function AtomizeSection({ summary, summaryLoading, selectedTour, onTourChange, o
   }
 
   const breakdown = summary?.distinctiveness_breakdown ?? { HIGH: 0, MED: 0, LOW: 0 };
+  // AA-564 1.3 — this block used to always read the whole-dataset `summary.total_count`/
+  // `reviewed_count`, even when a single Tour was selected (the header stat bar above it does
+  // filter correctly, which is why the two used to visibly disagree). `summary.by_tour` already
+  // carries per-tour `atom_count`/`unreviewed_count` (GET /admin/atoms/summary, unchanged) — just
+  // read that when a Tour is selected instead of the platform-wide totals. High/Medium/Low stays
+  // platform-wide on purpose (decision 3, AA-563/564: backend's distinctiveness breakdown has no
+  // per-tour grouping, out of scope here) — labeled below so it doesn't read as another bug.
+  const selectedTourMeta = selectedTour ? (summary?.by_tour ?? []).find(t => t.tour_id === selectedTour) ?? null : null;
+  const totalAtoms = selectedTourMeta ? selectedTourMeta.atom_count : (summary?.total_count ?? 0);
+  const reviewedAtoms = selectedTourMeta
+    ? selectedTourMeta.atom_count - selectedTourMeta.unreviewed_count
+    : (summary?.reviewed_count ?? 0);
 
   return (
     <>
       {summaryLoading ? <LoadingScreen msg="Loading curation dashboard…" /> : (
         <>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 14, marginBottom: 20 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 14, marginBottom: 6 }}>
             {[
-              ["Total atoms", summary?.total_count ?? 0, A.gold],
-              ["Reviewed", summary?.reviewed_count ?? 0, A.green],
+              ["Total atoms", totalAtoms, A.gold],
+              ["Reviewed", reviewedAtoms, A.green],
               ["High distinctiveness", breakdown.HIGH, A.green],
               ["Medium", breakdown.MED, A.amber],
               ["Low", breakdown.LOW, A.muted2],
@@ -262,6 +322,42 @@ function AtomizeSection({ summary, summaryLoading, selectedTour, onTourChange, o
               </Card>
             ))}
           </div>
+          <div style={{ fontSize: 10.5, color: A.muted2, marginBottom: 14 }}>
+            {selectedTourMeta
+              ? "Total atoms/Reviewed are for the selected Tour. High/Medium/Low distinctiveness stays platform-wide (all tours)."
+              : "All 5 figures are platform-wide (all tours)."}
+          </div>
+
+          {/* AA-564 3.2 — manual atomize backfill banner. Only 1 automatic trigger exists (a
+              fresh publish, AA-526) — this is the only way an OLDER Master Content tour ever
+              gets atomized. */}
+          {unatomizedTours.length > 0 && (
+            <Card style={{ padding: "14px 16px", marginBottom: 16, borderColor: A.gold }}>
+              <div style={{ fontSize: 13, color: A.body, marginBottom: 10 }}>
+                ⚠ <strong>{unatomizedTours.length} tour{unatomizedTours.length === 1 ? "" : "s"}</strong> in
+                Master Content {unatomizedTours.length === 1 ? "has" : "have"} never been atomized — atomize
+                only runs automatically the moment a tour is freshly published (AA-526); anything published
+                before that, or another way, needs a manual run.
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <Btn
+                  variant="secondary" size="sm"
+                  disabled={atomizeTriggering || !!atomizeRunning || !selectedTour || !unatomizedTours.some(t => t.tour_id === selectedTour)}
+                  onClick={() => selectedTour && triggerAtomize({ tour_id: selectedTour })}
+                >
+                  Atomize selected Tour
+                </Btn>
+                <Btn
+                  variant="secondary" size="sm"
+                  disabled={atomizeTriggering || !!atomizeRunning}
+                  onClick={() => triggerAtomize({ all: true })}
+                >
+                  Atomize all {unatomizedTours.length} tours (runs in background)
+                </Btn>
+                {atomizeRunning && <span style={{ fontSize: 12, color: A.muted }}>{atomizeRunning}</span>}
+              </div>
+            </Card>
+          )}
 
           <div style={{ display: "grid", gridTemplateColumns: "280px 1fr", gap: 18, alignItems: "start" }}>
             {/* AA-554 B.4/B.5 — sticky (same `position: sticky, top: 0` pattern AA-551 already
@@ -876,7 +972,10 @@ function RouteHubSection({ tourId, market, focusRouteId, onClearFocus, onNavigat
               own "Days" cell) to expand a real per-Day breakdown below it. */}
           <AuditTable sortable rows={filteredRows} rowKey={r => `${r.route_id}-${r.market ?? "none"}`} columns={[
             { key: "status", label: "Status", render: r => r.superseded_at
-              ? <Badge color="gray">superseded v{r.version}</Badge>
+              // AA-564 1.4 — SUPERSEDED had no explanation for anyone not reading route_detection.py.
+              ? <span title="This Route's identity (Tour + day-span) was recomputed with a different shape or no longer qualifies — the old version is kept, never deleted, so any Slate proposal still pointing at it keeps resolving instead of breaking.">
+                  <Badge color="gray">superseded v{r.version}</Badge>
+                </span>
               : <Badge color="green">current{r.version > 1 ? ` v${r.version}` : ""}</Badge>,
               sortValue: r => r.superseded_at ? 1 : 0 },
             { key: "tour", label: "Tour", render: r => r.tour_name ?? "—",
@@ -1020,7 +1119,13 @@ function PageFooter({ total, offset, pageSize, onOffset }: {
 interface SlateRow {
   subject_id: string; tenant_name: string | null; channel: string; state: string; score: number | null;
   segment_id: string | null; route_id: string | null; created_at: string;
+  // AA-564 2.1 — real topic name, joined server-side the same way the Tenant Portal already does
+  // (services/acp_shared/slate.py::fetch_slate()) instead of a raw segment_id/route_id.
+  canonical_place: string | null; canonical_action: string | null; hub_name: string | null;
+  tour_name: string | null; segment_count: number | null;
 }
+
+interface TenantOption { tenant_id: string; name: string; }
 
 const SLATE_STATE_COLOR: Record<string, "gray" | "blue" | "green" | "red"> = {
   proposed: "gray", picked: "blue", used: "green", cut: "red",
@@ -1049,9 +1154,9 @@ function SlateExplainerNote() {
       <div style={{ fontSize: 13, color: A.body, lineHeight: 1.55, marginBottom: 10 }}>
         <strong>What is Slate?</strong> It&apos;s the list of topic ideas the pipeline has proposed
         for a tenant to write about — each one already scored and checked against that Channel&apos;s
-        minimum bar. This page is a read-only, platform-wide view across every tenant; a tenant only
-        ever sees their own, in their portal at Workspace → Slate
-        (<code style={{ fontFamily: mono }}>/portal/slate</code>).
+        minimum bar. This page lets Admin view any one tenant's proposals (pick a Tenant below);
+        a tenant only ever sees and acts on their own, in their portal's Social Content page
+        (<code style={{ fontFamily: mono }}>/portal/t7-planning</code>).
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 18px", fontSize: 11.5, color: A.muted }}>
         <span><strong>proposed</strong> = the system suggested it, tenant hasn&apos;t acted yet</span>
@@ -1067,24 +1172,56 @@ function SlateExplainerNote() {
   );
 }
 
-function SlateSection({ tourId }: { tourId: string | null }) {
+// AA-564 2.1 — same title logic as the Tenant Portal's SlateTab.tsx:295-297, so Admin and Tenant
+// read identically instead of Admin showing a generic "Segment"/"Route" label.
+function slateTopicTitle(r: SlateRow): string {
+  if (r.route_id) return r.hub_name ?? "Untitled journey";
+  return [r.canonical_place, r.canonical_action].filter(Boolean).join(" — ") || "Untitled moment";
+}
+
+const CHANNELS = ["blog", "linkedin", "facebook", "instagram", "tiktok", "email", "landing_page", "ads"];
+
+function SlateSection() {
+  // AA-564 2.2 — Slate is genuinely per-tenant (ADR-0003); this section now picks a Tenant, not a
+  // Tour, and no longer depends on the page's shared Tour/Market filter at all.
+  const [selectedTenant, setSelectedTenant] = useState<string | null>(null);
+  const [selectedChannel, setSelectedChannel] = useState("");
+  const { data: tenantsData } = usePlatformFetch<{ tenants: TenantOption[] }>("/api/admin/tenants", {}, true);
+  const tenants = tenantsData?.tenants ?? [];
+
   const { data, loading, error, reload } = usePlatformFetch<{ data: SlateRow[]; total: number; by_state: Record<string, number> }>(
-    "/api/admin/dashboard/slate", { tour_id: tourId ?? undefined }, !!tourId,
+    "/api/admin/dashboard/slate", { tenant_id: selectedTenant ?? undefined, channel: selectedChannel || undefined }, !!selectedTenant,
   );
-  if (!tourId) {
-    return <><SlateExplainerNote /><EmptyState title="Select a Tour" body="Slate is tenant-specific — pick a Tour above to see it." /></>;
+
+  const tenantPicker = (
+    <div style={{ display: "flex", gap: 10, marginBottom: 14, alignItems: "center", flexWrap: "wrap" }}>
+      <span style={{ fontSize: 12, color: A.muted }}>Tenant:</span>
+      <select value={selectedTenant ?? ""} onChange={e => setSelectedTenant(e.target.value || null)} style={{ ...selectStyle, minWidth: 200, fontWeight: 600 }}>
+        <option value="">Choose a tenant…</option>
+        {tenants.map(t => <option key={t.tenant_id} value={t.tenant_id}>{t.name}</option>)}
+      </select>
+      <span style={{ fontSize: 12, color: A.muted }}>Channel:</span>
+      <select value={selectedChannel} onChange={e => setSelectedChannel(e.target.value)} style={selectStyle}>
+        <option value="">All channels</option>
+        {CHANNELS.map(c => <option key={c} value={c}>{c}</option>)}
+      </select>
+    </div>
+  );
+
+  if (!selectedTenant) {
+    return <><SlateExplainerNote />{tenantPicker}<EmptyState title="Select a Tenant" body="Slate is tenant-specific — pick a Tenant above to see their proposals. Each row shows its own originating Tour/Segment/Route, so no Tour needs to be chosen first." /></>;
   }
-  if (error) return <><SlateExplainerNote /><ErrorState message={error} onRetry={reload} /></>;
-  if (loading) return <><SlateExplainerNote /><LoadingScreen msg="Loading Slate…" /></>;
+  if (error) return <><SlateExplainerNote />{tenantPicker}<ErrorState message={error} onRetry={reload} /></>;
+  if (loading) return <><SlateExplainerNote />{tenantPicker}<LoadingScreen msg="Loading Slate…" /></>;
   if (!data || data.total === 0) {
-    return <><SlateExplainerNote /><EmptyState title="No Slate proposals yet" body="No proposals yet for this Tour — Slate proposes a Subject once a Segment/Route clears a Channel's Bar." /></>;
+    return <><SlateExplainerNote />{tenantPicker}<EmptyState title="No Slate proposals yet" body="No proposals yet for this tenant — Slate proposes a Subject once a Segment/Route clears a Channel's Bar." /></>;
   }
   return (
     <>
       <SlateExplainerNote />
+      {tenantPicker}
       {/* AA-554 H.23 — sticky header stat bar, same mechanism Segment/Score's filter rows use.
-          H.3 — CUT badge is NOT hidden (shows the real, always-0-for-now count) with a small note
-          underneath explaining why, so it doesn't read as a bug. */}
+          H.3 — CUT badge is NOT hidden (shows the real count) with a small note underneath. */}
       <div style={{ display: "flex", gap: 14, marginBottom: 14, flexWrap: "wrap", alignItems: "flex-start",
         position: "sticky", top: 0, background: A.bg, zIndex: 5, paddingTop: 4, paddingBottom: 10 }}>
         {SLATE_STATE_ORDER.map(state => (
@@ -1092,6 +1229,8 @@ function SlateSection({ tourId }: { tourId: string | null }) {
             <span title={SLATE_STATE_TOOLTIP[state]} style={{ cursor: "help" }}>
               <Badge color={SLATE_STATE_COLOR[state] ?? "gray"}>{state}: {data.by_state[state] ?? 0}</Badge>
             </span>
+            {/* AA-564 Group 5 — removed once AA-556's Cut button ships in the Tenant Portal
+                (Group 4.2); kept until then so this doesn't overclaim a feature not live yet. */}
             {state === "cut" && (
               <div style={{ fontSize: 10, color: A.muted2, marginTop: 3, maxWidth: 150 }}>
                 Manual cut action coming soon
@@ -1118,19 +1257,30 @@ function SlateSection({ tourId }: { tourId: string | null }) {
           ),
           sortValue: r => r.state, filterValue: r => r.state,
         },
-        { key: "tenant", label: "Tenant", render: r => r.tenant_name ?? "—",
-          sortValue: r => r.tenant_name ?? "", filterValue: r => r.tenant_name ?? "" },
         { key: "score", label: "Score", render: r => r.score ?? "—", sortValue: r => r.score },
         {
-          key: "kind", label: "Idea from", render: r => (
+          key: "kind", label: "Kind", render: r => (
             <span title={r.route_id
               ? "This idea covers a whole multi-day Route (a journey), not just one place."
               : "This idea is about one specific place/moment (a Segment)."}
               style={{ cursor: "help" }}>
-              {r.route_id ? "Whole journey (Route)" : "One place (Segment)"}
+              {r.route_id ? "Route" : "Segment"}
             </span>
           ),
           sortValue: r => r.route_id ? "Route" : "Segment", filterValue: r => r.route_id ? "Route" : "Segment",
+        },
+        {
+          // AA-564 2.1 — the whole point of this fix: a real topic name + its originating Tour
+          // (and segment count for Route-based ideas), instead of a generic "Segment"/"Route" label.
+          key: "topic", label: "Topic", render: r => (
+            <div>
+              <div style={{ fontWeight: 600, color: A.ink }}>{slateTopicTitle(r)}</div>
+              <div style={{ fontSize: 11, color: A.muted2, marginTop: 2 }}>
+                ↳ tour: &quot;{r.tour_name || "—"}&quot;{r.segment_count != null ? ` · ${r.segment_count} segments` : ""}
+              </div>
+            </div>
+          ),
+          sortValue: r => slateTopicTitle(r), filterValue: r => `${slateTopicTitle(r)} ${r.tour_name ?? ""}`,
         },
         { key: "created", label: "Proposed", render: r => new Date(r.created_at).toLocaleString(),
           sortValue: r => r.created_at },
@@ -1265,7 +1415,13 @@ export default function AtomCurationDashboardPage() {
           </div>
         </div>
 
-        <div style={{ flex: 1, overflowY: "auto", padding: "20px 32px 32px" }}>
+        {/* AA-564 1.1 — `minHeight: 0` is required here: a flex column's default `min-height:auto`
+            makes this item grow to its content's min-content size (which exceeds the viewport once
+            the atom list/tables get tall) instead of shrinking to its flex-basis and scrolling
+            internally, which pushed the overflow up to the document — dragging the header (which
+            relies on being outside this scroll region, not on `position:sticky`) off-screen on a
+            real full-page scroll. This is the actual root cause AA-554/AA-557 both missed. */}
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "20px 32px 32px" }}>
           <div className="a527-dash-body" style={{ display: "flex", gap: 20, alignItems: "flex-start" }}>
             <div className="a527-inner-sidebar" style={{
               width: 200, flexShrink: 0, display: "flex", flexDirection: "column", gap: 2,
@@ -1325,7 +1481,7 @@ export default function AtomCurationDashboardPage() {
                   focusRouteId={focusRouteId} onClearFocus={() => setFocusRouteId(null)}
                   onNavigateToSegment={routeId => { setFocusRouteId(routeId); setActiveSection("segment"); }} />
               )}
-              {activeSection === "slate" && <SlateSection tourId={selectedTour} />}
+              {activeSection === "slate" && <SlateSection />}
             </div>
           </div>
         </div>
