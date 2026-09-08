@@ -69,9 +69,9 @@ export default function BrandPage() {
   return (
     <div style={{ display: "flex", minHeight: "100vh", fontFamily: sans, background: A.bg }}>
       <InternalSidebar isAdmin={isAdmin} userName={userName} />
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, height: "100vh" }}>
         <TopBar breadcrumb={["Content", "Brand Identity"]} />
-        <main style={{ flex: 1, overflowY: "auto", padding: "28px 36px 56px" }}>
+        <main style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "28px 36px 56px" }}>
           <div style={{ maxWidth: 800 }}>
             {!data ? (
               <div style={{ color: A.muted, padding: 40 }}>Loading…</div>

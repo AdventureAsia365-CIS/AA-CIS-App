@@ -264,7 +264,7 @@ export function CompareModal({ tourIds, onClose }: {
                 <div
                   ref={el => { scrollRefs.current[idx] = el; }}
                   onScroll={e => handleScroll(idx, e)}
-                  style={{ flex: 1, overflowY: "auto", padding: 16 }}
+                  style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 16 }}
                 >
                   {activeTab === "summary" && (
                     gen?.aa_summary

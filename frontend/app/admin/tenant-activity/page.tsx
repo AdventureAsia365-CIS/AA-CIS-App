@@ -144,7 +144,7 @@ export default function TenantActivityPage() {
           </div>
         </div>
 
-        <div style={{ flex: 1, overflowY: "auto", padding: "20px 32px 32px" }}>
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "20px 32px 32px" }}>
           {summaryLoading ? <LoadingScreen msg="Loading tours…" /> : (
             <div className="a551-dash-body" style={{ display: "flex", gap: 20, alignItems: "flex-start" }}>
               <div className="a551-inner-sidebar" style={{

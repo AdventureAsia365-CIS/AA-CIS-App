@@ -482,9 +482,9 @@ export default function S1Page() {
   }
 
   return (
-    <div style={{ display: "flex", minHeight: "100vh", background: A.bg, fontFamily: sans }}>
+    <div style={{ display: "flex", height: "100vh", background: A.bg, fontFamily: sans }}>
       <AdminSidebar />
-      <main style={{ flex: 1, padding: "32px 36px", overflowY: "auto" }}>
+      <main style={{ flex: 1, minHeight: 0, padding: "32px 36px", overflowY: "auto" }}>
         {/* Header */}
         <div style={{ marginBottom: 28 }}>
           <div style={{ fontFamily: serif, fontSize: 26, fontWeight: 500, color: A.ink, letterSpacing: "-0.02em" }}>
