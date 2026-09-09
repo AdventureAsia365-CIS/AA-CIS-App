@@ -1,0 +1,90 @@
+"use client";
+// app/admin/_components/SocialContentSubNav.tsx — AA-575
+//
+// STEP0 (AA-575): 01-05 are NOT separate Next.js routes — they are client-side tab state
+// (`SectionKey`) inside ONE page, atom-curation/page.tsx. Its "01-06" inner-sidebar used to be
+// JSX embedded directly in that page's own render tree (never a shared component). Content Trace
+// (06, /admin/tenant-activity) is a genuinely separate route/page with its own `page.tsx` render
+// tree — it never had that inline JSX, so the sub-nav simply didn't exist there. That's the root
+// cause of the sub-nav "disappearing": it was never a layout wrapping both routes, just one
+// page's local markup.
+//
+// Fix: this component is the single source of truth for the 01-06 list, used by both pages.
+// - Rendered from atom-curation/page.tsx (which owns 01-05's tab state): pass `onSelectSection`
+//   so 01-05 are same-page tab switches (no navigation/reload — preserves the instant-switch UX
+//   AA-554's own comments call out as load-bearing).
+// - Rendered from any other page (Content Trace today): omit `onSelectSection` so 01-05 render as
+//   real links to `/admin/atom-curation?section=<key>`, which reads that query param on mount to
+//   open the right tab.
+// 06 · Content Trace is always a real link/highlight — there's no local tab state for it to hook
+// into from atom-curation, and it's a no-op nav when already there.
+import Link from "next/link";
+import { Puzzle, Layers, TrendingUp, GitBranch, FileStack, Radio } from "lucide-react";
+import { A, sans } from "./adminUi";
+
+export type SectionKey = "atomize" | "segment" | "score" | "route_hub" | "slate";
+export type SubNavKey = SectionKey | "content_trace";
+
+const SECTIONS: { key: SectionKey; label: string; icon: React.ReactNode }[] = [
+  { key: "atomize",    label: "01 · Atomize",   icon: <Puzzle size={15} /> },
+  { key: "segment",    label: "02 · Segment",   icon: <Layers size={15} /> },
+  { key: "score",      label: "03 · Score",     icon: <TrendingUp size={15} /> },
+  { key: "route_hub",  label: "04 · Route/Hub", icon: <GitBranch size={15} /> },
+  { key: "slate",      label: "05 · Slate",     icon: <FileStack size={15} /> },
+];
+
+export default function SocialContentSubNav({ active, onSelectSection }: {
+  active: SubNavKey;
+  onSelectSection?: (key: SectionKey) => void;
+}) {
+  return (
+    <>
+      {/* Media query shared across every page that mounts this component — <style> tags are
+          global (not scoped to this subtree), so defining it once here covers atom-curation's
+          own ".a527-dash-body" wrapper too without duplicating the block per-page. */}
+      <style>{`
+        @media (max-width: 980px) {
+          .a527-inner-sidebar { flex-direction: row !important; overflow-x: auto !important; width: 100% !important; border-right: none !important; border-bottom: 1px solid ${A.line}; position: static !important; }
+          .a527-inner-sidebar button, .a527-inner-sidebar a { white-space: nowrap; }
+          .a527-dash-body { flex-direction: column !important; }
+        }
+      `}</style>
+      <div className="a527-inner-sidebar" style={{
+        width: 200, flexShrink: 0, display: "flex", flexDirection: "column", gap: 2,
+        background: A.card, border: `1px solid ${A.line}`, borderRadius: 10, padding: 6,
+        position: "sticky", top: 0,
+      }}>
+        {SECTIONS.map(s => {
+          const isActive = active === s.key;
+          const itemStyle: React.CSSProperties = {
+            display: "flex", alignItems: "center", gap: 8, padding: "9px 12px", borderRadius: 7,
+            border: "none", background: isActive ? A.goldTint : "transparent",
+            color: isActive ? A.gold : A.body, cursor: "pointer", fontFamily: sans,
+            fontSize: 12.5, fontWeight: isActive ? 700 : 500, textAlign: "left",
+            textDecoration: "none",
+          };
+          return onSelectSection ? (
+            <button key={s.key} onClick={() => onSelectSection(s.key)} style={itemStyle}>
+              {s.icon}
+              <span style={{ flex: 1 }}>{s.label}</span>
+            </button>
+          ) : (
+            <Link key={s.key} href={`/admin/atom-curation?section=${s.key}`} style={itemStyle}>
+              {s.icon}
+              <span style={{ flex: 1 }}>{s.label}</span>
+            </Link>
+          );
+        })}
+        <Link href="/admin/tenant-activity" style={{
+          display: "flex", alignItems: "center", gap: 8, padding: "9px 12px", borderRadius: 7,
+          background: active === "content_trace" ? A.goldTint : "transparent",
+          color: active === "content_trace" ? A.gold : A.body, cursor: "pointer", fontFamily: sans,
+          textDecoration: "none", fontSize: 12.5, fontWeight: active === "content_trace" ? 700 : 500,
+        }}>
+          <Radio size={15} />
+          <span style={{ flex: 1 }}>06 · Content Trace</span>
+        </Link>
+      </div>
+    </>
+  );
+}
