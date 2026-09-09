@@ -66,8 +66,15 @@ class VerifyCache<T> {
   }
 }
 
-const adminVerifyCache = new VerifyCache<{ adminId: string; role: string }>();
-const tenantVerifyCache = new VerifyCache<{ tenantId: string; name: string; planTier: string }>();
+// AA-573: exported so middleware.ts's own verifyAdminToken()/verifyTenantToken()
+// can share the same cache — those run the identical uncached-round-trip
+// pattern this file already fixed for /api/admin/* proxy calls (same
+// /auth/verify-admin|verify-tenant endpoint, same token, milliseconds apart)
+// but as a separate module they never benefited from it. A fresh login
+// followed immediately by a client-side navigation to a protected route is
+// exactly this shape — see docs/implementation-notes/AA-573.md.
+export const adminVerifyCache = new VerifyCache<{ adminId: string; role: string }>();
+export const tenantVerifyCache = new VerifyCache<{ tenantId: string; name: string; planTier: string }>();
 
 const API_URL = process.env.API_URL ?? "https://api-cis.lumiguides.it.com";
 

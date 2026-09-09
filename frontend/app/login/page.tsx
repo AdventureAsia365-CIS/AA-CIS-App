@@ -1,6 +1,5 @@
 "use client";
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { User, Lock } from "lucide-react";
 
 export default function LoginPage() {
@@ -8,9 +7,16 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError]       = useState("");
   const [loading, setLoading]   = useState(false);
-  const router = useRouter();
 
   const login = async () => {
+    // AA-573: guard against a second concurrent submit (rapid double-Enter,
+    // or Enter racing the button click) — previously nothing here checked
+    // `loading`, so a second call could fire its own /api/auth/login +
+    // router.push("/admin/dashboard") while the first was still in flight.
+    // Two concurrent client-side navigations to the same route is what the
+    // bug report's Network tab captured (2x /login, a stray 307). Mirrors
+    // the guard tenant-login/page.tsx already had.
+    if (loading) return;
     if (!username || !password) { setError("Enter username and password"); return; }
     setLoading(true);
     setError("");
@@ -42,7 +48,20 @@ export default function LoginPage() {
       document.cookie = `cis_role=${data.role}; path=/; max-age=86400`;
       document.cookie = `cis_user=${encodeURIComponent(data.name)}; path=/; max-age=86400`;
 
-      router.push(data.role === "admin" ? "/admin/dashboard" : "/upload");
+      // AA-573: a full browser navigation instead of router.push(). The
+      // client-side App Router transition depends on middleware.ts NOT
+      // intervening on the very next request — but middleware's own
+      // verifyAdminToken() re-checks the JWT it was just issued via an
+      // uncached /auth/verify-admin round trip (the same uncached-round-trip
+      // shape AA-551 already fixed for /api/admin/* proxy calls, just a
+      // separate instance of it here) and can race/redirect back to /login.
+      // router.push() doesn't await/settle on that outcome, so `loading`
+      // never got reset — the button was stuck on "Connecting..." forever
+      // with no recovery but a manual refresh. window.location.href makes
+      // this a real navigation: whatever the server ultimately serves is
+      // what renders, and a fresh page load always leaves the old stuck
+      // state behind either way.
+      window.location.href = data.role === "admin" ? "/admin/dashboard" : "/upload";
     } catch {
       setError("Network error — check connection");
       setLoading(false);
@@ -66,7 +85,7 @@ export default function LoginPage() {
             <User size={13} style={{ position:"absolute", left:12, top:"50%", transform:"translateY(-50%)", color:"var(--text-muted)" }} />
             <input type="text" value={username} onChange={e => { setUsername(e.target.value); setError(""); }}
               placeholder="Username"
-              onKeyDown={e => e.key === "Enter" && login()}
+              onKeyDown={e => e.key === "Enter" && !loading && login()}
               style={{ width:"100%", padding:"10px 12px 10px 34px", background:"var(--bg-primary)", border:`1px solid ${error ? "#ef4444" : "var(--border)"}`, borderRadius:8, color:"var(--text-primary)", fontSize:13, outline:"none" }} />
           </div>
         </div>
@@ -77,7 +96,7 @@ export default function LoginPage() {
             <Lock size={13} style={{ position:"absolute", left:12, top:"50%", transform:"translateY(-50%)", color:"var(--text-muted)" }} />
             <input type="password" value={password} onChange={e => { setPassword(e.target.value); setError(""); }}
               placeholder="••••••••"
-              onKeyDown={e => e.key === "Enter" && login()}
+              onKeyDown={e => e.key === "Enter" && !loading && login()}
               style={{ width:"100%", padding:"10px 12px 10px 34px", background:"var(--bg-primary)", border:`1px solid ${error ? "#ef4444" : "var(--border)"}`, borderRadius:8, color:"var(--text-primary)", fontSize:13, outline:"none" }} />
           </div>
           {error && <div style={{ fontSize:12, color:"#ef4444", marginTop:6 }}>{error}</div>}

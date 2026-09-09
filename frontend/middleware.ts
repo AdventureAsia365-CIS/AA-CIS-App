@@ -44,6 +44,7 @@
 // under AA-253, out of scope here).
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import { adminVerifyCache, tenantVerifyCache } from "./lib/auth-server";
 
 const PUBLIC_PATHS = ["/login", "/tenant-login"];
 
@@ -153,6 +154,13 @@ async function verifyAdminToken(request: NextRequest): Promise<NextResponse | nu
     return response;
   }
 
+  // AA-573: shares lib/auth-server.ts's cache (AA-551). Without this, the
+  // very first protected-page navigation right after login re-ran this
+  // same 3s-timeout /auth/verify-admin round trip for a token issued
+  // milliseconds earlier — under any transient backend latency this could
+  // lose the race and bounce the fresh login straight back to /login.
+  if (adminVerifyCache.get(token)) return null;
+
   try {
     const res = await fetch(`${API_URL}/auth/verify-admin`, {
       method: "POST",
@@ -167,6 +175,8 @@ async function verifyAdminToken(request: NextRequest): Promise<NextResponse | nu
       response.cookies.delete("cis_admin_token");
       return response;
     }
+    const data = await res.json();
+    adminVerifyCache.set(token, { adminId: data.admin_id, role: data.role });
     return null;
   } catch {
     const isDev = process.env.NODE_ENV === "development";
@@ -187,6 +197,9 @@ async function verifyTenantToken(request: NextRequest): Promise<NextResponse | n
     return NextResponse.redirect(new URL("/tenant-login", request.url));
   }
 
+  // AA-573: same shared-cache fix as verifyAdminToken() above.
+  if (tenantVerifyCache.get(token)) return null;
+
   try {
     const res = await fetch(`${API_URL}/auth/verify-tenant`, {
       method: "POST",
@@ -206,6 +219,8 @@ async function verifyTenantToken(request: NextRequest): Promise<NextResponse | n
       response.cookies.delete("cis_tenant_plan");
       return response;
     }
+    const data = await res.json();
+    tenantVerifyCache.set(token, { tenantId: data.tenant_id, name: data.name, planTier: data.plan_tier });
     return null;
   } catch {
     // Verification service unreachable — fail open in dev, fail closed in prod
