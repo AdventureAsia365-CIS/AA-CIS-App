@@ -382,7 +382,7 @@ function PublishLogSection() {
             violation T10 didn&apos;t catch). Tenants can also unpublish their own content; this
             log doesn&apos;t distinguish who acted beyond the &quot;Unpublished By&quot; column.
             Same dataset as{" "}
-            <a href="/admin/tenant-activity" style={{ color: A.ink }}>Tenant Activity</a>&apos;s 08
+            <a href="/admin/tenant-activity" style={{ color: A.ink }}>Content Trace</a>&apos;s 08
             Publish, across all tenants here vs filtered per-Tour there.
           </div>
         </div>
@@ -517,7 +517,7 @@ function ContentLogSection() {
             held/failed rows, per-gate pass/fail + the retry-feedback trail. Post-hoc pattern
             review + lesson log, not a queue to action — AA does not gate tenant content.
             Same dataset as{" "}
-            <a href="/admin/tenant-activity" style={{ color: A.ink }}>Tenant Activity</a>&apos;s 07
+            <a href="/admin/tenant-activity" style={{ color: A.ink }}>Content Trace</a>&apos;s 07
             Review, across all tenants here vs filtered per-Tour there.
           </div>
         </div>
