@@ -40,6 +40,7 @@ from services.acp_content_writing.facts import fetch_facts_for_writing, format_f
 from services.acp_content_writing.generate import rewrite_with_feedback, write_content
 from services.acp_content_writing.quality_gates import (deep_strip_citation_tags, run_quality_gates,
                                                           strip_citation_tags)
+from services.acp_shared.audit_log import TenantAuditAction, write_audit_log
 from services.acp_shared.content_embedding import compute_embedding, embedding_to_pgvector_literal
 from services.acp_shared.piece_similarity import find_similar_pieces
 from services.acp_planning.tenant_pool import fetch_tenant_trips
@@ -356,6 +357,17 @@ async def _insert_placeholder_piece(
               )
             """,
             request_id,
+        )
+
+        # AA-559 — semantic tenant-activity log: this content_piece row now genuinely exists
+        # (status='processing') — NOT "content finished", the actual LLM write/gate loop hasn't
+        # run yet (that completion is logged separately, _finalize_piece()'s own
+        # CONTENT_PIECE_FINISHED below). Same connection/transaction as the INSERT+UPDATE above.
+        await write_audit_log(
+            conn, tenant_id=str(tenant_id), actor=f"tenant:{tenant_id}",
+            action=TenantAuditAction.CONTENT_PIECE_CREATED, resource_type="content_piece",
+            resource_id=str(row["piece_id"]),
+            details={"request_id": str(request_id), "channel": channel},
         )
     return _row_to_dict(row)
 
@@ -802,6 +814,21 @@ async def _finalize_piece(
             piece_id, attempt_number, content_text, status, held_reason,
             json.dumps(gate_ledger), json.dumps(repair_log), seo_title, meta_description, slug,
             json.dumps(flags), content_summary, embedding_literal,
+        )
+
+        # AA-559 — semantic tenant-activity log: the REAL "content finished writing" event
+        # (unlike _insert_placeholder_piece()'s CONTENT_PIECE_CREATED, which fires before any
+        # LLM/gate work). Covers all 3 call sites of this function (main loop, exception-handler
+        # fallback, buffer retry) in one place — every one of them reaches a terminal status
+        # (approved/held/failed).
+        await write_audit_log(
+            conn, tenant_id=str(row["tenant_id"]), actor=f"tenant:{row['tenant_id']}",
+            action=TenantAuditAction.CONTENT_PIECE_FINISHED, resource_type="content_piece",
+            resource_id=str(row["piece_id"]),
+            details={
+                "status": status, "held_reason": held_reason, "attempt_number": attempt_number,
+                "request_id": str(row["angle_gate_request_id"]),
+            },
         )
     return _row_to_dict(row)
 
