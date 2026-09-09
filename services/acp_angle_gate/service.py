@@ -65,19 +65,26 @@ class WrongStatusError(AngleGateError):
 _ATOM_QUERY = """
     SELECT atom_id, tour_id, text
     FROM acp_contract.tour_atoms
-    WHERE atom_id = $1 AND owner_scope = $2 AND NOT deleted AND NOT is_empty_marker
+    WHERE atom_id = $1 AND owner_scope IN ('platform', $2) AND NOT deleted AND NOT is_empty_marker
 """
 
 async def _fetch_atom_for_tenant(tenant_id: UUID, atom_id: str, pool) -> dict:
-    """Tenant-scoped single-atom fetch, same owner_scope=tenant_id convention
-    services.acp_planning.tenant_pool.fetch_tenant_atoms_by_trip() already established for T7
-    (AA-448) — not a new security pattern. No existing function in this repo fetches ONE atom by
-    id, tenant-scoped (tenant_pool.py's own function returns ALL of a tenant's atoms grouped by
-    trip); kept local here rather than added to tenant_pool.py since it's T8-specific."""
+    """AA-567 correction: this docstring used to claim "tenant-scoped... not a new security
+    pattern," following `tenant_pool.py`'s T7 precedent — that precedent does not actually apply
+    here. T7's `owner_scope=tenant_id`-only convention answers a different question ("how many
+    atoms has THIS tenant personally produced via their own T5 rewrite," matching Marketplace's
+    inventory count) than this function does ("what is the text of the ONE atom this
+    Slate-proposed Segment/Subject already resolved to, so T8/T9 can write about it"). Since
+    AA-526, atomize is platform-wide by default (`owner_scope='platform'`) — this atom_id was
+    already accepted by `slate.py::_resolve_representative_atom()`'s own (now-fixed, AA-567)
+    `owner_scope IN ('platform', tenant_id)` check before an `angle_gate_request` was ever
+    created for it, so re-checking it here with the OLD, narrower, tenant-only filter would
+    reject the exact same atom a moment later — the actual bug AA-567 fixes. Kept a tenant-owned
+    atom acceptable too, unchanged from before."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(_ATOM_QUERY, atom_id, str(tenant_id))
     if row is None:
-        raise AtomNotFoundError(f"atom_id={atom_id!r} not found for this tenant (or not owned by them)")
+        raise AtomNotFoundError(f"atom_id={atom_id!r} not found (deleted, or not a live platform/tenant atom)")
     return {"atom_id": row["atom_id"], "trip_id": row["tour_id"], "text": row["text"]}
 
 

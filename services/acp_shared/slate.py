@@ -603,14 +603,31 @@ async def _resolve_representative_atom(
 ) -> tuple[str | None, str | None, list[str] | None]:
     """(atom_id, trip_id, route_segment_ids) to hand T8/T9 — the third element is `None` for a
     Segment pick and the Route's full `ordered_segment_ids` for a Route/Blog pick (Gap A). See
-    `pick_subject()`'s own docstring for what now actually consumes it."""
+    `pick_subject()`'s own docstring for what now actually consumes it.
+
+    AA-567 — `owner_scope IN ('platform', tenant_id)`, NOT `owner_scope = tenant_id` alone. Since
+    AA-526, atomize runs exactly once, platform-wide (`owner_scope='platform'`) — a tenant-owned
+    atom (`owner_scope=tenant_id`, from that tenant's own T5 rewrite) is the rare exception, not
+    the main path. Every real Segment this function is ever called for is built from the shared
+    platform atom pool (confirmed live: 100% of a live sample of WanderLux Travel's proposed
+    Subjects resolved to `owner_scope='platform'`-only Segments, 0 tenant-owned atoms among
+    them) — the old tenant-only filter meant this function, and everything downstream of it
+    (T8/T9/T10), could never actually succeed for the real, common case. Confirmed via
+    docs/adr/0001 + 0003 and CONTEXT.md's own cross-tenant table (row 2: "every tenant's Segment
+    build reads the SAME acp_contract.tour_atoms rows... owner_scope='platform'") that Atom
+    ownership carries no tenant-isolation meaning — atoms hold AA's own neutral, brand-agnostic
+    text (AA-535), not tenant content; the tenant-facing security boundary is which
+    angle_gate_request/content_piece ROW a tenant can access (tenant_id on those tables), never
+    which underlying atom text they can read. Kept a tenant-owned atom acceptable too (not
+    switched to 'platform'-only) so a tenant's own T5-rewritten-tour atoms, on the rare Segment
+    built from them, still resolve exactly as before."""
     if segment_id:
         row = await conn.fetchrow("""
             SELECT m.atom_id, ta.tour_id
             FROM acp_contract.atom_segment_member m
             JOIN acp_contract.tour_atoms ta ON ta.atom_id = m.atom_id
             WHERE m.segment_id = $1 AND NOT m.is_alias
-              AND ta.owner_scope = $2::text AND NOT ta.deleted AND NOT ta.is_empty_marker
+              AND ta.owner_scope IN ('platform', $2::text) AND NOT ta.deleted AND NOT ta.is_empty_marker
             ORDER BY m.atom_id LIMIT 1
         """, segment_id, str(tenant_id))
         return (row["atom_id"], str(row["tour_id"]), None) if row else (None, None, None)
@@ -630,7 +647,7 @@ async def _resolve_representative_atom(
         FROM acp_contract.atom_segment_member m
         JOIN acp_contract.tour_atoms ta ON ta.atom_id = m.atom_id
         WHERE m.segment_id = $1 AND ta.tour_id = $2::uuid
-          AND ta.owner_scope = $3::text
+          AND ta.owner_scope IN ('platform', $3::text)
           AND NOT m.is_alias AND NOT ta.deleted AND NOT ta.is_empty_marker
         ORDER BY m.atom_id LIMIT 1
     """, segment_ids[0], route["tour_id"], str(tenant_id))
