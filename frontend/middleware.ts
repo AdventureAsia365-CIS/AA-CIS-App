@@ -63,6 +63,10 @@ const PROTECTED_ROUTES: { prefix: string; roles: string[] }[] = [
   // `!route` branch OR the `!role` branch below — so it never actually proved this entry
   // existed). Confirmed live with a real admin session before this fix: 307 → /login even though
   // /admin/dashboard worked fine in the same session.
+  // AA-560 — TEMPORARY: this page is being retired (replaced by /admin/platform-stats below),
+  // kept in the allow-list only until that page + Content Trace's new Force-unpublish button are
+  // both confirmed working in production (issue's explicit requirement). Remove this entry in the
+  // same follow-up commit that deletes the a4-oversight route + its AdminSidebar NavItem.
   { prefix: "/admin/a4-oversight", roles: ["admin"] },
   // AA-505 — LLM cost/quality monitoring (Tenant->Model->Stage). Admin-only, same tier as
   // a4-oversight/tenants above — this shows real per-call spend + Việc C's model choice is
@@ -76,6 +80,10 @@ const PROTECTED_ROUTES: { prefix: string; roles: string[] }[] = [
   // URL so the Admin/Tenant boundary AA-550 flagged is visible in the nav, not just a comment).
   // Same admin-only tier.
   { prefix: "/admin/tenant-activity", roles: ["admin"] },
+  // AA-560 — "07 · Platform Stats": Review Log + Trust Ramp (moved from a4-oversight) + a new
+  // real backend gate/error aggregate. Same admin-only tier, same Social Content sub-nav grouping
+  // as tenant-activity above.
+  { prefix: "/admin/platform-stats", roles: ["admin"] },
   // Internal staff pages (was INTERNAL_PATHS) — admin/reviewer get real JWT
   // verification; content is the known-limitation carve-out described above.
   { prefix: "/admin/dashboard", roles: ["admin", "reviewer", "content"] },
