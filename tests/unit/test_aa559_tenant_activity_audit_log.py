@@ -6,7 +6,12 @@ trip_reallocation_suggestion) — none of them touched by this issue. This file 
 call sites NOT already covered by tests/unit/test_aa450_content_writing_service.py (content_
 piece.created/finished) or tests/unit/test_aa450_v1_content_writing.py (write.started):
   - services/acp_shared/audit_log.py — the shared write_audit_log() helper itself
-  - api/routers/auth.py::tenant_login() — tenant.login
+  - api/main.py::tenant_login() — tenant.login (NOT api/routers/auth.py::tenant_login(), which
+    is dead code — see docs/implementation-notes/AA-559.md's STEP0-correction section for why:
+    api.routers.auth's own `router` object is never app.include_router()'d, only individual
+    helpers/models are imported into api/main.py, which redeclares the real, live route itself
+    — same pattern AA-232 already hit once for the admin-login routes, per that commit's own
+    message: "fix: mount admin auth endpoints in main.py — router was never included")
   - services/acp_shared/slate.py::pick_subject() — slate.subject_picked
   - api/routers/v1_tours.py::trigger_rewrite() — tour.rewrite_triggered
 """
@@ -18,7 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import HTTPException
 
-import api.routers.auth as auth
+import api.main as main
 from api.routers import v1_tours
 from services.acp_shared import slate
 from services.acp_shared.audit_log import write_audit_log
@@ -85,16 +90,19 @@ class TestWriteAuditLogHelper:
 
 @pytest.mark.asyncio
 class TestTenantLoginAuditLog:
+    """Targets api/main.py::tenant_login() — the REAL live route (api/routers/auth.py's own
+    tenant_login() is dead code, see this file's module docstring)."""
+
     async def test_successful_login_writes_audit_row(self):
         conn = AsyncMock()
         conn.fetchrow.return_value = {
             "tenant_id": str(TENANT_ID), "name": "WanderLux", "plan_tier": "pro",
         }
         pool = _pool_with_conn(conn)
-        with patch.object(auth, "write_audit_log", new=AsyncMock()) as mock_audit, \
-             patch.object(auth, "_create_jwt", return_value="signed.jwt.token"):
-            body = auth.TenantLoginRequest(api_key="cis_" + "x" * 20)
-            result = await auth.tenant_login(body, pool=pool)
+        with patch.object(main, "write_audit_log", new=AsyncMock()) as mock_audit, \
+             patch.object(main, "_create_jwt", return_value="signed.jwt.token"):
+            body = main.TenantLoginRequest(api_key="cis_" + "x" * 20)
+            result = await main.tenant_login(body, db=pool)
 
         assert result.token == "signed.jwt.token"
         mock_audit.assert_awaited_once()
@@ -110,10 +118,10 @@ class TestTenantLoginAuditLog:
         conn = AsyncMock()
         conn.fetchrow.return_value = None
         pool = _pool_with_conn(conn)
-        with patch.object(auth, "write_audit_log", new=AsyncMock()) as mock_audit:
-            body = auth.TenantLoginRequest(api_key="cis_" + "x" * 20)
+        with patch.object(main, "write_audit_log", new=AsyncMock()) as mock_audit:
+            body = main.TenantLoginRequest(api_key="cis_" + "x" * 20)
             with pytest.raises(HTTPException):
-                await auth.tenant_login(body, pool=pool)
+                await main.tenant_login(body, db=pool)
         mock_audit.assert_not_awaited()
 
     async def test_audit_log_failure_does_not_break_login(self):
@@ -124,10 +132,10 @@ class TestTenantLoginAuditLog:
             "tenant_id": str(TENANT_ID), "name": "WanderLux", "plan_tier": "pro",
         }
         pool = _pool_with_conn(conn)
-        with patch.object(auth, "write_audit_log", new=AsyncMock(side_effect=RuntimeError("db down"))), \
-             patch.object(auth, "_create_jwt", return_value="signed.jwt.token"):
-            body = auth.TenantLoginRequest(api_key="cis_" + "x" * 20)
-            result = await auth.tenant_login(body, pool=pool)
+        with patch.object(main, "write_audit_log", new=AsyncMock(side_effect=RuntimeError("db down"))), \
+             patch.object(main, "_create_jwt", return_value="signed.jwt.token"):
+            body = main.TenantLoginRequest(api_key="cis_" + "x" * 20)
+            result = await main.tenant_login(body, db=pool)
         assert result.token == "signed.jwt.token"
 
 
