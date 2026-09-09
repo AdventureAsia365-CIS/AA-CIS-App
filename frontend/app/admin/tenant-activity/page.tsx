@@ -116,7 +116,7 @@ export default function TenantActivityPage() {
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12 }}>
             <div>
               <h1 style={{ fontFamily: serif, fontSize: 26, fontWeight: 500, color: A.ink, margin: 0 }}>
-                Tenant Activity — Write / Review / Publish
+                Content Trace — Write / Review / Publish
               </h1>
               <div style={{ fontSize: 12, color: A.muted, marginTop: 4 }}>
                 Per-Tour, per-tenant monitoring — every row below belongs to a specific tenant&apos;s

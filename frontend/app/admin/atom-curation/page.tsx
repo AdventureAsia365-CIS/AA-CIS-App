@@ -1364,7 +1364,7 @@ export default function AtomCurationDashboardPage() {
                 Platform-wide monitoring — Atomize is the only section AA acts on; 02–05 show what
                 the pipeline has already produced across ALL tours, not just one. Per-tenant
                 write/review/publish activity moved to{" "}
-                <a href="/admin/tenant-activity" style={{ color: A.gold }}>Tenant Activity</a>.
+                <a href="/admin/tenant-activity" style={{ color: A.gold }}>Content Trace</a>.
               </div>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
@@ -1447,14 +1447,16 @@ export default function AtomCurationDashboardPage() {
                   general tenant account activity — moved into this same tab-group per Nghiệp's
                   decision. Route (`/admin/tenant-activity`) UNCHANGED (real full navigation, not
                   an inline tab — 06-08's content stays on its own page, only the MENU position
-                  moved); removed as its own top-level AdminSidebar entry (see that file). */}
+                  moved); removed as its own top-level AdminSidebar entry (see that file).
+                  AA-562 — display name changed to "Content Trace" ("Tenant Activity" misread as
+                  tenant login/account activity); route intentionally still unchanged. */}
               <a href="/admin/tenant-activity" style={{
                 display: "flex", alignItems: "center", gap: 8, padding: "9px 12px", borderRadius: 7,
                 color: A.body, cursor: "pointer", fontFamily: sans, textDecoration: "none",
                 fontSize: 12.5, fontWeight: 500, marginTop: 4, borderTop: `1px solid ${A.line2}`, paddingTop: 13,
               }}>
                 <Radio size={15} />
-                <span style={{ flex: 1 }}>06-08 · Tenant Activity</span>
+                <span style={{ flex: 1 }}>06-08 · Content Trace</span>
               </a>
             </div>
 
