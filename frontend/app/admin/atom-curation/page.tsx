@@ -43,12 +43,13 @@
 // service.py); `cut` stays backend/API-only (no tenant UI button yet — POST /v1/subjects/{id}/cut
 // exists, unreachable from any control here, see the AA-554 child issue for building that
 // button) — its header badge is shown for real (not hidden) with a "coming soon" note.
-import { useState, useEffect, useCallback } from "react";
+import { Suspense, useState, useEffect, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
 import {
-  Star, Trash2, ChevronDown, ChevronRight, Layers, Milestone, Puzzle,
-  TrendingUp, GitBranch, FileStack, Radio,
+  Star, Trash2, ChevronDown, ChevronRight, Layers, Milestone,
 } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
+import SocialContentSubNav, { type SectionKey } from "../_components/SocialContentSubNav";
 import { A, serif, mono, sans, Card, Badge, Btn, LoadingScreen, TH, TD } from "../_components/adminUi";
 import { fetchJson, EmptyState, ErrorState, AuditTable, Col } from "../_components/auditPanels";
 
@@ -101,15 +102,10 @@ interface DashboardSummary {
   score_count: number; route_count: number; hub_count: number;
 }
 
-type SectionKey = "atomize" | "segment" | "score" | "route_hub" | "slate";
-
-const SECTIONS: { key: SectionKey; label: string; icon: React.ReactNode }[] = [
-  { key: "atomize",    label: "01 · Atomize",   icon: <Puzzle size={15} /> },
-  { key: "segment",    label: "02 · Segment",   icon: <Layers size={15} /> },
-  { key: "score",      label: "03 · Score",     icon: <TrendingUp size={15} /> },
-  { key: "route_hub",  label: "04 · Route/Hub", icon: <GitBranch size={15} /> },
-  { key: "slate",      label: "05 · Slate",     icon: <FileStack size={15} /> },
-];
+// AA-575 — guards the `?section=` deep-link param (see AtomCurationDashboard below): an
+// unrecognized/typo'd value falls back to "atomize" instead of matching none of the
+// `activeSection === "..."` checks and rendering a blank content column.
+const VALID_SECTIONS: Set<string> = new Set(["atomize", "segment", "score", "route_hub", "slate"]);
 
 const LIFECYCLE_COLOR: Record<string, "green" | "amber" | "gray"> = {
   active: "green", phasing_out: "amber", retired: "gray",
@@ -1293,12 +1289,28 @@ function SlateSection() {
 // Page shell — sticky header (common Tour+Market filter + stat bar) + sticky inner nav (01-05)
 // ══════════════════════════════════════════════════════════════════════════
 
+// AA-575 — this page uses useSearchParams() (`?section=` deep-link from Content Trace's shared
+// sub-nav, see SocialContentSubNav.tsx), which requires a Suspense boundary or `next build` fails
+// prerendering this route (same pattern as frontend/app/(tenant)/portal/t4-pool/page.tsx).
 export default function AtomCurationDashboardPage() {
+  return (
+    <Suspense>
+      <AtomCurationDashboard />
+    </Suspense>
+  );
+}
+
+function AtomCurationDashboard() {
+  const searchParams = useSearchParams();
+  const sectionParam = searchParams.get("section");
+  const initialSection: SectionKey =
+    sectionParam && VALID_SECTIONS.has(sectionParam) ? (sectionParam as SectionKey) : "atomize";
+
   const [summary, setSummary] = useState<Summary | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [selectedTour, setSelectedTour] = useState<string | null>(null);
   const [selectedMarket, setSelectedMarket] = useState("");
-  const [activeSection, setActiveSection] = useState<SectionKey>("atomize");
+  const [activeSection, setActiveSection] = useState<SectionKey>(initialSection);
   const [stats, setStats] = useState<DashboardSummary | null>(null);
   const [statsLoading, setStatsLoading] = useState(true);
   // AA-554 E.12/F.17 — cross-navigation between sections: Segment's Route badge sets
@@ -1340,13 +1352,6 @@ export default function AtomCurationDashboardPage() {
 
   return (
     <div style={{ display: "flex", minHeight: "100vh", background: A.bg, fontFamily: sans }}>
-      <style>{`
-        @media (max-width: 980px) {
-          .a527-inner-sidebar { flex-direction: row !important; overflow-x: auto !important; width: 100% !important; border-right: none !important; border-bottom: 1px solid ${A.line}; position: static !important; }
-          .a527-inner-sidebar button { white-space: nowrap; }
-          .a527-dash-body { flex-direction: column !important; }
-        }
-      `}</style>
       <AdminSidebar />
       {/* AA-551 sticky fix (AA-550 A.4): header is a normal, non-scrolling flex item OUTSIDE
           the scroll region — the original bug was a `position: sticky` header with no defined
@@ -1423,44 +1428,13 @@ export default function AtomCurationDashboardPage() {
             real full-page scroll. This is the actual root cause AA-554/AA-557 both missed. */}
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "20px 32px 32px" }}>
           <div className="a527-dash-body" style={{ display: "flex", gap: 20, alignItems: "flex-start" }}>
-            <div className="a527-inner-sidebar" style={{
-              width: 200, flexShrink: 0, display: "flex", flexDirection: "column", gap: 2,
-              background: A.card, border: `1px solid ${A.line}`, borderRadius: 10, padding: 6,
-              position: "sticky", top: 0,
-            }}>
-              {SECTIONS.map(s => {
-                const active = activeSection === s.key;
-                return (
-                  <button key={s.key} onClick={() => gotoSection(s.key)} style={{
-                    display: "flex", alignItems: "center", gap: 8, padding: "9px 12px", borderRadius: 7,
-                    border: "none", background: active ? A.goldTint : "transparent",
-                    color: active ? A.gold : A.body, cursor: "pointer", fontFamily: sans,
-                    fontSize: 12.5, fontWeight: active ? 700 : 500, textAlign: "left",
-                  }}>
-                    {s.icon}
-                    <span style={{ flex: 1 }}>{s.label}</span>
-                  </button>
-                );
-              })}
-              {/* AA-557 H.15 — "Tenant Activity" is really Write/Gate→Review→Publish per-tenant
-                  content activity, genuinely part of this same Social Content flow (01-05), not
-                  general tenant account activity — moved into this same tab-group per Nghiệp's
-                  decision. Route (`/admin/tenant-activity`) UNCHANGED (real full navigation, not
-                  an inline tab); removed as its own top-level AdminSidebar entry (see that file).
-                  AA-562 — display name changed to "Content Trace"; route intentionally unchanged.
-                  AA-568 — the 3 old sub-tabs (Write/Gate, Review, Publish) merged into ONE page;
-                  restyled here to sit as a genuine peer of 01-05 (same button look, "06 ·" not
-                  "06-08 ·" — accurate now that it's one page, not three), not a visually-demoted
-                  link below a divider (Nghiệp's explicit "đưa lên ngang hàng" requirement). */}
-              <a href="/admin/tenant-activity" style={{
-                display: "flex", alignItems: "center", gap: 8, padding: "9px 12px", borderRadius: 7,
-                color: A.body, cursor: "pointer", fontFamily: sans, textDecoration: "none",
-                fontSize: 12.5, fontWeight: 500,
-              }}>
-                <Radio size={15} />
-                <span style={{ flex: 1 }}>06 · Content Trace</span>
-              </a>
-            </div>
+            {/* AA-575 — inner-sidebar extracted into a shared component (was JSX embedded only
+                in this page, which is exactly why Content Trace (06) had no sub-nav at all: it's
+                a genuinely separate route/page with its own render tree, never this page's inline
+                markup). `onSelectSection` keeps 01-05 as instant same-page tab switches here — see
+                SocialContentSubNav.tsx for why Content Trace renders the same list differently
+                (real links, no local tab state to hook into). */}
+            <SocialContentSubNav active={activeSection} onSelectSection={gotoSection} />
 
             <div style={{ flex: 1, minWidth: 0 }}>
               {activeSection === "atomize" && (

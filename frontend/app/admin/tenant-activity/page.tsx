@@ -40,12 +40,19 @@
 // Per-tenant, cross-tenant-by-default (A4 pattern, AA-437) — Tenant filter defaults to "All
 // tenants", never hard-scoped to one. Admin-only route (unchanged from AA-551,
 // middleware.ts PROTECTED_ROUTES already allowlists `/admin/tenant-activity`), genuinely a peer
-// of 01-05 in Social Content — see AdminSidebar.tsx / atom-curation/page.tsx's inner-nav link,
-// both restyled by this same build to read as one equal list, not a visually-demoted "06-08"
-// link tacked on below a divider.
+// of 01-05 in Social Content.
+//
+// AA-575 — this page never actually rendered that 01-06 sub-nav: it was JSX embedded directly in
+// atom-curation/page.tsx's own render tree, and this page (a separate route) had no equivalent
+// markup at all — so navigating here (by click OR direct URL) made the sub-nav disappear
+// entirely, with no way back except browser Back. Fixed by extracting it into
+// `_components/SocialContentSubNav.tsx`, now mounted on both pages with "06" highlighted here.
+// AA-575 also extends AA-572's Gate/Retry/Created-at-only sort to every column — see `sortValue()`
+// below.
 import { Fragment, useState, useEffect, useCallback, useMemo } from "react";
 import { ChevronDown, ChevronRight, ChevronUp, Radio } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
+import SocialContentSubNav from "../_components/SocialContentSubNav";
 import { A, serif, mono, sans, Card, Badge, LoadingScreen } from "../_components/adminUi";
 import { fetchJson, EmptyState, ErrorState } from "../_components/auditPanels";
 
@@ -117,12 +124,40 @@ const selectStyle: React.CSSProperties = {
 
 // AA-572 point 3 — sort state lives at the page level (not the table's) so it can be reset
 // alongside the filters if a future build wants that; for now it just persists across re-fetches.
-type SortKey = "gate" | "retry" | "created_at";
+// AA-575 — extended from the original 3 (gate/retry/created_at) to every column, per Nghiệp's
+// explicit "TẤT CẢ cột" follow-up request; same mechanism, no per-column special-casing beyond
+// `sortValue()` below picking the right field/rank.
+type SortKey =
+  | "topic" | "tenant" | "tour" | "channel" | "angle" | "status"
+  | "gate" | "retry" | "published" | "created_at";
 type Sort = { key: SortKey; dir: "asc" | "desc" };
 
 const CHANNEL_LABEL: Record<string, string> = Object.fromEntries(
   CHANNEL_OPTIONS.filter(o => o.value).map(o => [o.value, o.label]),
 );
+
+// AA-575 — Published has no single obvious sort field (it's a 3-state enum, not free text or a
+// number): ranked in pipeline order (not published → pending → published) rather than
+// alphabetically, so ascending/descending reads as "progress toward live" instead of a meaningless
+// string sort ("n/a" vs "pending_publish" vs "published" alphabetically doesn't match reality).
+const PUBLISH_RANK: Record<ContentLogRow["publish_status"], number> = {
+  "n/a": 0, "pending_publish": 1, "published": 2,
+};
+
+function sortValue(r: ContentLogRow, key: SortKey): string | number {
+  switch (key) {
+    case "topic": return r.topic ?? "";
+    case "tenant": return r.tenant_name ?? "";
+    case "tour": return r.tour?.name ?? "";
+    case "channel": return CHANNEL_LABEL[r.channel] ?? r.channel;
+    case "angle": return r.angles.find(a => a.chosen)?.name ?? "";
+    case "status": return r.status ?? "";
+    case "gate": return r.gate_pass_count;
+    case "retry": return r.retry_count;
+    case "published": return PUBLISH_RANK[r.publish_status];
+    case "created_at": return new Date(r.created_at).getTime();
+  }
+}
 
 export default function ContentTracePage() {
   const [tenants, setTenants] = useState<Tenant[]>([]);
@@ -182,18 +217,20 @@ export default function ContentTracePage() {
     };
   }, [rows]);
 
-  // AA-572 point 3 — sort applied client-side to the already-loaded rows (same "no backend
-  // change" scope as the stat header above); the endpoint has no `sort` param and doesn't need
-  // one for a page-sized result set (`limit` caps at 500).
+  // AA-572 point 3 / AA-575 — sort applied client-side to the already-loaded rows (same "no
+  // backend change" scope as the stat header above); the endpoint has no `sort` param and
+  // doesn't need one for a page-sized result set (`limit` caps at 500). `sortValue()` returns
+  // either a string (free-text/categorical columns) or a number (counts, the Published rank,
+  // and the Created-at timestamp) — compared with `localeCompare` or subtraction accordingly.
   const sortedRows = useMemo(() => {
     if (!rows || !sort) return rows;
-    const withKey = rows.map(r => ({
-      r,
-      k: sort.key === "gate" ? r.gate_pass_count
-        : sort.key === "retry" ? r.retry_count
-        : new Date(r.created_at).getTime(),
-    }));
-    withKey.sort((a, b) => sort.dir === "asc" ? a.k - b.k : b.k - a.k);
+    const withKey = rows.map(r => ({ r, k: sortValue(r, sort.key) }));
+    withKey.sort((a, b) => {
+      const cmp = typeof a.k === "string" && typeof b.k === "string"
+        ? a.k.localeCompare(b.k)
+        : (a.k as number) - (b.k as number);
+      return sort.dir === "asc" ? cmp : -cmp;
+    });
     return withKey.map(x => x.r);
   }, [rows, sort]);
 
@@ -260,25 +297,38 @@ export default function ContentTracePage() {
           )}
         </div>
 
-        {/* AA-572 point 6 — `overflowX: "auto"` now lives HERE (the real, single scrolling
-            ancestor: `flex:1, minHeight:0` already correctly bounds its height against the
-            page's own `height:"100vh"` chain above) rather than on ContentTraceTable's inner
-            wrapper div — see this file's header comment for why that nested overflow-x was
-            silently breaking the sticky `<thead>`. */}
+        {/* AA-572 point 6 — `overflowX: "auto"` lives HERE (the real, single scrolling ancestor:
+            `flex:1, minHeight:0` already correctly bounds its height against the page's own
+            `height:"100vh"` chain above) rather than on ContentTraceTable's inner wrapper div —
+            see this file's header comment for why that nested overflow-x was silently breaking
+            the sticky `<thead>`. AA-575 — the sub-nav + content split below (`a527-dash-body`,
+            same class/shape as atom-curation/page.tsx's own body) sets NO overflow of its own, so
+            it doesn't reintroduce that bug: this outer div stays the only scrolling ancestor, and
+            the table's `<th position:sticky>` still resolves against it unchanged. */}
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "auto", padding: "20px 32px 32px" }}>
-          {loading ? (
-            <LoadingScreen msg="Loading Content Trace…" />
-          ) : error ? (
-            <ErrorState message={error} onRetry={load} />
-          ) : !rows || rows.length === 0 ? (
-            <EmptyState
-              title="No content pieces match these filters"
-              body="Nothing has been written yet for this combination of tenant/channel/status/date — try widening a filter, or 'All tenants' to check whether the data exists elsewhere."
-            />
-          ) : (
-            <ContentTraceTable rows={sortedRows ?? rows} expandedId={expandedId} sort={sort} onSort={toggleSort}
-              onToggle={id => setExpandedId(prev => prev === id ? null : id)} />
-          )}
+          <div className="a527-dash-body" style={{ display: "flex", gap: 20, alignItems: "flex-start" }}>
+            {/* AA-575 — Content Trace is a genuinely separate Next.js route/page from
+                atom-curation/page.tsx (01-05's tab-state owner), which is exactly why it never
+                had this sub-nav before: there was no shared layout, just one page's own inline
+                JSX. Rendered here with no `onSelectSection` — 01-05 render as real links back to
+                `/admin/atom-curation?section=<key>` (see SocialContentSubNav.tsx). */}
+            <SocialContentSubNav active="content_trace" />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              {loading ? (
+                <LoadingScreen msg="Loading Content Trace…" />
+              ) : error ? (
+                <ErrorState message={error} onRetry={load} />
+              ) : !rows || rows.length === 0 ? (
+                <EmptyState
+                  title="No content pieces match these filters"
+                  body="Nothing has been written yet for this combination of tenant/channel/status/date — try widening a filter, or 'All tenants' to check whether the data exists elsewhere."
+                />
+              ) : (
+                <ContentTraceTable rows={sortedRows ?? rows} expandedId={expandedId} sort={sort} onSort={toggleSort}
+                  onToggle={id => setExpandedId(prev => prev === id ? null : id)} />
+              )}
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -310,12 +360,20 @@ function FilterField({ label, children }: { label: string; children: React.React
 
 const COLS = 10;
 
-// AA-572 point 3 — only these 3 columns are sortable (the issue's own stated minimum; the rest
-// are free-text/categorical where a client-side sort adds little value and wasn't asked for).
+// AA-572 shipped only 3 sortable columns (Gate/Retry/Created at); AA-575 extends every remaining
+// column (Topic/Tenant/Tour/Channel/Angle chosen/Status/Published) to the same mechanism, per
+// Nghiệp's explicit follow-up — only the leading expand-chevron column has no `sortKey`.
 const HEADERS: { label: string; sortKey?: SortKey }[] = [
-  { label: "" }, { label: "Topic" }, { label: "Tenant" }, { label: "Tour" }, { label: "Channel" },
-  { label: "Angle chosen" }, { label: "Status" }, { label: "Gate count", sortKey: "gate" },
-  { label: "Retry count", sortKey: "retry" }, { label: "Published" },
+  { label: "" },
+  { label: "Topic", sortKey: "topic" },
+  { label: "Tenant", sortKey: "tenant" },
+  { label: "Tour", sortKey: "tour" },
+  { label: "Channel", sortKey: "channel" },
+  { label: "Angle chosen", sortKey: "angle" },
+  { label: "Status", sortKey: "status" },
+  { label: "Gate count", sortKey: "gate" },
+  { label: "Retry count", sortKey: "retry" },
+  { label: "Published", sortKey: "published" },
   { label: "Created at", sortKey: "created_at" },
 ];
 
