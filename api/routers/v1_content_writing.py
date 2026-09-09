@@ -31,6 +31,7 @@ from pydantic import BaseModel
 from api.routers.v1_tours import get_tenant
 from services.acp_angle_gate.service import RequestNotFoundError
 from services.acp_content_writing import service
+from services.acp_shared.audit_log import TenantAuditAction, write_audit_log
 
 router = APIRouter(prefix="/v1/content-writing", tags=["tenant-content-writing"])
 
@@ -67,6 +68,18 @@ async def write(request_id: UUID, body: WriteBody, request: Request, tenant=Depe
         raise HTTPException(status_code=500, detail=str(exc))
 
     piece, context = started["piece"], started["context"]
+
+    # AA-559 — semantic tenant-activity log: the tenant's own "start write" action (the T9 step
+    # of the combined T8/T9 wizard, per AA-450's LIVE STATE record — no separate T9 route/page
+    # exists). Distinct from `content_piece.created` (services/acp_content_writing/service.py::
+    # _insert_placeholder_piece()), which fires ~simultaneously but records resource creation,
+    # not the tenant-initiated command.
+    await write_audit_log(
+        pool, tenant_id=str(tenant_id), actor=f"tenant:{tenant_id}",
+        action=TenantAuditAction.WRITE_STARTED, resource_type="angle_gate_request",
+        resource_id=str(request_id), details={"piece_id": piece["piece_id"]},
+    )
+
     task = asyncio.create_task(
         service.run_write_background(request_id, UUID(piece["piece_id"]), context, pool)
     )

@@ -9,6 +9,7 @@ embedding at all (a held piece never ships, nothing to index it for).
 Mirrors test_aa450_content_writing_service.py's own mocking shape (`_context()`/
 `_passing_outcome()` helpers duplicated locally rather than imported, same pattern
 test_aa452_t10_nine_gates.py already uses)."""
+import json
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -271,3 +272,59 @@ class TestFinalizePiecePersistsEmbeddingAsPgvectorLiteral:
         )
         params = conn.fetchrow.call_args[0]
         assert params[-1] is None
+
+
+@pytest.mark.asyncio
+class TestFinalizePieceAuditLog:
+    """AA-559 — _finalize_piece() writes a content_piece.finished audit_log row (the real
+    "content viết xong" completion event, unlike _insert_placeholder_piece()'s content_piece.
+    created which fires before any LLM/gate work) on every call — covers all 3 call sites of this
+    function (main loop, exception-handler fallback, buffer retry) since they all funnel through
+    here."""
+
+    async def test_writes_finished_row_with_status_and_held_reason(self):
+        conn = AsyncMock()
+        conn.fetchrow.return_value = _finalized_row(status="held", held_reason="F2 violation")
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=conn)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        pool = MagicMock()
+        pool.acquire = MagicMock(return_value=ctx)
+
+        await service._finalize_piece(
+            pool, piece_id=PIECE_ID, attempt_number=2, content_text="text", status="held",
+            held_reason="F2 violation", gate_ledger=[], repair_log=[], flags=[],
+        )
+
+        conn.execute.assert_awaited_once()
+        query, *params = conn.execute.call_args[0]
+        assert "INSERT INTO acp_shared.audit_log" in query
+        assert params[0] == str(TENANT_ID)
+        assert params[1] == f"tenant:{TENANT_ID}"
+        assert params[2] == "content_piece.finished"
+        assert params[3] == "content_piece"
+        assert params[4] == str(PIECE_ID)
+        details = json.loads(params[5])
+        assert details == {
+            "status": "held", "held_reason": "F2 violation", "attempt_number": 2,
+            "request_id": str(REQUEST_ID),
+        }
+
+    async def test_writes_finished_row_for_approved_status(self):
+        conn = AsyncMock()
+        conn.fetchrow.return_value = _finalized_row(status="approved")
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=conn)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        pool = MagicMock()
+        pool.acquire = MagicMock(return_value=ctx)
+
+        await service._finalize_piece(
+            pool, piece_id=PIECE_ID, attempt_number=1, content_text="text", status="approved",
+            held_reason=None, gate_ledger=[], repair_log=[], flags=[],
+        )
+
+        query, *params = conn.execute.call_args[0]
+        details = json.loads(params[5])
+        assert details["status"] == "approved"
+        assert details["held_reason"] is None

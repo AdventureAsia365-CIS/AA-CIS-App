@@ -5,6 +5,7 @@ from typing import Optional
 from pydantic import BaseModel as _BM
 from api.routers.auth import verify_jwt
 from api.routers.admin import PLAN_LIMITS
+from services.acp_shared.audit_log import TenantAuditAction, write_audit_log
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/v1/tours", tags=["B2B Tours"])
@@ -441,6 +442,18 @@ async def trigger_rewrite(
                 "status": "generating",
             }),
             body.rewrite_language, body.seo_mode)
+
+        # AA-559 — semantic tenant-activity log, same connection as the pending-version INSERT
+        # above (T1 Browse Pool "rewrite" action).
+        await write_audit_log(
+            conn, tenant_id=str(tenant_id), actor=f"tenant:{tenant_id}",
+            action=TenantAuditAction.TOUR_REWRITE_TRIGGERED, resource_type="tenant_tour_version",
+            resource_id=str(version_id),
+            details={
+                "published_tour_id": published_tour_id, "version_number": next_ver,
+                "tour_name": pt["aa_name"], "rewrite_language": body.rewrite_language,
+            },
+        )
 
     # P3-S9 fix: actually call LLM rewrite
     import asyncio as _asyncio

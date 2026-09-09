@@ -57,6 +57,8 @@ import json
 from dataclasses import dataclass
 from uuid import UUID
 
+from services.acp_shared.audit_log import TenantAuditAction, write_audit_log
+
 # One row per Channel: the Bar (STEP0 Q3, literal reference/channels.toml numbers), which grain
 # it reads (Blog is the one Channel scored at Route grain — AA-CIS's own extension, STEP0 Q2),
 # and whether it is on-demand (no weekly rhythm, origin's derive_posting_rhythm() skips these
@@ -551,6 +553,20 @@ async def pick_subject(tenant_id: UUID, subject_id: UUID, pool, selected_by: str
                           route_segment_ids
             """, tenant_id, atom_id, trip_id, row["channel"], subject_id,
                 json.dumps(route_segment_ids) if route_segment_ids is not None else None)
+
+            # AA-559 — semantic tenant-activity log, same transaction as the state change above
+            # (matches every other tenant-self-service audit_log writer's own convention —
+            # trip_reallocation.py's confirm_trip_reallocation() — a lost audit row fails the
+            # whole pick, not a silently-dropped side effect).
+            await write_audit_log(
+                conn, tenant_id=str(tenant_id), actor=selected_by,
+                action=TenantAuditAction.SLATE_SUBJECT_PICKED, resource_type="subject",
+                resource_id=str(subject_id),
+                details={
+                    "channel": row["channel"], "request_id": str(request_row["request_id"]),
+                    "atom_id": atom_id, "trip_id": str(trip_id) if trip_id else None,
+                },
+            )
 
     return {
         "subject_id": str(subject_id),

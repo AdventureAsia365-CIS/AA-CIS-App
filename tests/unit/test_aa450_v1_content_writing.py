@@ -40,7 +40,8 @@ class TestWrite:
         with patch.object(v1_content_writing.service, "start_write",
                            new=AsyncMock(return_value=_started())), \
              patch.object(v1_content_writing.service, "run_write_background",
-                           new=AsyncMock(return_value=None)) as mock_bg:
+                           new=AsyncMock(return_value=None)) as mock_bg, \
+             patch.object(v1_content_writing, "write_audit_log", new=AsyncMock()):
             result = await v1_content_writing.write(REQUEST_ID, body, _make_request(), tenant={"sub": TENANT_ID})
             await asyncio.sleep(0)  # let the scheduled background task actually run
 
@@ -59,7 +60,8 @@ class TestWrite:
         with patch.object(v1_content_writing.service, "start_write",
                            new=AsyncMock(return_value=_started())), \
              patch.object(v1_content_writing.service, "run_write_background",
-                           new=AsyncMock(return_value=None)):
+                           new=AsyncMock(return_value=None)), \
+             patch.object(v1_content_writing, "write_audit_log", new=AsyncMock()):
             await v1_content_writing.write(REQUEST_ID, body, _make_request(), tenant={"sub": TENANT_ID})
             assert len(v1_content_writing._background_tasks) == 1  # added before the task ran
             # task completion -> add_done_callback fires via call_soon, needs 2 ticks to observe
@@ -117,10 +119,49 @@ class TestWrite:
         with patch.object(v1_content_writing.service, "start_write",
                            new=AsyncMock(return_value=_started())) as mock_start, \
              patch.object(v1_content_writing.service, "run_write_background",
-                           new=AsyncMock(return_value=None)):
+                           new=AsyncMock(return_value=None)), \
+             patch.object(v1_content_writing, "write_audit_log", new=AsyncMock()):
             await v1_content_writing.write(REQUEST_ID, body, _make_request(), tenant={"sub": TENANT_ID})
             await asyncio.sleep(0)
         assert mock_start.call_args.kwargs["cta_override"] == "Read the guide"
+
+
+class TestWriteAuditLog:
+    """AA-559 — write() logs the tenant's "start write" action right after start_write()
+    succeeds, before the background write/check loop is kicked off."""
+
+    @pytest.mark.asyncio
+    async def test_write_started_row_logged_with_expected_fields(self):
+        body = v1_content_writing.WriteBody(cta=None)
+        with patch.object(v1_content_writing.service, "start_write",
+                           new=AsyncMock(return_value=_started())), \
+             patch.object(v1_content_writing.service, "run_write_background",
+                           new=AsyncMock(return_value=None)), \
+             patch.object(v1_content_writing, "write_audit_log", new=AsyncMock()) as mock_audit:
+            await v1_content_writing.write(REQUEST_ID, body, _make_request(), tenant={"sub": TENANT_ID})
+            await asyncio.sleep(0)
+
+        mock_audit.assert_awaited_once()
+        _pool, kwargs = mock_audit.call_args.args[0], mock_audit.call_args.kwargs
+        assert kwargs["tenant_id"] == TENANT_ID
+        assert kwargs["actor"] == f"tenant:{TENANT_ID}"
+        assert kwargs["action"] == "write.started"
+        assert kwargs["resource_type"] == "angle_gate_request"
+        assert kwargs["resource_id"] == str(REQUEST_ID)
+        assert kwargs["details"] == {"piece_id": str(PIECE_ID)}
+
+    @pytest.mark.asyncio
+    async def test_not_logged_when_start_write_raises(self):
+        """A failed start_write() (404/409/422/500) must not produce a "write started" row —
+        nothing actually started."""
+        body = v1_content_writing.WriteBody(cta=None)
+        with patch.object(
+            v1_content_writing.service, "start_write",
+            new=AsyncMock(side_effect=RequestNotFoundError("nope")),
+        ), patch.object(v1_content_writing, "write_audit_log", new=AsyncMock()) as mock_audit:
+            with pytest.raises(HTTPException):
+                await v1_content_writing.write(REQUEST_ID, body, _make_request(), tenant={"sub": TENANT_ID})
+        mock_audit.assert_not_awaited()
 
 
 class TestGetPiece:

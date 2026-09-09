@@ -305,8 +305,10 @@ class TestInsertPlaceholderPieceMarksSubjectUsed:
             channel="facebook",
         )
 
-        conn.execute.assert_awaited_once()
-        query, *params = conn.execute.call_args[0]
+        # AA-559 added a 2nd conn.execute() call (the audit_log INSERT, asserted separately
+        # below) — the subject-state UPDATE is now call #1, not the only call.
+        assert conn.execute.await_count == 2
+        query, *params = conn.execute.call_args_list[0][0]
         assert "UPDATE acp_shared.subject SET state = 'used'" in query
         assert "state = 'picked'" in query
         assert params == [REQUEST_ID]
@@ -322,8 +324,30 @@ class TestInsertPlaceholderPieceMarksSubjectUsed:
 
         await service._insert_placeholder_piece(pool, tenant_id=TENANT_ID, request_id=REQUEST_ID)
 
-        query, *_params = conn.execute.call_args[0]
+        query, *_params = conn.execute.call_args_list[0][0]
         assert "SELECT subject_id FROM acp_shared.angle_gate_request WHERE request_id = $1::uuid" in query
+
+    async def test_audit_log_row_written_after_subject_update(self):
+        """AA-559 — services/acp_shared/audit_log.py's write_audit_log(), called as the 2nd
+        conn.execute() (after the subject-state UPDATE), same connection/transaction."""
+        conn = AsyncMock()
+        conn.fetchrow.return_value = _placeholder_row()
+        pool = _make_pool(conn)
+
+        await service._insert_placeholder_piece(
+            pool, tenant_id=TENANT_ID, request_id=REQUEST_ID, angle_gate_option_id=OPTION_ID,
+            channel="facebook",
+        )
+
+        query, *params = conn.execute.call_args_list[1][0]
+        assert "INSERT INTO acp_shared.audit_log" in query
+        assert params[0] == str(TENANT_ID)
+        assert params[1] == f"tenant:{TENANT_ID}"
+        assert params[2] == "content_piece.created"
+        assert params[3] == "content_piece"
+        assert params[4] == str(PIECE_ID)
+        details = json.loads(params[5])
+        assert details == {"request_id": str(REQUEST_ID), "channel": "facebook"}
 
 
 @pytest.mark.asyncio
