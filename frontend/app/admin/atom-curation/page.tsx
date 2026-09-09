@@ -1446,17 +1446,19 @@ export default function AtomCurationDashboardPage() {
                   content activity, genuinely part of this same Social Content flow (01-05), not
                   general tenant account activity — moved into this same tab-group per Nghiệp's
                   decision. Route (`/admin/tenant-activity`) UNCHANGED (real full navigation, not
-                  an inline tab — 06-08's content stays on its own page, only the MENU position
-                  moved); removed as its own top-level AdminSidebar entry (see that file).
-                  AA-562 — display name changed to "Content Trace" ("Tenant Activity" misread as
-                  tenant login/account activity); route intentionally still unchanged. */}
+                  an inline tab); removed as its own top-level AdminSidebar entry (see that file).
+                  AA-562 — display name changed to "Content Trace"; route intentionally unchanged.
+                  AA-568 — the 3 old sub-tabs (Write/Gate, Review, Publish) merged into ONE page;
+                  restyled here to sit as a genuine peer of 01-05 (same button look, "06 ·" not
+                  "06-08 ·" — accurate now that it's one page, not three), not a visually-demoted
+                  link below a divider (Nghiệp's explicit "đưa lên ngang hàng" requirement). */}
               <a href="/admin/tenant-activity" style={{
                 display: "flex", alignItems: "center", gap: 8, padding: "9px 12px", borderRadius: 7,
                 color: A.body, cursor: "pointer", fontFamily: sans, textDecoration: "none",
-                fontSize: 12.5, fontWeight: 500, marginTop: 4, borderTop: `1px solid ${A.line2}`, paddingTop: 13,
+                fontSize: 12.5, fontWeight: 500,
               }}>
                 <Radio size={15} />
-                <span style={{ flex: 1 }}>06-08 · Content Trace</span>
+                <span style={{ flex: 1 }}>06 · Content Trace</span>
               </a>
             </div>
 
