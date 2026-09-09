@@ -1,6 +1,10 @@
 import { test, expect } from '@playwright/test';
 // AA-564 Nhóm 4.2 — SlateTab.tsx + AngleGateWizard.tsx (extracted from AngleGateTab.tsx) embedded
 // inline flow. Real WanderLux Travel tenant session (generate-key + real /tenant-login form).
+// AA-567 — this is also the real end-to-end proof that the owner_scope fix works all the way
+// through T8 (goal/angle generation, which re-fetches the atom by id) and T9 (write, which
+// fetches the atom text to prompt the LLM with) for a real platform-owned atom, not just
+// pick_subject() itself.
 const SHOT_DIR = 'tests/e2e/results/aa564-4-2';
 const WANDERLUX_API_KEY = process.env.WANDERLUX_API_KEY || '';
 
@@ -21,10 +25,8 @@ test('4.2 — pick a Subject expands the wizard INLINE, no navigation away from 
   await page.screenshot({ path: `${SHOT_DIR}/1-slate-before-pick.png`, fullPage: true });
 
   // Find a Subject that actually picks successfully — some rows are stale server-side data
-  // (e.g. "has no live atom left to write from, its Segment/Route was rebuilt away", a real
-  // pre-existing backend condition unrelated to this build; FE audit #2 correctly shows the
-  // error and leaves the row alone rather than navigating). Try every "Chọn viết" button across
-  // every Channel tab, in order of larger eligible_count first, until one succeeds.
+  // unrelated to this build. Try every "Chọn viết" button across every Channel tab, in order,
+  // until one succeeds.
   const urlBefore = page.url();
   const tabs = ['TikTok', 'Email', 'Landing Page', 'Ads', 'Blog', 'LinkedIn', 'Facebook', 'Instagram'];
   let picked = false;
@@ -39,7 +41,6 @@ test('4.2 — pick a Subject expands the wizard INLINE, no navigation away from 
         await expect(page.locator('text=1 · Choose a Goal')).toBeVisible({ timeout: 8000 });
         picked = true;
       } catch {
-        // Stale-data error on this row — dismiss via its own Refresh link and try the next one.
         const refresh = page.locator('button:has-text("Refresh")').first();
         if (await refresh.count() > 0) await refresh.click();
         await page.waitForTimeout(500);
@@ -49,47 +50,58 @@ test('4.2 — pick a Subject expands the wizard INLINE, no navigation away from 
   test.skip(!picked, 'Every currently-eligible Subject hit a stale-data error — nothing pickable right now');
   if (!picked) return;
 
-  // The wizard's own "Choose a Goal" card appearing IN PLACE is the proof of embedding — a real
-  // navigation would have taken us to /portal/t8-angle-gate instead.
   await expect(page.locator('text=1 · Choose a Goal')).toBeVisible({ timeout: 15000 });
-  expect(page.url()).toBe(urlBefore); // still on Social Content — no navigation happened
+  expect(page.url()).toBe(urlBefore);
   expect(page.url()).not.toContain('t8-angle-gate');
   await page.screenshot({ path: `${SHOT_DIR}/2-wizard-expanded-inline-goal-step.png`, fullPage: true });
 
-  // Pick a Goal -> generates 3 angles
-  await page.locator('div[style*="cursor: pointer"]', { hasText: /./ }).first(); // no-op, keep TS happy
-  const goalCards = page.locator('button', { hasText: /./ }).filter({ has: page.locator('text=/.+/ ') });
-  // Click the first goal option card (rendered as a <button> with a title div inside)
-  const firstGoalBtn = page.locator('div').filter({ hasText: '1 · Choose a Goal' }).locator('..').locator('button').first();
-  await firstGoalBtn.click();
+  // Pick the first real Goal by NAME (fetched from the same API the page itself calls) —
+  // robust regardless of the goal cards' exact DOM nesting.
+  const goals = await page.evaluate(async () => (await (await fetch('/api/tenant/v1/angle-gate/goals')).json()).goals);
+  expect(goals.length).toBeGreaterThan(0);
+  await page.locator(`button:has-text("${goals[0].name}")`).click();
+  await expect(page.locator('button:has-text("Generate 3 angles")')).toBeEnabled({ timeout: 5000 });
   await page.locator('button:has-text("Generate 3 angles")').click();
 
   await expect(page.locator('text=/2 · Choose (an|a Different) Angle/')).toBeVisible({ timeout: 30000 });
   await page.screenshot({ path: `${SHOT_DIR}/3-wizard-angle-step.png`, fullPage: true });
 
-  // Pick the recommended angle (or the first one) and confirm
-  const angleCard = page.locator('button:has-text("Recommended")').first().locator('..').locator('..');
-  const anyAngleCard = (await page.locator('text=Recommended').count()) > 0
-    ? page.locator('button', { has: page.locator('text=Recommended') }).first()
-    : page.locator('div[style*="border"] >> text=Why it works').first().locator('xpath=ancestor::button[1]');
-  await anyAngleCard.click();
+  // Pick the Recommended angle by its own visible name text — read the name from the card that
+  // contains the "Recommended" badge, then click precisely that card (not a fragile ancestor
+  // guess).
+  const recommendedCard = page.locator('button').filter({ has: page.locator('text=Recommended') }).first();
+  await recommendedCard.click();
   await page.locator('button:has-text("Confirm this angle")').click();
 
   await expect(page.locator('text=3 · Write')).toBeVisible({ timeout: 15000 });
+  // Let the write-step effect actually run (GET latest-piece, then decide: auto-write or ask
+  // for a CTA) before checking which branch it landed on — screenshotting/checking too early
+  // caught neither the CTA form nor the writing spinner in a real run once.
+  await page.waitForTimeout(3000);
   await page.screenshot({ path: `${SHOT_DIR}/4-wizard-write-step-entered.png`, fullPage: true });
 
   // May need a CTA first
   const ctaInput = page.locator('input[placeholder*="Book a consultation"]');
-  if (await ctaInput.count() > 0 && await ctaInput.isVisible()) {
+  if (await ctaInput.count() > 0 && await ctaInput.isVisible({ timeout: 5000 }).catch(() => false)) {
     await ctaInput.fill('Plan your trip with us');
     await page.locator('button:has-text("Write content")').click();
   }
 
-  // Wait for T9 write + T10 check to finish (real Bedrock call)
+  // The writing spinner MUST actually appear at some point (proves the write really started),
+  // then disappear (proves it finished) — not just "count is 0" which would trivially pass if
+  // the write never started at all.
+  await expect(page.locator('text=Writing and checking your content')).toBeVisible({ timeout: 15000 });
+  await page.screenshot({ path: `${SHOT_DIR}/4b-writing-spinner-real.png`, fullPage: true });
   await expect(page.locator('text=Writing and checking your content')).toHaveCount(0, { timeout: 180_000 });
   await page.waitForTimeout(500);
   await page.screenshot({ path: `${SHOT_DIR}/5-wizard-write-complete.png`, fullPage: true });
   expect(page.url()).toBe(urlBefore); // STILL on Social Content the whole time
+
+  // Real content must actually be present — not an empty/failed state — proving the atom text
+  // really was fetched and really was written from.
+  const hasApproved = await page.locator('text=Approved').count();
+  const hasNeedsReview = await page.locator('text=Needs review').count();
+  expect(hasApproved + hasNeedsReview).toBeGreaterThan(0);
 
   // "Change angle" in embedded mode — must reopen to the angle step INLINE, not navigate
   await page.locator('button:has-text("Change angle")').click();

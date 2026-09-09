@@ -875,7 +875,8 @@ async def get_version(
                    pt.aa_description, pt.aa_highlights, pt.aa_itineraries,
                    pt.seo_title AS aa_seo_title, pt.seo_meta AS aa_seo_meta,
                    pt.quality_score AS aa_quality_score,
-                   rt.country, rt.duration, rt.price_raw
+                   rt.country, rt.duration, rt.price_raw,
+                   rt.inclusions, rt.exclusions
             FROM gold_aa_internal.tenant_tour_versions ttv
             JOIN gold_aa_internal.published_tours pt ON pt.id = ttv.published_tour_id
             LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
@@ -897,6 +898,148 @@ async def get_version(
         **dict(row),
         "version_history": [dict(h) for h in history],
     }
+
+
+# AA-566 Phần B.2 — tenant-facing DOCX export, one version at a time (matches Admin Master
+# Content's own single-version DOCX convention, admin_pipeline.py::export_tour_version_docx()
+# — same python-docx pattern, same off-white-background/heading-color helpers, deliberately NOT
+# a shared function since the two read completely different tables (silver_aa_internal.
+# generated_content there vs gold_aa_internal.tenant_tour_versions here) and the tenant version
+# has no SEO/score/judge fields to render at all (AA-566 Phần B.5 — those are being dropped from
+# the tenant-facing drawer for the same reason: internal jargon, not tenant content).
+@router.get("/versions/{version_id}/export-docx")
+async def export_version_docx(
+    version_id: str,
+    request: Request,
+    tenant=Depends(get_tenant),
+):
+    import json as _json
+    tenant_id = tenant["sub"]
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT ttv.version_number, ttv.rewritten_content, ttv.rewrite_language,
+                   pt.tour_id, pt.aa_name, pt.aa_subtitle, pt.aa_summary, pt.aa_highlights,
+                   pt.aa_itineraries,
+                   rt.country, rt.duration, rt.inclusions, rt.exclusions
+            FROM gold_aa_internal.tenant_tour_versions ttv
+            JOIN gold_aa_internal.published_tours pt ON pt.id = ttv.published_tour_id
+            LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
+            WHERE ttv.id = $1::uuid AND ttv.tenant_id = $2::uuid
+        """, version_id, tenant_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Version not found")
+
+    # Same rewritten_content-overrides-aa_* merge CatalogTab.tsx's own loadDetail() does —
+    # a tenant's manual edit lives in rewritten_content, not the flat aa_* columns.
+    rc = {}
+    if row["rewritten_content"]:
+        try:
+            raw_rc = row["rewritten_content"]
+            rc = _json.loads(raw_rc) if isinstance(raw_rc, str) else dict(raw_rc)
+        except Exception:
+            rc = {}
+    name = rc.get("name") or row["aa_name"] or "(untitled)"
+    subtitle = rc.get("subtitle") or row["aa_subtitle"] or ""
+    summary = rc.get("summary") or row["aa_summary"] or ""
+    highlights = rc.get("highlights")
+    if not isinstance(highlights, list):
+        try:
+            highlights = _json.loads(row["aa_highlights"]) if row["aa_highlights"] else []
+        except Exception:
+            highlights = []
+    itineraries = rc.get("itineraries") or row["aa_itineraries"] or ""
+
+    import io
+    from docx import Document
+    from docx.shared import Pt, RGBColor
+    from fastapi.responses import StreamingResponse
+
+    ORANGE = RGBColor(0xDB, 0x96, 0x28)
+    BLACKBLUE = RGBColor(0x1F, 0x29, 0x33)
+    GRAY = RGBColor(0x33, 0x36, 0x3D)
+
+    doc = Document()
+
+    def _section(text):
+        p = doc.add_paragraph()
+        bar = p.add_run("▌ ")
+        bar.bold = True
+        bar.font.color.rgb = ORANGE
+        r = p.add_run(text)
+        r.bold = True
+        r.font.size = Pt(13)
+        r.font.color.rgb = BLACKBLUE
+
+    def _kv(label, value):
+        p = doc.add_paragraph()
+        lr = p.add_run(f"{label}: ")
+        lr.bold = True
+        lr.font.size = Pt(10.5)
+        lr.font.color.rgb = BLACKBLUE
+        vr = p.add_run("" if value is None else str(value))
+        vr.font.size = Pt(10.5)
+        vr.font.color.rgb = GRAY
+
+    def _body(text):
+        p = doc.add_paragraph()
+        for i, line in enumerate(str(text or "").split("\n")):
+            if i > 0:
+                p.add_run().add_break()
+            r = p.add_run(line)
+            r.font.size = Pt(10.5)
+            r.font.color.rgb = GRAY
+
+    title = doc.add_paragraph()
+    tr = title.add_run(name)
+    tr.bold = True
+    tr.font.size = Pt(20)
+    tr.font.color.rgb = BLACKBLUE
+    if subtitle:
+        sub = doc.add_paragraph()
+        sr = sub.add_run(subtitle)
+        sr.italic = True
+        sr.font.size = Pt(12)
+        sr.font.color.rgb = ORANGE
+    meta = doc.add_paragraph()
+    mr = meta.add_run(f"Version {row['version_number']}   ·   {row['rewrite_language']}")
+    mr.font.size = Pt(10)
+    mr.font.color.rgb = ORANGE
+
+    _section("Trip Details")
+    _kv("Country", row["country"] or "—")
+    _kv("Duration", row["duration"] or "—")
+
+    _section("Summary")
+    _body(summary)
+
+    if highlights:
+        _section("Highlights")
+        for h in highlights:
+            doc.add_paragraph(str(h), style="List Bullet")
+
+    if itineraries:
+        _section("Itinerary")
+        _body(itineraries)
+
+    if row["inclusions"]:
+        _section("Inclusions")
+        _body(row["inclusions"])
+
+    if row["exclusions"]:
+        _section("Exclusions")
+        _body(row["exclusions"])
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    short = str(row["tour_id"]).split("-")[0]
+    return StreamingResponse(
+        iter([buf.read()]),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f"attachment; filename=tour_{short}_v{row['version_number']}.docx"},
+    )
 
 
 class VersionActionRequest(_BM):
