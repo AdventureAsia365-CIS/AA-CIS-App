@@ -45,6 +45,7 @@ from api.routers.acp_health import router as acp_health_router
 from api.middleware.rate_limit import rate_limit_middleware
 from api.middleware.sentry_context import sentry_context_middleware
 from api.core.sentry import init_sentry
+from services.acp_shared.audit_log import TenantAuditAction, write_audit_log
 
 logger = structlog.get_logger()
 pool: asyncpg.Pool = None
@@ -169,6 +170,19 @@ async def tenant_login(
     if not row:
         raise HTTPException(status_code=401, detail="Invalid API key")
     token = _create_jwt(row["tenant_id"], row["name"], row["plan_tier"])
+
+    # AA-559 — semantic tenant-activity log. Best-effort/swallowed (unlike every other new call
+    # site this issue adds): login has no pre-existing DB write of its own to be atomic with, and
+    # a real tenant must never be locked out of the portal because an audit INSERT hiccuped.
+    try:
+        await write_audit_log(
+            db, tenant_id=row["tenant_id"], actor=f"tenant:{row['tenant_id']}",
+            action=TenantAuditAction.TENANT_LOGIN, resource_type="tenant",
+            resource_id=row["tenant_id"], details={"login_method": "api_key"},
+        )
+    except Exception as exc:
+        logger.error("tenant_login_audit_log_failed", tenant_id=row["tenant_id"], error=str(exc))
+
     return TenantLoginResponse(
         token=token,
         tenant_id=row["tenant_id"],
