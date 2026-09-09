@@ -12,6 +12,24 @@
 // comment), retries below are labeled "Retry reason" / "what was fed back to the writer to
 // rewrite", never "what changed" — a real content-diff view is AA-570's separate scope.
 //
+// AA-572 follow-up fixes (found by Nghiệp's own post-Done screenshots, not caught before this
+// page was marked Done — see that issue for the full list): (1) "Round N — Lý do yêu cầu viết
+// lại" label was never translated — fixed to "Round N — Retry reason", the ONLY UI string in
+// this file that was still Vietnamese (grepped the whole file + auditPanels.tsx/adminUi.tsx for
+// diacritics first — everything else was already English or a code comment, not UI text); (2)
+// tenant stat header (total pieces + per-channel breakdown, computed client-side from the
+// already-loaded `rows`, no new endpoint); (3) sortable Gate count/Retry count/Created at
+// columns; (4) Content block's fixed `maxHeight`/`overflowY` scrollbox removed — full text now
+// renders inline; (5) Lineage split into one line per entity; (6) sticky `<thead>` — the real
+// root cause was NOT a missing `minHeight:0`/`height:"100vh"` (both were already correct on this
+// page's own scroll container) but a REDUNDANT `overflowX:"auto"` on the table's own wrapper div
+// — per the CSS overflow spec, setting overflow-x to anything but visible while overflow-y stays
+// visible forces overflow-y to compute to auto too, making that inner div its own (non-scrolling,
+// since its height is unconstrained) sticky containing block instead of the real outer scrollport
+// — so `position:sticky` on `<th>` had nothing real to stick to. Fixed by moving `overflowX:
+// "auto"` onto the actual outer scroll container and letting the inner table wrapper stay
+// `overflow: visible` (default).
+//
 // This page also confirms AA-558's finding for real: the old "06 Write/Gate" and "07 Review" tabs
 // called the exact same endpoint (`/admin/a4/content-log`) for the exact same rows, just under 2
 // tab labels — merging removes that literal duplication, not just a UI simplification. "08
@@ -26,7 +44,7 @@
 // both restyled by this same build to read as one equal list, not a visually-demoted "06-08"
 // link tacked on below a divider.
 import { Fragment, useState, useEffect, useCallback, useMemo } from "react";
-import { ChevronDown, ChevronRight, Radio } from "lucide-react";
+import { ChevronDown, ChevronRight, ChevronUp, Radio } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
 import { A, serif, mono, sans, Card, Badge, LoadingScreen } from "../_components/adminUi";
 import { fetchJson, EmptyState, ErrorState } from "../_components/auditPanels";
@@ -92,16 +110,19 @@ const PUBLISHED_OPTIONS = [
   { value: "no", label: "Not published" },
 ];
 
-function sourceLabel(source: ContentSource): string {
-  if (source.kind === "segment") return `Segment — ${source.place ?? "?"}${source.action ? ` (${source.action})` : ""}`;
-  if (source.kind === "route") return `Route/Hub — ${source.hub_name ?? "?"} (Day ${source.first_day}-${source.last_day})`;
-  return "Chosen atom directly (not via Slate)";
-}
-
 const selectStyle: React.CSSProperties = {
   padding: "8px 12px", background: A.card, border: `1px solid ${A.line}`, borderRadius: 8,
   fontSize: 12.5, fontFamily: sans, color: A.body, cursor: "pointer",
 };
+
+// AA-572 point 3 — sort state lives at the page level (not the table's) so it can be reset
+// alongside the filters if a future build wants that; for now it just persists across re-fetches.
+type SortKey = "gate" | "retry" | "created_at";
+type Sort = { key: SortKey; dir: "asc" | "desc" };
+
+const CHANNEL_LABEL: Record<string, string> = Object.fromEntries(
+  CHANNEL_OPTIONS.filter(o => o.value).map(o => [o.value, o.label]),
+);
 
 export default function ContentTracePage() {
   const [tenants, setTenants] = useState<Tenant[]>([]);
@@ -116,6 +137,7 @@ export default function ContentTracePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [sort, setSort] = useState<Sort | null>(null);
 
   useEffect(() => {
     fetchJson<{ tenants: Tenant[] }>("/api/admin/tenants")
@@ -144,6 +166,40 @@ export default function ContentTracePage() {
   }, [query]);
 
   useEffect(() => { load(); }, [load]);
+
+  // AA-572 point 2 — tenant stat header: total pieces + per-channel breakdown, computed
+  // client-side from the already-loaded (already tenant/channel/status/date-filtered) `rows` —
+  // no new endpoint, matches the issue's own "no backend change" scope. Reflects whatever the
+  // current filters (Tenant included) narrow the table down to, exactly like Social Content's
+  // 01-Atomize header stat bar already does for its own Tour/Market filters.
+  const stats = useMemo(() => {
+    const list = rows ?? [];
+    const byChannel: Record<string, number> = {};
+    for (const r of list) byChannel[r.channel] = (byChannel[r.channel] ?? 0) + 1;
+    return {
+      total: list.length,
+      byChannel: Object.entries(byChannel).sort((a, b) => b[1] - a[1]),
+    };
+  }, [rows]);
+
+  // AA-572 point 3 — sort applied client-side to the already-loaded rows (same "no backend
+  // change" scope as the stat header above); the endpoint has no `sort` param and doesn't need
+  // one for a page-sized result set (`limit` caps at 500).
+  const sortedRows = useMemo(() => {
+    if (!rows || !sort) return rows;
+    const withKey = rows.map(r => ({
+      r,
+      k: sort.key === "gate" ? r.gate_pass_count
+        : sort.key === "retry" ? r.retry_count
+        : new Date(r.created_at).getTime(),
+    }));
+    withKey.sort((a, b) => sort.dir === "asc" ? a.k - b.k : b.k - a.k);
+    return withKey.map(x => x.r);
+  }, [rows, sort]);
+
+  const toggleSort = useCallback((key: SortKey) => {
+    setSort(prev => prev?.key === key ? { key, dir: prev.dir === "desc" ? "asc" : "desc" } : { key, dir: "desc" });
+  }, []);
 
   return (
     <div style={{ display: "flex", minHeight: "100vh", background: A.bg, fontFamily: sans }}>
@@ -190,9 +246,26 @@ export default function ContentTracePage() {
               <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} style={{ ...selectStyle, cursor: "text" }} />
             </FilterField>
           </div>
+
+          {/* AA-572 point 2 — tenant stat header, same tile shape 01-Atomize's own header stat
+              bar uses (adminUi.tsx has no shared StatTile export yet, so this mirrors it inline
+              rather than inventing a differently-shaped one). */}
+          {!loading && !error && rows && (
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 14 }}>
+              <StatTile label="Total pieces" value={stats.total} />
+              {stats.byChannel.map(([ch, count]) => (
+                <StatTile key={ch} label={CHANNEL_LABEL[ch] ?? ch} value={count} />
+              ))}
+            </div>
+          )}
         </div>
 
-        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "20px 32px 32px" }}>
+        {/* AA-572 point 6 — `overflowX: "auto"` now lives HERE (the real, single scrolling
+            ancestor: `flex:1, minHeight:0` already correctly bounds its height against the
+            page's own `height:"100vh"` chain above) rather than on ContentTraceTable's inner
+            wrapper div — see this file's header comment for why that nested overflow-x was
+            silently breaking the sticky `<thead>`. */}
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "auto", padding: "20px 32px 32px" }}>
           {loading ? (
             <LoadingScreen msg="Loading Content Trace…" />
           ) : error ? (
@@ -203,11 +276,20 @@ export default function ContentTracePage() {
               body="Nothing has been written yet for this combination of tenant/channel/status/date — try widening a filter, or 'All tenants' to check whether the data exists elsewhere."
             />
           ) : (
-            <ContentTraceTable rows={rows} expandedId={expandedId}
+            <ContentTraceTable rows={sortedRows ?? rows} expandedId={expandedId} sort={sort} onSort={toggleSort}
               onToggle={id => setExpandedId(prev => prev === id ? null : id)} />
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function StatTile({ label, value }: { label: string; value: number }) {
+  return (
+    <div style={{ background: A.card, border: `1px solid ${A.line}`, borderRadius: 8, padding: "6px 12px", minWidth: 92 }}>
+      <div style={{ fontSize: 10, color: A.muted, textTransform: "uppercase", letterSpacing: "0.04em" }}>{label}</div>
+      <div style={{ fontFamily: mono, fontSize: 15, fontWeight: 600, color: A.ink }}>{value}</div>
     </div>
   );
 }
@@ -228,21 +310,48 @@ function FilterField({ label, children }: { label: string; children: React.React
 
 const COLS = 10;
 
-function ContentTraceTable({ rows, expandedId, onToggle }: {
-  rows: ContentLogRow[]; expandedId: string | null; onToggle: (id: string) => void;
+// AA-572 point 3 — only these 3 columns are sortable (the issue's own stated minimum; the rest
+// are free-text/categorical where a client-side sort adds little value and wasn't asked for).
+const HEADERS: { label: string; sortKey?: SortKey }[] = [
+  { label: "" }, { label: "Topic" }, { label: "Tenant" }, { label: "Tour" }, { label: "Channel" },
+  { label: "Angle chosen" }, { label: "Status" }, { label: "Gate count", sortKey: "gate" },
+  { label: "Retry count", sortKey: "retry" }, { label: "Published" },
+  { label: "Created at", sortKey: "created_at" },
+];
+
+function ContentTraceTable({ rows, expandedId, sort, onSort, onToggle }: {
+  rows: ContentLogRow[]; expandedId: string | null; sort: Sort | null; onSort: (key: SortKey) => void;
+  onToggle: (id: string) => void;
 }) {
   return (
-    <div style={{ overflowX: "auto", border: `1px solid ${A.line}`, borderRadius: 10 }}>
+    // AA-572 point 6 — deliberately NO `overflowX` here (default `visible`): the outer page
+    // scroll container now owns horizontal scroll too, so this div isn't its own overflow
+    // context and doesn't hijack `<th>`'s `position: sticky` — see file header comment.
+    <div style={{ border: `1px solid ${A.line}`, borderRadius: 10 }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: sans }}>
         <thead>
           <tr>
-            {["", "Topic", "Tenant", "Tour", "Channel", "Angle chosen", "Status", "Gate count", "Retry count", "Published", "Created at"].map((h, i) => (
-              <th key={i} style={{
-                padding: "10px 14px", fontSize: 11, fontWeight: 600, textTransform: "uppercase",
-                letterSpacing: "0.08em", color: A.muted, textAlign: "left", background: A.bg,
-                borderBottom: `1px solid ${A.line}`, whiteSpace: "nowrap",
-              }}>{h}</th>
-            ))}
+            {HEADERS.map((h, i) => {
+              const active = h.sortKey && sort?.key === h.sortKey;
+              return (
+                <th key={i} onClick={h.sortKey ? () => onSort(h.sortKey as SortKey) : undefined} style={{
+                  padding: "10px 14px", fontSize: 11, fontWeight: 600, textTransform: "uppercase",
+                  letterSpacing: "0.08em", color: active ? A.gold : A.muted, textAlign: "left",
+                  background: A.bg, borderBottom: `1px solid ${A.line}`, whiteSpace: "nowrap",
+                  position: "sticky", top: 0, zIndex: 2, cursor: h.sortKey ? "pointer" : "default",
+                  userSelect: "none",
+                }}>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+                    {h.label}
+                    {h.sortKey && (
+                      active ? (
+                        sort!.dir === "asc" ? <ChevronUp size={12} /> : <ChevronDown size={12} />
+                      ) : <ChevronDown size={12} style={{ opacity: 0.25 }} />
+                    )}
+                  </span>
+                </th>
+              );
+            })}
           </tr>
         </thead>
         <tbody>
@@ -300,19 +409,38 @@ const rowTd: React.CSSProperties = {
 
 // ══════════════════════════════════════════════════════════════════════════
 // Accordion — full lineage + all 3 angles (chosen marked) + content + gate detail + retry
-// reasoning ("Lý do yêu cầu viết lại", never a content diff — see file header) + publish status.
+// reasoning ("Retry reason", never a content diff — see file header) + publish status.
 // ══════════════════════════════════════════════════════════════════════════
 
 function ContentTraceAccordion({ row: p }: { row: ContentLogRow }) {
   return (
     <Card style={{ padding: "16px 18px", marginTop: 4 }}>
-      {/* Lineage — Tour -> Atom -> Segment/Route/Hub -> Slate Subject, always visible, never a
-          blank cell (the pre-Slate direct-atom path is a real, explicitly-labeled state). */}
+      {/* AA-572 point 5 — Lineage: was 1 concatenated line ("Tour: X → Atom: Y → Slate: Segment —
+          Z"), hard to scan. Now one line per real entity (Tour/Atom/Segment/Route/Hub/Slate) —
+          always visible, never a blank cell (the pre-Slate direct-atom path is a real,
+          explicitly-labeled state, not an omission). Route/Hub were previously merged into one
+          `sourceLabel()` string ("Route/Hub — {hub} (Day X-Y)") — now genuinely 2 lines, matching
+          the issue's own entity list. */}
       <SectionLabel>Lineage</SectionLabel>
-      <div style={{ fontSize: 12.5, color: A.body, marginBottom: 4, lineHeight: 1.7 }}>
-        <strong>Tour:</strong> {p.tour?.name ?? "—"}{p.tour?.destination ? ` (${p.tour.destination})` : ""}
-        {p.atom && <> → <strong>Atom:</strong> {p.atom.text}</>}
-        {" → "}<strong>{p.source.kind === "direct_atom" ? "Path:" : "Slate:"}</strong> {sourceLabel(p.source)}
+      <div style={{ marginBottom: 4 }}>
+        <LineageLine label="Tour">
+          {p.tour?.name ?? "—"}{p.tour?.destination ? ` (${p.tour.destination})` : ""}
+        </LineageLine>
+        {p.atom && <LineageLine label="Atom">{p.atom.text}</LineageLine>}
+        {p.source.kind === "segment" && (
+          <LineageLine label="Segment">
+            {p.source.place ?? "?"}{p.source.action ? ` (${p.source.action})` : ""}
+          </LineageLine>
+        )}
+        {p.source.kind === "route" && (
+          <>
+            <LineageLine label="Route">Day {p.source.first_day}–{p.source.last_day}</LineageLine>
+            <LineageLine label="Hub">{p.source.hub_name ?? "?"}</LineageLine>
+          </>
+        )}
+        <LineageLine label="Slate">
+          {p.source.kind === "direct_atom" ? "Not used — atom chosen directly" : "Picked from the Slate"}
+        </LineageLine>
       </div>
       {p.goal && <div style={{ fontSize: 12.5, color: A.body, marginBottom: 12 }}><strong>Goal:</strong> {p.goal}</div>}
       {p.cta && <div style={{ fontSize: 12.5, color: A.body, marginBottom: 12 }}><strong>CTA:</strong> {p.cta}</div>}
@@ -339,11 +467,13 @@ function ContentTraceAccordion({ row: p }: { row: ContentLogRow }) {
         </div>
       )}
 
-      {/* Full content. */}
+      {/* Full content. AA-572 point 4 — no `maxHeight`/`overflowY` scrollbox anymore: the whole
+          piece renders inline so it can be read/scanned without cramming into a small nested
+          scroll area (the accordion itself already scrolls within the page). */}
       <SectionLabel>Content</SectionLabel>
       <div style={{
         fontSize: 12.5, color: A.body, lineHeight: 1.6, marginBottom: 14, whiteSpace: "pre-wrap",
-        maxHeight: 260, overflowY: "auto", border: `1px solid ${A.line}`, borderRadius: 8, padding: "10px 12px",
+        border: `1px solid ${A.line}`, borderRadius: 8, padding: "10px 12px",
         background: A.card,
       }}>
         {p.content_text || "(no content text on record)"}
@@ -383,7 +513,7 @@ function ContentTraceAccordion({ row: p }: { row: ContentLogRow }) {
           {p.repair_log.map((round, i) => (
             <div key={i} style={{ fontSize: 12, color: A.body, border: `1px solid ${A.line}`, borderRadius: 8, padding: "8px 10px" }}>
               <div style={{ fontWeight: 600, marginBottom: 3 }}>
-                Round {round.attempt ?? i + 1} — Lý do yêu cầu viết lại{round.gate_targeted ? ` (${round.gate_targeted})` : ""}
+                Round {round.attempt ?? i + 1} — Retry reason{round.gate_targeted ? ` (${round.gate_targeted})` : ""}
               </div>
               {round.violations && round.violations.length > 0 ? (
                 <ul style={{ margin: 0, paddingLeft: 18, color: A.muted }}>
@@ -417,6 +547,16 @@ function ContentTraceAccordion({ row: p }: { row: ContentLogRow }) {
         )}
       </div>
     </Card>
+  );
+}
+
+// AA-572 point 5 — one Lineage entity per line (label + value), replacing the old single
+// concatenated string.
+function LineageLine({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={{ fontSize: 12.5, color: A.body, lineHeight: 1.7 }}>
+      <strong>{label}:</strong> {children}
+    </div>
   );
 }
 
