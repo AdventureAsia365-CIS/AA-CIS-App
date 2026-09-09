@@ -144,11 +144,11 @@ class TestGetContentLog:
                 {"gate": "F6_cta_present", "passed": True, "violations": []},
             ]),
             "repair_log": json.dumps([{"round": 1, "feedback": "add a source"}]),
-            "attempt_number": 2, "content_preview": "Some real content...",
+            "attempt_number": 2, "content_text": "Some real content...",
             "atom_text": "Cross the bamboo bridge", "atom_activity_type": "adventure",
             "atom_emotional_hook": "awe", "atom_season_note": "dry season best",
             "tour_name": "Sapa Trek", "tour_destination": "Vietnam",
-            "publish_id": None,
+            "publish_id": None, "publish_external_url": None, "publish_published_at": None,
             "created_at": datetime(2026, 8, 30, tzinfo=timezone.utc),
             # AA-561 3a — lineage fields.
             "subject_id": str(uuid.uuid4()), "segment_id": "seg_abc123", "route_id": None,
@@ -351,3 +351,178 @@ class TestGetContentLog:
         result = await get_content_log(req, tenant_id=None, limit=200, x_admin_secret=_TEST_SECRET)
         assert result["data"] == []
         assert result["total"] == 0
+
+
+# ── AA-568 — merged "06 · Content Trace" page's new filters + computed fields ───────────────────
+
+@pytest.mark.asyncio
+class TestGetContentLogAA568:
+    """Reuses TestGetContentLog's own `_full_row` fixture (staticmethod, no need to inherit —
+    inheriting would re-collect and re-run every one of that class's own tests under this name)."""
+
+    _full_row = staticmethod(TestGetContentLog._full_row)
+
+    async def test_status_filter_scopes_query(self):
+        from api.routers.admin_a4 import get_content_log
+
+        pool, conn = _make_pool(fetch=[])
+        req = _make_request(pool)
+        await get_content_log(req, tenant_id=None, status="held", limit=200, x_admin_secret=_TEST_SECRET)
+
+        sql, *params = conn.fetch.call_args[0]
+        assert "cp.status = $" in sql
+        assert "held" in params
+
+    async def test_channel_filter_scopes_query(self):
+        from api.routers.admin_a4 import get_content_log
+
+        pool, conn = _make_pool(fetch=[])
+        req = _make_request(pool)
+        await get_content_log(req, tenant_id=None, channel="blog", limit=200, x_admin_secret=_TEST_SECRET)
+
+        sql, *params = conn.fetch.call_args[0]
+        assert "COALESCE(cp.channel, agr.channel) = $" in sql
+        assert "blog" in params
+
+    async def test_date_range_filter_scopes_query(self):
+        from api.routers.admin_a4 import get_content_log
+
+        pool, conn = _make_pool(fetch=[])
+        req = _make_request(pool)
+        await get_content_log(
+            req, tenant_id=None, date_from="2026-09-01", date_to="2026-09-08",
+            limit=200, x_admin_secret=_TEST_SECRET,
+        )
+
+        sql, *params = conn.fetch.call_args[0]
+        assert "cp.created_at >= $" in sql
+        assert "cp.created_at < (" in sql
+        assert "2026-09-01" in params
+        assert "2026-09-08" in params
+
+    async def test_published_yes_filters_to_rows_with_a_publish_log_row(self):
+        from api.routers.admin_a4 import get_content_log
+
+        pool, conn = _make_pool(fetch=[])
+        req = _make_request(pool)
+        await get_content_log(req, tenant_id=None, published="yes", limit=200, x_admin_secret=_TEST_SECRET)
+
+        sql = conn.fetch.call_args[0][0]
+        assert "pl.publish_id IS NOT NULL" in sql
+
+    async def test_published_no_filters_to_rows_without_a_publish_log_row(self):
+        from api.routers.admin_a4 import get_content_log
+
+        pool, conn = _make_pool(fetch=[])
+        req = _make_request(pool)
+        await get_content_log(req, tenant_id=None, published="no", limit=200, x_admin_secret=_TEST_SECRET)
+
+        sql = conn.fetch.call_args[0][0]
+        assert "pl.publish_id IS NULL" in sql
+
+    async def test_content_text_is_full_not_truncated(self):
+        """AA-568 — the merged page's row-click accordion needs the FULL text with no second
+        fetch; the old 280-char `content_preview` alone would truncate a real article."""
+        from api.routers.admin_a4 import get_content_log
+
+        long_text = "x" * 500
+        row = self._full_row(content_text=long_text)
+        pool, conn = _make_pool(fetch=[row])
+        req = _make_request(pool)
+
+        result = await get_content_log(req, tenant_id=None, limit=200, x_admin_secret=_TEST_SECRET)
+        item = result["data"][0]
+        assert item["content_text"] == long_text
+        assert item["content_preview"] == long_text[:280]
+
+    async def test_retry_count_is_repair_log_length(self):
+        from api.routers.admin_a4 import get_content_log
+
+        row = self._full_row(repair_log=json.dumps([
+            {"attempt": 1, "gate_targeted": "F1_grounding", "violations": ["unsupported claim"]},
+            {"attempt": 2, "gate_targeted": "F6_cta_present", "violations": ["missing CTA"]},
+        ]))
+        pool, conn = _make_pool(fetch=[row])
+        req = _make_request(pool)
+
+        result = await get_content_log(req, tenant_id=None, limit=200, x_admin_secret=_TEST_SECRET)
+        assert result["data"][0]["retry_count"] == 2
+
+    async def test_retry_count_zero_when_no_repair_rounds(self):
+        from api.routers.admin_a4 import get_content_log
+
+        row = self._full_row(repair_log=json.dumps([]))
+        pool, conn = _make_pool(fetch=[row])
+        req = _make_request(pool)
+
+        result = await get_content_log(req, tenant_id=None, limit=200, x_admin_secret=_TEST_SECRET)
+        assert result["data"][0]["retry_count"] == 0
+
+    async def test_topic_prefers_atom_text_over_goal(self):
+        from api.routers.admin_a4 import get_content_log
+
+        row = self._full_row(atom_text="Cross the bamboo bridge", goal="engagement_conversation")
+        pool, conn = _make_pool(fetch=[row])
+        req = _make_request(pool)
+
+        result = await get_content_log(req, tenant_id=None, limit=200, x_admin_secret=_TEST_SECRET)
+        assert result["data"][0]["topic"] == "Cross the bamboo bridge"
+
+    async def test_topic_falls_back_to_goal_when_no_atom_text(self):
+        from api.routers.admin_a4 import get_content_log
+
+        row = self._full_row(atom_text=None, goal="engagement_conversation")
+        pool, conn = _make_pool(fetch=[row])
+        req = _make_request(pool)
+
+        result = await get_content_log(req, tenant_id=None, limit=200, x_admin_secret=_TEST_SECRET)
+        assert result["data"][0]["topic"] == "engagement_conversation"
+
+    async def test_topic_is_untitled_when_neither_atom_text_nor_goal(self):
+        from api.routers.admin_a4 import get_content_log
+
+        row = self._full_row(atom_text=None, goal=None)
+        pool, conn = _make_pool(fetch=[row])
+        req = _make_request(pool)
+
+        result = await get_content_log(req, tenant_id=None, limit=200, x_admin_secret=_TEST_SECRET)
+        assert result["data"][0]["topic"] == "Untitled"
+
+    async def test_topic_truncates_long_atom_text(self):
+        from api.routers.admin_a4 import get_content_log
+
+        row = self._full_row(atom_text="a" * 200)
+        pool, conn = _make_pool(fetch=[row])
+        req = _make_request(pool)
+
+        result = await get_content_log(req, tenant_id=None, limit=200, x_admin_secret=_TEST_SECRET)
+        topic = result["data"][0]["topic"]
+        assert len(topic) == 91  # 90 chars + the "…" truncation marker
+        assert topic.endswith("…")
+
+    async def test_publish_url_and_published_at_pass_through_when_published(self):
+        from api.routers.admin_a4 import get_content_log
+
+        row = self._full_row(
+            status="approved", held_reason=None, publish_id=str(uuid.uuid4()),
+            publish_external_url="https://wp.example.com/post/123",
+            publish_published_at=datetime(2026, 9, 9, tzinfo=timezone.utc),
+        )
+        pool, conn = _make_pool(fetch=[row])
+        req = _make_request(pool)
+
+        result = await get_content_log(req, tenant_id=None, limit=200, x_admin_secret=_TEST_SECRET)
+        item = result["data"][0]
+        assert item["publish_external_url"] == "https://wp.example.com/post/123"
+        assert item["publish_published_at"] == "2026-09-09T00:00:00+00:00"
+
+    async def test_publish_url_is_none_when_never_published(self):
+        from api.routers.admin_a4 import get_content_log
+
+        pool, conn = _make_pool(fetch=[self._full_row()])  # base fixture: publish_id=None
+        req = _make_request(pool)
+
+        result = await get_content_log(req, tenant_id=None, limit=200, x_admin_secret=_TEST_SECRET)
+        item = result["data"][0]
+        assert item["publish_external_url"] is None
+        assert item["publish_published_at"] is None

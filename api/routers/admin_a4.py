@@ -403,6 +403,11 @@ async def get_content_log(
     request: Request,
     tenant_id: Optional[str] = Query(None),
     tour_id: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    channel: Optional[str] = Query(None),
+    published: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
     limit: int = Query(200, ge=1, le=500),
     x_admin_secret: str = Header(None),
 ):
@@ -450,7 +455,24 @@ async def get_content_log(
     AA-527 (bổ sung, Phương án C dashboard): optional `tour_id` filters on `agr.trip_id` (already
     selected/joined below for the `tour` display block) — lets the dashboard's Write-Gate and
     Review panels scope this same dataset to whichever tour is the page's current header anchor,
-    with no schema change."""
+    with no schema change.
+
+    AA-568 — merged "06 · Content Trace" page: this is now the SOLE data source for the combined
+    table (the old 3-tab Write/Gate + Review + Publish split on `/admin/tenant-activity` read the
+    exact same rows twice, per AA-558's confirmed finding — see that page's own STEP0 comment).
+    Gains 4 new optional filters matching the merged page's filter bar (`status` one of
+    processing/approved/held/failed — the real `content_piece.status` CHECK values, no `draft`;
+    `channel`; `date_from`/`date_to`, inclusive day-range on `cp.created_at`) plus `published`
+    (`yes`/`no` — derived from the existing `pl.publish_id IS [NOT] NULL` join, never a 5th status
+    value, per STEP0's explicit terminology finding). `content_text` is now selected in FULL
+    (was `LEFT(cp.content_text, 280)`) so the merged page's row-click accordion needs no second
+    per-piece fetch — same "one already-fetched row, no second fetch" principle `PieceLineageCard`
+    documented before it (this endpoint is now this codebase's only reader of that field, the old
+    component is deleted, see auditPanels.tsx). `retry_count` (`len(repair_log)`) and `topic` (a
+    real proxy — the underlying atom's text, or the T8 goal when no atom text exists — content_
+    piece has no title/topic column of its own, confirmed in STEP0, never fabricated) are new
+    computed fields. `publish_external_url`/`publish_published_at` are added to the SELECT so the
+    merged table's "Published Y/N + link" column needs no second call to `/publish-log`."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
 
@@ -462,6 +484,22 @@ async def get_content_log(
     if tour_id:
         params.append(tour_id)
         conditions.append(f"agr.trip_id = ${len(params)}::uuid")
+    if status:
+        params.append(status)
+        conditions.append(f"cp.status = ${len(params)}")
+    if channel:
+        params.append(channel)
+        conditions.append(f"COALESCE(cp.channel, agr.channel) = ${len(params)}")
+    if date_from:
+        params.append(date_from)
+        conditions.append(f"cp.created_at >= ${len(params)}::date")
+    if date_to:
+        params.append(date_to)
+        conditions.append(f"cp.created_at < (${len(params)}::date + interval '1 day')")
+    if published == "yes":
+        conditions.append("pl.publish_id IS NOT NULL")
+    elif published == "no":
+        conditions.append("pl.publish_id IS NULL")
     where = " AND ".join(conditions)
     params.append(limit)
 
@@ -473,7 +511,7 @@ async def get_content_log(
                 agr.dfs_paa_snapshot, agr.trip_id,
                 COALESCE(cp.channel, agr.channel) AS channel,
                 cp.status, cp.held_reason, cp.gate_ledger, cp.repair_log, cp.attempt_number,
-                LEFT(cp.content_text, 280) AS content_preview, cp.created_at,
+                cp.content_text, cp.created_at,
                 -- AA-561 3a — lineage: subject (Slate proposal) -> Segment OR Route it came from.
                 -- subject_id is nullable (the pre-existing atom-picker entry point, AA-449, still
                 -- creates a request with no Subject at all — NOT retired by this build, per its
@@ -486,7 +524,8 @@ async def get_content_log(
                 ta.text AS atom_text, ta.activity_type AS atom_activity_type,
                 ta.emotional_hook AS atom_emotional_hook, ta.season_note AS atom_season_note,
                 rt.src_name AS tour_name, rt.country AS tour_destination,
-                pl.publish_id AS publish_id,
+                pl.publish_id AS publish_id, pl.external_url AS publish_external_url,
+                pl.published_at AS publish_published_at,
                 -- AA-561 3a — retry: how many content_piece rows exist for this SAME request, and
                 -- whether THIS row is the earliest one. >1 sibling + not-earliest = a buffer retry
                 -- of an earlier held piece (AA-485's _run_buffer_retry_attempt() inserts a NEW
@@ -554,10 +593,23 @@ async def get_content_log(
                     "first_day": r["route_first_day"], "last_day": r["route_last_day"]}
         return {"kind": "direct_atom"}
 
+    def _topic(atom_text: Optional[str], goal: Optional[str]) -> str:
+        """AA-568 — content_piece has no title/topic column (confirmed in STEP0). Best honest
+        proxy: the underlying atom's own text (what real moment/activity this piece is about),
+        falling back to the T8 goal when no atom is on record (the pre-Slate direct-atom path can
+        still lack atom_text if the atom itself was since deleted)."""
+        if atom_text:
+            return atom_text[:90] + ("…" if len(atom_text) > 90 else "")
+        if goal:
+            return goal
+        return "Untitled"
+
     data = []
     for r in rows:
         gate_ledger = _parse_jsonb(r["gate_ledger"], [])
         gate_counts = _gate_counts(gate_ledger)
+        repair_log = _parse_jsonb(r["repair_log"], [])
+        content_text = r["content_text"]
         data.append({
             "piece_id": r["piece_id"],
             "tenant_id": r["tenant_id"],
@@ -566,15 +618,18 @@ async def get_content_log(
             "angle_gate_request_id": r["angle_gate_request_id"],
             "atom_id": r["atom_id"],
             "goal": r["goal"],
+            "topic": _topic(r["atom_text"], r["goal"]),
             "channel": r["channel"],
             "status": r["status"],
             "held_reason": r["held_reason"],
             "gate_ledger": gate_ledger,
             "gate_pass_count": gate_counts["passed"],
             "gate_total_count": gate_counts["total"],
-            "repair_log": _parse_jsonb(r["repair_log"], []),
+            "repair_log": repair_log,
+            "retry_count": len(repair_log),
             "attempt_number": r["attempt_number"],
-            "content_preview": r["content_preview"],
+            "content_text": content_text,
+            "content_preview": (content_text[:280] if content_text else ""),
             "cta": r["cta"],
             # AA-561 3a — every angle the request generated (idx 0-2), not just the chosen one.
             "angles": _parse_jsonb(r["angles"], []),
@@ -600,9 +655,14 @@ async def get_content_log(
             "sibling_piece_count": r["sibling_piece_count"],
             "dfs_paa_snapshot": _parse_jsonb(r["dfs_paa_snapshot"], None),
             "publish_status": _publish_status(r["status"], r["publish_id"] is not None),
+            "publish_external_url": r["publish_external_url"],
+            "publish_published_at": r["publish_published_at"].isoformat() if r["publish_published_at"] else None,
             "created_at": r["created_at"].isoformat() if r["created_at"] else None,
         })
-    logger.info("a4_content_log_queried", count=len(data), tenant_filter=tenant_id, tour_filter=tour_id)
+    logger.info(
+        "a4_content_log_queried", count=len(data), tenant_filter=tenant_id, tour_filter=tour_id,
+        status_filter=status, channel_filter=channel, published_filter=published,
+    )
     return {"data": data, "total": len(data), "tenant_filter": tenant_id, "tour_filter": tour_id}
 
 
