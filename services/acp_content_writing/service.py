@@ -76,19 +76,21 @@ class MissingCTAError(ContentWritingError):
 
 _ATOM_TEXT_QUERY = """
     SELECT text FROM acp_contract.tour_atoms
-    WHERE atom_id = $1 AND owner_scope = $2 AND NOT deleted AND NOT is_empty_marker
+    WHERE atom_id = $1 AND owner_scope IN ('platform', $2) AND NOT deleted AND NOT is_empty_marker
 """
 
 
 async def _fetch_atom_text(tenant_id: UUID, atom_id: str, pool) -> str:
-    """Tenant-scoped, kept local per the same precedent AA-449 already set for
-    services/acp_angle_gate/service.py::_fetch_atom_for_tenant() ("kept local here rather than
-    added to tenant_pool.py since it's T8-specific") — this one is T9-specific and only needs
-    the text field, not the full atom dict T8's version returns."""
+    """AA-567: `owner_scope IN ('platform', tenant_id)`, not tenant-only — see
+    `acp_angle_gate/service.py::_fetch_atom_for_tenant()`'s docstring (same fix, same reasoning)
+    for why the old tenant-only filter was a real bug, not an intentional isolation boundary.
+    Kept local per the same precedent AA-449 already set ("kept local here rather than added to
+    tenant_pool.py since it's T8-specific") — this one is T9-specific and only needs the text
+    field, not the full atom dict T8's version returns."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(_ATOM_TEXT_QUERY, atom_id, str(tenant_id))
     if row is None:
-        raise ContentWritingError(f"atom_id={atom_id!r} not found for this tenant")
+        raise ContentWritingError(f"atom_id={atom_id!r} not found (deleted, or not a live platform/tenant atom)")
     return row["text"]
 
 
@@ -112,10 +114,15 @@ _ROUTE_SEGMENT_TEXT_QUERY = """
     FROM acp_contract.atom_segment_member m
     JOIN acp_contract.tour_atoms ta ON ta.atom_id = m.atom_id
     WHERE m.segment_id = $1 AND ta.tour_id = $2::uuid
-      AND ta.owner_scope = $3::text
+      AND ta.owner_scope IN ('platform', $3::text)
       AND NOT m.is_alias AND NOT ta.deleted AND NOT ta.is_empty_marker
     ORDER BY m.atom_id LIMIT 1
 """
+# AA-567 — owner_scope IN ('platform', tenant_id), matching the identical fix to
+# services/acp_shared/slate.py::_resolve_representative_atom()'s own Route-pick branch (this
+# query is that same resolution, applied per-Segment across the whole walk — see this module's
+# docstring above). Same reasoning: platform-wide atomize (AA-526) means a Route's member
+# Segments are built from the shared atom pool by default.
 
 
 async def _fetch_route_segments(
@@ -922,16 +929,16 @@ _LATEST_PIECE_FOR_REQUEST_QUERY = """
 _ATOM_CONTEXT_QUERY = """
     SELECT text, activity_type, emotional_hook, season_note
     FROM acp_contract.tour_atoms
-    WHERE atom_id = $1 AND owner_scope = $2 AND NOT deleted AND NOT is_empty_marker
+    WHERE atom_id = $1 AND owner_scope IN ('platform', $2) AND NOT deleted AND NOT is_empty_marker
 """
 
 
 async def _fetch_atom_context(tenant_id: UUID, atom_id: str, pool) -> Optional[dict]:
-    """Tenant-scoped atom context for the review screen (AA-501) — text/activity_type/
-    emotional_hook/season_note only, the fields the build task asked for (distinctiveness/
-    persona_fit/media are AA-internal signals, out of scope here). Same owner_scope=tenant_id
-    convention as this module's own _fetch_atom_text() / acp_angle_gate.service.
-    _fetch_atom_for_tenant() — not a new security pattern."""
+    """Atom context for the review screen (AA-501) — text/activity_type/emotional_hook/
+    season_note only, the fields the build task asked for (distinctiveness/persona_fit/media are
+    AA-internal signals, out of scope here). AA-567: `owner_scope IN ('platform', tenant_id)`,
+    not tenant-only — same fix, same reasoning as this module's own `_fetch_atom_text()` /
+    `acp_angle_gate.service._fetch_atom_for_tenant()`."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(_ATOM_CONTEXT_QUERY, atom_id, str(tenant_id))
     return dict(row) if row else None
@@ -1057,7 +1064,7 @@ _TENANT_REVIEWS_QUERY = """
             ON ago_chosen.request_id = agr.request_id AND ago_chosen.chosen = true
             AND cp.angle_gate_option_id IS NULL
         LEFT JOIN acp_contract.tour_atoms ta
-            ON ta.atom_id = agr.atom_id AND ta.owner_scope = $2
+            ON ta.atom_id = agr.atom_id AND ta.owner_scope IN ('platform', $2)
         WHERE cp.tenant_id = $1
         ORDER BY cp.angle_gate_request_id, cp.created_at DESC
     ) latest
@@ -1070,6 +1077,12 @@ _TENANT_REVIEWS_QUERY = """
 # `uuid = text` operator for the `cp.tenant_id = $1` comparison ("operator does not exist: uuid =
 # text"). Fixed by binding tenant_id twice as two separate, unambiguously-typed params ($1 uuid,
 # $2 text) — same value, no ambiguity for either placeholder.
+#
+# AA-567 — the LEFT JOIN's own owner_scope filter was ALSO the tenant-only bug (see
+# _fetch_atom_text()'s docstring above for the full reasoning): for any request whose atom was
+# platform-owned (the common case since AA-526), this join silently matched nothing and every
+# atom_* column came back NULL — no error, just a quietly incomplete review row. Fixed to
+# `owner_scope IN ('platform', $2)`.
 
 
 async def fetch_review_list(tenant_id: UUID, pool) -> list[dict]:
