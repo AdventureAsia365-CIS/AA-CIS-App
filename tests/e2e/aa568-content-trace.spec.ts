@@ -113,10 +113,12 @@ test('05 - click a row: accordion shows lineage, all 3 angles (chosen marked), c
   await expect(page.getByText(/Gate ledger \(\d+\/\d+ passed\)/)).toBeVisible();
   await expect(page.getByText(/Retry history \(\d+\)/)).toBeVisible();
 
-  // The retry section must use the honest "Lý do yêu cầu viết lại" label, never a fabricated
-  // "content changed" / diff framing (STEP0's confirmed constraint).
+  // The retry section must use the honest "Retry reason" label (AA-572 translated this from the
+  // original Vietnamese "Lý do yêu cầu viết lại"), never a fabricated "content changed" / diff
+  // framing (STEP0's confirmed constraint).
   const retryText = await page.locator('body').innerText();
-  expect(retryText).toContain('Lý do yêu cầu viết lại');
+  expect(retryText).toContain('Retry reason');
+  expect(retryText).not.toContain('Lý do yêu cầu viết lại');
   expect(retryText.toLowerCase()).not.toContain('content diff');
   expect(retryText.toLowerCase()).not.toContain('nội dung đã đổi');
 
