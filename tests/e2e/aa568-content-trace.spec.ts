@@ -5,6 +5,14 @@ fs.mkdirSync(SHOT_DIR, { recursive: true });
 
 test.describe.configure({ mode: 'serial' });
 
+// Waits for the "Loading Content Trace…" spinner to clear rather than a fixed timeout — real
+// prod network latency (real API Gateway + ECS round trip) is slower and more variable than the
+// local dev stack this suite was first written against, so a fixed timeout that passed locally
+// flaked here.
+async function waitLoaded(page: import('@playwright/test').Page) {
+  await expect(page.getByText('Loading Content Trace…')).toHaveCount(0, { timeout: 15000 });
+}
+
 test.beforeEach(async ({ page }) => {
   await page.goto('/login');
   await page.fill('input[type="text"]', 'e2e-test-admin');
@@ -25,8 +33,8 @@ test('01 - sidebar: Content Trace sits as an equal peer of 01-05, not a demoted 
 
 test('02 - main table renders real rows with the required columns', async ({ page }) => {
   await page.goto('/admin/tenant-activity');
-  await page.waitForTimeout(1500);
   await expect(page.getByRole('heading', { name: '06 · Content Trace' })).toBeVisible();
+  await waitLoaded(page);
   const thead = page.locator('thead');
   for (const col of ['Topic', 'Tenant', 'Tour', 'Channel', 'Angle chosen', 'Status', 'Gate count', 'Retry count', 'Published', 'Created at']) {
     await expect(thead.getByText(col, { exact: true })).toBeVisible();
@@ -37,20 +45,20 @@ test('02 - main table renders real rows with the required columns', async ({ pag
 
 test('03 - tenant filter narrows the table', async ({ page }) => {
   await page.goto('/admin/tenant-activity');
-  await page.waitForTimeout(1500);
+  await waitLoaded(page);
   const rowsBefore = await page.locator('tbody tr').count();
 
   const tenantSelect = page.locator('select').first();
   // Wait for the real tenant list to load (not just the default "All tenants" option) before
   // selecting, then wait for the filtered content-log response specifically (not the initial
   // unfiltered one, which is still in flight when this test starts).
-  await expect(tenantSelect.locator('option')).toHaveCount(5, { timeout: 5000 });
+  await expect(tenantSelect.locator('option')).toHaveCount(5, { timeout: 10000 });
   const filteredResponse = page.waitForResponse(
     r => r.url().includes('/api/admin/a4/content-log') && r.url().includes('tenant_id=') && r.status() === 200,
   );
   await tenantSelect.selectOption({ label: 'WanderLux Travel' });
   await filteredResponse;
-  await page.waitForTimeout(300);
+  await waitLoaded(page);
 
   const rowsAfterTenant = await page.locator('tbody tr').count();
   expect(rowsAfterTenant).toBeGreaterThan(0);
@@ -65,11 +73,15 @@ test('03 - tenant filter narrows the table', async ({ page }) => {
 
 test('04 - status filter narrows to Held only', async ({ page }) => {
   await page.goto('/admin/tenant-activity');
-  await page.waitForTimeout(1500);
+  await waitLoaded(page);
 
   const statusSelect = page.locator('select').nth(2); // Tenant, Channel, Status
+  const filteredResponse = page.waitForResponse(
+    r => r.url().includes('/api/admin/a4/content-log') && r.url().includes('status=held') && r.status() === 200,
+  );
   await statusSelect.selectOption({ label: 'Held' });
-  await page.waitForTimeout(1200);
+  await filteredResponse;
+  await waitLoaded(page);
 
   const statusCells = await page.locator('tbody tr td:nth-child(7)').allTextContents();
   expect(statusCells.length).toBeGreaterThan(0);
@@ -80,11 +92,15 @@ test('04 - status filter narrows to Held only', async ({ page }) => {
 
 test('05 - click a row: accordion shows lineage, all 3 angles (chosen marked), content, gate ledger, and honest retry labeling', async ({ page }) => {
   await page.goto('/admin/tenant-activity');
-  await page.waitForTimeout(1500);
+  await waitLoaded(page);
 
-  // Reset filters to "All" so we have the best chance of a row with retries + angles.
-  await page.locator('select').nth(2).selectOption({ label: 'Held' }); // status=held rows are the ones with repair_log entries
-  await page.waitForTimeout(1200);
+  // Narrow to Held — those rows are the ones with real repair_log entries (retries).
+  const filteredResponse = page.waitForResponse(
+    r => r.url().includes('/api/admin/a4/content-log') && r.url().includes('status=held') && r.status() === 200,
+  );
+  await page.locator('select').nth(2).selectOption({ label: 'Held' });
+  await filteredResponse;
+  await waitLoaded(page);
 
   const firstRow = page.locator('tbody tr').first();
   await firstRow.click();
@@ -111,7 +127,7 @@ test('05 - click a row: accordion shows lineage, all 3 angles (chosen marked), c
 
 test('06 - published filter + old sub-tab labels (Write/Gate, Review, Publish) are gone', async ({ page }) => {
   await page.goto('/admin/tenant-activity');
-  await page.waitForTimeout(1200);
+  await waitLoaded(page);
 
   await expect(page.getByText('Write/Gate', { exact: false })).toHaveCount(0);
   await expect(page.getByText('07 · Review', { exact: true })).toHaveCount(0);
@@ -123,7 +139,7 @@ test('06 - published filter + old sub-tab labels (Write/Gate, Review, Publish) a
   );
   await publishedSelect.selectOption({ label: 'Published' });
   await publishedResponse;
-  await page.waitForTimeout(300);
+  await waitLoaded(page);
   // Real data today has 0 genuinely published pieces (T11's own known gap — see AA-458 LIVE
   // STATE) — an honest empty state here, not stale unfiltered rows, is the correct proof.
   await expect(page.getByText('No content pieces match these filters')).toBeVisible();
