@@ -18,12 +18,16 @@
 //   open the right tab.
 // 06 · Content Trace is always a real link/highlight — there's no local tab state for it to hook
 // into from atom-curation, and it's a no-op nav when already there.
+//
+// AA-560 — "07 · Platform Stats" added the same way as 06: a real link/highlight, no local tab
+// state (it replaces the deleted `/admin/a4-oversight` page — Review Log + Trust Ramp + a new
+// backend gate/error aggregate).
 import Link from "next/link";
-import { Puzzle, Layers, TrendingUp, GitBranch, FileStack, Radio } from "lucide-react";
+import { Puzzle, Layers, TrendingUp, GitBranch, FileStack, Radio, BarChart3 } from "lucide-react";
 import { A, sans } from "./adminUi";
 
 export type SectionKey = "atomize" | "segment" | "score" | "route_hub" | "slate";
-export type SubNavKey = SectionKey | "content_trace";
+export type SubNavKey = SectionKey | "content_trace" | "platform_stats";
 
 const SECTIONS: { key: SectionKey; label: string; icon: React.ReactNode }[] = [
   { key: "atomize",    label: "01 · Atomize",   icon: <Puzzle size={15} /> },
@@ -83,6 +87,15 @@ export default function SocialContentSubNav({ active, onSelectSection }: {
         }}>
           <Radio size={15} />
           <span style={{ flex: 1 }}>06 · Content Trace</span>
+        </Link>
+        <Link href="/admin/platform-stats" style={{
+          display: "flex", alignItems: "center", gap: 8, padding: "9px 12px", borderRadius: 7,
+          background: active === "platform_stats" ? A.goldTint : "transparent",
+          color: active === "platform_stats" ? A.gold : A.body, cursor: "pointer", fontFamily: sans,
+          textDecoration: "none", fontSize: 12.5, fontWeight: active === "platform_stats" ? 700 : 500,
+        }}>
+          <BarChart3 size={15} />
+          <span style={{ flex: 1 }}>07 · Platform Stats</span>
         </Link>
       </div>
     </>

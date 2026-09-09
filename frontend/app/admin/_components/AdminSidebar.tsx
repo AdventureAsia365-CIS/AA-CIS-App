@@ -212,11 +212,14 @@ export default function AdminSidebar() {
             <NavItem active={active("/admin/run-health")} accent={A.red}
               icon={<Activity size={15} />} label="Run Health"
               onClick={() => router.push("/admin/run-health")} />
-            {/* AA-437 [A4]: read-only cross-tenant oversight — T3 escalation log + trust ramp
-                state. No action here (flag/suspend/force-unpublish is future Command Center
-                scope), so it sits alongside Run Health rather than under a new group. */}
+            {/* AA-560 — TEMPORARY, kept alive only until "07 · Platform Stats" (Review Log +
+                Trust Ramp, reachable via SocialContentSubNav inside Social Content) and Content
+                Trace's new Force-unpublish button are both confirmed working in production —
+                issue's own explicit requirement (don't lose functionality mid-move). Remove this
+                NavItem + the Eye import + the /admin/a4-oversight middleware.ts entry + the
+                a4-oversight route itself in the SAME follow-up commit once that's verified. */}
             <NavItem active={active("/admin/a4-oversight")} accent={A.red}
-              icon={<Eye size={15} />} label="Cross-Tenant Oversight"
+              icon={<Eye size={15} />} label="Cross-Tenant Oversight (retiring — AA-560)"
               onClick={() => router.push("/admin/a4-oversight")} />
             {/* AA-505 — real per-call LLM cost/quality, Tenant->Model->Stage. Admin-only, same
                 tier as Cross-Tenant Oversight above (middleware.ts). */}

@@ -47,6 +47,16 @@ endpoints, both requiring an explicit admin click, never automatic (ADR-2026-038
 `acp_shared.audit_log` without touching `packets.publish_mode`). Both re-compute the suggestion
 fresh server-side rather than trusting a client-supplied mode, same "never stale" principle
 `services/acp_planning/trip_reallocation.py::confirm_trip_reallocation()` already uses.
+
+AA-560 (09/09/2026) — the old `/admin/a4-oversight` FE page is retired (replaced by "07 · Platform
+Stats" in Social Content, Review Log + Trust Ramp moved verbatim; Content Log/Publish Log's READ
+side stays covered by Content Trace/06, AA-568). Adds `GET /platform-stats`: a real backend
+aggregate for "gate/lỗi mắc phải nhiều nhất toàn platform" (AA-558 Phần 1 Q3's own finding — the
+old "F1_GROUNDING × 4" tags on the deleted page's Content Log section were a CLIENT-SIDE rollup
+over only the loaded page (`limit=200`), not the true platform-wide count). This is a fresh
+`GROUP BY` over the FULL `content_piece.gate_ledger` column, no row cap. Also returns
+total-pieces/by-channel/by-status counts (AA-560's own item 3, "platform-level, no lineage
+detail" — Segment/Route lineage is explicitly out per AA-558's "not ready to display" finding).
 """
 from __future__ import annotations
 
@@ -524,7 +534,7 @@ async def get_content_log(
                 ta.text AS atom_text, ta.activity_type AS atom_activity_type,
                 ta.emotional_hook AS atom_emotional_hook, ta.season_note AS atom_season_note,
                 rt.src_name AS tour_name, rt.country AS tour_destination,
-                pl.publish_id AS publish_id, pl.external_url AS publish_external_url,
+                pl.publish_id::text AS publish_id, pl.external_url AS publish_external_url,
                 pl.published_at AS publish_published_at,
                 -- AA-561 3a — retry: how many content_piece rows exist for this SAME request, and
                 -- whether THIS row is the earliest one. >1 sibling + not-earliest = a buffer retry
@@ -655,6 +665,12 @@ async def get_content_log(
             "sibling_piece_count": r["sibling_piece_count"],
             "dfs_paa_snapshot": _parse_jsonb(r["dfs_paa_snapshot"], None),
             "publish_status": _publish_status(r["status"], r["publish_id"] is not None),
+            # AA-560 — exposed so the frontend's new "Force unpublish" button (moved here from the
+            # deleted a4-oversight page) can address the right publish_log row. Previously used
+            # only for the is-not-None check above and discarded — never returned on its own
+            # before this (already cast to text in the SELECT, same convention every other
+            # UUID-as-text field in this query already uses).
+            "publish_id": r["publish_id"],
             "publish_external_url": r["publish_external_url"],
             "publish_published_at": r["publish_published_at"].isoformat() if r["publish_published_at"] else None,
             "created_at": r["created_at"].isoformat() if r["created_at"] else None,
@@ -710,3 +726,70 @@ async def force_unpublish(
         "unpublished_at": row["unpublished_at"].isoformat() if row["unpublished_at"] else None,
         "unpublished_by": f"admin:{admin_actor}",
     }
+
+
+@router.get("/platform-stats")
+async def get_platform_stats(
+    request: Request,
+    top_n: int = Query(15, ge=1, le=100),
+    x_admin_secret: str = Header(None),
+):
+    """AA-560 — real backend aggregate for "07 · Platform Stats", replacing the deleted
+    `/admin/a4-oversight` page's client-side "F1_GROUNDING × 4" tag rollup (which only ever
+    counted whatever was in the currently-loaded `limit=200` page, per AA-558 Phần 1 Q3's own
+    finding). Every number here is computed by a fresh `GROUP BY` over the FULL
+    `acp_shared.content_piece` table — no row cap, no page-load window.
+
+    `top_gate_failures`: unnests every row's `gate_ledger` (a JSONB array of
+    `{gate, passed, violations}`, migration 115) via `jsonb_array_elements`, keeps only entries
+    where `passed` is false, groups by `gate`. This works directly in SQL regardless of this
+    app's own asyncpg jsonb-codec gap (`_parse_jsonb()` above) — that gap is about how Python
+    decodes an already-fetched value, not how Postgres evaluates a jsonb function server-side.
+    """
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+
+    async with pool.acquire() as conn:
+        total_pieces = await conn.fetchval("SELECT count(*) FROM acp_shared.content_piece")
+
+        by_status_rows = await conn.fetch("""
+            SELECT status, count(*) AS n
+            FROM acp_shared.content_piece
+            GROUP BY status
+            ORDER BY n DESC
+        """)
+
+        by_channel_rows = await conn.fetch("""
+            SELECT COALESCE(cp.channel, agr.channel) AS channel, count(*) AS n
+            FROM acp_shared.content_piece cp
+            JOIN acp_shared.angle_gate_request agr ON agr.request_id = cp.angle_gate_request_id
+            GROUP BY 1
+            ORDER BY n DESC
+        """)
+
+        top_gate_rows = await conn.fetch("""
+            SELECT elem->>'gate' AS gate, count(*) AS fail_count
+            FROM acp_shared.content_piece cp
+            CROSS JOIN LATERAL jsonb_array_elements(cp.gate_ledger) AS elem
+            WHERE COALESCE((elem->>'passed')::boolean, false) = false
+            GROUP BY 1
+            ORDER BY fail_count DESC
+            LIMIT $1
+        """, top_n)
+
+        published_count = await conn.fetchval("""
+            SELECT count(DISTINCT piece_id) FROM acp_shared.publish_log WHERE status = 'published'
+        """)
+
+    data = {
+        "total_pieces": total_pieces,
+        "published_count": published_count,
+        "by_status": [{"status": r["status"], "count": r["n"]} for r in by_status_rows],
+        "by_channel": [{"channel": r["channel"], "count": r["n"]} for r in by_channel_rows],
+        "top_gate_failures": [{"gate": r["gate"], "fail_count": r["fail_count"]} for r in top_gate_rows],
+    }
+    logger.info(
+        "a4_platform_stats_queried", total_pieces=total_pieces,
+        top_gate_count=len(data["top_gate_failures"]),
+    )
+    return {"data": data}

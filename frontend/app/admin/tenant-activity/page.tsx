@@ -49,6 +49,14 @@
 // `_components/SocialContentSubNav.tsx`, now mounted on both pages with "06" highlighted here.
 // AA-575 also extends AA-572's Gate/Retry/Created-at-only sort to every column — see `sortValue()`
 // below.
+//
+// AA-560 — "Force unpublish" added to the Publish section of the row accordion (published rows
+// only). This is the old `/admin/a4-oversight` (Cross-Tenant Oversight) page's one mutating
+// action, moved here after a STEP0 gap-check found that page's Publish Log section's WRITE half
+// (unlike its READ half) had no other home — Content Trace previously only showed publish_status
+// read-only. Calls the same untouched `POST /admin/a4/publish-log/{id}/unpublish` (AA-455).
+// `admin_a4.py::get_content_log()` now also returns `publish_id` (previously computed into
+// `publish_status` and discarded) so this button can address the right row.
 import { Fragment, useState, useEffect, useCallback, useMemo } from "react";
 import { ChevronDown, ChevronRight, ChevronUp, Radio } from "lucide-react";
 import AdminSidebar from "../_components/AdminSidebar";
@@ -79,6 +87,9 @@ interface ContentLogRow {
   tour: { name: string; destination: string | null } | null;
   source: ContentSource; is_buffer_retry: boolean; sibling_piece_count: number;
   publish_status: "published" | "pending_publish" | "n/a";
+  // AA-560 — publish_log's own row id, needed to address the "Force unpublish" action below.
+  // null whenever publish_status !== "published" (no publish_log row exists yet).
+  publish_id: string | null;
   publish_external_url: string | null; publish_published_at: string | null;
   created_at: string;
 }
@@ -173,6 +184,9 @@ export default function ContentTracePage() {
   const [error, setError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [sort, setSort] = useState<Sort | null>(null);
+  // AA-560 — Force unpublish state, same shape a4-oversight/page.tsx's own PublishLogSection used.
+  const [unpublishingId, setUnpublishingId] = useState<string | null>(null);
+  const [unpublishError, setUnpublishError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchJson<{ tenants: Tenant[] }>("/api/admin/tenants")
@@ -201,6 +215,24 @@ export default function ContentTracePage() {
   }, [query]);
 
   useEffect(() => { load(); }, [load]);
+
+  // AA-560 — same confirm-dialog + re-fetch-after-success shape as the old a4-oversight page's
+  // handleForceUnpublish(). Destructive/irreversible from here (real, immediate publish-status
+  // change on the actual channel), hence the native confirm().
+  const handleForceUnpublish = useCallback(async (publishId: string) => {
+    if (!window.confirm("Force-unpublish this piece? This cannot be undone from here.")) return;
+    setUnpublishingId(publishId);
+    setUnpublishError(null);
+    try {
+      const res = await fetch(`/api/admin/a4/publish-log/${publishId}/unpublish`, { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await load();
+    } catch (e) {
+      setUnpublishError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setUnpublishingId(null);
+    }
+  }, [load]);
 
   // AA-572 point 2 — tenant stat header: total pieces + per-channel breakdown, computed
   // client-side from the already-loaded (already tenant/channel/status/date-filtered) `rows` —
@@ -314,6 +346,11 @@ export default function ContentTracePage() {
                 `/admin/atom-curation?section=<key>` (see SocialContentSubNav.tsx). */}
             <SocialContentSubNav active="content_trace" />
             <div style={{ flex: 1, minWidth: 0 }}>
+              {unpublishError && (
+                <div style={{ padding: "8px 12px", marginBottom: 12, borderRadius: 6, background: "#fef2f2", color: A.red, fontSize: 12 }}>
+                  {unpublishError}
+                </div>
+              )}
               {loading ? (
                 <LoadingScreen msg="Loading Content Trace…" />
               ) : error ? (
@@ -325,7 +362,8 @@ export default function ContentTracePage() {
                 />
               ) : (
                 <ContentTraceTable rows={sortedRows ?? rows} expandedId={expandedId} sort={sort} onSort={toggleSort}
-                  onToggle={id => setExpandedId(prev => prev === id ? null : id)} />
+                  onToggle={id => setExpandedId(prev => prev === id ? null : id)}
+                  onForceUnpublish={handleForceUnpublish} unpublishingId={unpublishingId} />
               )}
             </div>
           </div>
@@ -377,9 +415,10 @@ const HEADERS: { label: string; sortKey?: SortKey }[] = [
   { label: "Created at", sortKey: "created_at" },
 ];
 
-function ContentTraceTable({ rows, expandedId, sort, onSort, onToggle }: {
+function ContentTraceTable({ rows, expandedId, sort, onSort, onToggle, onForceUnpublish, unpublishingId }: {
   rows: ContentLogRow[]; expandedId: string | null; sort: Sort | null; onSort: (key: SortKey) => void;
   onToggle: (id: string) => void;
+  onForceUnpublish: (publishId: string) => void; unpublishingId: string | null;
 }) {
   return (
     // AA-572 point 6 — deliberately NO `overflowX` here (default `visible`): the outer page
@@ -447,7 +486,7 @@ function ContentTraceTable({ rows, expandedId, sort, onSort, onToggle }: {
                 {expanded && (
                   <tr>
                     <td colSpan={COLS} style={{ padding: "0 14px 18px", background: A.bg, borderBottom: `1px solid ${A.line}` }}>
-                      <ContentTraceAccordion row={r} />
+                      <ContentTraceAccordion row={r} onForceUnpublish={onForceUnpublish} unpublishingId={unpublishingId} />
                     </td>
                   </tr>
                 )}
@@ -470,7 +509,9 @@ const rowTd: React.CSSProperties = {
 // reasoning ("Retry reason", never a content diff — see file header) + publish status.
 // ══════════════════════════════════════════════════════════════════════════
 
-function ContentTraceAccordion({ row: p }: { row: ContentLogRow }) {
+function ContentTraceAccordion({ row: p, onForceUnpublish, unpublishingId }: {
+  row: ContentLogRow; onForceUnpublish: (publishId: string) => void; unpublishingId: string | null;
+}) {
   return (
     <Card style={{ padding: "16px 18px", marginTop: 4 }}>
       {/* AA-572 point 5 — Lineage: was 1 concatenated line ("Tour: X → Atom: Y → Slate: Segment —
@@ -602,6 +643,22 @@ function ContentTraceAccordion({ row: p }: { row: ContentLogRow }) {
         )}
         {p.publish_published_at && (
           <span style={{ fontSize: 11.5, color: A.muted2 }}>published {new Date(p.publish_published_at).toLocaleString()}</span>
+        )}
+        {/* AA-560 — moved here from the deleted a4-oversight page's own Publish Log section, same
+            confirm-then-call shape. Only a published row with a real publish_id can be
+            unpublished — a pending/n/a row has no publish_log row to act on. */}
+        {p.publish_status === "published" && p.publish_id && (
+          <button
+            onClick={() => onForceUnpublish(p.publish_id as string)}
+            disabled={unpublishingId === p.publish_id}
+            style={{
+              padding: "5px 10px", borderRadius: 6, border: `1px solid ${A.red}`,
+              background: "transparent", color: A.red, fontSize: 11.5, cursor: "pointer",
+              opacity: unpublishingId === p.publish_id ? 0.5 : 1,
+            }}
+          >
+            {unpublishingId === p.publish_id ? "Unpublishing…" : "Force unpublish"}
+          </button>
         )}
       </div>
     </Card>
