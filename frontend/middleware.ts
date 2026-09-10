@@ -56,24 +56,12 @@ const PUBLIC_PATHS = ["/login", "/tenant-login"];
 const PROTECTED_ROUTES: { prefix: string; roles: string[] }[] = [
   // Admin-only (was ADMIN_PATHS)
   { prefix: "/admin/tenants", roles: ["admin"] },
-  // AA-437: A4 Cross-Tenant Oversight (review-log + trust-ramp, read-only) — admin-only, same
-  // shape as Gate A/Gate B/Produce above. Same gap as AA-384/AA-388/AA-405 documented in this
-  // file's header, and the exact one PR #196's own "post-deploy live verification" note missed:
-  // it tested only the unauthenticated case (307 there is expected either way — via this
-  // `!route` branch OR the `!role` branch below — so it never actually proved this entry
-  // existed). Confirmed live with a real admin session before this fix: 307 → /login even though
-  // /admin/dashboard worked fine in the same session.
-  // AA-560 — TEMPORARY: this page is being retired (replaced by /admin/platform-stats below),
-  // kept in the allow-list only until that page + Content Trace's new Force-unpublish button are
-  // both confirmed working in production (issue's explicit requirement). Remove this entry in the
-  // same follow-up commit that deletes the a4-oversight route + its AdminSidebar NavItem.
-  { prefix: "/admin/a4-oversight", roles: ["admin"] },
   // AA-505 — LLM cost/quality monitoring (Tenant->Model->Stage). Admin-only, same tier as
-  // a4-oversight/tenants above — this shows real per-call spend + Việc C's model choice is
+  // tenants above — this shows real per-call spend + Việc C's model choice is
   // reached via /admin/settings (already admin+reviewer+content, unchanged).
   { prefix: "/admin/llm-usage", roles: ["admin"] },
   // AA-527 — Atom Curation, replacing the removed tenant-facing T6 (AA-526): admin decides which
-  // atoms are good to use, same admin-only tier as a4-oversight/llm-usage above (Nghiệp's
+  // atoms are good to use, same admin-only tier as llm-usage above (Nghiệp's
   // explicit choice among 2 options presented, 05/09/2026), not the broader content-team tier.
   { prefix: "/admin/atom-curation", roles: ["admin"] },
   // AA-551 — split out of Atom Curation (06-08, per-Tour tenant activity, moved to its own page/
