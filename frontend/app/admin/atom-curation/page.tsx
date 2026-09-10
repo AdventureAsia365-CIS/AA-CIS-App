@@ -1134,7 +1134,7 @@ const SLATE_STATE_TOOLTIP: Record<string, string> = {
   proposed: "System-proposed — this Segment/Route cleared the channel's Bar; the tenant hasn't acted on it yet.",
   picked: "The tenant chose to write this proposal (created its T8 Angle Gate request).",
   used: "A content_piece was successfully created from this proposal — it genuinely became content.",
-  cut: "The tenant declined this proposal. Not yet reachable from any UI — manual cut action coming soon.",
+  cut: "The tenant declined this proposal via the \"Cut\" button in their own Slate (AA-556).",
 };
 
 const SLATE_STATE_ORDER = ["proposed", "picked", "used", "cut"] as const;
@@ -1217,7 +1217,8 @@ function SlateSection() {
       <SlateExplainerNote />
       {tenantPicker}
       {/* AA-554 H.23 — sticky header stat bar, same mechanism Segment/Score's filter rows use.
-          H.3 — CUT badge is NOT hidden (shows the real count) with a small note underneath. */}
+          H.3 — CUT badge is NOT hidden (shows the real count). AA-556 removed the "coming soon"
+          note that used to sit under it, now that the tenant-facing Cut button is real. */}
       <div style={{ display: "flex", gap: 14, marginBottom: 14, flexWrap: "wrap", alignItems: "flex-start",
         position: "sticky", top: 0, background: A.bg, zIndex: 5, paddingTop: 4, paddingBottom: 10 }}>
         {SLATE_STATE_ORDER.map(state => (
@@ -1225,13 +1226,6 @@ function SlateSection() {
             <span title={SLATE_STATE_TOOLTIP[state]} style={{ cursor: "help" }}>
               <Badge color={SLATE_STATE_COLOR[state] ?? "gray"}>{state}: {data.by_state[state] ?? 0}</Badge>
             </span>
-            {/* AA-564 Group 5 — removed once AA-556's Cut button ships in the Tenant Portal
-                (Group 4.2); kept until then so this doesn't overclaim a feature not live yet. */}
-            {state === "cut" && (
-              <div style={{ fontSize: 10, color: A.muted2, marginTop: 3, maxWidth: 150 }}>
-                Manual cut action coming soon
-              </div>
-            )}
           </div>
         ))}
       </div>
