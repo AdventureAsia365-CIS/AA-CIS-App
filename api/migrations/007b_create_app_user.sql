@@ -6,6 +6,14 @@
 --   aa_cis_admin has SUPERUSER/BYPASSRLS → RLS policies don't apply to it.
 --   aa_app_user is the runtime application role — RLS IS enforced.
 --   This is the proper separation needed for S7 RLS verification.
+--
+-- AA-544 Stage 0 (10/09/2026): the plaintext password below is STALE — rotated live on RDS via
+-- ALTER ROLE (not through a migration file, to avoid committing the new value to git same as
+-- this one was). Current password lives only in Secrets Manager (`aa-cis/dev/rds-app-user`).
+-- This file is left as-is for historical/idempotence reasons (CREATE ROLE ... IF NOT EXISTS
+-- already no-ops on every environment where 007b previously ran) — do not reuse
+-- 'cisappuser2026' anywhere, and do not "fix" this file by editing the literal below; rotate via
+-- Secrets Manager + ALTER ROLE instead, same as this rotation did.
 -- =============================================================================
 
 BEGIN;
