@@ -73,11 +73,16 @@ to the new `aa_app_user` pool, behind a default-off flag, before expanding furth
   call saw exactly 0 rows every time, wanderlux saw exactly 4 every time, GUC readback always
   matched the tenant that set it. Re-ran at 60 iterations first (also 0 errors) before scaling to
   300 for stronger confidence.
-- **Full end-to-end HTTP verify (real tenant JWT, real domain, flag ON → OFF → deleted)**: pending
-  until this PR is deployed — the leak test above runs independently of the deployed app (raw
-  asyncpg against RDS), but confirming the actual `GET /v1/publish-log/pending` HTTP response is
-  byte-identical with the flag on vs. off requires the new code to be live in ECS first. Will be
-  done as a follow-up comment on AA-544 post-deploy, before declaring Stage 1 fully verified.
+- **Full end-to-end HTTP verify — done post-deploy (10/09/2026)**: PR #367 merged (`5b49b97`),
+  Deploy Dev green, ECS rollout COMPLETED (task def `:268`). Real flow via ECS-internal
+  `localhost:8000`: generated a fresh API key for `wanderlux-travel` (`POST /admin/tenants/{id}/
+  generate-key`), real `tenant-login` to get a real JWT, then called `GET /v1/publish-log/pending`
+  3 times against the real deployed route: flag OFF (`total=4`) → flag ON (`total=4`) → flag
+  deleted (`total=4`) — response bodies byte-identical across all 3. Independently confirmed via
+  CloudWatch (`/ecs/aa-cis-dev`, `aa544_stage1_list_pending`) that `used_tenant_pool` really did
+  flip `False → True → False` across those 3 calls, matching the flag toggles exactly — not just
+  a flag that silently no-op'd. Flag left unset (confirmed via direct Redis read) after the test —
+  system is back in its default-off state, same behavior as before this PR for every request.
 - Default state after this PR merges and deploys: flag unset in Redis → `stage1_flag_enabled()`
   returns `False` → `acquire_scoped_conn()` falls back to `app.state.pool` (`aa_cis_admin`) →
   **identical behavior to before this PR**, for this route and every other route. Turning the

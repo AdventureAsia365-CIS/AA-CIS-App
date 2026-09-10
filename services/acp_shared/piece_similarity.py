@@ -43,6 +43,22 @@ _WITHIN_TENANT_QUERY = """
 
 # Same shape, no tenant_id WHERE clause — real cross-tenant scan (AA-484's own consumption).
 # $3 excludes the writing tenant's OWN pieces (see this module's own header on why).
+#
+# INTENTIONAL: cross-tenant read via admin pool — see AA-544. This query has NO tenant_id
+# filter by design (F10's whole point is scanning every OTHER tenant's approved pieces for
+# cannibalization) — every caller of find_similar_pieces(cross_tenant=True) MUST pass the
+# admin pool (aa_cis_admin, request.app.state.pool), never AA-544's aa_app_user tenant pool.
+# Running this specific query through a real-RLS connection would not "fail safe" — it would
+# silently return 0 matches (RLS would filter every other tenant's rows away), turning F10 from
+# a real BLOCKING gate into a permanent no-op. AA-544 Round 2 decision (a): this stays on the
+# admin pool permanently, not a temporary state. _WITHIN_TENANT_QUERY above (cross_tenant=False)
+# has no such restriction — it IS a same-tenant query, in principle eligible for the tenant pool
+# once its own caller (services/acp_content_writing/service.py::run_write_background(), the T9
+# write/rewrite/gate background loop) is migrated — NOT done as part of AA-544 Stage 3: that
+# loop threads a single `pool` value through multiple LLM-interleaved attempts, a gate-regression
+# revert path, and _finalize_piece()'s own content_piece write — splitting it into 2 pool
+# references is a real signature change through a background task, not a comment-only fix, and
+# needs its own AA-544 stage/confirmation before touching it (see AA-544 Linear thread).
 _CROSS_TENANT_QUERY = """
     SELECT cp.piece_id, cp.tenant_id, agr.atom_id, cp.angle_gate_request_id,
            1 - (cp.content_embedding <=> $1::vector) AS similarity
