@@ -3,7 +3,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Eye, Gauge, Puzzle } from "lucide-react";
+import { LayoutDashboard, Users, Upload, Wand2, ClipboardList, Palette, Library, LogOut, Bell, Settings, Activity, Gauge, Puzzle } from "lucide-react";
 import { A, serif, sans, SIDEBAR_WIDTH } from "./adminUi";
 
 interface Notif {
@@ -212,17 +212,14 @@ export default function AdminSidebar() {
             <NavItem active={active("/admin/run-health")} accent={A.red}
               icon={<Activity size={15} />} label="Run Health"
               onClick={() => router.push("/admin/run-health")} />
-            {/* AA-560 — TEMPORARY, kept alive only until "07 · Platform Stats" (Review Log +
-                Trust Ramp, reachable via SocialContentSubNav inside Social Content) and Content
-                Trace's new Force-unpublish button are both confirmed working in production —
-                issue's own explicit requirement (don't lose functionality mid-move). Remove this
-                NavItem + the Eye import + the /admin/a4-oversight middleware.ts entry + the
-                a4-oversight route itself in the SAME follow-up commit once that's verified. */}
-            <NavItem active={active("/admin/a4-oversight")} accent={A.red}
-              icon={<Eye size={15} />} label="Cross-Tenant Oversight (retiring — AA-560)"
-              onClick={() => router.push("/admin/a4-oversight")} />
+            {/* AA-437 [A4]'s "Cross-Tenant Oversight" NavItem (Eye icon) is retired here (AA-560)
+                — real Playwright confirmed BOTH its replacements work in production first: "07 ·
+                Platform Stats" (Review Log + Trust Ramp, reachable via SocialContentSubNav inside
+                Social Content, same as "06 · Content Trace" — no top-level sidebar item for
+                either) and Content Trace's new Force-unpublish button. The a4-oversight route +
+                its middleware.ts entry are deleted in this same commit. */}
             {/* AA-505 — real per-call LLM cost/quality, Tenant->Model->Stage. Admin-only, same
-                tier as Cross-Tenant Oversight above (middleware.ts). */}
+                tier Cross-Tenant Oversight used to be (middleware.ts). */}
             <NavItem active={active("/admin/llm-usage")} accent={A.red}
               icon={<Gauge size={15} />} label="LLM Usage"
               onClick={() => router.push("/admin/llm-usage")} />
