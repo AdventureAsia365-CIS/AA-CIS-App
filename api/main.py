@@ -23,7 +23,6 @@ from api.routers.v1_planning import slate_router as v1_slate_router
 from api.routers.v1_route_hub import router as v1_route_hub_router
 from api.routers.v1_angle_gate import router as v1_angle_gate_router
 from api.routers.v1_content_writing import router as v1_content_writing_router
-from api.routers.v1_exports import router as v1_exports_router
 from api.routers.v1_pipeline import router as v1_pipeline_router
 from api.routers.v1_competitors import router as v1_competitors_router
 from api.routers.v1_publish import router as v1_publish_router
@@ -129,7 +128,8 @@ app.include_router(v1_slate_router)  # AA-511 — the Slate (GET /v1/slate, POST
 app.include_router(v1_route_hub_router)  # AA-510 — Route/Hub derivation + Subject pick
 app.include_router(v1_angle_gate_router)  # AA-449 — T8 Angle Gate
 app.include_router(v1_content_writing_router)  # AA-450 — T9 Content Writing + T10-inline
-app.include_router(v1_exports_router)
+# AA-579: v1_exports_router (POST /v1/exports) removed — S8/S9 tàn dư (21/04/2026), 0 traffic
+# tenant thật trong 14 ngày CloudWatch, 0 UI caller. Xem AA-579 (Linear) trước khi khôi phục.
 app.include_router(v1_pipeline_router)
 app.include_router(v1_competitors_router)
 app.include_router(v1_publish_router)  # AA-455 bước 1 — tenant self-unpublish (publish_log)

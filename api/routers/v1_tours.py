@@ -57,56 +57,14 @@ async def _run_research_only(tenant_id: str, pool) -> None:
         logger.warning("t5_segment_research_failed", tenant_id=tenant_id, exc_info=True)
 
 
-@router.get("")
-async def list_tours(
-    request: Request,
-    tenant=Depends(get_tenant),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    min_quality: Optional[float] = Query(None, ge=0, le=1),
-):
-    tenant_id = tenant["sub"]
-    pool = request.app.state.pool
-    offset = (page - 1) * page_size
-
-    conditions = ["pt.tenant_id = $1"]
-    params = [tenant_id]
-
-    if min_quality is not None:
-        params.append(min_quality)
-        conditions.append(f"pt.quality_score >= ${len(params)}")
-
-    where = "WHERE " + " AND ".join(conditions)
-
-    async with pool.acquire() as conn:
-        total = await conn.fetchval(f"""
-            SELECT COUNT(*)
-            FROM gold_aa_internal.published_tours pt
-            LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
-            {where}
-        """, *params)
-        params_paged = params + [page_size, offset]
-        rows = await conn.fetch(f"""
-            SELECT pt.id, pt.tour_id, pt.aa_name, pt.aa_subtitle, pt.aa_summary,
-                   pt.seo_title, pt.quality_score, pt.published_at,
-                   rt.country
-            FROM gold_aa_internal.published_tours pt
-            LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
-            {where}
-            ORDER BY pt.published_at DESC
-            LIMIT ${len(params)+1} OFFSET ${len(params)+2}
-        """, *params_paged)
-
-    return {
-        "data": [dict(r) for r in rows],
-        "pagination": {
-            "page": page,
-            "page_size": page_size,
-            "total": total,
-            "pages": -(-total // page_size)
-        },
-        "tenant_id": tenant_id
-    }
+# AA-579: bare `GET /v1/tours` (list_tours()) removed — tàn dư kiến trúc S8/S9 (21/04/2026,
+# commit a5e207d), viết cho 1 model RLS-per-tenant-row trên published_tours chưa từng thành hiện
+# thực (bị đè bởi Pool/Rewrite model 2 tuần sau, 05/05/2026, cùng file). `pt.tenant_id = $1` không
+# bao giờ khớp vì published_tours 100% thuộc sentinel aa_internal — route luôn trả rỗng cho mọi
+# tenant thật, độc lập RLS. CloudWatch 14 ngày (/ecs/aa-cis-dev) xác nhận 0 traffic tenant thật
+# (chỉ 401 từ (internal)/catalog's proxy auth mismatch — bug khác, xem AA-579). Tính năng thật đã
+# được /v1/tours/pool + /v1/tours/my-versions phủ đúng kiến trúc tenant_tour_versions hiện tại.
+# Xem AA-579 (Linear) cho đầy đủ bằng chứng trước khi khôi phục route này.
 
 
 # ── P3-S4: Shared Pool Browse ─────────────────────────────────────────────────
