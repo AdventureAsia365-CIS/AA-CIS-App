@@ -43,6 +43,7 @@ import structlog
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from api.core.aa544_tenant_pool import acquire_scoped_conn
 from api.routers.v1_tours import get_tenant
 from services.acp_publish.base import SocialPost
 from services.acp_publish.facebook import FacebookAdapter
@@ -107,6 +108,14 @@ async def list_pending(request: Request, tenant=Depends(get_tenant)):
     a row with a currently-'published' publish_log entry is excluded, so a failed/unpublished
     piece stays retryable rather than disappearing.
 
+    AA-544 Stage 1 canary — this is the first route wired to the aa_app_user pool (real RLS)
+    behind a default-off Redis flag (see api/core/aa544_tenant_pool.py). Flag off (today's
+    default): identical to pre-AA-544 behavior, admin pool, no RLS. Flag on: runs through
+    aa_app_user with app.tenant_id set LOCAL to this request's transaction. Response shape is
+    unchanged either way — the WHERE cp.tenant_id = $1 clause below already scoped this query
+    correctly before RLS existed; RLS is defense-in-depth here, not the only thing standing
+    between tenants for this specific query.
+
     AA-497 — angle_name now joins via cp.angle_gate_option_id (denormalized at write time,
     migration 124/AA-497) rather than ago.chosen=true, which is MUTABLE (AA-497's reopen action
     can re-point it to a different option after this piece was already written) — falls back to
@@ -120,10 +129,9 @@ async def list_pending(request: Request, tenant=Depends(get_tenant)):
     write. Falls back to agr.channel only for pre-this-session rows where cp.channel is NULL
     (0 such rows existed live at the time of this change, confirmed — this fallback is pure
     defense, not a real backfill gap)."""
-    pool = request.app.state.pool
     tenant_id = tenant["sub"]
 
-    async with pool.acquire() as conn:
+    async with acquire_scoped_conn(request, tenant_id) as (conn, used_tenant_pool):
         rows = await conn.fetch(
             """
             SELECT cp.piece_id::text, cp.content_text, cp.created_at,
@@ -145,6 +153,7 @@ async def list_pending(request: Request, tenant=Depends(get_tenant)):
             """,
             tenant_id, list(_SUPPORTED_CHANNELS),
         )
+    logger.info("aa544_stage1_list_pending", tenant_id=tenant_id, used_tenant_pool=used_tenant_pool)
 
     return {
         "data": [

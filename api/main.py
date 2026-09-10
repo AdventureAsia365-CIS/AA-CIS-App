@@ -65,6 +65,13 @@ async def lifespan(app: FastAPI):
     )
     app.state.pool = pool
 
+    # AA-544 Stage 1 — second pool, aa_app_user (non-BYPASSRLS). Best-effort: None on failure,
+    # every caller falls back to app.state.pool (aa_cis_admin, unchanged). Used only by routes
+    # that explicitly opt in via api/core/aa544_tenant_pool.py::acquire_scoped_conn() — today
+    # that's exactly 1 route (GET /v1/publish-log/pending), behind a Redis flag default-off.
+    from api.core.aa544_tenant_pool import create_tenant_pool
+    app.state.tenant_pool = await create_tenant_pool()
+
     # AA-223: recover run-tour jobs left 'running' by a prior container exit.
     # Best-effort — a transient DB error here must NOT crash boot (crash-loop risk).
     try:
@@ -90,6 +97,8 @@ async def lifespan(app: FastAPI):
             logger.error("shutdown_forced_task_abandon", count=len(_pending))
 
     await pool.close()
+    if app.state.tenant_pool is not None:
+        await app.state.tenant_pool.close()
     await redis.aclose()
 
 app = FastAPI(
