@@ -546,7 +546,19 @@ async def list_slate(
     said "Slate is tenant-specific"). Each row now also carries the ORIGINATING topic name
     (`place`/`action`/`hub_name`, `tour_name`) via the same LEFT JOINs `fetch_slate()` already
     runs in production (AA-564 2.1) — previously this endpoint returned only raw `segment_id`/
-    `route_id`, which the FE could only render as a generic "Segment"/"Route" label."""
+    `route_id`, which the FE could only render as a generic "Segment"/"Route" label.
+
+    AA-556 fix (found live while verifying that issue's own "cut count rises on the admin
+    dashboard" acceptance criteria): the SQL used to hard-filter `s.state != 'cut'`, which meant
+    `by_state["cut"]` below could never be anything but 0 no matter how many Subjects were
+    actually cut — the query never even fetched those rows for the Python loop to count. Real,
+    pre-existing bug (predates AA-556's tenant-facing Cut button; the backend `cut_subject()`
+    itself was already correctly writing `state='cut'` since AA-554 H.2, this endpoint just never
+    surfaced it). Confirmed directly against RDS: 2 real `linkedin` Subjects for tenant
+    WanderLux Travel had `state='cut'` while this endpoint reported `cut: 0`. Removed the filter
+    — cut rows are meant to be visible (SLATE_STATE_COLOR/SLATE_STATE_TOOLTIP on the frontend
+    already have a real `cut` = red entry, and the H.3 comment on the frontend explicitly says
+    the badge "is NOT hidden (shows the real count)"), so excluding them was never intentional."""
     verify_admin_secret(x_admin_secret)
     pool = request.app.state.pool
 
@@ -575,7 +587,7 @@ async def list_slate(
                 LEFT JOIN silver_aa_internal.raw_tours rt2 ON rt2.tour_id = ta2.tour_id
                 WHERE asm2.segment_id = s.segment_id AND NOT ta2.deleted AND NOT ta2.is_empty_marker
             ) seg_tours ON s.segment_id IS NOT NULL
-            WHERE s.tenant_id = $1::uuid AND s.state != 'cut'
+            WHERE s.tenant_id = $1::uuid
               AND ($2::text IS NULL OR s.channel = $2::text)
             ORDER BY s.channel, s.score ASC NULLS LAST, s.created_at DESC
             """,

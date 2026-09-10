@@ -400,6 +400,37 @@ class TestListSlate:
             assert "segment_tour_names" not in row
 
     @pytest.mark.asyncio
+    async def test_cut_state_rows_are_not_filtered_out(self):
+        """AA-556 regression guard — found live while verifying that issue's own "cut count
+        rises on the admin dashboard" acceptance criteria: the SQL used to hard-filter
+        `s.state != 'cut'`, so `by_state["cut"]` could never be anything but 0 no matter how many
+        Subjects were actually cut. Confirmed directly against RDS (2 real cut linkedin Subjects,
+        endpoint reporting cut: 0) before fixing. This asserts a cut-state row survives into both
+        `data` and `by_state`, and that the query itself no longer excludes it."""
+        conn = AsyncMock()
+        conn.fetch.return_value = [
+            {"subject_id": uuid.uuid4(), "tenant_id": uuid.uuid4(), "tenant_name": "WanderLux",
+             "channel": "linkedin", "state": "cut", "score": None,
+             "segment_id": "seg1", "route_id": None, "cleared_bar_reason": '{}',
+             "created_at": "2026-09-10T00:00:00",
+             "canonical_place": "Luang Prabang", "canonical_action": "sunrise alms",
+             "hub_name": None, "route_tour_name": None, "route_segment_count": None,
+             "segment_tour_names": ["Laos Classic"]},
+        ]
+        pool = _make_pool(conn)
+        request = _make_request(pool)
+
+        result = await admin_dashboard.list_slate(
+            request, tenant_id=str(uuid.uuid4()), channel=None, x_admin_secret=_TEST_SECRET,
+        )
+        assert result["total"] == 1
+        assert result["by_state"]["cut"] == 1
+        assert result["data"][0]["state"] == "cut"
+
+        query, *_ = conn.fetch.call_args[0]
+        assert "!= 'cut'" not in query
+
+    @pytest.mark.asyncio
     async def test_scoped_by_tenant_id_not_tour_id(self):
         tenant_id = str(uuid.uuid4())
         conn = AsyncMock()
