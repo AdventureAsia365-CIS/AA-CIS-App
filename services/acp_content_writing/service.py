@@ -31,6 +31,7 @@ from typing import Optional
 from uuid import UUID
 
 import structlog
+from fastapi import Request
 
 from services.acp_angle_gate import service as angle_gate_service
 from services.acp_angle_gate.brand_audience import fetch_brand_audience
@@ -908,19 +909,34 @@ async def fetch_latest_piece_for_request(tenant_id: UUID, request_id: UUID, pool
     return _row_to_dict(row) if row else None
 
 
-async def fetch_piece(tenant_id: UUID, piece_id: UUID, pool) -> dict:
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT piece_id, tenant_id, angle_gate_request_id, attempt_number, content_text,
-                   status, held_reason, gate_ledger, repair_log, created_at,
-                   seo_title, meta_description, slug,
-                   route_hub_name, route_segment_count, flags
-            FROM acp_shared.content_piece
-            WHERE piece_id = $1 AND tenant_id = $2
-            """,
-            piece_id, tenant_id,
-        )
+_FETCH_PIECE_QUERY = """
+    SELECT piece_id, tenant_id, angle_gate_request_id, attempt_number, content_text,
+           status, held_reason, gate_ledger, repair_log, created_at,
+           seo_title, meta_description, slug,
+           route_hub_name, route_segment_count, flags
+    FROM acp_shared.content_piece
+    WHERE piece_id = $1 AND tenant_id = $2
+"""
+
+
+async def fetch_piece(tenant_id: UUID, piece_id: UUID, pool, request: Optional[Request] = None) -> dict:
+    """AA-544 Stage 5 canary — when `request` is passed (the router does; a direct caller that
+    only has a bare `pool` falls back to it unchanged, same admin-pool behavior as before this
+    stage) and the aa544:stage5:get_piece_pool flag is on, this runs through the aa_app_user
+    tenant pool with app.tenant_id set LOCAL to the transaction. Flag off (today's default):
+    identical to pre-AA-544 behavior. The WHERE tenant_id = $2 clause below already scoped this
+    query correctly before RLS existed — RLS is defense-in-depth here, not the only thing
+    standing between tenants for this query."""
+    if request is not None:
+        from api.core.aa544_tenant_pool import STAGE5_GET_PIECE_FLAG, acquire_scoped_conn
+        async with acquire_scoped_conn(
+            request, str(tenant_id), STAGE5_GET_PIECE_FLAG
+        ) as (conn, used_tenant_pool):
+            row = await conn.fetchrow(_FETCH_PIECE_QUERY, piece_id, tenant_id)
+        logger.info("aa544_stage5_fetch_piece", tenant_id=str(tenant_id), used_tenant_pool=used_tenant_pool)
+    else:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(_FETCH_PIECE_QUERY, piece_id, tenant_id)
     if row is None:
         raise ContentWritingError(f"piece_id={piece_id} not found for this tenant")
     return _row_to_dict(row)

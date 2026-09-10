@@ -43,7 +43,7 @@ import structlog
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from api.core.aa544_tenant_pool import acquire_scoped_conn
+from api.core.aa544_tenant_pool import STAGE1_PUBLISH_PENDING_FLAG, acquire_scoped_conn
 from api.routers.v1_tours import get_tenant
 from services.acp_publish.base import SocialPost
 from services.acp_publish.facebook import FacebookAdapter
@@ -131,7 +131,9 @@ async def list_pending(request: Request, tenant=Depends(get_tenant)):
     defense, not a real backfill gap)."""
     tenant_id = tenant["sub"]
 
-    async with acquire_scoped_conn(request, tenant_id) as (conn, used_tenant_pool):
+    async with acquire_scoped_conn(
+        request, tenant_id, STAGE1_PUBLISH_PENDING_FLAG
+    ) as (conn, used_tenant_pool):
         rows = await conn.fetch(
             """
             SELECT cp.piece_id::text, cp.content_text, cp.created_at,

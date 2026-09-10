@@ -93,7 +93,7 @@ async def get_piece(piece_id: UUID, request: Request, tenant=Depends(get_tenant)
     tenant_id = UUID(tenant["sub"])
     pool = request.app.state.pool
     try:
-        return await service.fetch_piece(tenant_id, piece_id, pool)
+        return await service.fetch_piece(tenant_id, piece_id, pool, request=request)
     except service.ContentWritingError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 

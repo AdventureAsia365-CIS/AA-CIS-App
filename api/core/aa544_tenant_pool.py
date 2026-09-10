@@ -1,18 +1,22 @@
 """
-AA-544 Stage 1 — aa_app_user tenant pool + per-request RLS GUC helper.
+AA-544 -- aa_app_user tenant pool + per-request RLS GUC helper.
 
-Canary scope: wired into exactly ONE route today (GET /v1/publish-log/pending,
-v1_publish.py::list_pending) behind the Redis flag below. Do NOT import this into any other
-router without going through AA-544's own stage-by-stage report-then-confirm ritual first --
-expanding which routes use this pool is Stage 2+'s job, not something to copy-paste in ad hoc.
+Rollout scope: wired into routes ONE AT A TIME, each behind its OWN Redis flag (see
+STAGE_FLAGS below), per AA-544's original plan's Stage 5 principle ("mo rong dan tung route,
+moi route revert rieng qua flag"). Do NOT import this into another router without going
+through AA-544's own stage-by-stage report-then-confirm ritual first -- picking which route is
+next is a decision, not something to copy-paste in ad hoc. Live routes so far:
+  - Stage 1 (10/09/2026): GET /v1/publish-log/pending (v1_publish.py::list_pending)
+  - Stage 5 (10/09/2026): GET /v1/content-writing/pieces/{piece_id} (service.py::fetch_piece)
 
 Design (matches AA-544's approved 2-pool split): Admin (/admin/*) keeps app.state.pool
 (aa_cis_admin, BYPASSRLS) unchanged, always. This module adds a SECOND pool, aa_app_user
 (non-BYPASSRLS, real RLS applies), used ONLY by routes that explicitly opt in via
-acquire_scoped_conn() below, and only when the flag is on.
+acquire_scoped_conn() below, and only when that route's OWN flag is on.
 
-Rollback: `redis-cli DEL aa544:stage1:publish_pending_pool` (or SET ... false) reverts the
-canary route to the admin pool immediately -- no deploy needed. Nothing else changes.
+Rollback (per route, independent of every other route on this pool): `redis-cli DEL
+<that route's flag key>` (or SET ... false) reverts it to the admin pool immediately -- no
+deploy needed, and does not affect any other route already on the tenant pool.
 
 GUC safety: app.tenant_id is set via set_config(..., is_local=true) INSIDE an explicit
 transaction (SET LOCAL semantics) -- scoped to that one transaction so it cannot leak onto the
@@ -32,7 +36,11 @@ from fastapi import Request
 
 logger = structlog.get_logger()
 
-_FLAG_KEY = "aa544:stage1:publish_pending_pool"
+# One flag per canary route -- each independently revertible. Add a new named constant here
+# (don't invent ad hoc string literals at call sites) whenever a new route joins the rollout.
+STAGE1_PUBLISH_PENDING_FLAG = "aa544:stage1:publish_pending_pool"
+STAGE5_GET_PIECE_FLAG = "aa544:stage5:get_piece_pool"
+
 _SECRET_ID = "aa-cis/dev/rds-app-user"
 
 
@@ -57,22 +65,26 @@ async def create_tenant_pool() -> Optional[asyncpg.Pool]:
         return None
 
 
-async def stage1_flag_enabled(request: Request) -> bool:
-    """Fail CLOSED -- any Redis error or unset key means "off" (the pre-Stage-1 behavior:
-    admin pool, no RLS). Never fail open into a code path that hasn't been proven yet."""
+async def _flag_enabled(request: Request, flag_key: str) -> bool:
+    """Fail CLOSED -- any Redis error or unset key means "off" (falls back to the admin pool,
+    the pre-rollout behavior for that route). Never fail open into a code path that hasn't been
+    proven yet."""
     try:
-        val = await request.app.state.redis.get(_FLAG_KEY)
+        val = await request.app.state.redis.get(flag_key)
     except Exception as e:
-        logger.warning("aa544_stage1_flag_read_failed", error=repr(e))
+        logger.warning("aa544_flag_read_failed", flag_key=flag_key, error=repr(e))
         return False
     return val == "true"
 
 
 @asynccontextmanager
-async def acquire_scoped_conn(request: Request, tenant_id: str):
+async def acquire_scoped_conn(request: Request, tenant_id: str, flag_key: str):
     """Yields (conn, used_tenant_pool: bool).
 
-    When the Stage 1 flag is on AND the tenant pool booted successfully: acquires from
+    `flag_key` is one of this module's own STAGE*_FLAG constants -- each route on this rollout
+    gets its own flag, so reverting one route never affects another already on the tenant pool.
+
+    When that route's flag is on AND the tenant pool booted successfully: acquires from
     request.app.state.tenant_pool (aa_app_user, non-BYPASSRLS) and opens a transaction with
     app.tenant_id set LOCAL to it. Everything the caller does with `conn` inside this
     `async with` block MUST happen inside that same transaction for the GUC to apply -- do not
@@ -82,7 +94,7 @@ async def acquire_scoped_conn(request: Request, tenant_id: str):
     request.app.state.pool (aa_cis_admin, current behavior, completely unchanged) with no
     transaction wrapper -- this is the fail-closed default path, not an error case."""
     tenant_pool = getattr(request.app.state, "tenant_pool", None)
-    use_tenant_pool = tenant_pool is not None and await stage1_flag_enabled(request)
+    use_tenant_pool = tenant_pool is not None and await _flag_enabled(request, flag_key)
 
     if use_tenant_pool:
         async with tenant_pool.acquire() as conn:
