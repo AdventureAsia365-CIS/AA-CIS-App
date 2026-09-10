@@ -128,6 +128,18 @@ async def browse_pool(
     All active tenants can read the pool — RLS bypassed via aa_internal filter.
     """
     tenant_id = tenant["sub"]
+    # INTENTIONAL: cross-tenant read via admin pool — see AA-544. All 3 queries below scan
+    # gold_aa_internal.published_tours filtered to the aa_internal sentinel tenant (the shared
+    # pool itself), not the caller's own tenant — this is AA-544's narrow, deliberate admin-pool
+    # exception (Round 2 decision (a)), not RLS accidentally not applying. All active tenants
+    # read the pool this way, unconditionally.
+    #
+    # Nothing in this function is eligible to move to the aa_app_user tenant pool: the
+    # `already_rewritten` EXISTS subquery in the `rows` query below does reference the caller's
+    # OWN tenant_id (gold_aa_internal.tenant_tour_versions), but as a correlated sub-select
+    # inside the same cross-tenant SELECT — not a separable per-tenant query. Splitting it into
+    # its own tenant-pool round trip would add a second DB call + in-Python merge for zero
+    # behavior change; not worth it unless this function's shape changes for an unrelated reason.
     pool = request.app.state.pool
     offset = (page - 1) * page_size
 
