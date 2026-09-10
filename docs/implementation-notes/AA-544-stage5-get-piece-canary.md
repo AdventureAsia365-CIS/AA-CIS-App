@@ -59,3 +59,12 @@ low-risk route, each independently revertible via its own flag (per the plan's o
   set it.
 - Default state after merge: both flags unset → both canary routes fall back to the unchanged
   admin pool. Turning Stage 5's flag on is a separate, deliberate step, not part of this PR.
+- **Full end-to-end HTTP verify — done post-deploy (10/09/2026)**: PR #369 merged (`209db24`),
+  Deploy Dev green, ECS rollout COMPLETED (task def `:270`). Real flow via ECS-internal
+  `localhost:8000`: generated a fresh API key for `wanderlux-travel`, real `tenant-login`, then
+  called `GET /v1/content-writing/pieces/{real piece_id}` 3 times against the real deployed
+  route: flag OFF (`status=held`) → flag ON (`status=held`) → flag deleted (`status=held`) —
+  response bodies byte-identical across all 3. Independently confirmed via CloudWatch
+  (`aa544_stage5_fetch_piece`) that `used_tenant_pool` flipped `False → True → False` across
+  those 3 calls. Both Stage 1 and Stage 5 flags confirmed unset after the test — system back in
+  its default-off state for every request.
