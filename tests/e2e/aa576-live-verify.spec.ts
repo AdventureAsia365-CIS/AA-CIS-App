@@ -126,16 +126,10 @@ test.describe('with tenant session', () => {
     await page.screenshot({ path: `${SHOT_DIR}/06-email-on-demand.png`, fullPage: true });
   });
 
-  test('07 - Phần 2: Sidebar "Write Content" link still resolves /portal/t8-angle-gate (NOT deleted)', async ({ page }) => {
-    await page.goto('/portal/t7-planning');
-    const link = page.getByRole('link', { name: 'Write Content' });
-    await expect(link).toBeVisible();
-    await expect(link).toHaveAttribute('href', '/portal/t8-angle-gate');
-    await link.click();
-    await page.waitForURL('**/portal/t8-angle-gate**', { timeout: 5000 });
-    // Standalone page renders the AngleGateWizard's goal-selection step (requestId=null) —
-    // confirms the route is live, not a 404/blank page.
-    await expect(page.locator('body')).not.toContainText('404');
-    await page.screenshot({ path: `${SHOT_DIR}/07-t8-angle-gate-still-live.png`, fullPage: true });
-  });
+  // Test 07 ("Write Content" sidebar link still resolves /portal/t8-angle-gate) removed here —
+  // Phần 3 (Nghiệp's confirmed decision, same Linear issue) later removed that nav item from the
+  // sidebar entirely (redundant since AA-564 embeds the wizard inline in Social Content). The
+  // underlying claim this test protected — the route itself still works as a deep-link even
+  // without a menu entry — is now covered by tests/e2e/aa576-part3-sidebar-rename.spec.ts
+  // (test 02 confirms the link is gone, test 03 confirms the bare URL still renders).
 });

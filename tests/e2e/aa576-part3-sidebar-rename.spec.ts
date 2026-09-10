@@ -85,7 +85,7 @@ test.describe('with tenant session', () => {
     await page.goto('/portal/t8-angle-gate');
     await expect(page.locator('body')).not.toContainText('404');
     // AngleGateWizard's own goal-selection step renders (requestId=null, standalone, fresh flow).
-    await expect(page.getByText(/Choose a Goal|Pick a Subject to start/)).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText(/Choose a Goal|Pick a Subject to start/).first()).toBeVisible({ timeout: 10000 });
     await page.screenshot({ path: `${SHOT_DIR}/03-t8-angle-gate-deep-link-still-alive.png`, fullPage: true });
   });
 
