@@ -104,8 +104,8 @@ async def post_pick_subject(
 
 @slate_router.post(
     "/subjects/{subject_id}/cut",
-    summary="AA-554 mục H.2 — mark a Subject 'cut' (backend/API only; no tenant UI button wired to "
-            "this yet, see the AA-554 child issue for that)",
+    summary="AA-554 mục H.2 — mark a Subject 'cut'; wired to the tenant-facing \"Cut\" button in "
+            "AA-556 (SlateTab.tsx's SubjectRow)",
 )
 async def post_cut_subject(
     subject_id: UUID, request: Request, tenant=Depends(get_tenant),

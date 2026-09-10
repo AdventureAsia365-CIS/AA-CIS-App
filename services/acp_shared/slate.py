@@ -580,12 +580,10 @@ async def pick_subject(tenant_id: UUID, subject_id: UUID, pool, selected_by: str
 
 
 async def cut_subject(tenant_id: UUID, subject_id: UUID, pool) -> dict:
-    """AA-554 mục H.2 — flip a Subject `proposed -> cut`. Backend/API only, per Nghiệp's final
-    decision on AA-554 (Linear comment "Điều chỉnh quyết định mục H", 07/09/2026): the tenant-
-    facing "Cut" button itself is deliberately NOT built in this pass — this function and its
-    router endpoint (`POST /v1/subjects/{subject_id}/cut`, v1_planning.py) are ready
-    infrastructure, not reachable from any UI control yet. See the AA-554 child issue for building
-    that button.
+    """AA-554 mục H.2 — flip a Subject `proposed -> cut`. Built backend/API-only in that pass, per
+    Nghiệp's final decision (Linear comment "Điều chỉnh quyết định mục H", 07/09/2026), to avoid
+    scope creep — the tenant-facing "Cut" button itself shipped separately in AA-556
+    (SlateTab.tsx's `SubjectRow`), which is this function's only real caller today.
 
     Only `proposed -> cut` is legal (mirrors `pick_subject()`'s own state guard above) — a Subject
     already `picked`/`used` has already become real tenant activity (an `angle_gate_request`, and
