@@ -1022,6 +1022,69 @@ async def toggle_master_status(
     return {"tour_id": tour_id, "master_status": status}
 
 
+# ── GET /admin/catalog — staff content review list (AA-580) ────────────────────
+# Admin-native replacement for the bare `GET /v1/tours` deleted in AA-579 (Depends(get_tenant)
+# Bearer-JWT auth — content/reviewer staff have no tenant JWT, only x-admin-secret via the
+# `/catalog` staff proxy, so that route was never reachable with valid auth in the first place).
+# Path is `/admin/catalog`, not `/admin/tours` — admin_pipeline.py already owns `GET /admin/tours`
+# for a different shape (raw_tours/pipeline_status, used by /admin/s1-rewrite); reusing that path
+# would collide. No tenant_id scoping (unlike the deleted route's `pt.tenant_id = $1`, which never
+# matched any real tenant JWT anyway) — this is staff reviewing the whole aa_internal catalog, not
+# a per-tenant B2B view. Same SELECT fields as the deleted route otherwise, same {data,pagination}
+# response shape, so frontend/app/(internal)/catalog/page.tsx needs only a URL change.
+
+
+@router.get("/catalog", summary="AA-580 — staff content review: published_tours list")
+async def list_catalog_tours(
+    request: Request,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    min_quality: Optional[float] = Query(None, ge=0, le=1),
+    x_admin_secret: str = Header(None),
+):
+    verify_admin_secret(x_admin_secret)
+    pool = request.app.state.pool
+    offset = (page - 1) * page_size
+
+    conditions = []
+    params: list = []
+
+    if min_quality is not None:
+        params.append(min_quality)
+        conditions.append(f"pt.quality_score >= ${len(params)}")
+
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    async with pool.acquire() as conn:
+        total = await conn.fetchval(f"""
+            SELECT COUNT(*)
+            FROM gold_aa_internal.published_tours pt
+            LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
+            {where}
+        """, *params)
+        params_paged = params + [page_size, offset]
+        rows = await conn.fetch(f"""
+            SELECT pt.id, pt.tour_id, pt.aa_name, pt.aa_subtitle, pt.aa_summary,
+                   pt.seo_title, pt.quality_score, pt.published_at,
+                   rt.country
+            FROM gold_aa_internal.published_tours pt
+            LEFT JOIN silver_aa_internal.raw_tours rt ON rt.tour_id = pt.tour_id
+            {where}
+            ORDER BY pt.published_at DESC
+            LIMIT ${len(params)+1} OFFSET ${len(params)+2}
+        """, *params_paged)
+
+    return {
+        "data": [dict(r) for r in rows],
+        "pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "pages": -(-total // page_size) if total else 0,
+        },
+    }
+
+
 # ── PATCH /admin/tours/{tour_id}/trash — Soft-delete source tour ───────────────
 
 
