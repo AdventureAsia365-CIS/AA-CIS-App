@@ -474,8 +474,15 @@ export default function CatalogPage() {
   }, []);
 
   useEffect(() => {
-    fetch(`/api/tenant/v1/tours?page=${page}&page_size=20`)
-      .then(r => r.json())
+    // AA-580: GET /v1/tours (bare) was deleted in AA-579 (dead, tenant-JWT-gated — content/
+    // reviewer staff never had a tenant JWT to satisfy it). Admin-native replacement below.
+    fetch(`/api/tenant/admin/catalog?page=${page}&page_size=20`)
+      .then(r => {
+        if (!r.ok) return r.json().catch(() => ({})).then(body => {
+          throw new Error(body.detail || `HTTP ${r.status}`);
+        });
+        return r.json();
+      })
       .then(d => { setTours(d.data || []); setTotal(d.pagination?.total || 0); setLoading(false); })
       .catch(e => { setError(e.message); setLoading(false); });
   }, [page]);
