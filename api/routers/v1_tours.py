@@ -758,10 +758,24 @@ async def get_tour_full(
 
     pool = request.app.state.pool
     async with pool.acquire() as conn:
-        pt = await conn.fetchrow("""
-            SELECT * FROM gold_aa_internal.published_tours
-            WHERE id = $1::uuid AND tenant_id = $2::uuid
-        """, tour_id, tenant_id)
+        if is_admin:
+            # Admin review path reads the shared aa_internal reference pool directly
+            # (published_tours.tenant_id sentinel) — unchanged, not a per-tenant lookup.
+            pt = await conn.fetchrow("""
+                SELECT * FROM gold_aa_internal.published_tours
+                WHERE id = $1::uuid AND tenant_id = $2::uuid
+            """, tour_id, tenant_id)
+        else:
+            # Real tenant JWT: scope through tenant_tour_versions (AA-582 fix), same
+            # pattern as v1_marketplace.py — published_tours.tenant_id is always the
+            # aa_internal sentinel and was never a valid per-tenant filter.
+            pt = await conn.fetchrow("""
+                SELECT pt.* FROM gold_aa_internal.published_tours pt
+                JOIN gold_aa_internal.tenant_tour_versions ttv
+                    ON ttv.published_tour_id = pt.id
+                WHERE pt.id = $1::uuid AND ttv.tenant_id = $2::uuid
+                LIMIT 1
+            """, tour_id, tenant_id)
         if not pt:
             raise HTTPException(status_code=404, detail="Tour not found")
 
@@ -829,9 +843,14 @@ async def get_tour(
     pool = request.app.state.pool
 
     async with pool.acquire() as conn:
+        # AA-582 fix: scope through tenant_tour_versions (v1_marketplace.py pattern) —
+        # published_tours.tenant_id is always the aa_internal sentinel, never per-tenant.
         row = await conn.fetchrow("""
-            SELECT * FROM gold_aa_internal.published_tours
-            WHERE id = $1 AND tenant_id = $2
+            SELECT pt.* FROM gold_aa_internal.published_tours pt
+            JOIN gold_aa_internal.tenant_tour_versions ttv
+                ON ttv.published_tour_id = pt.id
+            WHERE pt.id = $1::uuid AND ttv.tenant_id = $2::uuid
+            LIMIT 1
         """, tour_id, tenant_id)
 
     if not row:
