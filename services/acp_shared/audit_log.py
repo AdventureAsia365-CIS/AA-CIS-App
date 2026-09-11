@@ -43,6 +43,7 @@ class TenantAuditAction:
     CONTENT_PIECE_CREATED = "content_piece.created"
     CONTENT_PIECE_FINISHED = "content_piece.finished"
     TOUR_REWRITE_TRIGGERED = "tour.rewrite_triggered"
+    CONTENT_PIECE_EDITED = "content_piece.edited"  # AA-569 — tenant hand-edit on My Content
 
 
 async def write_audit_log(

@@ -206,6 +206,103 @@ class TestGetPiece:
         assert exc.value.status_code == 404
 
 
+class TestUpdatePiece:
+    """AA-569 — PATCH /v1/content-writing/pieces/{piece_id}, the My Content hand-edit."""
+
+    @pytest.mark.asyncio
+    async def test_success(self):
+        body = v1_content_writing.UpdateContentBody(content_text="Edited text")
+        with patch.object(
+            v1_content_writing.service, "update_piece_content_text",
+            new=AsyncMock(return_value={"status": "approved", "content_text": "Edited text"}),
+        ) as mock_update:
+            result = await v1_content_writing.update_piece(PIECE_ID, body, _make_request(), tenant={"sub": TENANT_ID})
+        assert result["content_text"] == "Edited text"
+        mock_update.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_empty_content_422(self):
+        body = v1_content_writing.UpdateContentBody(content_text="   ")
+        with pytest.raises(HTTPException) as exc:
+            await v1_content_writing.update_piece(PIECE_ID, body, _make_request(), tenant={"sub": TENANT_ID})
+        assert exc.value.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_not_found_or_not_editable_404(self):
+        body = v1_content_writing.UpdateContentBody(content_text="x")
+        with patch.object(
+            v1_content_writing.service, "update_piece_content_text",
+            new=AsyncMock(side_effect=service.ContentWritingError("nope")),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await v1_content_writing.update_piece(PIECE_ID, body, _make_request(), tenant={"sub": TENANT_ID})
+        assert exc.value.status_code == 404
+
+
+class TestExportPiece:
+    """AA-569 — GET /v1/content-writing/pieces/{piece_id}/export?format=text|html."""
+
+    @pytest.mark.asyncio
+    async def test_text_export_any_channel(self):
+        with patch.object(
+            v1_content_writing.service, "fetch_piece",
+            new=AsyncMock(return_value={"status": "approved", "channel": "linkedin", "content_text": "Hello"}),
+        ):
+            result = await v1_content_writing.export_piece(
+                PIECE_ID, _make_request(), tenant={"sub": TENANT_ID}, format="text",
+            )
+        assert result.media_type == "text/plain"
+        assert result.body == b"Hello"
+
+    @pytest.mark.asyncio
+    async def test_html_export_blog_channel(self):
+        with patch.object(
+            v1_content_writing.service, "fetch_piece",
+            new=AsyncMock(return_value={"status": "approved", "channel": "blog", "content_text": "## Title\n\nBody"}),
+        ):
+            result = await v1_content_writing.export_piece(
+                PIECE_ID, _make_request(), tenant={"sub": TENANT_ID}, format="html",
+            )
+        assert result.media_type == "text/html"
+        assert b"<h2>Title</h2>" in result.body
+
+    @pytest.mark.asyncio
+    async def test_html_export_non_blog_channel_400(self):
+        with patch.object(
+            v1_content_writing.service, "fetch_piece",
+            new=AsyncMock(return_value={"status": "approved", "channel": "instagram", "content_text": "x"}),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await v1_content_writing.export_piece(
+                    PIECE_ID, _make_request(), tenant={"sub": TENANT_ID}, format="html",
+                )
+        assert exc.value.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_not_yet_written_409(self):
+        with patch.object(
+            v1_content_writing.service, "fetch_piece",
+            new=AsyncMock(return_value={"status": "processing", "channel": "blog", "content_text": ""}),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await v1_content_writing.export_piece(
+                    PIECE_ID, _make_request(), tenant={"sub": TENANT_ID}, format="text",
+                )
+        assert exc.value.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_not_found_404(self):
+        with patch.object(
+            v1_content_writing.service, "fetch_piece",
+            new=AsyncMock(side_effect=service.ContentWritingError("nope")),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await v1_content_writing.export_piece(
+                    PIECE_ID, _make_request(), tenant={"sub": TENANT_ID}, format="text",
+                )
+        assert exc.value.status_code == 404
+
+
 class TestGetLatestPiece:
     """AA-522 — GET .../requests/{request_id}/latest-piece, resume support for the T8/T9 wizard's
     write step. service.fetch_latest_piece_for_request() itself is unit-tested in
