@@ -602,6 +602,119 @@ class TestGateRegressionGuard:
 
 
 @pytest.mark.asyncio
+class TestDiscardedAttempts:
+    """AA-570 — content_piece.discarded_attempts (migration 148): the attempt that did NOT
+    become this row's final content_text, {attempt_number, content_text, gate_ledger}. At most
+    one element, since MAX_ATTEMPTS=2."""
+
+    def _outcome(self, *gates):
+        ledger = [{"gate": g, "passed": p, "violations": [] if p else [f"{g} violation"],
+                   "repairable": True, "blocking": b} for g, p, b in gates]
+        first_failure = next((g for g in ledger if not g["passed"] and g["blocking"]), None)
+        return {"passed": first_failure is None, "gate_ledger": ledger,
+                "first_failure": first_failure, "flags": []}
+
+    async def test_single_attempt_no_discard(self):
+        with patch.object(service, "write_content", return_value=("draft 1", 0.02, {}, None)), \
+             patch.object(service, "run_quality_gates", return_value=_passing_outcome()), \
+             patch.object(service, "_finalize_piece",
+                           new=AsyncMock(return_value=_finalized_row())) as mock_fin:
+            await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())
+
+        assert mock_fin.call_args.kwargs["discarded_attempts"] == []
+
+    async def test_retry_then_approved_discards_attempt_one(self):
+        """The common case (AA-570's own real-data finding, 66.7% of pieces): attempt 1 fails,
+        attempt 2 passes with no gate regression — attempt 1's own text/ledger is what's
+        discarded."""
+        attempt1_ledger = [{"gate": "F2_banned_patterns", "passed": False,
+                             "violations": ["F2_banned_patterns violation"], "repairable": True}]
+        with patch.object(service, "write_content", return_value=("draft 1", 0.02, {}, None)), \
+             patch.object(service, "rewrite_with_feedback", return_value=("draft 2", 0.02, {}, None)), \
+             patch.object(service, "run_quality_gates",
+                           side_effect=[_failing_outcome(), _passing_outcome()]), \
+             patch.object(service, "_finalize_piece",
+                           new=AsyncMock(return_value=_finalized_row(attempt_number=2))) as mock_fin:
+            await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())
+
+        discarded = mock_fin.call_args.kwargs["discarded_attempts"]
+        assert discarded == [{
+            "attempt_number": 1, "content_text": "draft 1", "gate_ledger": attempt1_ledger,
+        }]
+
+    async def test_retry_both_fail_same_gate_discards_attempt_one(self):
+        """No regression revert (same gate both attempts) — attempt 2's rewrite is what's kept
+        as the final held content, so attempt 1 is still the one discarded."""
+        with patch.object(service, "write_content", return_value=("draft 1", 0.02, {}, None)), \
+             patch.object(service, "rewrite_with_feedback", return_value=("draft 2", 0.02, {}, None)), \
+             patch.object(service, "run_quality_gates",
+                           side_effect=[_failing_outcome(), _failing_outcome()]), \
+             patch.object(service, "_finalize_piece",
+                           new=AsyncMock(return_value=_finalized_row(status="held"))) as mock_fin:
+            await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())
+
+        discarded = mock_fin.call_args.kwargs["discarded_attempts"]
+        assert len(discarded) == 1
+        assert discarded[0]["attempt_number"] == 1
+        assert discarded[0]["content_text"] == "draft 1"
+
+    async def test_non_repairable_immediate_hold_no_discard(self):
+        """Only 1 attempt ever ran — nothing to discard."""
+        with patch.object(service, "write_content", return_value=("draft 1", 0.02, {}, None)), \
+             patch.object(service, "run_quality_gates",
+                           return_value=_failing_outcome(gate="F6_cta_present", repairable=False)), \
+             patch.object(service, "_finalize_piece",
+                           new=AsyncMock(return_value=_finalized_row(status="held"))) as mock_fin:
+            await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())
+
+        assert mock_fin.call_args.kwargs["discarded_attempts"] == []
+
+    async def test_gate_regression_revert_discards_attempt_two_not_attempt_one(self):
+        """AA-528's revert case: attempt 1's content is what's KEPT (reverted back to), so
+        attempt 2 — the just-generated rewrite that regressed — is the one reported discarded,
+        not attempt 1."""
+        attempt1_outcome = self._outcome(("F4_extreme_length", False, True))
+        attempt2_outcome = self._outcome(("F4_extreme_length", False, True), ("F1_grounding", False, True))
+        with patch.object(service, "write_content", return_value=("attempt 1 text", 0.02, {}, None)), \
+             patch.object(service, "rewrite_with_feedback", return_value=("attempt 2 text", 0.02, {}, None)), \
+             patch.object(service, "run_quality_gates", side_effect=[attempt1_outcome, attempt2_outcome]), \
+             patch.object(service, "_finalize_piece",
+                           new=AsyncMock(return_value=_finalized_row(status="held"))) as mock_fin:
+            await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())
+
+        assert mock_fin.call_args.kwargs["content_text"] == "attempt 1 text"  # kept
+        discarded = mock_fin.call_args.kwargs["discarded_attempts"]
+        assert len(discarded) == 1
+        assert discarded[0]["attempt_number"] == 2
+        assert discarded[0]["content_text"] == "attempt 2 text"  # the regressed rewrite, discarded
+        gate_names = {g["gate"] for g in discarded[0]["gate_ledger"]}
+        assert gate_names == {"F4_extreme_length", "F1_grounding"}
+
+    async def test_citation_tags_stripped_from_discarded_content_and_ledger(self):
+        """The same AA-452 leak-prevention step that strips [R:atom_id] tags from the final
+        content_text/gate_ledger must also cover the discarded attempt — it's persisted to the
+        same table, no reason a tag would be safe there and not here."""
+        attempt1_ledger = [{"gate": "F1_grounding", "passed": False,
+                             "violations": ["sentence [R:atom_1] not grounded"], "repairable": True}]
+        with patch.object(service, "write_content",
+                           return_value=("draft with [R:atom_1] tag", 0.02, {}, None)), \
+             patch.object(service, "rewrite_with_feedback", return_value=("draft 2", 0.02, {}, None)), \
+             patch.object(service, "run_quality_gates",
+                           side_effect=[
+                               {"passed": False, "gate_ledger": attempt1_ledger,
+                                "first_failure": attempt1_ledger[0], "flags": []},
+                               _passing_outcome(),
+                           ]), \
+             patch.object(service, "_finalize_piece",
+                           new=AsyncMock(return_value=_finalized_row(attempt_number=2))) as mock_fin:
+            await service.run_write_background(REQUEST_ID, PIECE_ID, _context(), pool=MagicMock())
+
+        discarded = mock_fin.call_args.kwargs["discarded_attempts"][0]
+        assert "[R:atom_1]" not in discarded["content_text"]
+        assert "[R:atom_1]" not in discarded["gate_ledger"][0]["violations"][0]
+
+
+@pytest.mark.asyncio
 class TestFetchRouteSegments:
     """AA-513 — services/acp_content_writing/service.py::_fetch_route_segments() itself (AA-511
     Gap A's own `_fetch_route_text()` had zero direct test coverage before this build — added
