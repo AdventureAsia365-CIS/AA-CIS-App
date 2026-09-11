@@ -47,6 +47,12 @@ from .models import AtomRecord, Trip
 from .quarter import _row_to_atom
 from .runway import _row_to_trip
 
+# INTENTIONAL: the JOIN into published_tours/raw_tours below reads a shared reference pool
+# (100% sentinel tenant_id=aa_internal), not per-tenant data — the real per-tenant boundary is
+# already drawn by tenant_tour_versions.tenant_id above it. This is the query behind T7's live
+# quarterly reallocation suggestion panel (trip_reallocation.py -> fetch_tenant_trips(), real
+# CloudWatch traffic confirmed AA-578) — KHÔNG BAO GIỜ chuyển sang RLS pool thật cho query này —
+# xem AA-578.
 _TENANT_TRIP_QUERY = """
     WITH latest_versions AS (
         SELECT DISTINCT ON (ttv.published_tour_id) ttv.published_tour_id

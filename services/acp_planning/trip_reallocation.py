@@ -41,6 +41,9 @@ async def suggest_trip_reallocation(tenant_id: UUID, year: int, quarter: int, po
     whatever weights already exist), and diffs its trip_ids against the tenant's existing
     finalized plan for that quarter, if any."""
     config = await fetch_tenant_planning_config(tenant_id, pool)
+    # INTENTIONAL: fetch_tenant_trips() reads published_tours/raw_tours as a shared reference
+    # pool (sentinel tenant_id), not per-tenant data — see tenant_pool.py's own _TENANT_TRIP_QUERY
+    # comment. KHÔNG BAO GIỜ chuyển sang RLS pool thật — xem AA-578.
     trips = await fetch_tenant_trips(tenant_id, pool)
     atoms_by_trip = await fetch_tenant_atoms_by_trip(tenant_id, pool)
     runway = compute_runway_map(tenant_id, year, trips, config.markets)
