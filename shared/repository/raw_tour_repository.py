@@ -38,12 +38,14 @@ class RawTourRepository:
                 price_raw, inclusions, exclusions, links,
                 activities, feature, best_time_to_go,
                 pipeline_status,
-                source_group_id, source_version, source_status
+                source_group_id, source_version, source_status,
+                country_raw_unresolved
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                 $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
                 $21, $22, $23, $24,
-                $25, $26, $27
+                $25, $26, $27,
+                $28
             )
             RETURNING tour_id::text
         """,
@@ -77,6 +79,7 @@ class RawTourRepository:
             data.get("source_group_id"),
             data.get("source_version", 1),
             data.get("source_status", "active"),
+            data.get("country_raw_unresolved"),
         )
         return row["tour_id"]
 

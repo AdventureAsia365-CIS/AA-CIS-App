@@ -50,7 +50,9 @@ def test_unresolved_country_still_null_but_logs_warning():
             records = parser.parse()
 
         assert len(records) == 1
-        assert records[0]["country"] is None  # unchanged: still NULL, not blocked here
+        assert records[0]["country"] is None  # unchanged: still NULL, not blocked here (Cách A)
+        # AA-571 round 3: raw value preserved for later querying (migration 151)
+        assert records[0]["country_raw_unresolved"] == "Neverland"
         mock_logger.warning.assert_any_call(
             "country_unresolved_null", file="weird_region.xlsx",
             raw_country="Neverland", tour_name="Mystery Tour",
@@ -69,6 +71,7 @@ def test_resolved_country_does_not_log_warning():
             records = parser.parse()
 
         assert records[0]["country"] == "Japan"
+        assert records[0].get("country_raw_unresolved") is None
         for call in mock_logger.warning.call_args_list:
             assert call.args[0] != "country_unresolved_null"
     finally:
@@ -85,6 +88,7 @@ def test_empty_country_does_not_log_warning():
             records = parser.parse()
 
         assert records[0]["country"] is None
+        assert records[0].get("country_raw_unresolved") is None
         for call in mock_logger.warning.call_args_list:
             assert call.args[0] != "country_unresolved_null"
     finally:

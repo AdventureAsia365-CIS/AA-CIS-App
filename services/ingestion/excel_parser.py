@@ -149,15 +149,15 @@ class ExcelParser:
                 _raw_country = current.get("country")
                 _resolved_country = resolve_country(_raw_country, self.source_file)
                 if _raw_country and not _resolved_country:
-                    # AA-571 Việc 2B: this used to silently overwrite an unrecognized raw value
-                    # with NULL, losing the original string entirely. Country still ends up
-                    # NULL here (unchanged) -- whether to preserve the raw value in a side
-                    # column or block ingestion of the row instead is a separate, proposed-not-
-                    # decided design question (see the AA-571 Linear comment) -- this log line
-                    # is the minimum fix: make the loss visible instead of silent.
+                    # AA-571 Việc 2B (Cách A, Nghiep confirmed): does NOT block ingestion --
+                    # the tour still comes in normally, country still ends up NULL (unchanged)
+                    # -- but the raw value is preserved in country_raw_unresolved (migration
+                    # 151) so these rows are directly queryable later, plus a log line so it's
+                    # visible at ingest time too, not just via a later query.
                     logger.warning("country_unresolved_null",
                                     file=self.source_file, raw_country=_raw_country,
                                     tour_name=current.get("src_name"))
+                    current["country_raw_unresolved"] = _raw_country
                 current["country"] = _resolved_country
                 current["raw_data"] = json.dumps(row.to_dict(), default=str)
             else:
