@@ -1,5 +1,7 @@
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.docs import (get_redoc_html, get_swagger_ui_html,
+                                   get_swagger_ui_oauth2_redirect_html)
 from contextlib import asynccontextmanager
 import asyncio
 import asyncpg
@@ -33,6 +35,7 @@ from api.routers.v1_s1_from_atom import router as v1_s1_from_atom_router
 from api.routers.v1_rules import router as v1_rules_router
 from api.routers.v1_social import router as v1_social_router
 from api.routers.admin import router as admin_router
+from api.routers.admin import verify_admin_secret  # AA-577 — reused to gate Swagger/ReDoc/openapi.json
 from api.routers.admin_pipeline import router as admin_pipeline_router
 from api.routers.admin_settings import router as admin_settings_router
 from api.routers.admin_atoms import router as admin_atoms_router
@@ -100,11 +103,15 @@ async def lifespan(app: FastAPI):
         await app.state.tenant_pool.close()
     await redis.aclose()
 
+# AA-577 — docs_url/redoc_url/openapi_url all disabled here (were the FastAPI defaults: /docs,
+# /redoc, /openapi.json) so none of the 4 routes auto-register unprotected; re-registered by hand
+# below, each behind require_admin_secret_for_docs().
 app = FastAPI(
     title="AA-CIS API",
     version="0.3.0",
     description="Adventure Asia Content Intelligence System",
     lifespan=lifespan,
+    docs_url=None, redoc_url=None, openapi_url=None,
 )
 
 app.add_middleware(
@@ -119,6 +126,56 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _is_publicly_deployed() -> bool:
+    """AA-577 STEP0 — true only for the real, internet-reachable ECS deployment (the one bots
+    scan), never for a developer's laptop or the GitHub Actions CI runner. Deliberately NOT
+    `ENVIRONMENT` (`os.getenv("ENVIRONMENT", "dev")`, api/core/sentry.py's own convention):
+    Terraform sets `environment = "dev"` for the ONE real AWS deployment this app has today (no
+    separate staging/prod cluster exists — confirmed via `aws ecs list-clusters`) — gating on
+    `ENVIRONMENT == "production"` would never be true and would leave Swagger fully exposed,
+    exactly the opposite of this fix. `AWS_EXECUTION_ENV` is auto-injected by AWS on every real
+    ECS/Fargate task (confirmed live: `AWS_ECS_FARGATE` on the real running task) and absent on
+    both a local machine and CI — a reliable "is this the real live thing" signal that needs no
+    Terraform change and can't be spoofed by an unauthenticated caller (it's never read from a
+    request, only from this process's own environment)."""
+    return bool(os.environ.get("AWS_EXECUTION_ENV"))
+
+
+def require_admin_secret_for_docs(x_admin_secret: str = Header(None)):
+    """AA-577 — Swagger UI/ReDoc/the OpenAPI schema JSON were public on the real deployment,
+    handing a bot the full API surface (route names, params) for free — a real CloudWatch-
+    confirmed finding, not a theoretical one. Gated behind the same X-Admin-Secret mechanism
+    every /admin/* route already uses (verify_admin_secret(), api/routers/admin.py) — but ONLY
+    when `_is_publicly_deployed()`, per Nghiệp's explicit decision (10/09/2026): local/CI stays
+    fully public, no secret needed, for coding/testing convenience."""
+    if _is_publicly_deployed():
+        verify_admin_secret(x_admin_secret)
+
+
+@app.get("/openapi.json", include_in_schema=False)
+async def get_openapi_json(_: None = Depends(require_admin_secret_for_docs)):
+    return app.openapi()
+
+
+@app.get("/docs", include_in_schema=False)
+async def get_swagger_docs(_: None = Depends(require_admin_secret_for_docs)):
+    return get_swagger_ui_html(
+        openapi_url="/openapi.json", title=f"{app.title} - Swagger UI",
+        oauth2_redirect_url="/docs/oauth2-redirect",
+    )
+
+
+@app.get("/docs/oauth2-redirect", include_in_schema=False)
+async def get_swagger_oauth2_redirect(_: None = Depends(require_admin_secret_for_docs)):
+    return get_swagger_ui_oauth2_redirect_html()
+
+
+@app.get("/redoc", include_in_schema=False)
+async def get_redoc_docs(_: None = Depends(require_admin_secret_for_docs)):
+    return get_redoc_html(openapi_url="/openapi.json", title=f"{app.title} - ReDoc")
+
 
 app.include_router(v1_tours_router)
 app.include_router(v1_quota_router)  # AA-489 — GET /v1/quota, real replacement for AA-428's dead endpoint
