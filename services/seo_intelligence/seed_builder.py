@@ -8,10 +8,34 @@ without DB or HTTP. The DFS client consumes the finished seed verbatim (no more 
 
 import re
 
-# Known dirty country values observed in silver_aa_internal.raw_tours. Extend as needed.
+# Known dirty country-COLUMN values observed in silver_aa_internal.raw_tours. AA-571 migration
+# 149 cleaned the column itself (SRI-LANDKA -> Sri Lanka, OKINAWA -> Japan), so this dict is now
+# a defensive fallback only, not the live path for either entry -- kept, not deleted, in case a
+# future raw path re-introduces a dirty column value before ingestion validation catches it.
 COUNTRY_NORMALIZE = {
     "SRI-LANDKA": "Sri Lanka",
-    "OKINAWA":    "Okinawa, Japan",
+}
+
+# AA-571 Việc 1: sub-region/landmark override, keyed off the TOUR'S OWN TITLE (src_name), not
+# the country column -- the country column is clean at country-level only (migration 149) and
+# was never meant to carry sub-region detail. Evidence-based via a live catalog scan
+# (2026-09-11): of 104 real Japan tours, 36 have "Okinawa" (or one of its own sub-locations)
+# somewhere in src_name/itinerary text, and critically 24+ of those already say "Okinawa" (or
+# a known sub-location) directly IN THE TITLE -- title-level detection alone catches
+# effectively the whole real cluster without needing itinerary text. Deliberately NOT extended
+# to Kyoto/Osaka/Hokkaido -- the same scan found ZERO title-level hits for any of them in the
+# current catalog (Kyoto/Osaka only ever appear as an incidental itinerary stop inside broader
+# multi-city Japan tours), so hardcoding them now would be guessing ahead of real data, not
+# reading it -- add them here if/when a future catalog scan finds a real title-level cluster,
+# same evidence bar as this one. "YAMBARU" (with b) is a real spelling variant of "Yanbaru"
+# (with n) found live in an actual title -- both map here.
+REGION_LANDMARKS: dict[str, str] = {
+    "OKINAWA":  "Okinawa, Japan",
+    "NAHA":     "Okinawa, Japan",
+    "YANBARU":  "Okinawa, Japan",
+    "YAMBARU":  "Okinawa, Japan",
+    "IRIOMOTE": "Okinawa, Japan",
+    "MIYAKO":   "Okinawa, Japan",
 }
 
 # DataForSEO location codes (google_ads / serp). Buyer markets we support today.
@@ -51,8 +75,32 @@ _DEFAULT_MARKET = "US"
 _ACTIVITY_SPLIT = re.compile(r"[,│\n]+")
 
 
-def normalize_country(raw: str) -> str:
-    """Map dirty country text to a clean display country. Empty -> ''."""
+def detect_region_landmark(tour_name: str) -> str | None:
+    """Sub-region override from the TOUR'S OWN TITLE (AA-571 Việc 1).
+
+    Title-only, deliberately: a multi-city Japan tour that merely visits a landmark as one
+    itinerary stop should not be re-labeled by it -- only a tour whose own title names the
+    landmark is treated as being ABOUT that place. None when no landmark matches.
+    """
+    if not tour_name:
+        return None
+    name_upper = tour_name.upper()
+    for landmark, region in REGION_LANDMARKS.items():
+        if landmark in name_upper:
+            return region
+    return None
+
+
+def normalize_country(raw: str, tour_name: str = "") -> str:
+    """Map dirty/generic country text to the most specific display country available.
+
+    tour_name is checked FIRST against known sub-region landmarks (AA-571) -- independent of
+    the country column, which is clean at country-level only since migration 149. Falls back to
+    the country column itself when no landmark matches. Empty -> ''.
+    """
+    landmark = detect_region_landmark(tour_name)
+    if landmark:
+        return landmark
     if not raw:
         return ""
     s = str(raw).strip()
@@ -89,7 +137,7 @@ def build_seed(country_raw: str, activities, tour_name: str = "") -> str:
     ~85% of the KR/LK catalogue. tour_name (raw_tours.src_name, always populated)
     is the nearest per-tour specificity available without a live per-tour DFS call.
     """
-    c = normalize_country(country_raw)
+    c = normalize_country(country_raw, tour_name)
     a = first_activity(activities)
     if a and c:
         return f"{a} in {c}"

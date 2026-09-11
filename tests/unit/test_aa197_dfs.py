@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from services.seo_intelligence.seed_builder import (
-    normalize_country, first_activity, build_seed, resolve_buyer_market,
+    normalize_country, first_activity, build_seed, resolve_buyer_market, detect_region_landmark,
 )
 from services.seo_intelligence.dataforseo_client import DataForSEOClient
 
@@ -23,6 +23,48 @@ def test_normalize_country_titlecase():
 def test_normalize_country_empty():
     assert normalize_country("") == ""
     assert normalize_country(None) == ""
+
+
+# ── AA-571 Việc 1: landmark detection off tour title, independent of country column ───────────
+
+def test_detect_region_landmark_okinawa_title():
+    assert detect_region_landmark("Discover Okinawa 2026") == "Okinawa, Japan"
+
+
+def test_detect_region_landmark_sublocation_naha():
+    assert detect_region_landmark("Port Pick-Up: Naha Private Tour") == "Okinawa, Japan"
+
+
+def test_detect_region_landmark_spelling_variant_yambaru():
+    # real spelling variant found live in an actual title ("Yambaru", with b, vs "Yanbaru")
+    assert detect_region_landmark("Family Fun in Yambaru National Park") == "Okinawa, Japan"
+
+
+def test_detect_region_landmark_no_match():
+    assert detect_region_landmark("Classic Tokyo-Kyoto-Osaka Highlights") is None
+
+
+def test_detect_region_landmark_empty():
+    assert detect_region_landmark("") is None
+    assert detect_region_landmark(None) is None
+
+
+def test_normalize_country_landmark_overrides_clean_country():
+    # country column is already clean ("Japan") -- title alone drives the more specific result
+    assert normalize_country("Japan", "Discover Okinawa 2026") == "Okinawa, Japan"
+
+
+def test_normalize_country_no_landmark_falls_back_to_country():
+    assert normalize_country("Japan", "Classic Tokyo-Kyoto-Osaka Highlights") == "Japan"
+
+
+def test_build_seed_okinawa_landmark_from_title():
+    # AA-571: country column is clean ("Japan"), landmark comes from tour_name, not country
+    assert build_seed("Japan", None, "Discover Okinawa 2026") == "Discover Okinawa 2026 Okinawa, Japan"
+
+
+def test_build_seed_okinawa_landmark_with_activity():
+    assert build_seed("Japan", ["Snorkeling"], "Okinawa SUP & Snorkel Tour") == "Snorkeling in Okinawa, Japan"
 
 
 # ── first_activity ────────────────────────────────────────────────────────────
