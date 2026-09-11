@@ -7,10 +7,8 @@ import asyncio
 import asyncpg
 import redis.asyncio as aioredis
 import os
-import uuid
 import structlog
 
-from shared.repository.raw_tour_repository import RawTourRepository
 from api.routers.auth import (
     _hash_api_key, _create_jwt, verify_jwt,
     TenantLoginRequest, TenantLoginResponse,
@@ -213,10 +211,6 @@ def get_pool() -> asyncpg.Pool:
         raise HTTPException(status_code=503, detail="DB not ready")
     return pool
 
-async def get_repo(db: asyncpg.Pool = Depends(get_pool)):
-    async with db.acquire() as conn:
-        yield RawTourRepository(conn, "00000000-0000-0000-0000-000000000001")
-
 @app.post("/auth/tenant-login", response_model=TenantLoginResponse, tags=["auth"])
 async def tenant_login(
     body: TenantLoginRequest,
@@ -319,26 +313,3 @@ async def verify_admin(request: Request):
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "aa-cis-api", "version": "0.3.0"}
-
-@app.get("/tours")
-async def list_tours(
-    limit: int = 50,
-    offset: int = 0,
-    repo: RawTourRepository = Depends(get_repo),
-):
-    tours = await repo.list(limit=limit, offset=offset)
-    return {"total": len(tours), "limit": limit, "offset": offset, "data": tours}
-
-@app.get("/tours/{tour_id}")
-async def get_tour(
-    tour_id: str,
-    repo: RawTourRepository = Depends(get_repo),
-):
-    try:
-        uuid.UUID(tour_id)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Tour not found")
-    tour = await repo.get_by_id(tour_id)
-    if not tour:
-        raise HTTPException(status_code=404, detail="Tour not found")
-    return tour
