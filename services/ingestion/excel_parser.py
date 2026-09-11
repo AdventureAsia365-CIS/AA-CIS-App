@@ -146,7 +146,19 @@ class ExcelParser:
                                         file=self.source_file, column=excel_col, db_field=db_field)
                     current.setdefault(db_field, None)
                 current["source_file"] = self.source_file
-                current["country"] = resolve_country(current.get("country"), self.source_file)
+                _raw_country = current.get("country")
+                _resolved_country = resolve_country(_raw_country, self.source_file)
+                if _raw_country and not _resolved_country:
+                    # AA-571 Việc 2B: this used to silently overwrite an unrecognized raw value
+                    # with NULL, losing the original string entirely. Country still ends up
+                    # NULL here (unchanged) -- whether to preserve the raw value in a side
+                    # column or block ingestion of the row instead is a separate, proposed-not-
+                    # decided design question (see the AA-571 Linear comment) -- this log line
+                    # is the minimum fix: make the loss visible instead of silent.
+                    logger.warning("country_unresolved_null",
+                                    file=self.source_file, raw_country=_raw_country,
+                                    tour_name=current.get("src_name"))
+                current["country"] = _resolved_country
                 current["raw_data"] = json.dumps(row.to_dict(), default=str)
             else:
                 # Continuation row — concat itineraries only

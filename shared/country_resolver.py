@@ -6,7 +6,10 @@ Priority: 1) normalize raw value against master list  2) extract from filename  
 import re
 
 COUNTRY_MASTER = {
-    "Japan":         ["JAPAN", "JAPANESE"],
+    # AA-571 Việc 2B: OKINAWA added after a real dirty raw_tours.country value was found
+    # (migration 149 backfilled the 1 pre-existing row; this alias stops a NEW Excel upload
+    # from reproducing it — Okinawa is a Japanese prefecture, not a country).
+    "Japan":         ["JAPAN", "JAPANESE", "OKINAWA"],
     "Sri Lanka":     ["SRI LANKA", "SRILANKA", "LKA", "SRI-LANDKA", "SRI LANDKA"],
     "South Korea":   ["SOUTH KOREA", "KOREA", "KOR", "REPUBLIC OF KOREA"],
     "Vietnam":       ["VIETNAM", "VIET NAM", "VNM"],
