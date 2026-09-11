@@ -438,6 +438,13 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
         # right before that attempt gets overwritten by a rewrite. Only used by the gate-
         # regression-guard below; stays None on attempt 1 (nothing to compare against yet).
         prev_snapshot: dict | None = None
+        # AA-570 — whichever attempt did NOT become the final content_text (at most one, since
+        # MAX_ATTEMPTS=2), captured for the Data Flywheel/lesson-log use case. Set either inside
+        # the gate-regression-guard block below (the just-generated attempt 2 that got reverted
+        # AWAY from) or, in the post-loop fallback, from `prev_snapshot` (attempt 1, discarded in
+        # favor of whatever attempt 2 produced) — see that fallback's own comment for why both
+        # paths are needed. Stays None whenever only 1 attempt ever ran.
+        discarded_attempt: dict | None = None
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
             if attempt == 1:
@@ -546,6 +553,15 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
                         prev_blocking_fail=sorted(prev_blocking_fail),
                         cur_blocking_fail=sorted(cur_blocking_fail),
                     )
+                    # AA-570 — capture THIS attempt's just-generated rewrite before it's
+                    # overwritten below by the revert. In this specific branch, attempt 1 (not
+                    # this attempt) is the one that ends up as the final content_text, so it must
+                    # NOT be reported as discarded — this attempt's own regressed content is the
+                    # real discard.
+                    discarded_attempt = {
+                        "attempt_number": attempt, "content_text": content_text,
+                        "gate_ledger": gate_ledger,
+                    }
                     content_text = prev_snapshot["content_text"]
                     gate_ledger = prev_ledger
                     seo_meta = prev_snapshot["seo_meta"]
@@ -584,6 +600,22 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
         if held_reason:
             held_reason = strip_citation_tags(held_reason)
 
+        # AA-570 — the common case: attempt 2 ran and its own gate-regression-guard branch above
+        # never fired, so `discarded_attempt` is still None even though a real attempt WAS
+        # thrown away (attempt 1, overwritten by attempt 2's rewrite). `prev_snapshot` is exactly
+        # that attempt's own outcome, captured right before the rewrite ran.
+        if discarded_attempt is None and attempt > 1 and prev_snapshot is not None:
+            discarded_attempt = {
+                "attempt_number": attempt - 1, "content_text": prev_snapshot["content_text"],
+                "gate_ledger": prev_snapshot["gate_ledger"],
+            }
+        if discarded_attempt is not None:
+            discarded_attempt = {
+                **discarded_attempt,
+                "content_text": strip_citation_tags(discarded_attempt["content_text"]),
+                "gate_ledger": deep_strip_citation_tags(discarded_attempt["gate_ledger"]),
+            }
+
         # AA-499 (Decision 5) — within-tenant reuse flag, 'approved' only (a held piece never
         # ships, nothing useful to compare it against or index it for). Reuses the LAST attempt's
         # own `embedding` (computed above, inside the loop, for AA-484's cannibalization check on
@@ -614,6 +646,7 @@ async def run_write_background(request_id: UUID, piece_id: UUID, context: dict, 
             pool, piece_id=piece_id, attempt_number=attempt,
             content_text=content_text, status=status, held_reason=held_reason,
             gate_ledger=gate_ledger, repair_log=repair_log, flags=flags,
+            discarded_attempts=[discarded_attempt] if discarded_attempt else [],
             seo_title=seo_meta.get("seo_title"), meta_description=seo_meta.get("meta_description"),
             slug=seo_meta.get("slug"), content_summary=summary,
             # AA-484 now computes `embedding` on EVERY attempt (for the cannibalization gate),
@@ -783,6 +816,7 @@ async def _finalize_piece(
     seo_title: Optional[str] = None, meta_description: Optional[str] = None,
     slug: Optional[str] = None, content_summary: Optional[str] = None,
     content_embedding: Optional[list[float]] = None,
+    discarded_attempts: Optional[list[dict]] = None,
 ) -> dict:
     # AA-514 — seo_title/meta_description/slug default None (the exception handler's own
     # "failed" finalize call above never has a real seo_meta to pass, and every non-blog piece
@@ -799,6 +833,10 @@ async def _finalize_piece(
     # pgvector column in this repo), so the value is pre-formatted as pgvector's own text literal
     # ('[0.1,0.2,...]') by embedding_to_pgvector_literal() and cast explicitly in SQL.
     embedding_literal = embedding_to_pgvector_literal(content_embedding) if content_embedding else None
+    # AA-570 — every attempt that did NOT become this row's content_text (migration 148). `[]`
+    # default for the exception-handler/buffer-retry call sites (neither ever has more than 1
+    # attempt) — only run_write_background()'s own main loop ever passes a non-empty list.
+    discarded_attempts = discarded_attempts or []
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -806,15 +844,17 @@ async def _finalize_piece(
             SET attempt_number = $2, content_text = $3, status = $4, held_reason = $5,
                 gate_ledger = $6::jsonb, repair_log = $7::jsonb,
                 seo_title = $8, meta_description = $9, slug = $10, flags = $11::jsonb,
-                content_summary = $12, content_embedding = $13::vector
+                content_summary = $12, content_embedding = $13::vector,
+                discarded_attempts = $14::jsonb
             WHERE piece_id = $1
             RETURNING piece_id, tenant_id, angle_gate_request_id, attempt_number, content_text,
                       status, held_reason, gate_ledger, repair_log, created_at,
-                      seo_title, meta_description, slug, route_hub_name, route_segment_count, flags
+                      seo_title, meta_description, slug, route_hub_name, route_segment_count, flags,
+                      discarded_attempts
             """,
             piece_id, attempt_number, content_text, status, held_reason,
             json.dumps(gate_ledger), json.dumps(repair_log), seo_title, meta_description, slug,
-            json.dumps(flags), content_summary, embedding_literal,
+            json.dumps(flags), content_summary, embedding_literal, json.dumps(discarded_attempts),
         )
 
         # AA-559 — semantic tenant-activity log: the REAL "content finished writing" event
@@ -865,6 +905,14 @@ def _row_to_dict(row) -> dict:
         # INSERT time but that statement doesn't select it back), same "missing key = not
         # selected by this particular query" convention as the fields above.
         "channel": row["channel"] if "channel" in row.keys() else None,
+        # AA-570 — every attempt discarded in favor of this row's own content_text (migration
+        # 148). [] for every single-attempt piece and every pre-AA-570 row, same "missing key or
+        # NULL means never populated" convention as flags above.
+        "discarded_attempts": (
+            (json.loads(row["discarded_attempts"]) if isinstance(row["discarded_attempts"], str)
+             else row["discarded_attempts"]) or []
+            if "discarded_attempts" in row.keys() and row["discarded_attempts"] is not None else []
+        ),
         # AA-519 Việc 5 — absent from _insert_placeholder_piece()'s RETURNING (nothing to report
         # before T10 has run once), same "missing key means never populated yet" convention
         # seo_title/etc. above already use.
