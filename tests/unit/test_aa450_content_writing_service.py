@@ -682,6 +682,50 @@ class TestFetchPiece:
 
 
 @pytest.mark.asyncio
+class TestUpdatePieceContentText:
+    """AA-569 — the My Content hand-edit. Ownership + editable-status both enforced in the
+    UPDATE's WHERE clause (piece_id + tenant_id + status IN ('approved','held')) — a mocked conn
+    can't actually exercise that filter, so these tests cover the two outcomes it produces
+    (a row comes back, or none does) rather than the SQL text itself."""
+
+    async def test_success_returns_updated_piece(self):
+        conn = AsyncMock()
+        conn.fetchrow.return_value = _finalized_row(content_text="Edited by tenant")
+        pool = _make_pool(conn)
+
+        result = await service.update_piece_content_text(TENANT_ID, PIECE_ID, "Edited by tenant", pool)
+
+        assert result["content_text"] == "Edited by tenant"
+        query, *params = conn.fetchrow.call_args_list[0][0]
+        assert "UPDATE acp_shared.content_piece" in query
+        assert "status IN ('approved', 'held')" in query
+        assert params == [PIECE_ID, TENANT_ID, "Edited by tenant"]
+
+    async def test_audit_log_row_written(self):
+        conn = AsyncMock()
+        conn.fetchrow.return_value = _finalized_row()
+        pool = _make_pool(conn)
+
+        await service.update_piece_content_text(TENANT_ID, PIECE_ID, "x", pool)
+
+        query, *params = conn.execute.call_args_list[0][0]
+        assert "INSERT INTO acp_shared.audit_log" in query
+        assert params[2] == "content_piece.edited"
+        assert params[4] == str(PIECE_ID)
+
+    async def test_not_found_or_not_owned_or_not_editable_raises(self):
+        """One WHERE clause covers 3 real cases (wrong piece_id, wrong tenant, or a
+        processing/failed piece) — all indistinguishable from the caller's side, all correctly
+        surfaced as 404 by the router either way."""
+        conn = AsyncMock()
+        conn.fetchrow.return_value = None
+        pool = _make_pool(conn)
+
+        with pytest.raises(service.ContentWritingError):
+            await service.update_piece_content_text(TENANT_ID, PIECE_ID, "x", pool)
+
+
+@pytest.mark.asyncio
 class TestFetchLatestPieceForRequest:
     """AA-522 — resume support for the T8/T9 wizard's write step (see AngleGateTab.tsx's own
     header comment for the bug this closes). Scoped to the CURRENTLY chosen angle option, same

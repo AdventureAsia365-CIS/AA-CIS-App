@@ -860,6 +860,11 @@ def _row_to_dict(row) -> dict:
         "route_segment_count": (
             row["route_segment_count"] if "route_segment_count" in row.keys() else None
         ),
+        # AA-569 — export/edit need the piece's own channel (Blog gets text+HTML export, every
+        # other channel text-only); absent from _insert_placeholder_piece()'s RETURNING (set at
+        # INSERT time but that statement doesn't select it back), same "missing key = not
+        # selected by this particular query" convention as the fields above.
+        "channel": row["channel"] if "channel" in row.keys() else None,
         # AA-519 Việc 5 — absent from _insert_placeholder_piece()'s RETURNING (nothing to report
         # before T10 has run once), same "missing key means never populated yet" convention
         # seo_title/etc. above already use.
@@ -912,7 +917,7 @@ async def fetch_latest_piece_for_request(tenant_id: UUID, request_id: UUID, pool
 _FETCH_PIECE_QUERY = """
     SELECT piece_id, tenant_id, angle_gate_request_id, attempt_number, content_text,
            status, held_reason, gate_ledger, repair_log, created_at,
-           seo_title, meta_description, slug,
+           seo_title, meta_description, slug, channel,
            route_hub_name, route_segment_count, flags
     FROM acp_shared.content_piece
     WHERE piece_id = $1 AND tenant_id = $2
@@ -939,6 +944,39 @@ async def fetch_piece(tenant_id: UUID, piece_id: UUID, pool, request: Optional[R
             row = await conn.fetchrow(_FETCH_PIECE_QUERY, piece_id, tenant_id)
     if row is None:
         raise ContentWritingError(f"piece_id={piece_id} not found for this tenant")
+    return _row_to_dict(row)
+
+
+_UPDATE_CONTENT_TEXT_QUERY = """
+    UPDATE acp_shared.content_piece
+    SET content_text = $3
+    WHERE piece_id = $1 AND tenant_id = $2 AND status IN ('approved', 'held')
+    RETURNING piece_id, tenant_id, angle_gate_request_id, attempt_number, content_text,
+              status, held_reason, gate_ledger, repair_log, created_at,
+              seo_title, meta_description, slug, channel,
+              route_hub_name, route_segment_count, flags
+"""
+
+
+async def update_piece_content_text(
+    tenant_id: UUID, piece_id: UUID, content_text: str, pool,
+) -> dict:
+    """AA-569 — tenant hand-edit on My Content (ReviewList.tsx). Ownership + status both enforced
+    in the WHERE clause, not a separate check: a 'processing' piece has nothing real to edit yet
+    (still being written) and a 'failed' piece has no content_text worth keeping (see
+    run_write_background()'s exception-handler finalize call) — same 2-status boundary
+    fetch_review_list() already draws for "does this piece have real content_text to show"."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(_UPDATE_CONTENT_TEXT_QUERY, piece_id, tenant_id, content_text)
+        if row is None:
+            raise ContentWritingError(
+                f"piece_id={piece_id} not found for this tenant, or not in an editable state"
+            )
+        await write_audit_log(
+            conn, tenant_id=str(tenant_id), actor=f"tenant:{tenant_id}",
+            action=TenantAuditAction.CONTENT_PIECE_EDITED, resource_type="content_piece",
+            resource_id=str(piece_id), details={"content_length": len(content_text)},
+        )
     return _row_to_dict(row)
 
 
@@ -1200,5 +1238,5 @@ async def fetch_review_list(tenant_id: UUID, pool) -> list[dict]:
 __all__ = [
     "ContentWritingError", "RequestNotReadyError", "MissingCTAError", "MAX_ATTEMPTS",
     "start_write", "run_write_background", "fetch_piece", "fetch_latest_piece_for_request",
-    "fetch_review", "fetch_review_list",
+    "fetch_review", "fetch_review_list", "update_piece_content_text",
 ]

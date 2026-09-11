@@ -25,12 +25,13 @@ from __future__ import annotations
 import asyncio
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from api.routers.v1_tours import get_tenant
 from services.acp_angle_gate.service import RequestNotFoundError
 from services.acp_content_writing import service
+from services.acp_content_writing.export import render_content_text_to_html
 from services.acp_shared.audit_log import TenantAuditAction, write_audit_log
 
 router = APIRouter(prefix="/v1/content-writing", tags=["tenant-content-writing"])
@@ -96,6 +97,59 @@ async def get_piece(piece_id: UUID, request: Request, tenant=Depends(get_tenant)
         return await service.fetch_piece(tenant_id, piece_id, pool, request=request)
     except service.ContentWritingError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+
+class UpdateContentBody(BaseModel):
+    content_text: str
+
+
+@router.patch(
+    "/pieces/{piece_id}",
+    summary="AA-569 — tenant hand-edit of a piece's content_text (My Content). Only the owning "
+            "tenant, only while status is approved/held (a piece with real content to edit).",
+)
+async def update_piece(
+    piece_id: UUID, body: UpdateContentBody, request: Request, tenant=Depends(get_tenant),
+):
+    tenant_id = UUID(tenant["sub"])
+    pool = request.app.state.pool
+    if not body.content_text.strip():
+        raise HTTPException(status_code=422, detail="Content cannot be empty")
+    try:
+        return await service.update_piece_content_text(tenant_id, piece_id, body.content_text, pool)
+    except service.ContentWritingError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get(
+    "/pieces/{piece_id}/export",
+    summary="AA-569 — download a piece's content. format=text (every channel) or format=html "
+            "(Blog channel only — the only channel T9 writes real markdown for).",
+)
+async def export_piece(
+    piece_id: UUID, request: Request, tenant=Depends(get_tenant),
+    format: str = Query("text", pattern="^(text|html)$"),
+):
+    tenant_id = UUID(tenant["sub"])
+    pool = request.app.state.pool
+    try:
+        piece = await service.fetch_piece(tenant_id, piece_id, pool, request=request)
+    except service.ContentWritingError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    if piece["status"] not in ("approved", "held"):
+        raise HTTPException(status_code=409, detail="Nothing to export yet")
+
+    if format == "html":
+        if piece["channel"] != "blog":
+            raise HTTPException(
+                status_code=400,
+                detail="HTML export is only available for the Blog channel — every other "
+                       "channel's content isn't written as markdown.",
+            )
+        html = render_content_text_to_html(piece["content_text"], title="Blog post")
+        return Response(content=html, media_type="text/html")
+
+    return Response(content=piece["content_text"], media_type="text/plain")
 
 
 @router.get(
