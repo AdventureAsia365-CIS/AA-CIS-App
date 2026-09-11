@@ -41,6 +41,10 @@ async def _tenant_tour_ids(tenant_id: str, conn) -> list:
     """AA-545 — Route/Hub are platform-wide now (no `tenant_id` column); scope this router's
     reads to tours the tenant has actually picked, same join `services/acp_shared/slate.py`'s
     own `_tenant_tour_ids()` uses."""
+    # INTENTIONAL: the JOIN into published_tours below reads a shared reference pool (100%
+    # sentinel tenant_id=aa_internal), not per-tenant data — the real per-tenant boundary is
+    # already drawn by tenant_tour_versions.tenant_id above it. KHÔNG BAO GIỜ chuyển sang RLS
+    # pool thật cho query này — xem AA-578.
     rows = await conn.fetch("""
         SELECT pt.tour_id
         FROM gold_aa_internal.tenant_tour_versions ttv

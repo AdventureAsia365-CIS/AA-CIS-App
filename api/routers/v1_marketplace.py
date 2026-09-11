@@ -61,6 +61,10 @@ def _safe(row) -> dict:
 # the result (COALESCE to 0) rather than dropping it — a rewritten tour with no
 # atoms yet is a real, useful gap signal for T7 planning (ADR §0.3's stated
 # purpose), not noise to filter out.
+# INTENTIONAL: the JOIN into published_tours/raw_tours below reads a shared reference pool
+# (100% sentinel tenant_id=aa_internal), not per-tenant data — the real per-tenant boundary is
+# already drawn by tenant_tour_versions.tenant_id above it. KHÔNG BAO GIỜ chuyển sang RLS pool
+# thật cho các query này — xem AA-578.
 _MARKETPLACE_QUERY = """
     WITH latest_versions AS (
         SELECT DISTINCT ON (ttv.published_tour_id)

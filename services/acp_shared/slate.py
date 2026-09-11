@@ -145,6 +145,10 @@ async def _tenant_tour_ids(tenant_id: UUID, conn) -> list:
     table's own tenant_id filter — must now be explicit here, same join
     `segment_matching.py::run_segment_matching()`'s own docstring already established as "the
     tours this tenant made their own"."""
+    # INTENTIONAL: the JOIN into published_tours below reads a shared reference pool (100%
+    # sentinel tenant_id=aa_internal), not per-tenant data — the real per-tenant boundary is
+    # already drawn by tenant_tour_versions.tenant_id above it. KHÔNG BAO GIỜ chuyển sang RLS
+    # pool thật cho query này — xem AA-578.
     rows = await conn.fetch("""
         SELECT pt.tour_id
         FROM gold_aa_internal.tenant_tour_versions ttv
